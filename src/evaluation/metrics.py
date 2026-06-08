@@ -1,0 +1,169 @@
+from __future__ import annotations
+
+from typing import Any, Dict, Iterable, Mapping
+
+import numpy as np
+
+from src.models.state import EvaluationResult, ExperimentConfig
+from src.models.urban_queue_model import boundary_indices, safe_balance_index
+
+
+def improvement_rate(
+    baseline: float,
+    proposed: float,
+    direction: str = "lower_is_better",
+    eps: float = 1.0e-9,
+) -> float:
+    if direction == "higher_is_better":
+        return float(100.0 * (proposed - baseline) / max(abs(baseline), eps))
+    return float(100.0 * (baseline - proposed) / max(abs(baseline), eps))
+
+
+def boundary_cv(values: Iterable[float], eps: float = 1.0e-9) -> float:
+    arr = np.asarray(list(values), dtype=float)
+    if arr.size == 0:
+        return 0.0
+    mean = float(np.mean(arr))
+    return float(np.std(arr) / max(mean, eps)) if mean > eps else 0.0
+
+
+def summarize_run(result: Mapping[str, Any], cfg: ExperimentConfig) -> Dict[str, float]:
+    rows = result.get("run_rows", [])
+    final_state = result.get("final_state")
+    boundary_values = final_state.boundary_queue.values() if final_state is not None else []
+    return {
+        "freeway_ttt": float(result.get("freeway_ttt", 0.0)),
+        "urban_ttt": float(result.get("urban_ttt", 0.0)),
+        "total_ttt": float(result.get("total_ttt", 0.0)),
+        "mean_metering_error": float(np.mean([r.get("total_metering_error", 0.0) for r in rows])) if rows else 0.0,
+        "max_metering_violation": float(np.max([r.get("total_metering_error", 0.0) for r in rows])) if rows else 0.0,
+        "ramp_queue_overflow_duration": float(np.sum([r.get("ramp_queue_overflow_count", 0.0) > 0 for r in rows])) if rows else 0.0,
+        "density_exceedance_duration": float(np.sum([r.get("density_exceedance_count", 0.0) > 0 for r in rows])) if rows else 0.0,
+        "net_inflow_tracking_error": float(np.mean([r.get("net_inflow_tracking_error", 0.0) for r in rows])) if rows else 0.0,
+        "CV_boundary": boundary_cv(boundary_values, cfg.evaluation.eps),
+        "B_in": safe_balance_index(
+            final_state.boundary_queue[l] for l in cfg.network.boundary_in_links
+        ) if final_state is not None else 0.0,
+        "B_out": safe_balance_index(
+            final_state.boundary_queue[l] for l in cfg.network.boundary_out_links
+        ) if final_state is not None else 0.0,
+        **(
+            boundary_indices(final_state.boundary_queue.values(), cfg.network.boundary_queue_max_veh)
+            if final_state is not None
+            else {}
+        ),
+    }
+
+
+def evaluate(
+    baseline: Mapping[str, Any],
+    proposed: Mapping[str, Any],
+    cfg: ExperimentConfig,
+) -> EvaluationResult:
+    baseline_summary = summarize_run(baseline, cfg)
+    proposed_summary = summarize_run(proposed, cfg)
+    metric = cfg.evaluation.main_metric
+    imp = improvement_rate(
+        baseline_summary.get(metric, baseline_summary["total_ttt"]),
+        proposed_summary.get(metric, proposed_summary["total_ttt"]),
+        cfg.evaluation.main_metric_direction,
+        cfg.evaluation.eps,
+    )
+    validation = validate_controls(baseline, proposed, cfg)
+    passed = bool(imp >= cfg.evaluation.min_improvement_pct and all(v.get("pass", False) for v in validation.values()))
+    metrics = {
+        **{f"baseline_{k}": v for k, v in baseline_summary.items()},
+        **{f"proposed_{k}": v for k, v in proposed_summary.items()},
+        "improvement_pct": imp,
+    }
+    return EvaluationResult(metrics=metrics, improvement_pct=imp, passed=passed, control_validation=validation)
+
+
+def validate_controls(
+    baseline: Mapping[str, Any],
+    proposed: Mapping[str, Any],
+    cfg: ExperimentConfig,
+) -> Dict[str, Dict[str, Any]]:
+    rows = proposed.get("run_rows", [])
+    controls = proposed.get("control_rows", [])
+    baseline_summary = summarize_run(baseline, cfg)
+    proposed_summary = summarize_run(proposed, cfg)
+    vsl_values = [
+        value for row in controls for key, value in row.items()
+        if key.startswith("vsl_")
+    ]
+    vsl_set = set(float(v) for v in cfg.freeway_follower.vsl_set)
+    vsl_ok = all(float(v) in vsl_set for v in vsl_values)
+    vsl_change_violations = 0
+    for prev, cur in zip(controls, controls[1:]):
+        for link in cfg.network.freeway_links:
+            if abs(cur.get(f"vsl_{link}", 0.0) - prev.get(f"vsl_{link}", 0.0)) > cfg.freeway_follower.max_vsl_step + 1e-9:
+                vsl_change_violations += 1
+    cycle_errors = []
+    green_min_v = 0
+    green_max_v = 0
+    offset_v = 0
+    offset_smooth_v = 0
+    for row in controls:
+        for signal in cfg.network.signals:
+            p1 = row.get(f"green_{signal}_p1", 0.0)
+            p2 = row.get(f"green_{signal}_p2", 0.0)
+            cycle_errors.append(abs(p1 + p2 + cfg.network.lost_time - cfg.network.cycle_length))
+            green_min_v += int(p1 < cfg.network.green_min - 1e-9 or p2 < cfg.network.green_min - 1e-9)
+            green_max_v += int(p1 > cfg.network.green_max + 1e-9 or p2 > cfg.network.green_max + 1e-9)
+            offset = row.get(f"offset_{signal}", 0.0)
+            offset_v += int(offset < 0.0 or offset >= cfg.network.cycle_length)
+    for prev, cur in zip(controls, controls[1:]):
+        for signal in cfg.network.signals:
+            delta = abs(cur.get(f"offset_{signal}", 0.0) - prev.get(f"offset_{signal}", 0.0))
+            delta = min(delta, cfg.network.cycle_length - delta)
+            if delta > cfg.urban_follower.max_offset_step + 1e-9:
+                offset_smooth_v += 1
+    mean_metering = proposed_summary["mean_metering_error"]
+    return {
+        "ramp_metering": {
+            "mean_total_metering_error": mean_metering,
+            "max_metering_violation": proposed_summary["max_metering_violation"],
+            "ramp_queue_overflow_duration": proposed_summary["ramp_queue_overflow_duration"],
+            "pass": mean_metering <= cfg.freeway_follower.eps_F
+            and proposed_summary["ramp_queue_overflow_duration"] <= max(1.0, 0.05 * len(rows)),
+        },
+        "vsl": {
+            "vsl_feasible_rate": float(np.mean([float(v) in vsl_set for v in vsl_values])) if vsl_values else 1.0,
+            "vsl_change_violation_count": vsl_change_violations,
+            "density_exceedance_duration": proposed_summary["density_exceedance_duration"],
+            "pass": vsl_ok and vsl_change_violations == 0
+            and proposed_summary["density_exceedance_duration"] <= baseline_summary["density_exceedance_duration"] + 1.0,
+        },
+        "green_time": {
+            "cycle_sum_error": max(cycle_errors) if cycle_errors else 0.0,
+            "green_min_violation_count": green_min_v,
+            "green_max_violation_count": green_max_v,
+            "queue_overflow_count": proposed_summary.get("OverflowRatio_boundary", 0.0),
+            "pass": (max(cycle_errors) if cycle_errors else 0.0) <= 1.0e-6
+            and green_min_v == 0 and green_max_v == 0,
+        },
+        "offset": {
+            "offset_range_violation_count": offset_v,
+            "offset_smoothness_violation_count": offset_smooth_v,
+            "corridor_delay_change": proposed_summary["urban_ttt"] - baseline_summary["urban_ttt"],
+            "pass": offset_v == 0 and offset_smooth_v == 0,
+        },
+        "boundary_balance": {
+            "B_in": proposed_summary["B_in"],
+            "B_out": proposed_summary["B_out"],
+            "CV_boundary": proposed_summary["CV_boundary"],
+            "MaxMin_boundary": proposed_summary["MaxMin_boundary"],
+            "OverflowRatio_boundary": proposed_summary["OverflowRatio_boundary"],
+            "boundary_queue_balance_improvement": improvement_rate(
+                baseline_summary["CV_boundary"],
+                proposed_summary["CV_boundary"],
+                "lower_is_better",
+                cfg.evaluation.eps,
+            ),
+            "net_inflow_tracking_error": proposed_summary["net_inflow_tracking_error"],
+            "pass": proposed_summary["CV_boundary"] <= baseline_summary["CV_boundary"] + 1e-9
+            and proposed_summary["OverflowRatio_boundary"] <= baseline_summary["OverflowRatio_boundary"] + 1e-9
+            and proposed_summary["net_inflow_tracking_error"] <= cfg.urban_follower.eps_U + 1e-9,
+        },
+    }

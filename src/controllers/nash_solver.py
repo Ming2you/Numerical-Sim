@@ -1,0 +1,112 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Dict, Optional
+
+import numpy as np
+
+from src.controllers.freeway_follower import FreewayFollower
+from src.controllers.leader import LeaderAction
+from src.controllers.urban_follower import UrbanFollower
+from src.models.demand import DemandStep
+from src.models.state import ControlAction, ExperimentConfig, TrafficState
+
+
+@dataclass
+class NashResult:
+    control: ControlAction
+    objective_value: float
+    iterations: int
+    converged: bool
+    residual_objective: float
+    residual_control: float
+    diagnostics: Dict[str, float]
+
+
+def _relax_map(old: Dict[str, float], new: Dict[str, float], alpha: float) -> Dict[str, float]:
+    keys = set(old) | set(new)
+    return {k: float((1.0 - alpha) * old.get(k, new.get(k, 0.0)) + alpha * new.get(k, old.get(k, 0.0))) for k in keys}
+
+
+class NashSolver:
+    def __init__(self, cfg: ExperimentConfig):
+        self.cfg = cfg
+        self.freeway = FreewayFollower(cfg)
+        self.urban = UrbanFollower(cfg)
+
+    def solve(
+        self,
+        state: TrafficState,
+        leader: LeaderAction,
+        demand: DemandStep,
+        previous_control: Optional[ControlAction] = None,
+    ) -> NashResult:
+        alpha = float(np.clip(self.cfg.mpc.nash_relaxation_alpha, 0.0, 1.0))
+        current = previous_control or ControlAction.fixed(self.cfg)
+        current.N_P_star = leader.N_P_star
+        current.N_UF_star = leader.N_UF_star
+        prev_obj = np.inf
+        converged = False
+        residual_obj = np.inf
+        residual_control = np.inf
+        diagnostics: Dict[str, float] = {}
+
+        for iteration in range(1, self.cfg.mpc.max_nash_iter + 1):
+            fw = self.freeway.solve(state, leader, demand, current)
+            tmp = ControlAction(
+                N_P_star=leader.N_P_star,
+                N_UF_star=leader.N_UF_star,
+                ramp_metering=_relax_map(current.ramp_metering, fw.ramp_metering, alpha),
+                vsl=fw.vsl,
+                green_times=dict(current.green_times),
+                offsets=dict(current.offsets),
+                inflow_outflow_allocation=dict(current.inflow_outflow_allocation),
+            )
+            urban_reference = previous_control or current
+            urban = self.urban.solve(state, leader, demand, fw, urban_reference)
+            candidate = ControlAction(
+                N_P_star=leader.N_P_star,
+                N_UF_star=leader.N_UF_star,
+                ramp_metering=tmp.ramp_metering,
+                vsl=tmp.vsl,
+                green_times=_relax_map(current.green_times, urban.green_times, alpha),
+                offsets=_relax_map(current.offsets, urban.offsets, alpha),
+                inflow_outflow_allocation=_relax_map(
+                    current.inflow_outflow_allocation,
+                    urban.inflow_outflow_allocation,
+                    alpha,
+                ),
+                infeasibility={**fw.infeasibility, **urban.infeasibility},
+                diagnostics={**urban.metrics},
+            )
+            obj = fw.objective_value + urban.objective_value
+            residual_obj = abs(prev_obj - obj) if np.isfinite(prev_obj) else np.inf
+            old_vec = np.asarray(current.control_vector(self.cfg), dtype=float)
+            new_vec = np.asarray(candidate.control_vector(self.cfg), dtype=float)
+            residual_control = float(np.max(np.abs(new_vec - old_vec))) if old_vec.size else 0.0
+            current = candidate
+            prev_obj = obj
+            diagnostics = {
+                "freeway_objective": float(fw.objective_value),
+                "urban_objective": float(urban.objective_value),
+                "nash_residual_objective": float(residual_obj if np.isfinite(residual_obj) else obj),
+                "nash_residual_control": float(residual_control),
+            }
+            if (
+                residual_obj < self.cfg.mpc.nash_obj_tol
+                and residual_control < self.cfg.mpc.nash_control_tol
+            ):
+                converged = True
+                break
+        current.diagnostics.update(diagnostics)
+        current.diagnostics["nash_converged"] = converged
+        current.diagnostics["nash_iterations"] = iteration
+        return NashResult(
+            control=current,
+            objective_value=float(prev_obj),
+            iterations=iteration,
+            converged=converged,
+            residual_objective=float(residual_obj if np.isfinite(residual_obj) else prev_obj),
+            residual_control=float(residual_control),
+            diagnostics=diagnostics,
+        )
