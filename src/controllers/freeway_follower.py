@@ -19,6 +19,14 @@ class FreewayFollowerResult:
 
 
 class FreewayFollower:
+    """Freeway follower solved by explicit feasible projection.
+
+    Ramp metering is projected onto per-ramp capacities and the aggregate
+    `N_UF_star` target. VSL is selected from the configured discrete set with
+    the configured smoothness bound. No historical root-level controller code is
+    imported or reused here.
+    """
+
     def __init__(self, cfg: ExperimentConfig):
         self.cfg = cfg
 

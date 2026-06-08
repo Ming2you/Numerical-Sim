@@ -46,6 +46,9 @@ class NashSolver:
         current.N_P_star = leader.N_P_star
         current.N_UF_star = leader.N_UF_star
         prev_obj = np.inf
+        best_control = current
+        best_obj = np.inf
+        best_diagnostics: Dict[str, float] = {}
         converged = False
         residual_obj = np.inf
         residual_control = np.inf
@@ -80,6 +83,9 @@ class NashSolver:
                 diagnostics={**urban.metrics},
             )
             obj = fw.objective_value + urban.objective_value
+            if obj < best_obj:
+                best_obj = float(obj)
+                best_control = candidate
             residual_obj = abs(prev_obj - obj) if np.isfinite(prev_obj) else np.inf
             old_vec = np.asarray(current.control_vector(self.cfg), dtype=float)
             new_vec = np.asarray(candidate.control_vector(self.cfg), dtype=float)
@@ -92,21 +98,27 @@ class NashSolver:
                 "nash_residual_objective": float(residual_obj if np.isfinite(residual_obj) else obj),
                 "nash_residual_control": float(residual_control),
             }
+            if obj <= best_obj + 1.0e-12:
+                best_diagnostics = dict(diagnostics)
             if (
                 residual_obj < self.cfg.mpc.nash_obj_tol
                 and residual_control < self.cfg.mpc.nash_control_tol
             ):
                 converged = True
                 break
+        if not converged:
+            current = best_control
+            diagnostics = best_diagnostics or diagnostics
+            prev_obj = best_obj
         current.diagnostics.update(diagnostics)
         current.diagnostics["nash_converged"] = converged
         current.diagnostics["nash_iterations"] = iteration
         return NashResult(
             control=current,
-            objective_value=float(prev_obj),
+            objective_value=float(prev_obj if np.isfinite(prev_obj) else best_obj),
             iterations=iteration,
             converged=converged,
-            residual_objective=float(residual_obj if np.isfinite(residual_obj) else prev_obj),
+            residual_objective=float(residual_obj if np.isfinite(residual_obj) else best_obj),
             residual_control=float(residual_control),
             diagnostics=diagnostics,
         )

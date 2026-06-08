@@ -11,7 +11,8 @@ MPC-based Stackelberg game simulation framework for integrated urban-freeway tra
 ├── docs/
 │   ├── codex_implementation_spec.md
 │   ├── agent_debate_protocol.md
-│   └── experiment_acceptance_criteria.md
+│   ├── experiment_acceptance_criteria.md
+│   └── clean_room_rebuild_notes.md
 ├── reports/
 │   ├── codex_run_report.md
 │   ├── claude_review_report.md
@@ -60,3 +61,7 @@ python -m experiments.run_experiment `
 - Codex implements and runs simulations.
 - Claude reviews methodology, code, and simulation validity.
 - Shared Markdown files under `reports/` preserve the debate and validation record.
+
+## Clean Implementation Boundary
+
+The active implementation lives under `src/`. Historical root-level model/controller files were removed so the current code path is driven by the spec and the structured package only.

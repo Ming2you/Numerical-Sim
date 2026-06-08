@@ -2,7 +2,7 @@
 
 ## Status
 
-Initial structured implementation completed. Current short smoke runs execute end to end, but the controller has not yet achieved the default 8% main-metric improvement criterion.
+Clean structured implementation completed. The active code path is now limited to the `src/` package and documented wrappers. Historical root-level implementation files were removed from the repository root to avoid accidental reuse.
 
 ## Implemented
 
@@ -22,6 +22,8 @@ Initial structured implementation completed. Current short smoke runs execute en
   - `python -m experiments.run_experiment`
   - `python -m experiments.run_ablation`
 - Added unit and smoke tests under `src/tests/`.
+- Added `src/tests/test_clean_structure.py` to guard against references to deleted historical controller names.
+- Added `docs/clean_room_rebuild_notes.md`.
 
 ## Validation Commands
 

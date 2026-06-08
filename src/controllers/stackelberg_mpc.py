@@ -18,6 +18,15 @@ class DecisionResult:
 
 
 class StackelbergMPCController:
+    """Spec-first Stackelberg MPC controller.
+
+    This implementation is intentionally self-contained under `src/` and does
+    not import any root-level historical controller modules. Leader actions are
+    enumerated, follower responses are solved by deterministic projection and
+    queue-balancing heuristics, and each candidate is evaluated by the same
+    closed-loop model used by the experiment runner.
+    """
+
     def __init__(self, cfg: ExperimentConfig):
         self.cfg = cfg
         self.leader = Leader(cfg)

@@ -22,6 +22,13 @@ class UrbanFollowerResult:
 
 
 class UrbanFollower:
+    """Two-stage urban follower.
+
+    Stage 1 allocates inflow/outflow service and green splits to track
+    `N_P_star` while balancing boundary queues. Stage 2 computes bounded signal
+    offsets from current speed/queue-derived travel-time estimates.
+    """
+
     def __init__(self, cfg: ExperimentConfig):
         self.cfg = cfg
 
