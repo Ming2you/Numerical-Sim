@@ -136,3 +136,25 @@ This file records human-readable update notes for each direct push.
 - `python -B -m unittest discover -s src\\tests -v`
 - Reduced feasibility probe: `run_experiment --T-total 180 --mpc-horizon-steps 1 --leader-candidate-count 2 --max-nash-iter 2 --freeway-horizon-beam-width 1 --freeway-ramp-candidate-limit 1 --freeway-vsl-candidate-limit 1`
 - Result: 37 tests passed. Reduced probe completed in 0.318 sec and printed `FAIL improvement=-2.98%`, which is diagnostic only.
+
+## 2026-06-09 21:42:49 +09:00
+
+### Scope
+
+- 기본 MPC prediction horizon을 3으로 낮췄습니다.
+- `src/config/default.yaml`의 `mpc.horizon_steps`를 `8 -> 3`으로 수정했습니다.
+- 코드에서 직접 `ExperimentConfig()`를 생성하는 경우와의 혼선을 줄이기 위해 `MPCConfig.horizon_steps` 기본값도 `3`으로 맞췄습니다.
+
+### Notes
+
+- 기본 config의 freeway follower transition 상한은 약 405에서 135로 줄었습니다.
+- leader 후보와 Nash 반복까지 포함한 한 MPC decision의 coupled interval 호출 상한은 약 60,750에서 20,250으로 줄었습니다.
+- 기본 config 첫 control decision은 78.7초에 완료되었습니다.
+- full default run은 시도했지만 사용자 중단 전까지 baseline 산출물만 생성되었습니다. Proposed/controller 단계는 여전히 무거워 추가 경량화가 필요할 수 있습니다.
+
+### Validation
+
+- `python -B -c "from src.models.state import ExperimentConfig; cfg=ExperimentConfig.from_file('src/config/default.yaml'); print(cfg.mpc.horizon_steps)"`
+- `python -B -c "<first StackelbergMPCController.decide timing probe>"`
+- `python -B -m unittest discover -s src\\tests -v`
+- Result: 37 tests passed. First default-config control decision completed in 78.7 sec.

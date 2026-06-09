@@ -300,7 +300,7 @@ class NetworkConfig:
 
 @dataclass
 class MPCConfig:
-    horizon_steps: int = 5
+    horizon_steps: int = 3
     leader_candidate_count: int = 15
     max_nash_iter: int = 10
     nash_obj_tol: float = 1.0e-3
