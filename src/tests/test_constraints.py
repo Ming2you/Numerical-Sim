@@ -1,9 +1,10 @@
 import unittest
 from unittest.mock import patch
 
-from src.controllers.freeway_follower import FreewayFollower
+from src.controllers.freeway_follower import FreewayFollower, FreewayFollowerResult
 from src.controllers.leader import LeaderAction
 from src.controllers.stackelberg_mpc import StackelbergMPCController
+from src.controllers.urban_follower import UrbanFollower
 from src.models.demand import DemandProfile, ScenarioConfig
 from src.models.state import ControlAction, ExperimentConfig, TrafficState
 from src.simulation.coupling import CoupledStepResult
@@ -99,11 +100,15 @@ class ConstraintTests(unittest.TestCase):
         demand = DemandProfile(cfg, ScenarioConfig("test")).horizon(0.0, 3)
         used_demand_ids = []
 
-        def fake_freeway_step(*args):
+        def fake_coupled_step(*args):
             used_demand_ids.append(id(args[2]))
-            return 1.0, {"total_metering_error": 0.0, "mean_ramp_receiving_factor": 1.0}
+            return CoupledStepResult(
+                freeway_ttt=1.0,
+                urban_ttt=0.0,
+                diagnostics={"total_metering_error": 0.0, "mean_ramp_receiving_factor": 1.0},
+            )
 
-        with patch("src.controllers.freeway_follower.freeway_step", side_effect=fake_freeway_step):
+        with patch("src.controllers.freeway_follower.run_coupled_interval", side_effect=fake_coupled_step):
             result = FreewayFollower(cfg).solve(
                 state,
                 LeaderAction(0.0, 1200.0),
@@ -134,16 +139,24 @@ class ConstraintTests(unittest.TestCase):
         demand = DemandProfile(cfg, ScenarioConfig("test")).horizon(0.0, 2)
         second_step_vsl_values = []
 
-        def fake_freeway_step(*args):
+        def fake_coupled_step(*args):
             control = args[1]
             demand_step = args[2]
             if demand_step is demand[1]:
                 second_step_vsl_values.extend(control.vsl.values())
             if demand_step is demand[0] and min(control.vsl.values()) < 100.0:
-                return 1.0, {"total_metering_error": 0.0, "mean_ramp_receiving_factor": 1.0}
-            return 10.0, {"total_metering_error": 0.0, "mean_ramp_receiving_factor": 1.0}
+                return CoupledStepResult(
+                    freeway_ttt=1.0,
+                    urban_ttt=0.0,
+                    diagnostics={"total_metering_error": 0.0, "mean_ramp_receiving_factor": 1.0},
+                )
+            return CoupledStepResult(
+                freeway_ttt=10.0,
+                urban_ttt=0.0,
+                diagnostics={"total_metering_error": 0.0, "mean_ramp_receiving_factor": 1.0},
+            )
 
-        with patch("src.controllers.freeway_follower.freeway_step", side_effect=fake_freeway_step):
+        with patch("src.controllers.freeway_follower.run_coupled_interval", side_effect=fake_coupled_step):
             FreewayFollower(cfg).solve(
                 state,
                 LeaderAction(0.0, 1200.0),
@@ -179,6 +192,7 @@ class ConstraintTests(unittest.TestCase):
         log = sim.step(ControlAction.fixed(cfg), demand, 0)
         self.assertEqual(log.diagnostics["coupling_freeway_substeps"], float(cfg.simulation.K_cf))
         self.assertEqual(log.diagnostics["coupling_urban_substeps"], float(cfg.simulation.K_cu))
+        self.assertEqual(log.diagnostics["coupling_nested_order_active"], 1.0)
         self.assertEqual(log.diagnostics["coupling_aggregate_urban_model"], 0.0)
         self.assertEqual(log.diagnostics["coupling_movement_urban_model"], 1.0)
         self.assertEqual(log.diagnostics["coupling_onramp_sync_active"], 1.0)
@@ -194,6 +208,19 @@ class ConstraintTests(unittest.TestCase):
                 sim.state.ramp_queue[ramp],
                 sim.state.urban_movement_queue[movement],
             )
+
+    def test_onramp_demand_enters_urban_movement_queue_when_metering_closed(self):
+        cfg = short_config()
+        sim = MixedTrafficSimulator(cfg)
+        control = ControlAction.fixed(cfg)
+        control.ramp_metering = {ramp: 0.0 for ramp in cfg.network.ramps}
+        demand = DemandProfile(cfg, ScenarioConfig("test", ramp_scale=2.0)).at(0.0)
+        log = sim.step(control, demand, 0)
+        self.assertGreater(log.diagnostics["onramp_arrivals_veh"], 0.0)
+        self.assertAlmostEqual(log.diagnostics["onramp_releases_veh"], 0.0)
+        for ramp, movement in cfg.network.on_ramp_to_movement.items():
+            self.assertGreater(sim.state.urban_movement_queue[movement], 0.0)
+            self.assertAlmostEqual(sim.state.ramp_queue[ramp], sim.state.urban_movement_queue[movement])
 
     def test_offramp_storage_limits_freeway_boundary_flow(self):
         cfg = ExperimentConfig.from_file(
@@ -240,6 +267,68 @@ class ConstraintTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertAlmostEqual(total_ttt, 4.0)
         self.assertAlmostEqual(states[0].time_sec, cfg.simulation.control_interval)
+
+    def test_freeway_follower_prediction_preserves_urban_control_context(self):
+        cfg = ExperimentConfig.from_file(
+            "src/config/default.yaml",
+            {
+                "simulation": {"T_total": 360.0},
+                "mpc": {"horizon_steps": 1},
+                "freeway_follower": {"vsl_set": [100], "max_vsl_step": 0.0},
+            },
+        )
+        state = TrafficState.initial(cfg)
+        demand = DemandProfile(cfg, ScenarioConfig("test")).horizon(0.0, 1)
+        previous = ControlAction.fixed(cfg)
+        previous.green_times["A_p1"] = cfg.network.green_min
+        previous.green_times["A_p2"] = cfg.network.effective_green_total - cfg.network.green_min
+        seen_green = []
+
+        def fake_coupled_step(*args):
+            seen_green.append(dict(args[1].green_times))
+            return CoupledStepResult(
+                freeway_ttt=1.0,
+                urban_ttt=0.0,
+                diagnostics={"total_metering_error": 0.0, "mean_ramp_receiving_factor": 1.0},
+            )
+
+        with patch("src.controllers.freeway_follower.run_coupled_interval", side_effect=fake_coupled_step):
+            result = FreewayFollower(cfg).solve(state, LeaderAction(0.0, 1200.0), demand, previous)
+
+        self.assertEqual(result.infeasibility["freeway_follower_coupled_prediction"], 1.0)
+        self.assertTrue(seen_green)
+        self.assertEqual(seen_green[0]["A_p1"], previous.green_times["A_p1"])
+
+    def test_urban_follower_uses_freeway_response_pressure(self):
+        cfg = short_config()
+        demand = DemandProfile(cfg, ScenarioConfig("test")).at(0.0)
+        state = TrafficState.initial(cfg)
+        follower = UrbanFollower(cfg)
+        leader = LeaderAction(0.0, 1200.0)
+        previous = ControlAction.fixed(cfg)
+        no_response = follower.solve(state.copy(), leader, demand, None, previous)
+        freeway_response = FreewayFollowerResult(
+            ramp_metering={},
+            vsl={},
+            objective_value=0.0,
+            infeasibility={
+                "metering_tracking_residual": 1500.0,
+                "ramp_projection_first_step_capacity": 1500.0,
+                "ramp_queue_overflow": cfg.network.ramp_queue_max_veh,
+                "density_excess": cfg.network.rho_crit,
+                "min_ramp_receiving_factor": 0.2,
+            },
+        )
+        with_response = follower.solve(state.copy(), leader, demand, freeway_response, previous)
+        outbound = [
+            movement for movement, spec in cfg.network.urban_movements.items()
+            if spec.get("kind") == "off_ramp"
+        ]
+        no_out = sum(no_response.inflow_outflow_allocation.get(movement, 0.0) for movement in outbound)
+        yes_out = sum(with_response.inflow_outflow_allocation.get(movement, 0.0) for movement in outbound)
+        self.assertEqual(with_response.metrics["freeway_response_used"], 1.0)
+        self.assertGreater(with_response.metrics["freeway_total_pressure"], 0.0)
+        self.assertGreaterEqual(yes_out, no_out)
 
 
 if __name__ == "__main__":

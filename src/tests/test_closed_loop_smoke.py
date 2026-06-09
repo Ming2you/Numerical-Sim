@@ -14,7 +14,13 @@ class ClosedLoopSmokeTest(unittest.TestCase):
                 "--scenario", "peak_demand",
                 "--baseline", "fixed_signal_fixed_speed",
                 "--controller", "stackelberg_mpc",
-                "--T-total", "360",
+                "--T-total", "180",
+                "--mpc-horizon-steps", "1",
+                "--leader-candidate-count", "2",
+                "--max-nash-iter", "2",
+                "--freeway-horizon-beam-width", "1",
+                "--freeway-ramp-candidate-limit", "1",
+                "--freeway-vsl-candidate-limit", "1",
                 "--output", str(out),
             ])
             attempt = out / "attempt_0"

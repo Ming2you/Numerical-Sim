@@ -8,8 +8,8 @@ import numpy as np
 
 from src.controllers.leader import LeaderAction
 from src.models.demand import DemandStep
-from src.models.metanet import freeway_step
 from src.models.state import ControlAction, ExperimentConfig, TrafficState
+from src.simulation.coupling import run_coupled_interval
 
 
 @dataclass
@@ -210,8 +210,14 @@ class FreewayFollower:
             N_UF_star=leader.N_UF_star,
             ramp_metering=dict(ramp_metering),
             vsl=dict(vsl),
+            green_times=dict(node.last_control.green_times),
+            offsets=dict(node.last_control.offsets),
+            inflow_outflow_allocation=dict(node.last_control.inflow_outflow_allocation),
         )
-        fw_ttt, diag = freeway_step(probe, control, demand, self.cfg)
+        result = run_coupled_interval(probe, control, demand, self.cfg)
+        probe.time_sec += self.cfg.simulation.control_interval
+        fw_ttt = result.freeway_ttt
+        diag = result.diagnostics
         metering_error = float(diag.get("total_metering_error", 0.0))
         receiving = float(diag.get("mean_ramp_receiving_factor", 1.0))
         queue_overflow = sum(max(0.0, q - net.ramp_queue_max_veh) for q in probe.ramp_queue.values())
@@ -361,5 +367,6 @@ class FreewayFollower:
                 "freeway_follower_beam_width": float(fc.horizon_beam_width),
                 "freeway_follower_expanded_nodes": float(evaluation.expanded_nodes),
                 "ramp_projection_first_step_capacity": float(projection["step_capacity"]),
+                "freeway_follower_coupled_prediction": 1.0,
             },
         )

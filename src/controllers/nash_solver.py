@@ -84,7 +84,13 @@ class NashSolver:
                     alpha,
                 ),
                 infeasibility={**fw.infeasibility, **urban.infeasibility},
-                diagnostics={**urban.metrics},
+                diagnostics={
+                    **urban.metrics,
+                    "freeway_follower_coupled_prediction": fw.infeasibility.get(
+                        "freeway_follower_coupled_prediction",
+                        0.0,
+                    ),
+                },
             )
             obj = fw.objective_value + urban.objective_value
             if obj < best_obj:
@@ -101,6 +107,12 @@ class NashSolver:
                 "urban_objective": float(urban.objective_value),
                 "nash_residual_objective": float(residual_obj if np.isfinite(residual_obj) else obj),
                 "nash_residual_control": float(residual_control),
+                "nash_mutual_response_active": 1.0,
+                "nash_urban_used_freeway_response": float(urban.metrics.get("freeway_response_used", 0.0)),
+                "nash_freeway_used_coupled_prediction": float(fw.infeasibility.get(
+                    "freeway_follower_coupled_prediction",
+                    0.0,
+                )),
             }
             if obj <= best_obj + 1.0e-12:
                 best_diagnostics = dict(diagnostics)

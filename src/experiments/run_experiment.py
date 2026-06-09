@@ -90,6 +90,12 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--min-improvement-pct", type=float, default=None)
     parser.add_argument("--output", default="outputs/peak_demand_stackelberg")
     parser.add_argument("--T-total", type=float, default=None, help="Optional short-run override for smoke tests.")
+    parser.add_argument("--mpc-horizon-steps", type=int, default=None, help="Optional MPC horizon override.")
+    parser.add_argument("--leader-candidate-count", type=int, default=None, help="Optional leader candidate override.")
+    parser.add_argument("--max-nash-iter", type=int, default=None, help="Optional Nash iteration override.")
+    parser.add_argument("--freeway-horizon-beam-width", type=int, default=None, help="Optional freeway beam width override.")
+    parser.add_argument("--freeway-ramp-candidate-limit", type=int, default=None, help="Optional ramp candidate override.")
+    parser.add_argument("--freeway-vsl-candidate-limit", type=int, default=None, help="Optional VSL candidate override.")
     args = parser.parse_args(argv)
 
     overrides: Dict[str, Any] = {}
@@ -97,6 +103,18 @@ def main(argv: list[str] | None = None) -> None:
         overrides.setdefault("evaluation", {})["min_improvement_pct"] = args.min_improvement_pct
     if args.T_total is not None:
         overrides.setdefault("simulation", {})["T_total"] = args.T_total
+    if args.mpc_horizon_steps is not None:
+        overrides.setdefault("mpc", {})["horizon_steps"] = args.mpc_horizon_steps
+    if args.leader_candidate_count is not None:
+        overrides.setdefault("mpc", {})["leader_candidate_count"] = args.leader_candidate_count
+    if args.max_nash_iter is not None:
+        overrides.setdefault("mpc", {})["max_nash_iter"] = args.max_nash_iter
+    if args.freeway_horizon_beam_width is not None:
+        overrides.setdefault("freeway_follower", {})["horizon_beam_width"] = args.freeway_horizon_beam_width
+    if args.freeway_ramp_candidate_limit is not None:
+        overrides.setdefault("freeway_follower", {})["horizon_ramp_candidate_limit"] = args.freeway_ramp_candidate_limit
+    if args.freeway_vsl_candidate_limit is not None:
+        overrides.setdefault("freeway_follower", {})["horizon_vsl_candidate_limit_per_link"] = args.freeway_vsl_candidate_limit
     cfg = ExperimentConfig.from_file(args.config, overrides)
     scenarios_path = Path(args.scenarios_config) if args.scenarios_config else _default_scenarios_path(args.config)
     scenarios = load_scenarios(scenarios_path)

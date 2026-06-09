@@ -86,3 +86,28 @@ This file records human-readable update notes for each direct push.
 
 - Documentation-only change.
 - `git diff --check`
+
+## 2026-06-09 18:09:13 +09:00
+
+### Scope
+
+- `freeway_step`를 `freeway_substep` 기반 wrapper로 분해하고, `T_f` 단위 METANET 갱신을 독립 실행 가능하게 정리했습니다.
+- `urban_step`를 `urban_substep` 기반 wrapper로 분해하고, on-ramp demand/release가 urban movement queue에 실제로 반영되도록 연결했습니다.
+- `coupling.py`를 spec 3.4.3의 `T_c -> T_f -> T_u` nested order로 재작성했습니다.
+- Freeway follower prediction을 standalone freeway plant가 아니라 coupled plant 기반으로 통일했습니다.
+- Urban follower가 freeway follower response pressure를 green/allocation 결정에 반영하도록 수정했습니다.
+- Nash solver diagnostics에 mutual response 및 coupled prediction 사용 여부를 기록하도록 추가했습니다.
+- Smoke test용 MPC/search override CLI 옵션과 coupling/follower 관련 regression tests를 추가했습니다.
+
+### Notes
+
+- 기본 실험 설정은 유지하고, smoke test에서만 horizon/search 규모를 줄이도록 CLI override를 사용합니다.
+- `coupling_nested_order_active`, `freeway_follower_coupled_prediction`, `nash_mutual_response_active` diagnostics로 새 coupling/prediction 경로를 확인할 수 있습니다.
+
+### Validation
+
+- `python -B -m py_compile src\\models\\metanet.py src\\models\\urban_queue_model.py src\\simulation\\coupling.py src\\controllers\\freeway_follower.py src\\controllers\\urban_follower.py src\\controllers\\nash_solver.py src\\tests\\test_constraints.py`
+- `python -B -m unittest src.tests.test_constraints -v`
+- `python -B -m unittest src.tests.test_metanet_equations -v`
+- `python -B -m unittest discover -s src\\tests -v`
+- Result: 36 tests passed. Smoke experiment printed `FAIL improvement=-5.67%`, but the unittest suite passed with `OK`.

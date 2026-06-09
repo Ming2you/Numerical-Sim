@@ -32,9 +32,56 @@ class UrbanFollower:
     def __init__(self, cfg: ExperimentConfig):
         self.cfg = cfg
 
-    def _green_times(self, state: TrafficState, previous: Optional[ControlAction]) -> Dict[str, float]:
+    def _freeway_pressure(self, freeway_response: object | None) -> Dict[str, float]:
+        """Freeway follower 결과를 urban 신호/배분이 사용할 압력 지표로 바꾼다."""
+        if freeway_response is None:
+            return {
+                "used": 0.0,
+                "metering_pressure": 0.0,
+                "queue_pressure": 0.0,
+                "density_pressure": 0.0,
+                "receiving_pressure": 0.0,
+                "total_pressure": 0.0,
+            }
+        infeasibility = getattr(freeway_response, "infeasibility", {}) or {}
+        metering_residual = float(infeasibility.get(
+            "metering_tracking_residual",
+            infeasibility.get("metering_residual", 0.0),
+        ))
+        step_capacity = float(infeasibility.get("ramp_projection_first_step_capacity", 0.0))
+        queue_overflow = float(infeasibility.get("ramp_queue_overflow", 0.0))
+        density_excess = float(infeasibility.get("density_excess", 0.0))
+        receiving_factor = float(infeasibility.get("min_ramp_receiving_factor", 1.0))
+        metering_pressure = metering_residual / max(step_capacity, self.cfg.network.freeway_capacity_veh_h, 1.0e-9)
+        queue_pressure = queue_overflow / max(self.cfg.network.ramp_queue_max_veh, 1.0e-9)
+        density_pressure = density_excess / max(
+            self.cfg.network.rho_crit * len(self.cfg.network.freeway_links),
+            1.0e-9,
+        )
+        receiving_pressure = max(0.0, 1.0 - receiving_factor)
+        total_pressure = float(np.clip(
+            metering_pressure + queue_pressure + density_pressure + receiving_pressure,
+            0.0,
+            1.0,
+        ))
+        return {
+            "used": 1.0,
+            "metering_pressure": float(metering_pressure),
+            "queue_pressure": float(queue_pressure),
+            "density_pressure": float(density_pressure),
+            "receiving_pressure": float(receiving_pressure),
+            "total_pressure": total_pressure,
+        }
+
+    def _green_times(
+        self,
+        state: TrafficState,
+        previous: Optional[ControlAction],
+        freeway_response: object | None = None,
+    ) -> Dict[str, float]:
         net = self.cfg.network
         specs = movement_specs(self.cfg)
+        pressure = self._freeway_pressure(freeway_response)
         green: Dict[str, float] = {}
         total = net.effective_green_total
         for signal in net.signals:
@@ -48,6 +95,13 @@ class UrbanFollower:
                 for movement, spec in specs.items()
                 if spec.get("phase") == f"{signal}_p2"
             )
+            has_onramp_phase = any(
+                spec.get("phase") == f"{signal}_p2" and spec.get("kind") == "on_ramp"
+                for spec in specs.values()
+            )
+            if has_onramp_phase:
+                # ramp 병목 압력이 높으면 on-ramp 대기열을 green split 산정에서 더 크게 본다.
+                p2_queue += pressure["total_pressure"] * net.ramp_queue_max_veh
             ratio = p1_queue / max(p1_queue + p2_queue, 1.0e-9) if p1_queue + p2_queue > 0 else 0.5
             p1 = float(np.clip(total * ratio, net.green_min, net.green_max))
             p2 = total - p1
@@ -74,9 +128,15 @@ class UrbanFollower:
             offsets[signal] = bounded % net.cycle_length
         return offsets
 
-    def _allocation(self, state: TrafficState, leader: LeaderAction) -> tuple[Dict[str, float], float]:
+    def _allocation(
+        self,
+        state: TrafficState,
+        leader: LeaderAction,
+        freeway_response: object | None = None,
+    ) -> tuple[Dict[str, float], float]:
         net = self.cfg.network
         specs = movement_specs(self.cfg)
+        pressure = self._freeway_pressure(freeway_response)
         inbound_movements = [
             movement for movement, spec in specs.items()
             if spec.get("kind") == "boundary_in"
@@ -90,6 +150,14 @@ class UrbanFollower:
         total_service = 0.62 * (in_cap + out_cap)
         desired_in = np.clip((total_service + leader.N_P_star) / 2.0, 0.0, in_cap)
         desired_out = np.clip(desired_in - leader.N_P_star, 0.0, out_cap)
+        if pressure["used"] > 0.0 and outbound_movements:
+            # freeway가 막히면 off-ramp storage를 더 빨리 비우도록 outbound service 목표를 살짝 올린다.
+            desired_out = np.clip(
+                desired_out + pressure["total_pressure"] * 0.08 * out_cap,
+                0.0,
+                out_cap,
+            )
+            desired_in = np.clip(desired_out + leader.N_P_star, 0.0, in_cap)
         if abs((desired_in - desired_out) - leader.N_P_star) > self.cfg.urban_follower.eps_U:
             desired_out = np.clip(desired_in - leader.N_P_star, 0.0, out_cap)
             desired_in = np.clip(desired_out + leader.N_P_star, 0.0, in_cap)
@@ -99,6 +167,8 @@ class UrbanFollower:
             if not group:
                 continue
             q = np.asarray([state.urban_movement_queue.get(movement, 0.0) + 1.0 for movement in group], dtype=float)
+            if group is outbound_movements:
+                q = q * (1.0 + pressure["total_pressure"])
             w = q / max(float(np.sum(q)), 1.0e-9)
             for idx, movement in enumerate(group):
                 alloc[movement] = float(min(net.movement_capacity_veh_h, total * w[idx]))
@@ -132,12 +202,22 @@ class UrbanFollower:
         previous_control: Optional[ControlAction] = None,
     ) -> UrbanFollowerResult:
         ensure_urban_state(state, self.cfg)
-        green = self._green_times(state, previous_control)
+        pressure = self._freeway_pressure(freeway_response)
+        green = self._green_times(state, previous_control, freeway_response)
         offsets = self._offsets(state, previous_control)
-        allocation, residual = self._allocation(state, leader)
+        allocation, residual = self._allocation(state, leader, freeway_response)
         b_in = safe_balance_index(state.boundary_queue.get(l, 0.0) for l in self.cfg.network.boundary_in_links)
         b_out = safe_balance_index(state.boundary_queue.get(l, 0.0) for l in self.cfg.network.boundary_out_links)
-        metrics = {"B_in": b_in, "B_out": b_out}
+        metrics = {
+            "B_in": b_in,
+            "B_out": b_out,
+            "freeway_response_used": pressure["used"],
+            "freeway_metering_pressure": pressure["metering_pressure"],
+            "freeway_queue_pressure": pressure["queue_pressure"],
+            "freeway_density_pressure": pressure["density_pressure"],
+            "freeway_receiving_pressure": pressure["receiving_pressure"],
+            "freeway_total_pressure": pressure["total_pressure"],
+        }
         metrics.update(boundary_indices(state.boundary_queue.values(), self.cfg.network.boundary_queue_max_veh))
         smooth = 0.0
         if previous_control:
