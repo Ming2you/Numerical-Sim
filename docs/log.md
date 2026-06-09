@@ -47,3 +47,23 @@ This file records human-readable update notes for each direct push.
 - `python -B -m py_compile src/models/state.py src/models/urban_queue_model.py src/models/metanet.py src/simulation/coupling.py src/controllers/urban_follower.py src/controllers/stackelberg_mpc.py src/tests/test_constraints.py`
 - `python -B -m unittest discover -s src/tests -v`
 - Result: 33 tests passed. The smoke experiment printed `FAIL improvement=20.79%`, but the unittest suite passed with `OK`.
+
+## 2026-06-09 17:35:29 +09:00
+
+### Scope
+
+- Added a repository language policy: reports, review notes, agent-facing documents, code comments, and docstrings should be written in Korean by default.
+- Clarified that code identifiers, public APIs, config keys, metric names, commands, units, and quoted output should preserve their existing English or symbolic spelling.
+- Updated `CLAUDE.md` so Claude writes Korean review reports by default.
+- Rewrote `README.md` to include the language policy and fixed the broken repository tree rendering.
+- Expanded `docs/spec/12_coding_style.md` with required Korean comment coverage for equations, unit conversions, coupling boundaries, optimization logic, heuristics, diagnostics, and intentional approximations.
+
+### Notes
+
+- Korean reports and comments are acceptable for future Codex/Claude review and should not be treated as a blocker.
+- The comment policy requires meaningful comments for non-trivial model/controller logic, not noisy comments on self-evident assignments.
+
+### Validation
+
+- Documentation-only change.
+- `git diff --check`

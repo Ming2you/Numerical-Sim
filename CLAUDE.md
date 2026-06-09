@@ -6,6 +6,14 @@ You are the critic and validation agent.
 
 Your task is to review whether the implementation correctly follows the proposed MPC-based Stackelberg game controller. Do not implement first unless explicitly asked. Focus on method validity, simulation validity, and acceptance criteria.
 
+## Language and Comment Policy
+
+- Write review reports, validation notes, and agent-facing explanations in Korean by default.
+- Code comments and docstrings added in future implementation work should also be written in Korean by default.
+- Keep code identifiers, public APIs, config keys, equations, units, and command names in their existing English or symbolic form for compatibility and searchability.
+- When citing source code, metrics, file paths, commands, or exact error messages, preserve the original spelling exactly.
+- Korean reports and comments are acceptable for future Codex/Claude review. They should not be treated as a blocker or source of ambiguity.
+
 ## Review Targets
 
 Review these artifacts:
@@ -83,7 +91,7 @@ Write your review to:
 
 - `reports/claude_review_report.md`
 
-Use this format:
+Write the report in Korean by default and use this structure:
 
 ```md
 # Claude Review Report
