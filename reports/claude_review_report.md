@@ -43,6 +43,11 @@ Wu의 분산 통합제어(§IV-D, §V-C)는 CC(중앙) 최대 CPU >400s를 CD(�
 
 현재 코드는 이 스펙트럼의 정반대(중앙집중 + 후보마다 전체망 rollout) 끝에 있어 무겁다.
 
+> **Codex 구현 가이드**: Wu의 분할 규칙·agent별 상태/제어/목적함수·분산 MPC 6단계 알고리즘과
+> 이 repo 망으로의 매핑(신호 A/C/D/F→urban agent 4, FW_W/FW_E→freeway agent 2, 교환할 결합변수)을
+> [docs/wu2022_distributed_reference.md](../docs/wu2022_distributed_reference.md)에 상세 정리했다.
+> 아래 ①②를 구현할 때 그 문서를 그대로 따를 것.
+
 ## Methodological / Code-Level Issues
 
 - (직전과 동일) Nash 반복 내 plant 재시뮬 없음(state 고정), one-shot Nash로 문서화 권장.
