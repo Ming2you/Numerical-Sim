@@ -19,20 +19,89 @@ def _deep_update(base: Dict[str, Any], override: Mapping[str, Any]) -> Dict[str,
 
 
 def load_jsonish(path: str | Path) -> Dict[str, Any]:
-    """Load JSON-compatible YAML without requiring PyYAML.
+    """Load project config from JSON-compatible YAML or a small YAML subset.
 
-    The project config files are written as JSON, which is valid YAML. This
-    helper keeps the runtime dependency-free while still accepting ordinary
-    comments-free JSON/YAML scalars for small user edits.
+    The runtime intentionally has no PyYAML dependency. JSON remains the
+    preferred fully structured format, and the fallback supports the simple
+    mapping/list/scalar YAML used by the repository config files.
     """
     text = Path(path).read_text(encoding="utf-8")
     try:
         return json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise ValueError(
-            f"{path} is not JSON-compatible YAML. Install PyYAML or keep the "
-            "config in JSON/YAML subset syntax."
-        ) from exc
+    except json.JSONDecodeError:
+        parsed = _load_simple_yaml(text)
+        if not isinstance(parsed, dict):
+            raise ValueError(f"{path} must contain a mapping at the top level.")
+        return parsed
+
+
+def _load_simple_yaml(text: str) -> Any:
+    def parse_scalar(value: str) -> Any:
+        value = value.strip()
+        if value == "":
+            return ""
+        if value in ("true", "True"):
+            return True
+        if value in ("false", "False"):
+            return False
+        if value in ("null", "None", "~"):
+            return None
+        if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+            return value[1:-1]
+        try:
+            if any(c in value for c in (".", "e", "E")):
+                return float(value)
+            return int(value)
+        except ValueError:
+            return value
+
+    rows: List[tuple[int, str]] = []
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(raw) - len(raw.lstrip(" "))
+        rows.append((indent, stripped))
+
+    def parse_block(index: int, indent: int) -> tuple[Any, int]:
+        if index >= len(rows):
+            return {}, index
+        if rows[index][0] < indent:
+            return {}, index
+        is_list = rows[index][1].startswith("- ")
+        if is_list:
+            values: List[Any] = []
+            while index < len(rows) and rows[index][0] == indent and rows[index][1].startswith("- "):
+                item = rows[index][1][2:].strip()
+                if item:
+                    values.append(parse_scalar(item))
+                    index += 1
+                else:
+                    nested_indent = rows[index + 1][0] if index + 1 < len(rows) else indent + 2
+                    value, index = parse_block(index + 1, nested_indent)
+                    values.append(value)
+            return values, index
+
+        values: Dict[str, Any] = {}
+        while index < len(rows) and rows[index][0] == indent and not rows[index][1].startswith("- "):
+            key, sep, rest = rows[index][1].partition(":")
+            if not sep:
+                raise ValueError(f"Unsupported YAML line: {rows[index][1]}")
+            key = key.strip()
+            rest = rest.strip()
+            if rest:
+                values[key] = parse_scalar(rest)
+                index += 1
+            else:
+                nested_indent = rows[index + 1][0] if index + 1 < len(rows) else indent + 2
+                value, index = parse_block(index + 1, nested_indent)
+                values[key] = value
+        return values, index
+
+    parsed, end = parse_block(0, rows[0][0] if rows else 0)
+    if end != len(rows):
+        raise ValueError("Unsupported YAML indentation or mixed collection structure.")
+    return parsed
 
 
 @dataclass
@@ -42,6 +111,11 @@ class SimulationConfig:
     T_u: float = 5.0
     control_interval: float = 180.0
     random_seed: int = 42
+    unit_time: str = "seconds"
+    unit_flow: str = "veh/h"
+    unit_speed: str = "km/h"
+    unit_density: str = "veh/km/lane"
+    derived_time_ratios: Dict[str, float] = field(default_factory=dict)
 
     @property
     def control_interval_h(self) -> float:
@@ -79,6 +153,17 @@ class NetworkConfig:
     boundary_out_links: List[str] = field(default_factory=lambda: ["out_D", "out_F"])
     boundary_queue_max_veh: float = 240.0
     movement_capacity_veh_h: float = 1400.0
+    metanet_tau_h: float = 0.005
+    metanet_tau_sec: float = 18.0
+    metanet_nu_km2_h: float = 65.0
+    metanet_kappa_veh_km_lane: float = 40.0
+    metanet_a_m: float = 1.867
+    metanet_rho_eps: float = 0.001
+    urban_Q_sat_veh_h: float = 1000.0
+    urban_avg_vehicle_length_m: float = 6.0
+    urban_avg_speed_km_h: float = 50.0
+    green_min_fraction: float = 0.2
+    green_max_fraction: float = 0.8
 
     @property
     def movement_links(self) -> List[str]:
@@ -101,6 +186,10 @@ class MPCConfig:
     nash_obj_tol: float = 1.0e-3
     nash_control_tol: float = 1.0e-3
     nash_relaxation_alpha: float = 0.8
+    control_horizon_steps: int = 3
+    urban_freeway_tts_weight_alpha: float = 1.0
+    optimizer_maxiter: int = 40
+    optimizer_n_starts: int = 2
 
 
 @dataclass
@@ -112,6 +201,10 @@ class LeaderConfig:
     N_P_star_range: List[float] = field(default_factory=lambda: [0.0, 500.0])
     N_UF_star_range: List[float] = field(default_factory=lambda: [0.0, 6000.0])
     non_convergence_penalty: float = 500.0
+    metering_congestion_weight: float = 0.45
+    metering_queue_weight: float = 4.0
+    vsl_activation_density_ratio: float = 0.95
+    metering_activation_density_ratio: float = 0.95
 
 
 @dataclass
@@ -123,6 +216,10 @@ class FreewayFollowerConfig:
     density_penalty: float = 10.0
     metering_smoothness_weight: float = 0.1
     vsl_smoothness_weight: float = 0.1
+    ramp_metering_rate_min: float = 0.2
+    ramp_metering_rate_max: float = 1.0
+    vsl_min_km_h: float = 60.0
+    vsl_max_km_h: float = 106.0
 
 
 @dataclass

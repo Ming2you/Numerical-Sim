@@ -61,8 +61,9 @@ class FreewayFollower:
         vsl_set = sorted(float(v) for v in fc.vsl_set)
         for link in net.freeway_links:
             rho_mean = float(np.mean(state.freeway_density[link]))
-            if rho_mean > 0.98 * net.rho_max:
-                desired = 80.0
+            density_ratio = rho_mean / max(net.rho_crit, 1.0e-9)
+            if density_ratio >= self.cfg.leader.vsl_activation_density_ratio:
+                desired = 90.0
             else:
                 desired = max(vsl_set)
             prev = prev_vsl.get(link, max(vsl_set))

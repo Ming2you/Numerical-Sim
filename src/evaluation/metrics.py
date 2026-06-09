@@ -92,6 +92,17 @@ def validate_controls(
         value for row in controls for key, value in row.items()
         if key.startswith("vsl_")
     ]
+    vsl_active_steps = sum(
+        any(float(row.get(f"vsl_{link}", max(cfg.freeway_follower.vsl_set))) < max(cfg.freeway_follower.vsl_set) - 0.5
+            for link in cfg.network.freeway_links)
+        for row in controls
+    )
+    metering_active_steps = sum(
+        any(float(row.get(f"ramp_metering_{ramp}", cfg.network.ramp_capacity_veh_h[ramp]))
+            < cfg.network.ramp_capacity_veh_h[ramp] - 1.0
+            for ramp in cfg.network.ramps)
+        for row in controls
+    )
     vsl_set = set(float(v) for v in cfg.freeway_follower.vsl_set)
     vsl_ok = all(float(v) in vsl_set for v in vsl_values)
     vsl_change_violations = 0
@@ -122,6 +133,7 @@ def validate_controls(
     mean_metering = proposed_summary["mean_metering_error"]
     return {
         "ramp_metering": {
+            "metering_active_steps": metering_active_steps,
             "mean_total_metering_error": mean_metering,
             "max_metering_violation": proposed_summary["max_metering_violation"],
             "ramp_queue_overflow_duration": proposed_summary["ramp_queue_overflow_duration"],
@@ -129,6 +141,7 @@ def validate_controls(
             and proposed_summary["ramp_queue_overflow_duration"] <= max(1.0, 0.05 * len(rows)),
         },
         "vsl": {
+            "vsl_active_steps": vsl_active_steps,
             "vsl_feasible_rate": float(np.mean([float(v) in vsl_set for v in vsl_values])) if vsl_values else 1.0,
             "vsl_change_violation_count": vsl_change_violations,
             "density_exceedance_duration": proposed_summary["density_exceedance_duration"],

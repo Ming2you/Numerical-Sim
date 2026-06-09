@@ -1,79 +1,134 @@
-{
-  "simulation": {
-    "T_total": 7200,
-    "T_f": 10,
-    "T_u": 5,
-    "control_interval": 180,
-    "random_seed": 42
-  },
-  "network": {
-    "freeway_links": ["FW_W", "FW_E"],
-    "freeway_segments_per_link": 3,
-    "freeway_segment_length_km": 0.5,
-    "freeway_lanes": 2,
-    "v_free": 100.0,
-    "rho_crit": 33.5,
-    "rho_max": 180.0,
-    "freeway_capacity_veh_h": 3600.0,
-    "ramps": ["R1", "R2", "R3", "R4"],
-    "ramp_to_freeway": {"R1": "FW_W", "R2": "FW_W", "R3": "FW_E", "R4": "FW_E"},
-    "ramp_capacity_veh_h": {"R1": 1500.0, "R2": 1500.0, "R3": 1500.0, "R4": 1500.0},
-    "ramp_queue_max_veh": 180.0,
-    "signals": ["A", "C", "D", "F"],
-    "cycle_length": 120.0,
-    "lost_time": 8.0,
-    "green_min": 20.0,
-    "green_max": 92.0,
-    "boundary_in_links": ["in_A", "in_C"],
-    "boundary_out_links": ["out_D", "out_F"],
-    "boundary_queue_max_veh": 240.0,
-    "movement_capacity_veh_h": 1400.0
-  },
-  "mpc": {
-    "horizon_steps": 5,
-    "leader_candidate_count": 15,
-    "max_nash_iter": 10,
-    "nash_obj_tol": 1.0e-3,
-    "nash_control_tol": 1.0e-3,
-    "nash_relaxation_alpha": 0.8
-  },
-  "leader": {
-    "objective_mode": "follower_ttt",
-    "w_P": 1.0,
-    "w_F": 1.0,
-    "w_L": 0.05,
-    "N_P_star_range": [0.0, 500.0],
-    "N_UF_star_range": [0.0, 6000.0],
-    "non_convergence_penalty": 500.0
-  },
-  "freeway_follower": {
-    "eps_F": 100.0,
-    "vsl_set": [50, 60, 70, 80, 90, 100],
-    "max_vsl_step": 20.0,
-    "ramp_queue_penalty": 10.0,
-    "density_penalty": 10.0,
-    "metering_smoothness_weight": 0.1,
-    "vsl_smoothness_weight": 0.1
-  },
-  "urban_follower": {
-    "eps_U": 100.0,
-    "eps_g": 5.0,
-    "max_offset_step": 15.0,
-    "boundary_balance_weight": 10.0,
-    "offset_smoothness_weight": 0.1,
-    "green_smoothness_weight": 0.1,
-    "receiving_space_rule": "proportional"
-  },
-  "evaluation": {
-    "main_metric": "total_ttt",
-    "main_metric_direction": "lower_is_better",
-    "min_improvement_pct": 8.0,
-    "eps": 1.0e-9
-  },
-  "auto_tuning": {
-    "enabled": true,
-    "max_iterations": 5,
-    "preserve_all_runs": true
-  }
-}
-
+simulation:
+  T_total: 7200
+  T_f: 10
+  T_u: 5
+  control_interval: 180
+  random_seed: 42
+  unit_time: seconds
+  unit_flow: veh/h
+  unit_speed: km/h
+  unit_density: veh/km/lane
+  derived_time_ratios:
+    T_f_h: 0.002777777777777778
+    T_u_h: 0.001388888888888889
+    control_interval_h: 0.05
+    K_cu: 36
+    K_cf: 18
+    K_fu: 2
+network:
+  freeway_links:
+  - FW_W
+  - FW_E
+  freeway_segments_per_link: 3
+  freeway_segment_length_km: 0.5
+  freeway_lanes: 2
+  v_free: 100.0
+  rho_crit: 33.5
+  rho_max: 180.0
+  freeway_capacity_veh_h: 4000.0
+  ramps:
+  - R1
+  - R2
+  - R3
+  - R4
+  ramp_to_freeway:
+    R1: FW_W
+    R2: FW_W
+    R3: FW_E
+    R4: FW_E
+  ramp_capacity_veh_h:
+    R1: 1500.0
+    R2: 1500.0
+    R3: 1500.0
+    R4: 1500.0
+  ramp_queue_max_veh: 180.0
+  signals:
+  - A
+  - C
+  - D
+  - F
+  cycle_length: 120.0
+  lost_time: 8.0
+  green_min: 20.0
+  green_max: 92.0
+  boundary_in_links:
+  - in_A
+  - in_C
+  boundary_out_links:
+  - out_D
+  - out_F
+  boundary_queue_max_veh: 240.0
+  movement_capacity_veh_h: 1400.0
+  metanet_tau_h: 0.005
+  metanet_tau_sec: 18.0
+  metanet_nu_km2_h: 65.0
+  metanet_kappa_veh_km_lane: 40.0
+  metanet_a_m: 1.867
+  metanet_rho_eps: 0.001
+  urban_Q_sat_veh_h: 1000.0
+  urban_avg_vehicle_length_m: 6.0
+  urban_avg_speed_km_h: 50.0
+  green_min_fraction: 0.2
+  green_max_fraction: 0.8
+mpc:
+  horizon_steps: 8
+  leader_candidate_count: 15
+  max_nash_iter: 10
+  nash_obj_tol: 0.001
+  nash_control_tol: 0.001
+  nash_relaxation_alpha: 0.8
+  control_horizon_steps: 3
+  urban_freeway_tts_weight_alpha: 1.0
+  optimizer_maxiter: 40
+  optimizer_n_starts: 2
+leader:
+  objective_mode: follower_ttt
+  w_P: 1.0
+  w_F: 1.0
+  w_L: 0.05
+  N_P_star_range:
+  - 0.0
+  - 500.0
+  N_UF_star_range:
+  - 0.0
+  - 6000.0
+  non_convergence_penalty: 500.0
+  metering_congestion_weight: 0.45
+  metering_queue_weight: 4.0
+  vsl_activation_density_ratio: 0.95
+  metering_activation_density_ratio: 0.95
+freeway_follower:
+  eps_F: 100.0
+  vsl_set:
+  - 50
+  - 60
+  - 70
+  - 80
+  - 90
+  - 100
+  max_vsl_step: 20.0
+  ramp_queue_penalty: 10.0
+  density_penalty: 10.0
+  metering_smoothness_weight: 0.1
+  vsl_smoothness_weight: 0.1
+  ramp_metering_rate_min: 0.2
+  ramp_metering_rate_max: 1.0
+  vsl_min_km_h: 60.0
+  vsl_max_km_h: 106.0
+urban_follower:
+  eps_U: 100.0
+  eps_g: 5.0
+  max_offset_step: 15.0
+  boundary_balance_weight: 10.0
+  offset_smoothness_weight: 0.1
+  green_smoothness_weight: 0.1
+  receiving_space_rule: proportional
+evaluation:
+  main_metric: total_ttt
+  main_metric_direction: lower_is_better
+  min_improvement_pct: 8.0
+  eps: 1.0e-09
+auto_tuning:
+  enabled: true
+  max_iterations: 5
+  preserve_all_runs: true
