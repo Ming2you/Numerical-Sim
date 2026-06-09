@@ -18,6 +18,14 @@ Review these artifacts:
 - Simulation outputs under `outputs/`, when available locally
 - Evaluation scripts and generated metrics
 
+
+Before comparing simulation results, first verify whether the implemented traffic model and controller are sufficiently consistent with docs/codex_implementation_spec.md.
+
+Proceed to simulation-result comparison only if no critical or blocking implementation issues are found.
+
+If the traffic model or controller is not spec-compliant, or if there is insufficient code-level evidence to confirm correctness, stop the review at the implementation-validation stage and report the blocking issues. Do not interpret simulation improvements until the implementation validity is established.
+
+
 ## Required Checks
 
 Check whether the implementation includes and validates:

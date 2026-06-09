@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Dict, Iterable, Optional
 
 import numpy as np
 
@@ -38,9 +38,13 @@ class NashSolver:
         self,
         state: TrafficState,
         leader: LeaderAction,
-        demand: DemandStep,
+        demand: DemandStep | Iterable[DemandStep],
         previous_control: Optional[ControlAction] = None,
     ) -> NashResult:
+        forecast = [demand] if isinstance(demand, DemandStep) else list(demand)
+        if not forecast:
+            raise ValueError("NashSolver requires at least one demand step.")
+        first_demand = forecast[0]
         alpha = float(np.clip(self.cfg.mpc.nash_relaxation_alpha, 0.0, 1.0))
         current = previous_control or ControlAction.fixed(self.cfg)
         current.N_P_star = leader.N_P_star
@@ -55,7 +59,7 @@ class NashSolver:
         diagnostics: Dict[str, float] = {}
 
         for iteration in range(1, self.cfg.mpc.max_nash_iter + 1):
-            fw = self.freeway.solve(state, leader, demand, current)
+            fw = self.freeway.solve(state, leader, forecast, current)
             tmp = ControlAction(
                 N_P_star=leader.N_P_star,
                 N_UF_star=leader.N_UF_star,
@@ -66,7 +70,7 @@ class NashSolver:
                 inflow_outflow_allocation=dict(current.inflow_outflow_allocation),
             )
             urban_reference = previous_control or current
-            urban = self.urban.solve(state, leader, demand, fw, urban_reference)
+            urban = self.urban.solve(state, leader, first_demand, fw, urban_reference)
             candidate = ControlAction(
                 N_P_star=leader.N_P_star,
                 N_UF_star=leader.N_UF_star,

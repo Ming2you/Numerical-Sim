@@ -56,12 +56,13 @@ class StackelbergMPCController:
             self.leader = Leader(config)
             self.nash_solver = NashSolver(config)
         forecast = list(demand_forecast)
-        first_demand = forecast[0]
+        if not forecast:
+            raise ValueError("StackelbergMPCController requires a non-empty demand forecast.")
         previous = previous_control or self.previous_control or ControlAction.fixed(self.cfg)
         candidates = self.leader.candidates(state, previous)
         best: Optional[DecisionResult] = None
         for action in candidates:
-            nash = self.nash_solver.solve(state.copy(), action, first_demand, previous)
+            nash = self.nash_solver.solve(state.copy(), action, forecast, previous)
             predicted_states, follower_ttt = self._predict(state, nash.control, forecast)
             obj = self.leader.objective(
                 predicted_states,
@@ -93,16 +94,14 @@ class StackelbergMPCController:
         control: ControlAction,
         forecast: list[DemandStep],
     ) -> tuple[list[TrafficState], float]:
-        from src.models.metanet import freeway_step
-        from src.models.urban_queue_model import urban_step
+        from src.simulation.coupling import run_coupled_interval
 
         s = state.copy()
         states: list[TrafficState] = []
         total_ttt = 0.0
         for demand in forecast[: self.cfg.mpc.horizon_steps]:
-            fw_ttt, _ = freeway_step(s, control, demand, self.cfg)
-            ur_ttt, _ = urban_step(s, control, demand, self.cfg)
+            result = run_coupled_interval(s, control, demand, self.cfg)
             s.time_sec += self.cfg.simulation.control_interval
-            total_ttt += fw_ttt + ur_ttt
+            total_ttt += result.freeway_ttt + result.urban_ttt
             states.append(s.copy())
         return states, float(total_ttt)

@@ -59,6 +59,102 @@ network:
   - out_F
   boundary_queue_max_veh: 240.0
   movement_capacity_veh_h: 1400.0
+  urban_movements:
+    in_A_to_out_D:
+      origin: in_A
+      signal: A
+      destination: out_D
+      receiving_link: A_out_D
+      phase: A_p1
+      kind: boundary_in
+    in_C_to_out_F:
+      origin: in_C
+      signal: C
+      destination: out_F
+      receiving_link: C_out_F
+      phase: C_p1
+      kind: boundary_in
+    R1_onramp:
+      origin: A
+      signal: R1
+      destination: FW_W
+      receiving_link: A_R1
+      phase: A_p2
+      kind: on_ramp
+      ramp: R1
+    R2_onramp:
+      origin: C
+      signal: R2
+      destination: FW_W
+      receiving_link: C_R2
+      phase: C_p2
+      kind: on_ramp
+      ramp: R2
+    R3_onramp:
+      origin: D
+      signal: R3
+      destination: FW_E
+      receiving_link: D_R3
+      phase: D_p2
+      kind: on_ramp
+      ramp: R3
+    R4_onramp:
+      origin: F
+      signal: R4
+      destination: FW_E
+      receiving_link: F_R4
+      phase: F_p2
+      kind: on_ramp
+      ramp: R4
+    OR_W_to_out_D:
+      origin: OR_W
+      signal: D
+      destination: out_D
+      receiving_link: D_out_D
+      phase: D_p1
+      kind: off_ramp
+      off_ramp: OR_W
+    OR_E_to_out_F:
+      origin: OR_E
+      signal: F
+      destination: out_F
+      receiving_link: F_out_F
+      phase: F_p1
+      kind: off_ramp
+      off_ramp: OR_E
+  urban_link_storage_veh:
+    A_out_D: 220.0
+    C_out_F: 220.0
+    A_R1: 180.0
+    C_R2: 180.0
+    D_R3: 180.0
+    F_R4: 180.0
+    OR_W_D: 120.0
+    OR_E_F: 120.0
+    D_out_D: 220.0
+    F_out_F: 220.0
+  on_ramp_to_movement:
+    R1: R1_onramp
+    R2: R2_onramp
+    R3: R3_onramp
+    R4: R4_onramp
+  off_ramps:
+  - OR_W
+  - OR_E
+  off_ramp_from_freeway:
+    OR_W: FW_W
+    OR_E: FW_E
+  off_ramp_storage_link:
+    OR_W: OR_W_D
+    OR_E: OR_E_F
+  off_ramp_to_movement:
+    OR_W: OR_W_to_out_D
+    OR_E: OR_E_to_out_F
+  off_ramp_split_ratio:
+    OR_W: 0.12
+    OR_E: 0.12
+  v_min: 5.0
+  alpha_vsl: 0.0
   metanet_tau_h: 0.005
   metanet_tau_sec: 18.0
   metanet_nu_km2_h: 65.0
@@ -92,6 +188,7 @@ leader:
   N_UF_star_range:
   - 0.0
   - 6000.0
+  N_UF_star_unit: veh_per_hour
   non_convergence_penalty: 500.0
   metering_congestion_weight: 0.45
   metering_queue_weight: 4.0
@@ -111,6 +208,9 @@ freeway_follower:
   density_penalty: 10.0
   metering_smoothness_weight: 0.1
   vsl_smoothness_weight: 0.1
+  horizon_beam_width: 2
+  horizon_ramp_candidate_limit: 3
+  horizon_vsl_candidate_limit_per_link: 3
   ramp_metering_rate_min: 0.2
   ramp_metering_rate_max: 1.0
   vsl_min_km_h: 60.0

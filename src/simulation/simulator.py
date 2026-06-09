@@ -5,9 +5,8 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
 from src.models.demand import DemandStep
-from src.models.metanet import freeway_step
 from src.models.state import ControlAction, ExperimentConfig, TrafficState
-from src.models.urban_queue_model import urban_step
+from src.simulation.coupling import run_coupled_interval
 
 
 @dataclass
@@ -31,17 +30,16 @@ class MixedTrafficSimulator:
         return copy.deepcopy(self)
 
     def step(self, control: ControlAction, demand: DemandStep, step_idx: int) -> StepLog:
-        fw_ttt, fw_diag = freeway_step(self.state, control, demand, self.cfg)
-        ur_ttt, ur_diag = urban_step(self.state, control, demand, self.cfg)
+        coupled = run_coupled_interval(self.state, control, demand, self.cfg)
         self.state.time_sec += self.cfg.simulation.control_interval
-        self.freeway_ttt += fw_ttt
-        self.urban_ttt += ur_ttt
-        diag = {**fw_diag, **ur_diag, **control.diagnostics}
+        self.freeway_ttt += coupled.freeway_ttt
+        self.urban_ttt += coupled.urban_ttt
+        diag = {**coupled.diagnostics, **control.diagnostics}
         log = StepLog(
             step=step_idx,
             time_sec=self.state.time_sec,
-            freeway_ttt=fw_ttt,
-            urban_ttt=ur_ttt,
+            freeway_ttt=coupled.freeway_ttt,
+            urban_ttt=coupled.urban_ttt,
             diagnostics=diag,
         )
         self.logs.append(log)
@@ -63,10 +61,16 @@ def state_row(state: TrafficState, cfg: ExperimentConfig, step: int) -> Dict[str
         row[f"rho_{link}_mean"] = sum(values) / len(values)
     for link, values in state.freeway_speed.items():
         row[f"speed_{link}_mean"] = sum(values) / len(values)
+    for link, values in state.freeway_flow.items():
+        row[f"flow_{link}_mean"] = sum(values) / len(values)
     for ramp, value in state.ramp_queue.items():
         row[f"ramp_queue_{ramp}"] = value
     for link, value in state.boundary_queue.items():
         row[f"boundary_queue_{link}"] = value
+    for movement, value in state.urban_movement_queue.items():
+        row[f"movement_queue_{movement}"] = value
+    for link, value in state.urban_link_storage.items():
+        row[f"storage_available_{link}"] = value
     return row
 
 
@@ -87,5 +91,7 @@ def control_row(control: ControlAction, cfg: ExperimentConfig, step: int, time_s
         row[f"offset_{signal}"] = control.offsets.get(signal, 0.0)
     for link in cfg.network.movement_links:
         row[f"allocation_{link}"] = control.inflow_outflow_allocation.get(link, 0.0)
+    for movement in cfg.network.urban_movements:
+        row[f"allocation_{movement}"] = control.inflow_outflow_allocation.get(movement, 0.0)
     row.update({f"diag_{k}": v for k, v in control.diagnostics.items() if isinstance(v, (int, float, bool))})
     return row

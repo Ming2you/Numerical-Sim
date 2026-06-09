@@ -18,6 +18,11 @@ def _deep_update(base: Dict[str, Any], override: Mapping[str, Any]) -> Dict[str,
     return out
 
 
+def _is_integer_ratio(numerator: float, denominator: float, eps: float = 1.0e-9) -> bool:
+    ratio = numerator / denominator
+    return abs(ratio - round(ratio)) <= eps
+
+
 def load_jsonish(path: str | Path) -> Dict[str, Any]:
     """Load project config from JSON-compatible YAML or a small YAML subset.
 
@@ -118,12 +123,56 @@ class SimulationConfig:
     derived_time_ratios: Dict[str, float] = field(default_factory=dict)
 
     @property
+    def T_f_sec(self) -> float:
+        return self.T_f
+
+    @property
+    def T_u_sec(self) -> float:
+        return self.T_u
+
+    @property
+    def T_c_sec(self) -> float:
+        return self.control_interval
+
+    @property
+    def T_f_h(self) -> float:
+        return self.T_f_sec / 3600.0
+
+    @property
+    def T_u_h(self) -> float:
+        return self.T_u_sec / 3600.0
+
+    @property
+    def T_c_h(self) -> float:
+        return self.T_c_sec / 3600.0
+
+    @property
     def control_interval_h(self) -> float:
-        return self.control_interval / 3600.0
+        return self.T_c_h
 
     @property
     def n_control_steps(self) -> int:
-        return max(1, int(math.ceil(self.T_total / self.control_interval)))
+        return max(1, int(math.ceil(self.T_total / self.T_c_sec)))
+
+    @property
+    def K_fu(self) -> int:
+        return int(round(self.T_f_sec / self.T_u_sec))
+
+    @property
+    def K_cf(self) -> int:
+        return int(round(self.T_c_sec / self.T_f_sec))
+
+    @property
+    def K_cu(self) -> int:
+        return int(round(self.T_c_sec / self.T_u_sec))
+
+    def validate(self) -> None:
+        if min(self.T_f_sec, self.T_u_sec, self.T_c_sec) <= 0.0:
+            raise ValueError("T_f, T_u, and control_interval must be positive.")
+        if not _is_integer_ratio(self.T_f_sec, self.T_u_sec):
+            raise ValueError("T_f must be an integer multiple of T_u.")
+        if not _is_integer_ratio(self.T_c_sec, self.T_f_sec):
+            raise ValueError("control_interval must be an integer multiple of T_f.")
 
 
 @dataclass
@@ -153,6 +202,77 @@ class NetworkConfig:
     boundary_out_links: List[str] = field(default_factory=lambda: ["out_D", "out_F"])
     boundary_queue_max_veh: float = 240.0
     movement_capacity_veh_h: float = 1400.0
+    urban_movements: Dict[str, Dict[str, Any]] = field(default_factory=lambda: {
+        "in_A_to_out_D": {
+            "origin": "in_A", "signal": "A", "destination": "out_D",
+            "receiving_link": "A_out_D", "phase": "A_p1", "kind": "boundary_in",
+        },
+        "in_C_to_out_F": {
+            "origin": "in_C", "signal": "C", "destination": "out_F",
+            "receiving_link": "C_out_F", "phase": "C_p1", "kind": "boundary_in",
+        },
+        "R1_onramp": {
+            "origin": "A", "signal": "R1", "destination": "FW_W",
+            "receiving_link": "A_R1", "phase": "A_p2", "kind": "on_ramp", "ramp": "R1",
+        },
+        "R2_onramp": {
+            "origin": "C", "signal": "R2", "destination": "FW_W",
+            "receiving_link": "C_R2", "phase": "C_p2", "kind": "on_ramp", "ramp": "R2",
+        },
+        "R3_onramp": {
+            "origin": "D", "signal": "R3", "destination": "FW_E",
+            "receiving_link": "D_R3", "phase": "D_p2", "kind": "on_ramp", "ramp": "R3",
+        },
+        "R4_onramp": {
+            "origin": "F", "signal": "R4", "destination": "FW_E",
+            "receiving_link": "F_R4", "phase": "F_p2", "kind": "on_ramp", "ramp": "R4",
+        },
+        "OR_W_to_out_D": {
+            "origin": "OR_W", "signal": "D", "destination": "out_D",
+            "receiving_link": "D_out_D", "phase": "D_p1", "kind": "off_ramp", "off_ramp": "OR_W",
+        },
+        "OR_E_to_out_F": {
+            "origin": "OR_E", "signal": "F", "destination": "out_F",
+            "receiving_link": "F_out_F", "phase": "F_p1", "kind": "off_ramp", "off_ramp": "OR_E",
+        },
+    })
+    urban_link_storage_veh: Dict[str, float] = field(default_factory=lambda: {
+        "A_out_D": 220.0,
+        "C_out_F": 220.0,
+        "A_R1": 180.0,
+        "C_R2": 180.0,
+        "D_R3": 180.0,
+        "F_R4": 180.0,
+        "OR_W_D": 120.0,
+        "OR_E_F": 120.0,
+        "D_out_D": 220.0,
+        "F_out_F": 220.0,
+    })
+    on_ramp_to_movement: Dict[str, str] = field(default_factory=lambda: {
+        "R1": "R1_onramp",
+        "R2": "R2_onramp",
+        "R3": "R3_onramp",
+        "R4": "R4_onramp",
+    })
+    off_ramps: List[str] = field(default_factory=lambda: ["OR_W", "OR_E"])
+    off_ramp_from_freeway: Dict[str, str] = field(default_factory=lambda: {
+        "OR_W": "FW_W",
+        "OR_E": "FW_E",
+    })
+    off_ramp_storage_link: Dict[str, str] = field(default_factory=lambda: {
+        "OR_W": "OR_W_D",
+        "OR_E": "OR_E_F",
+    })
+    off_ramp_to_movement: Dict[str, str] = field(default_factory=lambda: {
+        "OR_W": "OR_W_to_out_D",
+        "OR_E": "OR_E_to_out_F",
+    })
+    off_ramp_split_ratio: Dict[str, float] = field(default_factory=lambda: {
+        "OR_W": 0.12,
+        "OR_E": 0.12,
+    })
+    v_min: float = 5.0
+    alpha_vsl: float = 0.0
     metanet_tau_h: float = 0.005
     metanet_tau_sec: float = 18.0
     metanet_nu_km2_h: float = 65.0
@@ -200,6 +320,7 @@ class LeaderConfig:
     w_L: float = 0.05
     N_P_star_range: List[float] = field(default_factory=lambda: [0.0, 500.0])
     N_UF_star_range: List[float] = field(default_factory=lambda: [0.0, 6000.0])
+    N_UF_star_unit: str = "veh_per_hour"
     non_convergence_penalty: float = 500.0
     metering_congestion_weight: float = 0.45
     metering_queue_weight: float = 4.0
@@ -216,6 +337,9 @@ class FreewayFollowerConfig:
     density_penalty: float = 10.0
     metering_smoothness_weight: float = 0.1
     vsl_smoothness_weight: float = 0.1
+    horizon_beam_width: int = 2
+    horizon_ramp_candidate_limit: int = 3
+    horizon_vsl_candidate_limit_per_link: int = 3
     ramp_metering_rate_min: float = 0.2
     ramp_metering_rate_max: float = 1.0
     vsl_min_km_h: float = 60.0
@@ -261,7 +385,7 @@ class ExperimentConfig:
 
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> "ExperimentConfig":
-        return cls(
+        cfg = cls(
             simulation=SimulationConfig(**raw.get("simulation", {})),
             network=NetworkConfig(**raw.get("network", {})),
             mpc=MPCConfig(**raw.get("mpc", {})),
@@ -271,6 +395,13 @@ class ExperimentConfig:
             evaluation=EvaluationConfig(**raw.get("evaluation", {})),
             auto_tuning=AutoTuningConfig(**raw.get("auto_tuning", {})),
         )
+        cfg.validate()
+        return cfg
+
+    def validate(self) -> None:
+        self.simulation.validate()
+        if self.leader.N_UF_star_unit not in {"veh_per_hour", "veh_per_control_interval"}:
+            raise ValueError("leader.N_UF_star_unit must be veh_per_hour or veh_per_control_interval.")
 
     @classmethod
     def from_file(cls, path: str | Path, overrides: Optional[Mapping[str, Any]] = None) -> "ExperimentConfig":
@@ -290,9 +421,14 @@ class ExperimentConfig:
 class TrafficState:
     freeway_density: Dict[str, List[float]]
     freeway_speed: Dict[str, List[float]]
+    freeway_flow: Dict[str, List[float]]
     ramp_queue: Dict[str, float]
     urban_queue: Dict[str, float]
     boundary_queue: Dict[str, float]
+    urban_movement_queue: Dict[str, float] = field(default_factory=dict)
+    urban_link_storage: Dict[str, float] = field(default_factory=dict)
+    urban_arrival_buffer: Dict[str, Dict[int, float]] = field(default_factory=dict)
+    urban_storage_release_buffer: Dict[str, Dict[int, float]] = field(default_factory=dict)
     time_sec: float = 0.0
 
     @classmethod
@@ -306,16 +442,43 @@ class TrafficState:
             link: [net.v_free for _ in range(net.freeway_segments_per_link)]
             for link in net.freeway_links
         }
+        flow = {
+            link: [
+                max(0.0, density[link][i]) * max(0.0, speed[link][i]) * max(0.0, net.freeway_lanes)
+                for i in range(net.freeway_segments_per_link)
+            ]
+            for link in net.freeway_links
+        }
         return cls(
             freeway_density=density,
             freeway_speed=speed,
+            freeway_flow=flow,
             ramp_queue={r: 0.0 for r in net.ramps},
             urban_queue={m: 20.0 for m in net.movement_links},
             boundary_queue={m: 20.0 for m in net.movement_links},
+            urban_movement_queue={
+                movement: (0.0 if spec.get("kind") == "on_ramp" else 20.0)
+                for movement, spec in net.urban_movements.items()
+            },
+            urban_link_storage=dict(net.urban_link_storage_veh),
+            urban_arrival_buffer={movement: {} for movement in net.urban_movements},
+            urban_storage_release_buffer={link: {} for link in net.urban_link_storage_veh},
         )
 
     def copy(self) -> "TrafficState":
         return copy.deepcopy(self)
+
+    def refresh_freeway_flow(self, net: NetworkConfig) -> None:
+        self.freeway_flow = {
+            link: [
+                max(0.0, rho) * max(0.0, speed) * max(0.0, net.freeway_lanes)
+                for rho, speed in zip(
+                    self.freeway_density.get(link, []),
+                    self.freeway_speed.get(link, []),
+                )
+            ]
+            for link in net.freeway_links
+        }
 
     def total_freeway_vehicles(self, net: NetworkConfig) -> float:
         return float(sum(
@@ -324,6 +487,8 @@ class TrafficState:
         ) + sum(self.ramp_queue.values()))
 
     def total_urban_vehicles(self) -> float:
+        if self.urban_movement_queue:
+            return float(sum(self.urban_movement_queue.values()))
         return float(sum(self.urban_queue.values()) + sum(self.boundary_queue.values()))
 
     def boundary_vector(self) -> List[float]:
@@ -350,12 +515,17 @@ class ControlAction:
         for signal in net.signals:
             green[f"{signal}_p1"] = phase_green
             green[f"{signal}_p2"] = phase_green
+        allocation = {m: net.movement_capacity_veh_h * 0.5 for m in net.movement_links}
+        allocation.update({
+            movement: net.movement_capacity_veh_h * 0.5
+            for movement in net.urban_movements
+        })
         return cls(
             ramp_metering={r: net.ramp_capacity_veh_h[r] for r in net.ramps},
             vsl={link: max(cfg.freeway_follower.vsl_set) for link in net.freeway_links},
             green_times=green,
             offsets={signal: 0.0 for signal in net.signals},
-            inflow_outflow_allocation={m: net.movement_capacity_veh_h * 0.5 for m in net.movement_links},
+            inflow_outflow_allocation=allocation,
         )
 
     def control_vector(self, cfg: ExperimentConfig) -> List[float]:
@@ -366,6 +536,7 @@ class ControlAction:
             + [self.green_times.get(f"{s}_p1", 0.0) for s in net.signals]
             + [self.offsets.get(s, 0.0) for s in net.signals]
             + [self.inflow_outflow_allocation.get(m, 0.0) for m in net.movement_links]
+            + [self.inflow_outflow_allocation.get(m, 0.0) for m in net.urban_movements]
         )
 
 

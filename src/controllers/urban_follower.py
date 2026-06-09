@@ -8,7 +8,7 @@ import numpy as np
 from src.controllers.leader import LeaderAction
 from src.models.demand import DemandStep
 from src.models.state import ControlAction, ExperimentConfig, TrafficState
-from src.models.urban_queue_model import boundary_indices, safe_balance_index
+from src.models.urban_queue_model import boundary_indices, ensure_urban_state, movement_specs, safe_balance_index
 
 
 @dataclass
@@ -34,15 +34,20 @@ class UrbanFollower:
 
     def _green_times(self, state: TrafficState, previous: Optional[ControlAction]) -> Dict[str, float]:
         net = self.cfg.network
+        specs = movement_specs(self.cfg)
         green: Dict[str, float] = {}
         total = net.effective_green_total
         for signal in net.signals:
-            if signal in ("A", "C"):
-                p1_queue = sum(state.boundary_queue.get(k, 0.0) for k in net.boundary_in_links)
-                p2_queue = sum(state.boundary_queue.get(k, 0.0) for k in net.boundary_out_links)
-            else:
-                p1_queue = sum(state.boundary_queue.get(k, 0.0) for k in net.boundary_out_links)
-                p2_queue = sum(state.boundary_queue.get(k, 0.0) for k in net.boundary_in_links)
+            p1_queue = sum(
+                state.urban_movement_queue.get(movement, 0.0)
+                for movement, spec in specs.items()
+                if spec.get("phase") == f"{signal}_p1"
+            )
+            p2_queue = sum(
+                state.urban_movement_queue.get(movement, 0.0)
+                for movement, spec in specs.items()
+                if spec.get("phase") == f"{signal}_p2"
+            )
             ratio = p1_queue / max(p1_queue + p2_queue, 1.0e-9) if p1_queue + p2_queue > 0 else 0.5
             p1 = float(np.clip(total * ratio, net.green_min, net.green_max))
             p2 = total - p1
@@ -71,9 +76,17 @@ class UrbanFollower:
 
     def _allocation(self, state: TrafficState, leader: LeaderAction) -> tuple[Dict[str, float], float]:
         net = self.cfg.network
-        caps = {link: net.movement_capacity_veh_h for link in net.movement_links}
-        in_cap = sum(caps[l] for l in net.boundary_in_links)
-        out_cap = sum(caps[l] for l in net.boundary_out_links)
+        specs = movement_specs(self.cfg)
+        inbound_movements = [
+            movement for movement, spec in specs.items()
+            if spec.get("kind") == "boundary_in"
+        ]
+        outbound_movements = [
+            movement for movement, spec in specs.items()
+            if spec.get("kind") == "off_ramp"
+        ]
+        in_cap = len(inbound_movements) * net.movement_capacity_veh_h
+        out_cap = len(outbound_movements) * net.movement_capacity_veh_h
         total_service = 0.62 * (in_cap + out_cap)
         desired_in = np.clip((total_service + leader.N_P_star) / 2.0, 0.0, in_cap)
         desired_out = np.clip(desired_in - leader.N_P_star, 0.0, out_cap)
@@ -82,12 +95,32 @@ class UrbanFollower:
             desired_in = np.clip(desired_out + leader.N_P_star, 0.0, in_cap)
 
         alloc: Dict[str, float] = {}
-        for group, total in ((net.boundary_in_links, desired_in), (net.boundary_out_links, desired_out)):
-            q = np.asarray([state.boundary_queue.get(link, 0.0) + 1.0 for link in group], dtype=float)
+        for group, total in ((inbound_movements, desired_in), (outbound_movements, desired_out)):
+            if not group:
+                continue
+            q = np.asarray([state.urban_movement_queue.get(movement, 0.0) + 1.0 for movement in group], dtype=float)
             w = q / max(float(np.sum(q)), 1.0e-9)
-            for idx, link in enumerate(group):
-                alloc[link] = float(min(caps[link], total * w[idx]))
-        residual = abs(sum(alloc[l] for l in net.boundary_in_links) - sum(alloc[l] for l in net.boundary_out_links) - leader.N_P_star)
+            for idx, movement in enumerate(group):
+                alloc[movement] = float(min(net.movement_capacity_veh_h, total * w[idx]))
+
+        for link in net.boundary_in_links:
+            related = [
+                movement for movement, spec in specs.items()
+                if spec.get("origin") == link and spec.get("kind") == "boundary_in"
+            ]
+            alloc[link] = float(sum(alloc.get(movement, 0.0) for movement in related))
+        for link in net.boundary_out_links:
+            related = [
+                movement for movement, spec in specs.items()
+                if spec.get("destination") == link and spec.get("kind") == "off_ramp"
+            ]
+            alloc[link] = float(sum(alloc.get(movement, 0.0) for movement in related))
+
+        residual = abs(
+            sum(alloc.get(m, 0.0) for m in inbound_movements)
+            - sum(alloc.get(m, 0.0) for m in outbound_movements)
+            - leader.N_P_star
+        )
         return alloc, float(residual)
 
     def solve(
@@ -98,6 +131,7 @@ class UrbanFollower:
         freeway_response: object | None = None,
         previous_control: Optional[ControlAction] = None,
     ) -> UrbanFollowerResult:
+        ensure_urban_state(state, self.cfg)
         green = self._green_times(state, previous_control)
         offsets = self._offsets(state, previous_control)
         allocation, residual = self._allocation(state, leader)
