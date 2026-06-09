@@ -7,6 +7,11 @@ from src.controllers.stackelberg_mpc import StackelbergMPCController
 from src.controllers.urban_follower import UrbanFollower
 from src.models.demand import DemandProfile, ScenarioConfig
 from src.models.state import ControlAction, ExperimentConfig, TrafficState
+from src.models.urban_queue_model import (
+    sync_onramp_queues_from_freeway,
+    sync_onramp_queues_to_freeway,
+    urban_substep,
+)
 from src.simulation.coupling import CoupledStepResult
 from src.simulation.simulator import MixedTrafficSimulator
 
@@ -196,18 +201,20 @@ class ConstraintTests(unittest.TestCase):
         self.assertEqual(log.diagnostics["coupling_aggregate_urban_model"], 0.0)
         self.assertEqual(log.diagnostics["coupling_movement_urban_model"], 1.0)
         self.assertEqual(log.diagnostics["coupling_onramp_sync_active"], 1.0)
+        self.assertEqual(log.diagnostics["coupling_onramp_two_reservoir_active"], 1.0)
         self.assertEqual(log.diagnostics["coupling_offramp_storage_active"], 1.0)
 
-    def test_onramp_queue_is_synchronized_with_urban_movement_queue(self):
+    def test_onramp_uses_two_reservoirs_instead_of_syncing_queues(self):
         cfg = short_config()
-        sim = MixedTrafficSimulator(cfg)
-        demand = DemandProfile(cfg, ScenarioConfig("test", ramp_scale=3.0)).at(0.0)
-        sim.step(ControlAction.fixed(cfg), demand, 0)
-        for ramp, movement in cfg.network.on_ramp_to_movement.items():
-            self.assertAlmostEqual(
-                sim.state.ramp_queue[ramp],
-                sim.state.urban_movement_queue[movement],
-            )
+        state = TrafficState.initial(cfg)
+        state.ramp_queue["R1"] = 30.0
+        state.urban_movement_queue["R1_onramp"] = 70.0
+        sync_onramp_queues_from_freeway(state, cfg)
+        self.assertAlmostEqual(state.ramp_queue["R1"], 30.0)
+        self.assertAlmostEqual(state.urban_movement_queue["R1_onramp"], 70.0)
+        sync_onramp_queues_to_freeway(state, cfg)
+        self.assertAlmostEqual(state.ramp_queue["R1"], 30.0)
+        self.assertAlmostEqual(state.urban_movement_queue["R1_onramp"], 70.0)
 
     def test_onramp_demand_enters_urban_movement_queue_when_metering_closed(self):
         cfg = short_config()
@@ -217,10 +224,40 @@ class ConstraintTests(unittest.TestCase):
         demand = DemandProfile(cfg, ScenarioConfig("test", ramp_scale=2.0)).at(0.0)
         log = sim.step(control, demand, 0)
         self.assertGreater(log.diagnostics["onramp_arrivals_veh"], 0.0)
-        self.assertAlmostEqual(log.diagnostics["onramp_releases_veh"], 0.0)
-        for ramp, movement in cfg.network.on_ramp_to_movement.items():
-            self.assertGreater(sim.state.urban_movement_queue[movement], 0.0)
-            self.assertAlmostEqual(sim.state.ramp_queue[ramp], sim.state.urban_movement_queue[movement])
+        self.assertAlmostEqual(log.diagnostics["ramp_metering_releases_veh"], 0.0)
+        self.assertGreater(log.diagnostics["onramp_green_releases_veh"], 0.0)
+        self.assertGreater(
+            log.diagnostics["onramp_approach_queue_veh"] + log.diagnostics["ramp_queue_veh"],
+            0.0,
+        )
+
+    def test_onramp_green_controls_approach_release_to_ramp_queue(self):
+        cfg = ExperimentConfig.from_file(
+            "src/config/default.yaml",
+            {"simulation": {"T_total": 10.0, "T_f": 10.0, "T_u": 5.0, "control_interval": 10.0}},
+        )
+        demand = DemandProfile(cfg, ScenarioConfig("test", ramp_scale=0.0)).at(0.0)
+        low = TrafficState.initial(cfg)
+        high = TrafficState.initial(cfg)
+        for state in (low, high):
+            for ramp in cfg.network.ramps:
+                state.ramp_queue[ramp] = 0.0
+            for movement in cfg.network.on_ramp_to_movement.values():
+                state.urban_movement_queue[movement] = 40.0
+
+        low_control = ControlAction.fixed(cfg)
+        high_control = ControlAction.fixed(cfg)
+        low_control.green_times["A_p2"] = cfg.network.green_min
+        high_control.green_times["A_p2"] = cfg.network.green_max
+        low_control.inflow_outflow_allocation["R1_onramp"] = cfg.network.movement_capacity_veh_h
+        high_control.inflow_outflow_allocation["R1_onramp"] = cfg.network.movement_capacity_veh_h
+        ramp_release = {ramp: 0.0 for ramp in cfg.network.ramps}
+
+        _, low_diag = urban_substep(low, low_control, demand, cfg, urban_step_index=0, ramp_release_veh_h=ramp_release)
+        _, high_diag = urban_substep(high, high_control, demand, cfg, urban_step_index=0, ramp_release_veh_h=ramp_release)
+
+        self.assertGreater(high.ramp_queue["R1"], low.ramp_queue["R1"])
+        self.assertGreater(high_diag["onramp_green_releases_veh"], low_diag["onramp_green_releases_veh"])
 
     def test_offramp_storage_limits_freeway_boundary_flow(self):
         cfg = ExperimentConfig.from_file(

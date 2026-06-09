@@ -67,9 +67,15 @@ def run_coupled_interval(
     start_urban_step = int(round(state.time_sec / max(sim.T_u_sec, 1.0e-9)))
 
     for freeway_substep_index in range(sim.K_cf):
-        # 현재 urban on-ramp queue를 freeway ramp queue와 맞춘 뒤, 이번 T_f 동안의 release를 정한다.
+        # 2저수지 구조에서는 현재 ramp 저수지 w_r만 이번 T_f의 metering release 후보가 된다.
         sync_onramp_queues_to_freeway(state, cfg)
-        ramp_release, ramp_diag = compute_ramp_release_flows(state, control, demand, cfg)
+        ramp_release, ramp_diag = compute_ramp_release_flows(
+            state,
+            control,
+            demand,
+            cfg,
+            include_current_arrivals=False,
+        )
 
         # freeway 한 스텝 사이에 들어있는 urban substep들을 먼저 진행해 off-ramp storage 여유를 갱신한다.
         for urban_offset in range(sim.K_fu):
@@ -126,6 +132,7 @@ def run_coupled_interval(
         "coupling_freeway_substeps": float(cfg.simulation.K_cf),
         "coupling_urban_substeps": float(cfg.simulation.K_cu),
         "coupling_onramp_sync_active": 1.0,
+        "coupling_onramp_two_reservoir_active": 1.0,
         "coupling_offramp_storage_active": 1.0,
         "coupling_aggregate_urban_model": 0.0,
         "coupling_movement_urban_model": 1.0,

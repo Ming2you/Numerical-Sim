@@ -111,3 +111,28 @@ This file records human-readable update notes for each direct push.
 - `python -B -m unittest src.tests.test_metanet_equations -v`
 - `python -B -m unittest discover -s src\\tests -v`
 - Result: 36 tests passed. Smoke experiment printed `FAIL improvement=-5.67%`, but the unittest suite passed with `OK`.
+
+## 2026-06-09 20:10:49 +09:00
+
+### Scope
+
+- on-ramp 결합을 2저수지 구조로 수정했습니다.
+- `urban_movement_queue[R*_onramp]`는 urban 접근부 queue `x_on`, `state.ramp_queue[R*]`는 freeway ramp queue `w_r`로 분리했습니다.
+- `demand.ramp_arrival`은 먼저 `x_on`에 쌓이고, urban green/phase/capacity가 `x_on -> w_r` release를 제어하도록 연결했습니다.
+- ramp metering은 `w_r -> freeway` release만 담당하도록 분리했습니다.
+- 기존 on-ramp sync helper는 두 queue를 복사하지 않고 각 reservoir의 유효 범위만 정리하도록 재정의했습니다.
+- `onramp_two_reservoir_active`, `coupling_onramp_two_reservoir_active`, `onramp_green_releases_veh`, `ramp_metering_releases_veh` diagnostics를 추가했습니다.
+- on-ramp green 증가가 실제 ramp queue 유입을 증가시키는 regression test를 추가했습니다.
+
+### Notes
+
+- 짧은 reduced search feasibility probe는 0.318초에 완료되어 2저수지 구조 자체의 실행 문제는 확인되지 않았습니다.
+- 기본 config 기준 한 MPC decision의 coupled interval 호출 상한은 약 60,750개로 계산되어, full 인증 run 전에 prediction 경량화 또는 단계적 run이 필요할 수 있습니다.
+
+### Validation
+
+- `python -B -m py_compile src\\models\\urban_queue_model.py src\\simulation\\coupling.py src\\tests\\test_constraints.py`
+- `python -B -m unittest src.tests.test_constraints -v`
+- `python -B -m unittest discover -s src\\tests -v`
+- Reduced feasibility probe: `run_experiment --T-total 180 --mpc-horizon-steps 1 --leader-candidate-count 2 --max-nash-iter 2 --freeway-horizon-beam-width 1 --freeway-ramp-candidate-limit 1 --freeway-vsl-candidate-limit 1`
+- Result: 37 tests passed. Reduced probe completed in 0.318 sec and printed `FAIL improvement=-2.98%`, which is diagnostic only.
