@@ -14,6 +14,14 @@ Your task is to review whether the implementation correctly follows the proposed
 - When citing source code, metrics, file paths, commands, or exact error messages, preserve the original spelling exactly.
 - Korean reports and comments are acceptable for future Codex/Claude review. They should not be treated as a blocker or source of ambiguity.
 
+## Repository Sync Policy
+
+- Before starting any user-requested work, check whether `origin/main` has newer commits than the local checkout.
+- If the local working tree is clean and `origin/main` is ahead, automatically fast-forward the local branch before editing.
+- If the local working tree has uncommitted changes, do not overwrite them. Report the conflict and ask how to proceed.
+- Prefer `git pull --ff-only origin main` for direct `main` workflows so accidental merge commits are not created.
+- After pulling, base all implementation, review, reports, and validation on the updated local code.
+
 ## Review Targets
 
 Review these artifacts:

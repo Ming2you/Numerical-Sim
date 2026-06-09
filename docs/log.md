@@ -67,3 +67,22 @@ This file records human-readable update notes for each direct push.
 
 - Documentation-only change.
 - `git diff --check`
+
+## 2026-06-09 17:39:44 +09:00
+
+### Scope
+
+- Added a repository sync policy to `CLAUDE.md` and `README.md`.
+- The policy requires agents to check `origin/main` before starting user-requested work.
+- If the local working tree is clean and the remote is ahead, agents should automatically fast-forward with `git pull --ff-only origin main` before editing.
+- If local uncommitted changes exist, agents must not overwrite them and should ask how to proceed.
+
+### Notes
+
+- This policy is intended to prevent Codex/Claude from working on stale local code after another agent pushes to GitHub.
+- Direct `main` work should continue to avoid accidental merge commits by using fast-forward pulls.
+
+### Validation
+
+- Documentation-only change.
+- `git diff --check`

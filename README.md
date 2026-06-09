@@ -10,6 +10,14 @@ MPC 기반 Stackelberg game simulation framework for integrated urban-freeway tr
 - 원문 오류 메시지, command output, CSV column, JSON key를 인용할 때는 원문 spelling을 그대로 보존한다.
 - 한국어 report와 주석은 Codex/Claude의 이후 검토에 지장을 주지 않는 것으로 간주한다.
 
+## Repository Sync Policy
+
+- 작업을 시작하기 전에 항상 GitHub의 `origin/main`이 로컬보다 최신인지 확인한다.
+- 로컬 working tree가 clean이고 원격에 새 commit이 있으면, 수정 전에 `git pull --ff-only origin main`으로 자동 fast-forward 한다.
+- 로컬에 uncommitted change가 있으면 임의로 덮어쓰지 않고, 충돌 가능성을 보고한 뒤 진행 방식을 정한다.
+- direct `main` workflow에서는 불필요한 merge commit을 만들지 않도록 fast-forward pull을 기본으로 사용한다.
+- 구현, review, report, validation은 pull 이후의 최신 로컬 코드 기준으로 수행한다.
+
 ## Repository Structure
 
 ```text
