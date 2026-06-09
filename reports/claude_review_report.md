@@ -1,65 +1,61 @@
 # Claude Review Report
 
-_검토 커밋: `e5caadb` "Implement nested coupled plant" (직전 검토는 `c4e68b3`)._
-_요청 관점: 게임(Stackelberg/Nash) 구조와 on-ramp/off-ramp 결합이 plant뿐 아니라 게임 안에서도 닫혔는지 검증. 직전 리포트의 P0/P1 지적과 사용자 제안 2저수지 결합안(ⓐ~ⓔ) 대조._
+_검토 커밋: `ed1c7c6` "Reduce default MPC horizon" (직전 검토는 `e5caadb`). 이번 구간 변경: `0da5b02` two-reservoir on-ramp coupling, `ed1c7c6` horizon 8→3._
+_요청 관점: (1) on-ramp 2저수지 결합이 실제로 닫혔는지, (2) 계산복잡도 폭발, (3) 공간 분할(교차로/링크 단위 agent) 부재. 코드·테스트로 직접 검증._
 
 ## Verdict
 
-**FAIL** — 인증 단계는 아직 미달. 다만 직전 대비 구현-검증이 크게 전진했다.
+**FAIL** — 인증 미달. 단, on-ramp 결합은 이번에 실질적으로 닫혔다.
 
-핵심 P0(중첩 결합 순서)와 P1#3(팔로워 예측을 결합 plant로 통일)은 **실제로 닫혔고 36/36 테스트 통과로 뒷받침**된다. 남은 블로커는 좁다. (1) **on-ramp 결합이 여전히 물리적으로 작동하지 않음**(사용자 제안 2저수지 미구현 — urban green이 ramp 유입을 제어하지 못함), (2) **현재 모델 기준 시뮬레이션 증거가 여전히 없음**(`codex_run_report.md` stale, `outputs/` git-ignore), (3) **결합-예측 팔로워의 실행 비용(feasibility) 미검증.**
+좋은 소식: **사용자 제안 2저수지 on-ramp 결합(ⓒ/ⓓ)이 정확히 구현**됐고 37/37 테스트 통과로 뒷받침된다. 직전 라운드의 "cosmetic on-ramp green" 지적은 해소됐다.
+블로커: **계산복잡도가 이제 1순위 블로커다.** horizon 8→3으로 완화했을 뿐 근본원인(follower 탐색 안 full coupled 재시뮬)은 그대로라, 기본 config full run이 여전히 완료 불가(Codex도 자인). 따라서 현재 모델 시뮬레이션 증거는 이번에도 없다. 그리고 **공간 분할(교차로/링크 단위 agent)은 착수되지 않았다.**
 
-테스트 증거: `python -m unittest discover -s src/tests` → **36개 통과(OK)** (numpy 2.3.5 / Python 3.12).
+테스트: `python -m unittest discover -s src/tests` → **37개 통과(OK)** (numpy 2.3.5 / Python 3.12).
 
-## 게임 구조 / 결합 검증 (요청 핵심)
+## ✅ 닫힌 것 — on-ramp 2저수지 결합 (검증 완료)
 
-플레이어 배치는 동일하다. 리더 1(`leader.py`, N_P_star·N_UF_star) + 팔로워 2(freeway=ramp/VSL, urban=green/offset/배분), `nash_solver.py`가 중재.
+직전 라운드 "비어 있던 절반"이 실제로 채워졌다. `urban_substep`(`urban_queue_model.py:288-323`)에서:
+- `demand.ramp_arrival` → 접근부 저수지 `x_on`(=`urban_movement_queue[R*_onramp]`)에 먼저 적재(`:289-291`).
+- urban green이 `x_on → w_r` 전송을 게이트: `u_on = min(x_on, T_u·green_fraction·cap_flow, ramp_space)`, `ramp_space = ramp_queue_max − w_r`(`:313-315`). **receiving-space 제약(ⓓ)까지 정확.**
+- ramp metering은 `w_r(=state.ramp_queue) → freeway` release만 담당(`:295-303`).
+- sync helper는 더 이상 두 큐를 복사하지 않고 각 reservoir를 독립 유지(`:56-85`).
+- **TTT 소유권 정확**: `urban_ttt`가 `movement + ramp_queue(w_r) + storage`를 1회 합산(`:383-387`), freeway는 coupled 모드에서 `include_ramp_queue_ttt=False`. 이중계상·누락 없음.
 
-**닫힌 것:**
-- **세로축 Stackelberg**: 정상 유지(`stackelberg_mpc.py`, 후보 열거→`run_coupled_interval` 평가→최소 선택).
-- **① freeway가 urban 제어를 반영**: `freeway_follower._transition_node`가 이제 `run_coupled_interval`로 예측하고(`freeway_follower.py:217`) `last_control`의 green/offset/allocation을 prediction에 포함(`:213-215`). `freeway_follower_coupled_prediction=1`. → P1#3 닫힘.
-- **② urban이 freeway 응답을 사용**: `urban_follower._freeway_pressure(freeway_response)`(`urban_follower.py:35-74`)가 freeway infeasibility를 스칼라 압력으로 변환해 green/allocation에 반영(`:102-104`, `:153-171`). 직전엔 인자만 받고 안 쓰던 부분.
-- **off-ramp 결합(물리적으로 실재)**: urban storage가 freeway off-ramp 유출을 제약(`off_ramp_capacity_by_freeway_link` → `freeway_substep`의 `offramp_capacity_veh_h`), urban green/allocation이 off-ramp storage를 비워 freeway 유출 용량을 회복. 중첩 루프 안에서 urban substep이 freeway substep보다 먼저 돌아 같은 interval 내에 반영됨(`coupling.py:75-99`).
-
-**여전히 비어 있는 것 (게임 결합의 핵심 절반):**
-- **on-ramp 2저수지(사용자 제안 ⓒ/ⓓ) 미구현.** `urban_substep`은 `demand.ramp_arrival`을 on-ramp movement queue에 넣고(`:270-273`) ramp metering release로 빼지만(`:275-286`), **on-ramp movement는 green 게이트 출발 루프에서 여전히 skip**된다(`:291`). 즉 urban green(`u_on`)이 ramp 유입을 제어하지 못한다. 큐를 urban으로 옮긴 **단일 저수지**일 뿐, `x_on → (green) → w_r` 2저수지가 아니다.
-- 그 결과 urban follower가 freeway 압력에 반응해 on-ramp phase에 green을 더 줘도(`urban_follower.py:102-104`) **물리 효과가 없다(cosmetic)** — 그 phase가 배출하는 차량이 없기 때문. urban→freeway 결합 중 **실효는 off-ramp 쪽 하나뿐**이다.
-- 근본 원인은 토폴로지: on-ramp로 유입되는 urban 접근부 movement가 없어 유일한 공급원이 외생 `demand.ramp_arrival`이다. `u_on`을 만들려면 green으로 on-ramp에 방출하는 urban movement를 추가하고 `ramp_arrival`을 그 movement의 수요로 옮겨야 한다.
-
-**결합 강도의 비대칭:** freeway는 urban 제어를 **전체 결합 plant로(고충실도)** 보지만, urban은 freeway를 **거친 스칼라 압력으로(저충실도)** 보고 그나마 두 채널 중 on-ramp green은 무효다. 따라서 J_U의 freeway-행동 의존성은 약하고 일부 cosmetic이다.
+결과: urban green이 **실제로 ramp 유입을 메터링**한다(green↑ → u_on↑ → w_r↑ → freeway 영향). 사용자 제안식 `x_on(k+1)=x_on+d_on−u_on`, `w_r(k+1)=w_r+u_on−r_ramp`와 일치. round-2 "cosmetic" 지적 해소.
+- (경미) urban follower가 freeway 압력↑일 때 on-ramp green을 늘리는데(`urban_follower.py:102-104`), 이는 혼잡 시 ramp로 더 밀어넣는 방향이라 제어 의도 재검토 권장(정확성 버그 아님, 로직 선택).
 
 ## Critical Issues
 
-1. **현재 모델 기준 시뮬레이션 증거 부재(직전과 동일, 미해결).** `reports/codex_run_report.md`는 이번 커밋에서 변경되지 않아 여전히 METANET 재작성 이전 실행이다. `.gitignore:8`이 `outputs/` 제외, 산출물 0건. smoke가 `improvement=-5.67%`를 출력하나 이는 축소 config의 스모크라 인증 근거가 못 된다. CLAUDE.md §5의 `control_timeseries.csv` 활성도 검증 불가.
-2. **on-ramp 결합이 게임에 실재하지 않음.** 위 "비어 있는 것" 참조. "통합(integrated) urban-freeway" 주장은 off-ramp 한쪽으로만 성립한다.
+1. **계산복잡도 폭발 — 이번 1순위 블로커이자 증거 부재의 직접 원인.**
+   - 분해: 리더후보 15 × Nash 10 × freeway follower 빔서치 transition. horizon 8→3으로 transition 405→135, decision당 coupled 호출 **60,750→20,250**으로 완화(`ed1c7c6`). 그러나 근본원인은 그대로 — `freeway_follower._transition_node`(`freeway_follower.py:217`)가 후보마다 full `run_coupled_interval`(K_cf·K_fu=54 sub-iter, urban substep 포함)을 재시뮬.
+   - 실측: **기본 config 첫 control decision 78.7초**(Codex log). decision ≈40개 × baseline+proposed면 full run 비현실적. Codex도 "proposed 단계는 여전히 무거워 추가 경량화 필요"라 자인, full default run 미완료.
+   - 따라서 현재 모델 기준 baseline/proposed 결과를 **이번에도 생성 못 함**. `codex_run_report.md` 여전히 stale, `outputs/` gitignore.
 
-## Methodological Issues
+2. **공간 분할(분산화) 부재 — 사용자 의도와 불일치.** 현재 follower는 2개뿐 — FreewayFollower 1개(R1~R4·FW_W·FW_E를 한 solve, 빔서치가 전 링크 VSL을 `product`로 결합) + UrbanFollower 1개(A·C·D·F 전부). 즉 **"1 freeway + 1 urban 블록(중앙집중)"** 이지, 사용자가 의도한 **교차로 1개=urban agent / 링크 묶음=freeway agent** 구조가 아니다. 게다가 두 블록이 리더열거+Nash 안에서 직렬로 풀리고, freeway 블록은 후보마다 전체망 재시뮬. → granularity와 분산-solve 원리 둘 다 없음.
 
-1. **Nash 반복 사이 plant 재시뮬 없음(③ 부분 잔존).** `nash_solver.py:61-124`는 매 iteration 동일 `state`를 두 팔로워에 전달한다. 다만 이제 freeway 응답이 urban 제어에(결합 예측), urban 응답이 freeway 압력에 의존하므로 **상호 의존은 생겼다** — best-response 사상이 비자명해졌다. "고정 state 위의 one-shot Nash"라는 점은 명시 문서화 권장.
-2. **결합-예측 팔로워의 비용(신규 우려).** `_transition_node`가 beam 전개의 매 노드마다 `run_coupled_interval`(K_cf·K_fu=36 subiter)을 호출하고, 이게 Nash(≤10)×리더 후보(15+) 안에 중첩된다. 직전 권고했던 "경량 결합 예측"이 아니라 full plant를 썼다. 기본 config 전체 실행이 매우 느릴 수 있고, smoke가 통과하는 건 CLI override로 horizon/search를 줄였기 때문이다 → 인증 rerun의 실행가능성 위험.
-3. **수렴/진동(⑤) 현실화 가능.** 결합이 실제로 생겼으므로 fixed-point 진동·`max_nash_iter` 도달·`non_convergence_penalty` 지배 가능. `residual_control`은 여전히 mixed-unit max라 약함.
+## 참고 — Wu et al.(2022)과의 구조적 차이 (왜 그쪽은 가벼운가)
 
-## Code-Level Issues (주장 검증 — 대부분 긍정)
+Wu의 분산 통합제어(§IV-D, §V-C)는 CC(중앙) 최대 CPU >400s를 CD(분산) <40s로 **100배** 줄인다. 차이의 핵심:
+- 공간 분할: 도시 agent 15개(교차로 1개씩)+고속 agent 2개. 각자 **자기 변수만** 최적화, **병렬**.
+- 이웃 결합변수를 **풀이 동안 상수로 고정**(step3), iteration 사이에만 교환 — 이웃을 재시뮬하지 않음.
+- local 문제를 SQP/CPLEX(gradient)로 1회 풀이 — brute-force rollout 아님.
+- 핵심 통찰: "결합 정확 반영"을 *이웃 재시뮬*이 아니라 *경계변수 고정 + iteration 합의*로 달성(충실도·비용 동시 해결).
 
-- **중첩 결합 순서(P0#1) 정확히 구현.** `coupling.py:69-122`가 `for K_cf` 안에서 on-ramp 동기화→ramp release→`for K_fu` urban substep→off-ramp 용량→`freeway_substep`→off-ramp 도착 스케줄 순으로 돈다. spec 3.4.3 순서와 일치. `coupling_nested_order_active=1`.
-- **TTT 이중계상(직전 ① 잠복버그) 해소.** coupled 모드에서 `freeway_substep(update_ramp_queues=False, include_ramp_queue_ttt=False)`로 ramp 큐 보존·TTT를 urban 쪽 1회로 일원화(`coupling.py:102-104`, `metanet.py:171-175,259-260`). on-ramp 큐는 `urban_substep`이 소유.
-- `freeway_step`/`urban_step`은 substep wrapper로 분해돼 하위호환 유지(`metanet.py:314`, `urban_queue_model.py:416`).
+현재 코드는 이 스펙트럼의 정반대(중앙집중 + 후보마다 전체망 rollout) 끝에 있어 무겁다.
 
-## Simulation Validity Issues
+## Methodological / Code-Level Issues
 
-1. baseline/proposed 동일 결정론적 수요는 유지(구조적으로 OK).
-2. 현재 모델 결과 부재로 개선율·활성도·경계 균형을 증거로 평가 불가(Critical 1).
-3. 결합 예측 비용 때문에 전체 시나리오 rerun 자체가 시간상 가능한지 먼저 확인 필요.
+- (직전과 동일) Nash 반복 내 plant 재시뮬 없음(state 고정), one-shot Nash로 문서화 권장.
+- (긍정) 중첩 결합 순서·TTT 소유권·2저수지 보존식은 코드·테스트로 검증됨. 하드코딩 relaxation 없음 유지.
 
-## Recommended Fixes for Codex
+## Recommended Fixes for Codex (우선순위)
 
-- **(우선) on-ramp 2저수지 실구현 또는 명시적 scope-out.** urban에 on-ramp 방출 movement(`u_on`)를 추가하고 `u_on ≤ min(green·포화유율, x_on+d_on, (ramp_queue_max−w_r)+r_ramp_drained)` receiving-space 제약으로 묶기. 안 할 거면 "on-ramp는 freeway-only 외생수요"임을 리포트/문서에 명시(현재의 cosmetic green 결합 제거).
-- **결합 예측 경량화.** 팔로워 내부 예측을 full `run_coupled_interval` 대신 off-ramp 용량+on-ramp 동기화만 반영한 축소 plant로, 또는 follower horizon/beam 축소. 인증 rerun 실행가능성 확보.
-- **urban→freeway 결합 충실도 보강.** 스칼라 pressure 대신 실제 ramp_metering/off-ramp 용량을 쓰고, on-ramp green이 무효인 현 상태를 제거.
-- **현재 모델 진단 rerun + 산출물 보존**, `codex_run_report.md`를 현재 커밋 기준으로 갱신(지금 stale).
-- (유지) baseline 모드 구분/문서화, 누락 metric(`speed_drop_reduction`, `number_of_stops_proxy`).
+- **① (1순위·즉효) follower 탐색에서 full coupled 재시뮬 제거.** `_transition_node`(`freeway_follower.py:217`)를 freeway-only `freeway_substep` 평가로 바꾸고, off-ramp 수용용량·on-ramp 결합을 **Nash iteration당 1회 urban 응답에서 계산해 고정 경계로 주입**(=Wu의 경계변수 고정). 빔 후보 루프에서 urban substep×K_cu 제거. 이게 horizon 축소보다 본질적이며 인증 run을 가능케 함.
+- **② 공간 분산화(다음 마일스톤·정공법).** "2블록 중앙집중 → 교차로/링크 단위 agent가 local 문제 풀고 경계변수만 교환·S_max 반복(병렬)". Wu의 100배 절감 원천. 사용자가 원래 의도한 분할.
+- ③ 추가 탐색 축소(beam_width, vsl/ramp 후보수, leader_candidate_count, max_nash_iter) — ①의 보조.
+- ④ ①/③로 full run 가능해지면 현재 모델 진단 rerun + `control_timeseries.csv` 등 산출물 보존, `codex_run_report.md` 갱신(현재 stale).
+- ⑤ (경미) 혼잡 시 on-ramp green↑ 방향이 ramp 유입을 늘리는 게 의도와 맞는지 재검토.
 
 ## Should Codex Rerun Simulation?
 
-**진단용은 Yes, 인증용은 아직 No.**
-중첩 결합 plant가 들어왔으니 현재 모델 진단 run은 의미가 있다. 단 (a) 실행시간이 기본 config에서 현실적인지 먼저 확인(또는 축소 config로), (b) on-ramp 결합이 실구현/scope-out으로 정리되기 전까지 결과는 진단용으로만 해석하고 8% 인증 판단은 보류.
+**아직 No (인증·진단 모두).** 현재 기본 config는 full run이 완료되지 않으므로(첫 decision 78.7초) 진단 run조차 생성 불가다. **먼저 ①(follower 재시뮬 제거)로 실행가능성을 확보**한 뒤에야 현재 모델 진단 rerun이 의미를 가진다. 8% 인증 판단은 그 이후.
