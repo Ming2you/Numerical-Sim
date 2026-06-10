@@ -26,9 +26,16 @@ agents:
   freeway: # 각 agent = 연속 링크 + 인접 on-ramp + off-ramp(≤1)
     - id: F_W   link: FW_W  ramps: [R1, R2]   off_ramps: [OR_W]
     - id: F_E   link: FW_E  ramps: [R3, R4]   off_ramps: [OR_E]
-  neighbors:   # 이웃맵 (경계변수 교환 대상)
-    U_A: [F_W];  U_C: [F_W];  U_D: [F_E];  U_F: [F_E]
-    F_W: [U_A, U_C, U_D];  F_E: [U_C, U_D, U_F]   # on-ramp 공급 + off-ramp 수취 기준
+  neighbors:   # 이웃맵 (경계변수 교환 대상) — 상호 대칭이어야 함(X∈N[Y] ⇔ Y∈N[X])
+    # urban -> freeway
+    U_A: [F_W]            # R1 -> FW_W
+    U_C: [F_W]            # R2 -> FW_W
+    U_D: [F_W, F_E]       # R3 -> FW_E(on-ramp) + OR_W from FW_W(off-ramp 수취)
+    U_F: [F_E]            # R4 -> FW_E + OR_E from FW_E(off-ramp 수취)
+    # freeway -> urban
+    F_W: [U_A, U_C, U_D]  # R1<-A, R2<-C, OR_W->D
+    F_E: [U_D, U_F]       # R3<-D, R4<-F, OR_E->F
+    # urban<->urban: 이 topology엔 신호 간 직접 연결 도로 없음 → 생략
 ```
 (매핑은 현재 `urban_movements`/`on_ramp_to_movement`/`off_ramp_*` config에서 자동 유도 가능.)
 
