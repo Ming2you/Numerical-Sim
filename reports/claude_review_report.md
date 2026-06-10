@@ -1,136 +1,87 @@
 # Claude Review Report
 
-_검토 커밋: `ee85ee1` "Implement lightweight freeway boundary forecast" (직전 검토는 `ed1c7c6`)._
-_요청 관점: 수정 ①(follower 탐색에서 full coupled 재시뮬 제거) 반영 여부, 계산복잡도 실측, 그리고 그것이 현재 모델 진단 run을 가능케 했는지. 코드·테스트·실측으로 검증._
+_검토 커밋: `a785494` "Calibrate setpoints and feasible ramp targets" (직전 검토는 `ee85ee1`)._
+_요청: setpoint 캘리브레이션·N_P_star 단위통일·feasible N_UF가 실제로 반영됐는지, 그리고
+round-4의 −10.64%(urban 악화)가 개선됐는지. 코드 검증 + 풀 진단 run으로 확인._
 
 ## Verdict
 
-**FAIL** — 인증 미달. 단, **4라운드간 1순위 블로커였던 계산복잡도(#1)가 실제로 해소**됐다.
+**FAIL** — Total TTT **−6.57%**(여전히 baseline보다 나쁨). 단, round-4 **−10.64% → −6.57%로 개선**.
+setpoint 재설계(누적목표·단위통일·feasible N_UF)는 코드로 검증됐고 방향이 맞으며 효과도 있다.
+그러나 **캘리브레이션 결과가 리더에 절반만 연결**돼, 핵심 버그가 남아 있다 — 도시 누적목표가
+측정된 n_crit의 약 2배다.
 
-`freeway_follower`가 후보 평가에서 full `run_coupled_interval`을 버리고, **고정된 urban
-control로부터 on-ramp/off-ramp 경계만 예측하는 경량 plant**(`_lightweight_transition`)로
-바뀌었다. 이는 docs/wu2022_distributed_reference.md가 제시한 "경계변수 고정 + 자기
-서브망만 평가"(Wu §IV-D) 방식과 정확히 일치한다. 실측 결과 **한 MPC decision이 78.7s →
-17.5s(약 4.5배)** 로 떨어져, 이제 풀 진단 run이 현실적(7200s 시나리오 ≈ 12분)이다.
+## 진단 run 결과 (peak_demand 7200s, `outputs/claude_diag_peak_full_r5/`)
 
-**현재 모델 풀 진단 run(peak_demand, 7200s)을 직접 실행**해 4라운드만에 증거를 확보했다.
-결과 **Total TTT −10.64%(proposed가 baseline보다 나쁨)**. 그리고 **피해가 전적으로 urban
-쪽**이며 컨트롤러가 자기 목표(boundary balance)를 오히려 악화시키는 명확한 이상 징후가
-드러났다(아래 "진단 run 결과" 절). 공간 분할(#2)은 미착수. 따라서 인증 보류이며, 다음
-과제는 비용이 아니라 **urban 제어 로직이 baseline보다 나쁜 원인**이다.
+| 지표 | baseline | r4 proposed | **r5 proposed** | r4→r5 |
+|---|---:|---:|---:|---|
+| Total TTT | 2889.8 | 3197.3 | **3079.6 (−6.57%)** | 개선 |
+| Urban TTT | 2702.0 | 3001.5 | 2881.6 | 개선 |
+| Boundary CV | 0.145 | 0.305 | 0.228 | 개선(여전히 악화) |
+| MaxMin_boundary | — | 215.1 | 145.7 | 개선 |
+| mean metering error | — | 624 | 475.6 | 개선 |
+| max metering violation | — | 3884 | 1028 | 개선(feasible cap 효과) |
 
-테스트: `python -m unittest discover -s src/tests` → **38개 통과(OK)**. 타이밍 실측:
-default config 첫 decision **17.54s**(horizon=3, leader=15, nash=10).
+## ✅ 검증된 수정 (코드 대조)
 
-## ✅ 닫힌 것 — #1 계산복잡도 (검증 완료)
+- **N_P_star = urban accumulation target(veh)로 단위통일.** config `N_P_star_unit: veh`,
+  `urban_follower._allocation`이 `urban_accumulation_feedback_flow`로 목표 net_inflow를
+  **유도**(직접 setpoint 추적 아님). → round-3/4에서 지적한 단위 불일치 해소.
+- **누적 피드백(MFD perimeter)**: `urban_accumulation_feedback_flow`(`urban_queue_model.py:232`)
+  = `(N_P_star − 현재누적)/feedback_horizon`, clip[±limit]. 게인은 `N_P_feedback_horizon_h(0.5)`
+  하나뿐 — 위치별 게인 증식 없음(우리가 합의한 "단순 boundary + MPC 피드백"과 일치).
+- **N_UF_star = feasible headroom 기반.** `leader._feasible_nuf_capacity`(`leader.py:59`)가
+  per-ramp `min(cap, available, q_cap·receiving, density_headroom_flow)` × margin(0.95)으로 상한.
+  `density_headroom = max(0, rho_crit − ρ)`라 **임계 overshoot도 차단**(우리 보정 ② 반영). → 초기
+  추적불가 6000 타겟 사라짐(max metering violation 3884→1028).
+- **캘리브레이션 스크립트** `experiments/calibrate_setpoints.py` 추가, smoke에서
+  **n_crit=172.2 veh, max production=1306.7 veh/h** 추정.
 
-- `_transition_node`(`freeway_follower.py:379-439`)가 `run_coupled_interval` 대신
-  `_lightweight_transition`(`:334-377`)을 호출. `run_coupled_interval` import 자체가 제거됨.
-- `_lightweight_transition`은 K_cf freeway substep만 돌리며, 각 substep에서:
-  - `_apply_onramp_boundary_forecast`(`:239-268`): **고정 urban green**으로부터
-    `estimate_onramp_green_release_flows`로 `x_on→w_r` 유입을 예측·반영(=Wu의 결합변수 고정).
-  - `_actual_metering_release`(`:270-311`): `w_r`에 **실제 존재하는 차량만** metering으로
-    freeway에 주입(요청량이 아니라 actual). 보존 정확도 개선.
-  - `off_ramp_capacity_by_freeway_link` + `freeway_substep`(freeway-only) +
-    `_consume_lightweight_offramp_storage`로 off-ramp 경계 갱신.
-  - diagnostics `freeway_follower_lightweight_prediction=1`, `coupled_prediction=0`.
-- 효과: 후보 루프에서 urban 전체 재시뮬(K_cu×movement 루프)이 제거됨. **78.7s→17.5s 실측.**
-  → **현재 모델 진단 run이 비로소 실행 가능**(이 4라운드 핵심 블로커 해소).
+## ★ 핵심 잔존 버그 — 누적목표(333)가 n_crit(172)의 2배
 
-## 진단 run 결과 — 이상 징후 (peak_demand, 7200s, seed 42)
+run 시계열(`proposed/run_log.csv`)에서 확정:
+- `urban_accumulation_target_veh = 333.33` (전 step 고정) — 그런데 캘리브레이션 **n_crit = 172.2**.
+- step0 누적 80 → step1 **171**(≈n_crit)인데, 목표가 333이라 피드백이 **계속 admit**
+  (`urban_net_inflow_target_veh_h`>0) → 누적이 n_crit를 넘어 계속 증가.
+- run 끝(step38) `urban_accumulation_veh = 1726`(≈n_crit의 10배), `error=+1393`,
+  net_inflow_target은 −800에 clamp(못 비움), `onramp_approach_queue=960`, `queue_overflow=216`.
 
-Claude가 직접 실행(`outputs/claude_diag_peak_full/`). baseline=fixed_signal_fixed_speed,
-proposed=stackelberg_mpc. **Total TTT 2889.8 → 3197.3 (−10.64%)**. 분해와 이상 징후:
+원인: **`leader.py:33`이 N_P_star를 여전히 `linspace([0,500])`에서 고름**(333.3은 그 그리드 점).
+**캘리브레이션의 n_crit=172가 `N_P_star_range`/후보에 연결되지 않았다.** 즉 N_UF엔 headroom 밴드를
+적용했지만 **N_P엔 미적용** — 우리가 합의한 "n_crit 근방으로 후보 좁히기"가 빠졌다.
 
-| 지표 | baseline | proposed | 판정 |
-|---|---:|---:|---|
-| Total TTT | 2889.8 | 3197.3 | −10.64% (악화) |
-| Freeway TTT | 187.8 | 195.8 | 거의 동일(uncongested) |
-| **Urban TTT** | **2702.0** | **3001.5** | **+11.1% 악화 ← 피해의 전부** |
-| Boundary CV | 0.145 | 0.305 | 2배 악화 |
+**이게 "짧은 smoke +6.85% vs 풀 run −6.57%"의 정체다.** 초반(누적 ≤171, ≤n_crit)엔 admit이 도움
+→ 2-step smoke는 +. 풀 run은 목표 333을 향해 계속 admit → 누적이 n_crit를 지나 1726까지 폭주
+→ 도시망 포화 → proposed가 baseline보다 나쁨. **2-step smoke(+6.85%)는 신뢰 금지.**
 
-**이상 징후 (control/state timeseries 근거):**
-1. **VSL이 한 번도 활성화되지 않음** — `vsl_active_steps=0`, control_timeseries 전 step
-   `vsl_FW_W=vsl_FW_E=100`. freeway가 혼잡하지 않아서(`density_exceedance_duration=0`,
-   freeway TTT 188로 미미) VSL이 할 일이 없음. → 이 시나리오는 **freeway 제어가 무의미한
-   urban-dominated 문제**. VSL/ramp 효과를 보려면 freeway를 혼잡시키는 시나리오 필요.
-2. **Leader가 초기에 추적 불가능한 N_UF_star를 고름** — step0=4000, step1=6000(=용량 전체)
-   인데 실제 ramp release는 step1에 ~4230뿐 → `mean_total_metering_error=624`,
-   `max_metering_violation=3884`. 이후 N_UF_star=2000으로 떨어지면 4×500=2000으로 추적됨.
-   즉 leader N_UF_star 선택이 **초기 비현실적**이라 metering이 "active"여도 무의미.
-3. **★ 핵심: urban 컨트롤러가 자기 목표(boundary balance)를 역으로 악화시킴.**
-   - `CV_boundary` 0.145→0.305, `boundary_queue_balance_improvement=−110%`,
-     `OverflowRatio_boundary=0.5`, `net_inflow_tracking_error=84.5`(>eps_U=100 근접).
-   - `MaxMin_boundary`가 **시간에 따라 단조 증가**(20→33.7→47.3→50.7→55.5→62→70+) —
-     경계 큐 불균형이 누적 발산. urban follower의 green/allocation이 baseline 균등분배보다
-     **경계 큐를 더 벌림**.
-   - offset 제어도 역효과: `corridor_delay_change=+299.5`(corridor 지체 증가).
-4. **green split이 초기에 심하게 진동** — A_p2: 90.6(step0)→89.9→47.5(step2)→53→...
-   큐비례 분배가 불안정. 초기 과도 진동이 urban TTT를 키움.
+## 기타 이상 징후
 
-**해석**: 비용(①)이 풀려 드러난 진짜 문제는 **urban 제어 로직이 fixed 베이스라인보다 나쁘다**는
-것이다. freeway 쪽은 (이 시나리오에서) 유휴. 따라서 −10.64%의 원인은 거의 전부 urban follower의
-green/offset/allocation 휴리스틱이 boundary balance·corridor 지체를 **악화**시키는 데 있다.
-
-> **더 상류의 근본 원인 — 리더 setpoint 미캘리브레이션.** `N_P_star`/`N_UF_star`가 분석이 아니라
-> 임의 그리드값이고(`leader.py:26`, `:54`), `N_P_star`는 리더(누적 veh, `:92-93`)와 도시(순유입
-> veh/h)에서 **단위가 불일치**한다. 타겟이 임계점(MFD n_crit / 수용량)과 무관하면 control law가
-> 옳아도 망을 혼잡 가지로 민다. no-control 수요 sweep로 n_crit·rho_crit를 실측해 setpoint를
-> 캘리브레이션하는 **구현 사양을 [docs/setpoint_calibration_spec.md](../docs/setpoint_calibration_spec.md)**
-> 에 정리했다. control-law 버그(③④⑤)보다 **이 캘리브레이션이 선행**이다.
-
-## Critical Issues
-
-1. **proposed가 baseline보다 −10.64% 나쁨, 원인은 urban 제어.** 위 이상 징후 3·4 참조.
-   urban follower(green 큐비례 분배, offset, inflow-outflow allocation)가 자기 목표인
-   boundary balance를 역으로 악화. **최우선 수정 대상.**
-2. **Leader N_UF_star 선택이 초기 비현실적**(이상 징후 2) → metering tracking 무의미.
-   leader 후보·목적함수에 ramp 용량 현실성 반영 필요.
-3. **현재 시나리오가 freeway 제어를 검증 못 함**(VSL 0회 활성, freeway 유휴). 통합 제어
-   효과를 보려면 **freeway를 혼잡시키는 시나리오/수요**(oversaturated, incident)에서 재검증 필요.
-   (`codex_run_report.md`는 여전히 stale → 위 현재 모델 결과로 갱신 권장.)
-
-## ❌ 미착수 — #2 공간 분할 (다음 마일스톤)
-
-여전히 FreewayFollower 1개(전 링크·램프 합동) + UrbanFollower 1개(전 신호) 구조이고,
-리더(15)×Nash(10) 열거 안에서 직렬로 푼다. 경량화로 freeway 블록은 싸졌지만, 교차로/링크
-단위 agent로 **분해되지는 않았다**. Wu식 진짜 분산(병렬 local solve + 경계변수 교환)은
-docs/wu2022_distributed_reference.md §7대로 후속 구현 필요. 단, 이번 ①은 그 문서의
-"경계변수 고정" 원리를 먼저 적용한 옳은 첫 단계다.
-
-## Methodological Issues
-
-- **경량 예측 ≠ 실제 plant(허용된 trade-off).** follower는 이제 추정 경계로 최적화하므로
-  실제 coupled plant와 다소 괴리된다. 이는 의도된 비용↔충실도 교환(Wu도 동일, iteration
-  합의로 보정). 단 현재 Nash는 반복 간 plant 재시뮬이 없어 이 괴리를 좁히는 메커니즘이
-  약함 → ② 분산화 시 결합변수 교환으로 자연 해소될 부분.
-- (직전과 동일) one-shot Nash, state 고정 — 문서화 권장.
-
-## Code-Level Issues (긍정)
-
-- 2저수지 보존·TTT 소유권·중첩 결합 순서·경량 경계예측 모두 코드·테스트로 검증됨.
-- on-ramp metering이 actual drained 차량 기준으로 freeway에 주입되도록 정정(보존 정확).
-- 38/38 테스트 통과.
+- **VSL 0회 활성(`vsl_active_steps=0`)** — freeway 유휴(density_exceedance=0), round-4와 동일.
+  freeway 제어 검증엔 부적합한 시나리오.
+- **시나리오가 urban 과포화.** 누적 1726 >> n_crit 172 (baseline·proposed 둘 다). peak_demand가
+  도시 수용량을 압도 → perimeter 제어로도 n을 n_crit에 못 잡음. **demand가 용량 근처인
+  "제어 가능한" 시나리오에서 재평가** 필요(현재는 10× 과포화라 공정한 시험이 안 됨).
+- **`net_inflow_tracking_error=721.8`은 stale 진단.** net_inflow(veh/h)를 N_P_star(veh 누적)와
+  비교하는 옛 식이 남음. Codex가 올바른 `urban_net_inflow_target_veh_h`/`urban_accumulation_error_veh`를
+  추가했으니, 리포트의 옛 metric은 제거/교체할 것.
+- 메터링 여전히 느슨(mean 475, `metering_target_infeasible=1`) — feasible cap으로 나아졌으나
+  freeway 유휴라 영향 미미.
+- round-4 control-law(offset이 freeway 속도로 도시 진행 계산 `urban_follower.py:131`, corridor
+  +179.6) 잔존.
 
 ## Recommended Fixes for Codex (우선순위)
 
-- **① (완료) follower 경량화** — 검증됨. 추가로 leader_candidate_count·max_nash_iter도
-  낮추면 풀 run이 더 빨라짐(현재 ~12분, 보조 최적화).
-- **② 공간 분산화(다음 마일스톤·정공법)** — docs/wu2022_distributed_reference.md §3~7대로
-  신호 A/C/D/F→urban agent 4, FW_W/FW_E→freeway agent 2, 경계변수 교환·S_max 반복.
-- **③ (1순위·신규) urban follower가 baseline을 악화시키는 원인 수정** — 풀 run −10.64%의
-  주범. green 큐비례 분배의 초기 진동·offset 역효과(corridor +299.5)·allocation의 boundary
-  balance 악화(CV 0.145→0.305, MaxMin 단조증가)를 잡아야 함. 최소한 "fixed 베이스라인보다
-  나쁘지 않게"가 1차 목표. 의심처: `_green_times` 큐비례 분배, `_offsets` 진행 계산,
-  `_allocation`의 N_P_star/boundary 균형 로직.
-- **④ leader N_UF_star 후보 현실화** — 초기 4000/6000 같은 추적불가 타겟 억제(ramp 용량·
-  receiving 반영).
-- **⑤ freeway 제어 검증용 혼잡 시나리오** — 현재 peak_demand는 freeway 유휴(VSL 0회 활성).
-  oversaturated/incident 시나리오로 VSL·metering 효과를 별도 검증.
+- **① (1순위) 캘리브레이션 n_crit를 N_P_star에 실제 연결.** `N_P_star_range`(또는 후보 생성)를
+  측정된 n_crit(≈172) 근방으로 좁힐 것(우리 headroom±밴드를 N_P에도 적용). 지금은 목표 333으로
+  망을 임계 2배까지 민다. config `N_P_star_range: [0,500]` → n_crit 기반으로.
+- **② 제어 가능한 시나리오로 재평가.** peak_demand는 10× 과포화라 perimeter 효과를 못 봄. demand가
+  용량 근처인 시나리오(또는 urban_scale 낮춤)에서 baseline 대비 개선을 확인.
+- **③ stale `net_inflow_tracking_error` 제거/교체**(누적 기준 metric으로).
+- **④ offset을 도시 링크 통행시간 기반으로**(freeway 속도 아님), green 진동 damping.
+- **⑤ freeway 제어(VSL/metering)는 freeway 혼잡 시나리오(oversaturated/incident)에서 별도 검증.**
 
 ## Should Codex Rerun Simulation?
 
-**진단 run은 Claude가 이미 실행함**(`outputs/claude_diag_peak_full/`, peak_demand 7200s,
-−10.64%). 따라서 다음은 rerun이 아니라 **③(urban 제어가 baseline보다 나쁜 원인) 수정 후
-재실행**이다. Codex는 `codex_run_report.md`를 위 현재 모델 결과로 갱신하고, ③ 수정 →
-재run → 개선 확인 순으로 진행할 것. 8% 인증은 그 이후.
+**①(n_crit 연결) 수정 후 재실행.** 누적목표를 n_crit로 맞추면 풀 run에서 −6.57%가 양수로 갈
+가능성이 큼(초반 +6.85%가 그 방향 신호). 단 ②(제어 가능한 시나리오)도 함께 봐야 perimeter
+제어의 실제 효과를 공정히 판정 가능. 8% 인증은 그 이후.
