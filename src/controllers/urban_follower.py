@@ -17,8 +17,8 @@ from src.models.state import ControlAction, ExperimentConfig, TrafficState
 from src.models.urban_queue_model import (
     boundary_indices,
     ensure_urban_state,
+    movement_balance_summary,
     movement_specs,
-    safe_balance_index,
 )
 
 
@@ -267,8 +267,15 @@ class UrbanFollower:
             green,
             plan,
         )
-        b_in = safe_balance_index(state.boundary_queue.get(l, 0.0) for l in self.cfg.network.boundary_in_links)
-        b_out = safe_balance_index(state.boundary_queue.get(l, 0.0) for l in self.cfg.network.boundary_out_links)
+        balance = movement_balance_summary(
+            state,
+            self.cfg,
+            saturation_fraction=self.cfg.evaluation.boundary_degenerate_saturation_fraction,
+            degenerate_ratio=self.cfg.evaluation.boundary_degenerate_ratio,
+            eps=self.cfg.evaluation.eps,
+        )
+        b_in = balance["B_in"]
+        b_out = balance["B_out"]
         metrics = {
             "B_in": b_in,
             "B_out": b_out,
@@ -284,6 +291,7 @@ class UrbanFollower:
             "urban_net_inflow_target_veh_h": float(target_net_inflow),
         }
         metrics.update(allocation_metrics)
+        metrics.update(balance)
         metrics.update(boundary_indices(state.boundary_queue.values(), self.cfg.network.boundary_queue_max_veh))
         smooth = 0.0
         if previous_control:

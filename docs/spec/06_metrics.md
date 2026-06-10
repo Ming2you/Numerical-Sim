@@ -118,23 +118,37 @@ Report:
 ```text
 B_in
 B_out
+eps_balance
 CV_boundary
 MaxMin_boundary
 OverflowRatio_boundary
 boundary_queue_balance_improvement
+boundary_balance_degenerate
+boundary_empty_ratio
+boundary_saturation_ratio
 net_inflow_tracking_error
 ```
 
-Default balance improvement:
+Default descriptive balance improvement:
 
 ```text
 BalanceImprovement(%) = 100 * (CV_boundary_baseline - CV_boundary_proposed) / max(CV_boundary_baseline, eps)
 ```
 
+`CV_boundary` and `MaxMin_boundary` are descriptive diagnostics. The acceptance gate must use the same movement-level density vectors as the §4.4 inflow-outflow allocation objective:
+
+```text
+k_inflow  = density vector of boundary_in + off_ramp movements
+k_outflow = density vector of boundary_out + on_ramp movements
+B_in/B_out = inverse-participation balance terms computed from those vectors
+```
+
 Pass if:
 
 ```text
-CV_boundary_proposed <= CV_boundary_baseline
+B_in <= eps_balance
+B_out <= eps_balance
+boundary_balance_degenerate == false
 OverflowRatio_boundary_proposed <= OverflowRatio_boundary_baseline
 net_inflow_tracking_error <= eps_U or is explicitly logged as infeasible
 ```

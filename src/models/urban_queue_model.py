@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from typing import Dict, Iterable, Mapping, Tuple
+from typing import Callable, Dict, Iterable, Mapping, Tuple
 
 import numpy as np
 
@@ -32,6 +32,83 @@ def boundary_indices(values: Iterable[float], queue_max: float, eps: float = 1.0
 
 def movement_specs(cfg: ExperimentConfig) -> Dict[str, Dict[str, object]]:
     return {key: dict(value) for key, value in cfg.network.urban_movements.items()}
+
+
+def movement_storage_capacity(
+    cfg: ExperimentConfig,
+    movement: str,
+    spec: Mapping[str, object] | None = None,
+) -> float:
+    """movement queue를 density로 정규화할 때 쓰는 저장용량을 반환한다."""
+    spec = movement_specs(cfg).get(movement, {}) if spec is None else spec
+    if "storage_capacity_veh" in spec:
+        return float(spec["storage_capacity_veh"])
+    kind = spec.get("kind")
+    if kind == "off_ramp":
+        off_ramp = str(spec.get("off_ramp", ""))
+        storage = cfg.network.off_ramp_storage_link.get(off_ramp, "")
+        return float(cfg.network.urban_link_storage_veh.get(storage, cfg.network.boundary_queue_max_veh))
+    if kind == "on_ramp":
+        return float(cfg.network.boundary_queue_max_veh)
+    receiving = str(spec.get("receiving_link", ""))
+    return float(cfg.network.urban_link_storage_veh.get(receiving, cfg.network.boundary_queue_max_veh))
+
+
+def movement_density_values(
+    state: TrafficState,
+    cfg: ExperimentConfig,
+    accepted_kinds: set[str],
+) -> list[float]:
+    """§3.2 allocation objective와 동일한 movement-level density vector를 만든다."""
+    specs = movement_specs(cfg)
+    out: list[float] = []
+    for movement, spec in specs.items():
+        if str(spec.get("kind", "")) not in accepted_kinds:
+            continue
+        queue = max(0.0, state.urban_movement_queue.get(movement, 0.0))
+        out.append(queue / max(movement_storage_capacity(cfg, movement, spec), 1.0e-9))
+    return out
+
+
+def movement_balance_summary(
+    state: TrafficState,
+    cfg: ExperimentConfig,
+    saturation_fraction: float = 0.95,
+    degenerate_ratio: float = 0.5,
+    eps: float = 1.0e-9,
+) -> Dict[str, float]:
+    """Movement-level B와 degenerate 여부를 한 번에 계산한다.
+
+    B 자체는 §3.2의 균등성 지표이므로, 모든 큐가 비었거나 대부분 포화된 경우에는
+    값이 작아도 제어 가능한 균형으로 해석하지 않도록 별도 flag를 함께 낸다.
+    """
+    inflow = movement_density_values(state, cfg, {"boundary_in", "off_ramp"})
+    outflow = movement_density_values(state, cfg, {"boundary_out", "on_ramp"})
+
+    def ratio(values: list[float], predicate: Callable[[float], bool]) -> float:
+        if not values:
+            return 1.0
+        return float(sum(1 for value in values if predicate(value)) / len(values))
+
+    in_empty = ratio(inflow, lambda value: value <= eps)
+    out_empty = ratio(outflow, lambda value: value <= eps)
+    in_saturated = ratio(inflow, lambda value: value >= saturation_fraction)
+    out_saturated = ratio(outflow, lambda value: value >= saturation_fraction)
+    empty_ratio = max(in_empty, out_empty)
+    saturation_ratio = max(in_saturated, out_saturated)
+    degenerate = empty_ratio >= degenerate_ratio or saturation_ratio >= degenerate_ratio
+    return {
+        "B_in": safe_balance_index(inflow),
+        "B_out": safe_balance_index(outflow),
+        "boundary_empty_ratio": float(empty_ratio),
+        "boundary_saturation_ratio": float(saturation_ratio),
+        "boundary_in_empty_ratio": float(in_empty),
+        "boundary_out_empty_ratio": float(out_empty),
+        "boundary_in_saturation_ratio": float(in_saturated),
+        "boundary_out_saturation_ratio": float(out_saturated),
+        "boundary_balance_degenerate": float(degenerate),
+        "boundary_balance_controllable": 0.0 if degenerate else 1.0,
+    }
 
 
 def ensure_urban_state(state: TrafficState, cfg: ExperimentConfig) -> None:
@@ -470,8 +547,13 @@ def urban_substep(
     diagnostics["urban_accumulation_abs_error_veh"] = abs(float(accumulation_error))
     diagnostics["urban_net_inflow_tracking_error_veh_h"] = float(net_inflow_error)
     diagnostics["net_inflow_tracking_error"] = float(net_inflow_error)
-    diagnostics["B_in"] = safe_balance_index(state.boundary_queue[l] for l in net.boundary_in_links)
-    diagnostics["B_out"] = safe_balance_index(state.boundary_queue[l] for l in net.boundary_out_links)
+    diagnostics.update(movement_balance_summary(
+        state,
+        cfg,
+        saturation_fraction=cfg.evaluation.boundary_degenerate_saturation_fraction,
+        degenerate_ratio=cfg.evaluation.boundary_degenerate_ratio,
+        eps=cfg.evaluation.eps,
+    ))
     diagnostics.update(boundary_indices(state.boundary_queue.values(), net.boundary_queue_max_veh))
     diagnostics["queue_overflow_count"] = float(overflow_count)
     diagnostics["movement_queue_projection_veh"] = float(projection_count)

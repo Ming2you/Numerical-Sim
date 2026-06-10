@@ -43,7 +43,9 @@ Example final result table:
 | Total TTT | 123456 | 112000 | 9.28% | Yes |
 | Freeway TTT | 60000 | 55200 | 8.00% | Yes |
 | Urban TTT | 63456 | 56800 | 10.49% | Yes |
-| Boundary CV | 0.42 | 0.31 | 26.19% | Yes |
+| Boundary B_in | 0.024 | 0.011 |  | Yes |
+| Boundary B_out | 0.020 | 0.014 |  | Yes |
+| Boundary CV (descriptive) | 0.42 | 0.31 |  |  |
 ```
 
 ---

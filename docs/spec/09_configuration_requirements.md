@@ -59,6 +59,9 @@ evaluation:
   main_metric_direction: lower_is_better
   min_improvement_pct: 8.0
   eps: 1.0e-9
+  eps_balance: 0.03
+  boundary_degenerate_saturation_fraction: 0.95
+  boundary_degenerate_ratio: 0.5
 
 auto_tuning:
   enabled: true

@@ -6,10 +6,12 @@ from src.controllers.freeway_follower import FreewayFollower, FreewayFollowerRes
 from src.controllers.leader import Leader, LeaderAction
 from src.controllers.stackelberg_mpc import StackelbergMPCController
 from src.controllers.urban_follower import UrbanFollower
+from src.evaluation.metrics import validate_controls
 from src.models.demand import DemandProfile, ScenarioConfig
 from src.models.metanet import effective_lane_profile
 from src.models.state import ControlAction, ExperimentConfig, TrafficState
 from src.models.urban_queue_model import (
+    movement_storage_capacity,
     sync_onramp_queues_from_freeway,
     sync_onramp_queues_to_freeway,
     urban_substep,
@@ -45,6 +47,13 @@ class ConstraintTests(unittest.TestCase):
         fw_merge_agent = next(agent for agent in freeway_agents if agent.id == "F_W1")
         self.assertIn("R_D_W", fw_merge_agent.ramps)
         self.assertIn("R_F_W", fw_merge_agent.ramps)
+        freeway_ids = {agent.id for agent in freeway_agents}
+        for agent in urban_agents:
+            self.assertTrue(set(agent.neighbors).issubset(freeway_ids))
+        self.assertEqual(
+            set(d_agent.neighbors),
+            {"F_W1", "F_W2", "F_E1", "F_E2"},
+        )
 
     def test_distributed_coordinator_returns_per_agent_diagnostics(self):
         cfg = ExperimentConfig.from_file(
@@ -392,6 +401,43 @@ class ConstraintTests(unittest.TestCase):
         from src.models.urban_queue_model import safe_balance_index
 
         self.assertEqual(safe_balance_index([0.0, 0.0]), 0.0)
+
+    def test_boundary_balance_gate_uses_movement_level_b_not_cv(self):
+        cfg = ExperimentConfig.from_file(
+            "src/config/default.yaml",
+            {"evaluation": {"eps_balance": 0.03}, "urban_follower": {"eps_U": 100.0}},
+        )
+        baseline_state = TrafficState.initial(cfg)
+        proposed_state = TrafficState.initial(cfg)
+        for idx, link in enumerate(cfg.network.movement_links):
+            proposed_state.boundary_queue[link] = 120.0 if idx == 0 else 10.0
+        for movement, spec in cfg.network.urban_movements.items():
+            if spec.get("kind") in {"boundary_in", "off_ramp", "boundary_out", "on_ramp"}:
+                proposed_state.urban_movement_queue[movement] = 0.5 * movement_storage_capacity(cfg, movement, spec)
+        validation = validate_controls(
+            {"final_state": baseline_state, "run_rows": [], "control_rows": []},
+            {"final_state": proposed_state, "run_rows": [], "control_rows": []},
+            cfg,
+        )
+        self.assertGreater(validation["boundary_balance"]["CV_boundary"], 0.0)
+        self.assertEqual(validation["boundary_balance"]["boundary_balance_degenerate"], 0.0)
+        self.assertTrue(validation["boundary_balance"]["pass"])
+
+    def test_degenerate_boundary_balance_does_not_trivially_pass(self):
+        cfg = ExperimentConfig.from_file("src/config/default.yaml", {"evaluation": {"eps_balance": 0.03}})
+        baseline_state = TrafficState.initial(cfg)
+        proposed_state = TrafficState.initial(cfg)
+        for movement in proposed_state.urban_movement_queue:
+            proposed_state.urban_movement_queue[movement] = 0.0
+        validation = validate_controls(
+            {"final_state": baseline_state, "run_rows": [], "control_rows": []},
+            {"final_state": proposed_state, "run_rows": [], "control_rows": []},
+            cfg,
+        )
+        self.assertEqual(validation["boundary_balance"]["B_in"], 0.0)
+        self.assertEqual(validation["boundary_balance"]["B_out"], 0.0)
+        self.assertEqual(validation["boundary_balance"]["boundary_balance_degenerate"], 1.0)
+        self.assertFalse(validation["boundary_balance"]["pass"])
 
     def test_no_negative_density_speed_queue(self):
         cfg = short_config()

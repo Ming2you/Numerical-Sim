@@ -98,10 +98,26 @@ def build_agent_specs(cfg: ExperimentConfig) -> tuple[list[AgentSpec], list[Agen
             if movement in movements
         )
         neighbors = sorted({
-            _freeway_agent_id(net.ramp_to_freeway[ramp])
+            _freeway_agent_id(
+                net.ramp_to_freeway[ramp],
+                _configured_segment_index(
+                    getattr(net, "ramp_merge_segment_index", {}),
+                    ramp,
+                    net.freeway_segments_per_link // 2,
+                    net.freeway_segments_per_link,
+                ),
+            )
             for ramp in ramps
         } | {
-            _freeway_agent_id(net.off_ramp_from_freeway[off_ramp])
+            _freeway_agent_id(
+                net.off_ramp_from_freeway[off_ramp],
+                _configured_segment_index(
+                    getattr(net, "off_ramp_segment_index", {}),
+                    off_ramp,
+                    net.freeway_segments_per_link - 1,
+                    net.freeway_segments_per_link,
+                ),
+            )
             for off_ramp in off_ramps
         })
         urban_agents.append(AgentSpec(

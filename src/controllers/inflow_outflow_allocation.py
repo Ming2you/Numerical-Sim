@@ -8,6 +8,7 @@ import numpy as np
 from src.controllers.leader import LeaderAction
 from src.models.state import ExperimentConfig, TrafficState
 from src.models.urban_queue_model import (
+    movement_storage_capacity,
     movement_specs,
     safe_balance_index,
     urban_accumulation_feedback_flow,
@@ -185,18 +186,7 @@ class InflowOutflowAllocationModule:
         return out
 
     def _movement_storage_capacity(self, movement: str) -> float:
-        spec = movement_specs(self.cfg).get(movement, {})
-        if "storage_capacity_veh" in spec:
-            return float(spec["storage_capacity_veh"])
-        kind = spec.get("kind")
-        if kind == "off_ramp":
-            off_ramp = str(spec.get("off_ramp", ""))
-            storage = self.cfg.network.off_ramp_storage_link.get(off_ramp, "")
-            return float(self.cfg.network.urban_link_storage_veh.get(storage, self.cfg.network.boundary_queue_max_veh))
-        if kind == "on_ramp":
-            return float(self.cfg.network.boundary_queue_max_veh)
-        receiving = str(spec.get("receiving_link", ""))
-        return float(self.cfg.network.urban_link_storage_veh.get(receiving, self.cfg.network.boundary_queue_max_veh))
+        return movement_storage_capacity(self.cfg, movement)
 
     @staticmethod
     def _net_flow(flows: np.ndarray, kinds: list[str]) -> float:

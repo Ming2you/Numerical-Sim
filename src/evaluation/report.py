@@ -51,9 +51,18 @@ def render_report(
             f"{m.get('proposed_urban_ttt', 0.0):.3f} |  |  |"
         ),
         (
-            f"| Boundary CV | {m.get('baseline_CV_boundary', 0.0):.3f} | "
-            f"{m.get('proposed_CV_boundary', 0.0):.3f} |  | "
+            f"| Boundary B_in | {m.get('baseline_B_in', 0.0):.4f} | "
+            f"{m.get('proposed_B_in', 0.0):.4f} |  | "
             f"{_yes(result.control_validation.get('boundary_balance', {}).get('pass', False))} |"
+        ),
+        (
+            f"| Boundary B_out | {m.get('baseline_B_out', 0.0):.4f} | "
+            f"{m.get('proposed_B_out', 0.0):.4f} |  | "
+            f"{_yes(result.control_validation.get('boundary_balance', {}).get('pass', False))} |"
+        ),
+        (
+            f"| Boundary CV (descriptive) | {m.get('baseline_CV_boundary', 0.0):.3f} | "
+            f"{m.get('proposed_CV_boundary', 0.0):.3f} |  |  |"
         ),
         "",
         "## Control Validation",

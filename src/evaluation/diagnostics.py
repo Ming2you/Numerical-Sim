@@ -24,7 +24,10 @@ def diagnose(result: EvaluationResult, cfg: ExperimentConfig) -> DiagnosticResul
         suggestions.append("increase ramp queue penalty or relax infeasible N_UF tracking")
     if not validation.get("boundary_balance", {}).get("pass", True):
         modes.append("boundary_queue_balance_failed")
-        suggestions.append("increase boundary balance weight or switch receiving-space rule")
+        if validation.get("boundary_balance", {}).get("boundary_balance_degenerate", 0.0) > 0.5:
+            suggestions.append("boundary balance is degenerate; inspect saturation/empty ratios before tuning")
+        else:
+            suggestions.append("increase movement-level boundary balance weight or switch receiving-space rule")
     if not validation.get("offset", {}).get("pass", True):
         modes.append("offset_validation_failed")
         suggestions.append("reduce max offset step or increase offset smoothness")

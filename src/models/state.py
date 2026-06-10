@@ -340,7 +340,7 @@ class LeaderConfig:
     w_L: float = 0.05
     N_P_star_range: List[float] = field(default_factory=lambda: [0.0, 500.0])
     N_UF_star_range: List[float] = field(default_factory=lambda: [0.0, 6000.0])
-    N_P_crit_veh: float = 172.2252769877888
+    N_P_crit_veh: float = 354.809
     N_P_candidate_lower_factor: float = 0.90
     N_P_candidate_upper_factor: float = 1.05
     N_P_star_unit: str = "veh"
@@ -393,6 +393,9 @@ class EvaluationConfig:
     main_metric_direction: str = "lower_is_better"
     min_improvement_pct: float = 8.0
     eps: float = 1.0e-9
+    eps_balance: float = 0.03
+    boundary_degenerate_saturation_fraction: float = 0.95
+    boundary_degenerate_ratio: float = 0.5
 
 
 @dataclass
@@ -457,6 +460,12 @@ class ExperimentConfig:
             raise ValueError("leader.N_P_candidate_upper_factor must be >= lower factor.")
         if self.leader.N_UF_star_unit not in {"veh_per_hour", "veh_per_control_interval"}:
             raise ValueError("leader.N_UF_star_unit must be veh_per_hour or veh_per_control_interval.")
+        if self.evaluation.eps_balance < 0.0:
+            raise ValueError("evaluation.eps_balance must be non-negative.")
+        if not 0.0 <= self.evaluation.boundary_degenerate_saturation_fraction <= 1.0:
+            raise ValueError("evaluation.boundary_degenerate_saturation_fraction must be in [0, 1].")
+        if not 0.0 <= self.evaluation.boundary_degenerate_ratio <= 1.0:
+            raise ValueError("evaluation.boundary_degenerate_ratio must be in [0, 1].")
 
     @classmethod
     def from_file(cls, path: str | Path, overrides: Optional[Mapping[str, Any]] = None) -> "ExperimentConfig":

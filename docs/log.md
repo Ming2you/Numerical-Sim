@@ -360,6 +360,29 @@ This file records human-readable update notes for each direct push.
 - `python -B -m unittest discover -s src\\tests`
 - Result: 54 tests passed.
 
+## 2026-06-11 01:34:18 +09:00
+
+### Scope
+
+- GitHub `origin/main`을 pull하여 `ce9d3ed`의 boundary-balance proposal/Claude review를 반영했습니다.
+- `leader.N_P_crit_veh`를 확장망 calibration 결과 `354.809 veh`로 갱신했습니다.
+- distributed urban agent neighbor map이 존재하지 않는 `F_W`/`F_E`가 아니라 segment agent(`F_W1`, `F_W2`, `F_E1`, `F_E2`)를 가리키도록 수정했습니다.
+- boundary-balance acceptance를 `CV_boundary` 기준에서 §3.2와 동일한 movement-level `B_in/B_out` 기준으로 정합했습니다.
+- empty/saturated regime에서 작은 B가 trivial pass가 되지 않도록 `boundary_balance_degenerate`, empty/saturation ratio diagnostics를 추가했습니다.
+- report/spec 문서에서 `CV_boundary`는 descriptive metric으로 낮추고, B 기준 acceptance를 명시했습니다.
+
+### Run
+
+- `python -B -m src.experiments.run_experiment --config src/config/default.yaml --scenario peak_demand --baseline fixed_signal_fixed_speed --controller stackelberg_mpc --T-total 360 --follower-solver-mode distributed --leader-candidate-count 5 --max-nash-iter 3 --output outputs\\codex_boundary_acceptance_peak_360`
+- Result: execution OK, Total TTT improvement `21.07%`, final evaluation `FAIL`.
+- Failure reason: ramp metering error and movement-level boundary balance. Boundary diagnostics now expose `B_in=0.0843`, `B_out=0.1602`, `boundary_balance_degenerate=1`, `boundary_empty_ratio=0.6364`, `urban_net_inflow_tracking_error_veh_h=2988`.
+
+### Validation
+
+- `python -B -m py_compile src\\models\\urban_queue_model.py src\\controllers\\inflow_outflow_allocation.py src\\controllers\\urban_follower.py src\\controllers\\distributed_coordinator.py src\\evaluation\\metrics.py src\\evaluation\\report.py src\\evaluation\\diagnostics.py src\\models\\state.py src\\tests\\test_constraints.py src\\tests\\test_metanet_equations.py`
+- `python -B -m unittest discover -s src\\tests`
+- Result: 56 tests passed.
+
 ## 2026-06-11 00:48:56 +09:00
 
 ### Scope

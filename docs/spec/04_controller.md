@@ -125,13 +125,15 @@ J_balance = B_in^2 + B_out^2
 
 Use safe division. If all queues are zero, set the corresponding balance term to zero.
 
-The controller must also evaluate a more interpretable boundary queue balance index:
+The controller should also report more interpretable boundary queue balance diagnostics:
 
 ```text
 CV_boundary = std(boundary_queue) / max(mean(boundary_queue), eps)
 MaxMin_boundary = max(boundary_queue) - min(boundary_queue)
 OverflowRatio_boundary = count(queue > queue_max) / number_of_boundary_links
 ```
+
+These CV/MaxMin diagnostics are descriptive. Acceptance for inflow-outflow balancing must use the same movement-level `B_in/B_out` vectors as the allocation objective, with degenerate empty/saturated regimes flagged separately.
 
 Mandatory constraints:
 

@@ -5,7 +5,7 @@ from typing import Any, Dict, Iterable, Mapping
 import numpy as np
 
 from src.models.state import EvaluationResult, ExperimentConfig
-from src.models.urban_queue_model import boundary_indices, safe_balance_index
+from src.models.urban_queue_model import boundary_indices, movement_balance_summary
 
 
 def improvement_rate(
@@ -31,6 +31,28 @@ def summarize_run(result: Mapping[str, Any], cfg: ExperimentConfig) -> Dict[str,
     rows = result.get("run_rows", [])
     final_state = result.get("final_state")
     boundary_values = final_state.boundary_queue.values() if final_state is not None else []
+    balance = (
+        movement_balance_summary(
+            final_state,
+            cfg,
+            saturation_fraction=cfg.evaluation.boundary_degenerate_saturation_fraction,
+            degenerate_ratio=cfg.evaluation.boundary_degenerate_ratio,
+            eps=cfg.evaluation.eps,
+        )
+        if final_state is not None
+        else {
+            "B_in": 0.0,
+            "B_out": 0.0,
+            "boundary_empty_ratio": 0.0,
+            "boundary_saturation_ratio": 0.0,
+            "boundary_in_empty_ratio": 0.0,
+            "boundary_out_empty_ratio": 0.0,
+            "boundary_in_saturation_ratio": 0.0,
+            "boundary_out_saturation_ratio": 0.0,
+            "boundary_balance_degenerate": 0.0,
+            "boundary_balance_controllable": 1.0,
+        }
+    )
     net_inflow_errors = [
         r.get("urban_net_inflow_tracking_error_veh_h", r.get("net_inflow_tracking_error", 0.0))
         for r in rows
@@ -51,12 +73,7 @@ def summarize_run(result: Mapping[str, Any], cfg: ExperimentConfig) -> Dict[str,
         "net_inflow_tracking_error": float(np.mean(net_inflow_errors)) if rows else 0.0,
         "urban_accumulation_abs_error_veh": float(np.mean(accumulation_errors)) if rows else 0.0,
         "CV_boundary": boundary_cv(boundary_values, cfg.evaluation.eps),
-        "B_in": safe_balance_index(
-            final_state.boundary_queue[l] for l in cfg.network.boundary_in_links
-        ) if final_state is not None else 0.0,
-        "B_out": safe_balance_index(
-            final_state.boundary_queue[l] for l in cfg.network.boundary_out_links
-        ) if final_state is not None else 0.0,
+        **balance,
         **(
             boundary_indices(final_state.boundary_queue.values(), cfg.network.boundary_queue_max_veh)
             if final_state is not None
@@ -141,6 +158,17 @@ def validate_controls(
             if delta > cfg.urban_follower.max_offset_step + 1e-9:
                 offset_smooth_v += 1
     mean_metering = proposed_summary["mean_metering_error"]
+    boundary_balance_improvement = improvement_rate(
+        baseline_summary["CV_boundary"],
+        proposed_summary["CV_boundary"],
+        "lower_is_better",
+        cfg.evaluation.eps,
+    )
+    movement_balance_ok = (
+        proposed_summary["B_in"] <= cfg.evaluation.eps_balance + 1.0e-9
+        and proposed_summary["B_out"] <= cfg.evaluation.eps_balance + 1.0e-9
+    )
+    boundary_degenerate = proposed_summary.get("boundary_balance_degenerate", 0.0) > 0.5
     return {
         "ramp_metering": {
             "metering_active_steps": metering_active_steps,
@@ -175,18 +203,23 @@ def validate_controls(
         "boundary_balance": {
             "B_in": proposed_summary["B_in"],
             "B_out": proposed_summary["B_out"],
+            "eps_balance": cfg.evaluation.eps_balance,
             "CV_boundary": proposed_summary["CV_boundary"],
             "MaxMin_boundary": proposed_summary["MaxMin_boundary"],
             "OverflowRatio_boundary": proposed_summary["OverflowRatio_boundary"],
-            "boundary_queue_balance_improvement": improvement_rate(
-                baseline_summary["CV_boundary"],
-                proposed_summary["CV_boundary"],
-                "lower_is_better",
-                cfg.evaluation.eps,
-            ),
+            "boundary_queue_balance_improvement": boundary_balance_improvement,
+            "boundary_balance_degenerate": proposed_summary.get("boundary_balance_degenerate", 0.0),
+            "boundary_balance_controllable": proposed_summary.get("boundary_balance_controllable", 1.0),
+            "boundary_empty_ratio": proposed_summary.get("boundary_empty_ratio", 0.0),
+            "boundary_saturation_ratio": proposed_summary.get("boundary_saturation_ratio", 0.0),
+            "boundary_in_empty_ratio": proposed_summary.get("boundary_in_empty_ratio", 0.0),
+            "boundary_out_empty_ratio": proposed_summary.get("boundary_out_empty_ratio", 0.0),
+            "boundary_in_saturation_ratio": proposed_summary.get("boundary_in_saturation_ratio", 0.0),
+            "boundary_out_saturation_ratio": proposed_summary.get("boundary_out_saturation_ratio", 0.0),
             "urban_net_inflow_tracking_error_veh_h": proposed_summary["urban_net_inflow_tracking_error_veh_h"],
             "urban_accumulation_abs_error_veh": proposed_summary["urban_accumulation_abs_error_veh"],
-            "pass": proposed_summary["CV_boundary"] <= baseline_summary["CV_boundary"] + 1e-9
+            "pass": movement_balance_ok
+            and not boundary_degenerate
             and proposed_summary["OverflowRatio_boundary"] <= baseline_summary["OverflowRatio_boundary"] + 1e-9
             and proposed_summary["urban_net_inflow_tracking_error_veh_h"] <= cfg.urban_follower.eps_U + 1e-9,
         },
