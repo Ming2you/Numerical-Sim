@@ -309,3 +309,34 @@ This file records human-readable update notes for each direct push.
 - `python -B -m experiments.capacity_drop_vsl_probe --output outputs\\codex_capacity_drop_vsl_probe_cli --T-total 720`
 - `python -B -m unittest discover -s src\\tests -v`
 - Result: probe reproduced `capacity_drop_active_steps=4`, `vsl_active_steps=4`, `overlap_steps=4`; 50 tests passed.
+
+## 2026-06-10 17:54:15 +09:00
+
+### Scope
+
+- distributed player 1차 구현을 추가했습니다.
+- 기존 2-block `NashSolver`는 유지하고, `mpc.follower_solver_mode: distributed`일 때 `DistributedCoordinator`를 사용하도록 연결했습니다.
+- topology 기반 agent partition을 추가했습니다.
+  - urban: `U_A`, `U_C`, `U_D`, `U_F`
+  - freeway: `F_W`, `F_E`
+- coupling variable exchange와 normalized coupling residual 기반 반복 종료를 추가했습니다.
+- `run_experiment` CLI에 `--follower-solver-mode two_block|distributed` 옵션을 추가했습니다.
+- distributed 내부 iteration에서 offset smoothness 제약이 누적 위반되지 않도록 최종 offset clamp를 추가했습니다.
+- distributed player regression tests를 추가했습니다.
+
+### Notes
+
+- 이번 구현은 Wu §IV-D 구조를 코드 경로로 넣은 1차 버전입니다.
+- agent별 exact MILP/SQP local optimizer는 아직 아닙니다.
+- Urban agent는 기존 `UrbanFollower` 결과에서 자기 signal/movement 변수만 추출합니다.
+- Freeway agent는 링크별 local heuristic으로 ramp metering/VSL을 계산합니다.
+- 따라서 “agent partition + coupling exchange + diagnostics”는 구현됐고, local optimizer 정밀화는 다음 단계입니다.
+
+### Validation
+
+- `python -B -m py_compile src\\controllers\\distributed_coordinator.py src\\controllers\\stackelberg_mpc.py src\\experiments\\run_experiment.py src\\models\\state.py src\\tests\\test_constraints.py src\\tests\\test_metanet_equations.py`
+- `python -B -m unittest src.tests.test_constraints.ConstraintTests.test_distributed_agent_partition_matches_topology src.tests.test_constraints.ConstraintTests.test_distributed_coordinator_returns_per_agent_diagnostics src.tests.test_metanet_equations.MetanetEquationTests.test_config_rejects_invalid_follower_solver_mode -v`
+- `python -B -m unittest src.tests.test_constraints.ConstraintTests.test_stackelberg_can_use_distributed_follower_solver -v`
+- `python -B -m experiments.run_experiment --config src/config/default.yaml --scenario peak_demand --baseline fixed_signal_fixed_speed --controller stackelberg_mpc --T-total 360 --follower-solver-mode distributed --leader-candidate-count 5 --max-nash-iter 3 --output outputs\\codex_distributed_player_peak_360_v2`
+- `python -B -m unittest discover -s src\\tests -v`
+- Result: 54 tests passed. Distributed smoke는 Total TTT improvement `8.28%`로 main metric은 통과했지만, boundary balance validation이 남아 최종 acceptance는 FAIL입니다.

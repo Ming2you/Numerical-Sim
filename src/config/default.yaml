@@ -174,10 +174,12 @@ freeway_offramp_capacity_drop:
 mpc:
   horizon_steps: 3
   leader_candidate_count: 15
+  follower_solver_mode: two_block
   max_nash_iter: 10
   nash_obj_tol: 0.001
   nash_control_tol: 0.001
   nash_relaxation_alpha: 0.8
+  distributed_coupling_tol: 0.001
   control_horizon_steps: 3
   urban_freeway_tts_weight_alpha: 1.0
   optimizer_maxiter: 40

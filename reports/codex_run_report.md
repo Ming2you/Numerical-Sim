@@ -1,69 +1,93 @@
 # Codex 실행 리포트
 
-## 2026-06-10 17:36:31 +09:00
+## 2026-06-10 17:54:15 +09:00
 
-### 질문
+### 이번 작업
 
-capacity drop이 실제로 발생하는 조건까지 튜닝했을 때, VSL이 activate되는지 확인했습니다.
+distributed player 1차 구현을 추가했습니다. 기존 `FreewayFollower + UrbanFollower` 2-block Nash 경로는 그대로 유지하고, 새 경로는 `mpc.follower_solver_mode: distributed`로 선택할 수 있게 했습니다.
 
-### 결론
+### 구현 내용
 
-- 예. stress tuning에서 capacity drop이 실제로 발화하면 VSL도 activate됩니다.
-- `outputs/codex_capacity_drop_vsl_probe_cli` run에서 `capacity_drop_active_steps=4`, `vsl_active_steps=4`, `overlap_steps=4`였습니다.
-- 최소 effective lane은 `lambda_min=1.250007`로, 2차로에서 약 `0.75`차로 감소가 실제 run log에 기록됐습니다.
-- 단, 이 결과는 “VSL이 켜지는가”에 대한 positive check입니다. “VSL이 항상 TTT를 개선하는가”는 아직 positive proof가 아닙니다.
+- `src/controllers/distributed_coordinator.py` 추가
+  - urban agent 4개: `U_A`, `U_C`, `U_D`, `U_F`
+  - freeway agent 2개: `F_W`, `F_E`
+  - topology에서 agent partition과 neighbor 후보를 자동 유도
+  - coupling variables: `u_on_*`, `q_off_*`, ramp queue, freeway boundary density/speed, urban agent accumulation
+  - iteration 종료 기준: control vector가 아니라 normalized coupling residual
+- `mpc.follower_solver_mode` 추가
+  - `two_block`: 기존 `NashSolver`
+  - `distributed`: 새 `DistributedCoordinator`
+- `mpc.distributed_coupling_tol` 추가
+- `experiments.run_experiment`에 `--follower-solver-mode` CLI override 추가
+- distributed 내부 iteration에서 offset이 실제 control interval의 `max_offset_step`을 누적 위반하지 않도록 최종 offset clamp 추가
+- distributed diagnostics 추가
+  - `distributed_player_active`
+  - `nash_per_agent_active`
+  - `distributed_urban_agent_count`
+  - `distributed_freeway_agent_count`
+  - `distributed_coupling_residual`
+  - `agent_U_A_objective`, `agent_F_W_objective` 등 agent별 objective
 
-### Stress Tuning
+### 한계
 
-기본 `peak_demand`에서는 off-ramp storage가 충분히 차지 않아 `capacity_drop_active=0`이었습니다. 그래서 capacity drop 발화를 확인하기 위해 아래 stress 조건을 사용했습니다.
+- 이번 구현은 Wu §IV-D 구조를 코드 경로로 넣은 1차 distributed player입니다.
+- 각 agent가 완전한 MILP/SQP local optimization을 푸는 단계는 아닙니다.
+- Urban agent는 기존 `UrbanFollower` 휴리스틱을 호출한 뒤 자기 signal/movement 변수만 추출합니다.
+- Freeway agent는 링크별 local heuristic으로 ramp metering/VSL을 계산합니다.
+- 즉, “공간 분산 agent + coupling exchange + per-agent diagnostics”는 구현됐지만, 논문 수준의 exact local optimizer는 다음 단계입니다.
 
-- `off_ramp_split_ratio`: `0.90`
-- `OR_W_D`, `OR_E_F` storage: `20 veh`
-- `urban_avg_speed_km_h`: `3.0`
-- `urban_avg_vehicle_length_m`: `15.0`
-- `lane_reduction`: `0.75`
-- `gamma`: `0.2`
-- `vsl_smoothness_weight`: `0.0`
-- `horizon_steps`: `3`
-- `T_total`: `720 s`
+### Distributed Smoke 결과
 
-### 실행 결과
-
-| run | total TTT | freeway TTT | urban TTT | capacity drop active | lambda min | VSL active | overlap |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| baseline | 249.168 | 136.497 | 112.671 | 4 | 1.250009 | 0 | 0 |
-| proposed | 250.111 | 123.387 | 126.723 | 4 | 1.250007 | 4 | 4 |
-| proposed_without_vsl | 249.763 | 123.071 | 126.692 | 4 | 1.250009 | 0 | 0 |
-
-### 해석
-
-- Capacity drop과 VSL activation은 같은 control step에서 함께 관측됐습니다.
-- Proposed controller는 capacity drop 상황에서 VSL `50 km/h`를 선택했습니다.
-- Proposed는 baseline 대비 freeway TTT는 낮췄지만 urban TTT가 올라 전체 TTT는 약간 나빠졌습니다.
-- `proposed_without_vsl`과 비교하면 VSL이 이 stress setting에서 TTT를 개선하지는 않았습니다.
-- 따라서 다음 튜닝 목표는 “VSL activation”이 아니라, VSL이 너무 강하게 `50 km/h`까지 떨어지지 않도록 VSL cost/benefit을 재조정하거나, capacity drop 대응을 ramp metering과 분담하게 만드는 것입니다.
-
-### 추가된 재현 도구
-
-- `src/experiments/capacity_drop_vsl_probe.py`
-- `experiments/capacity_drop_vsl_probe.py`
-
-재실행 명령:
+실행 명령:
 
 ```powershell
-python -B -m experiments.capacity_drop_vsl_probe `
-  --output outputs\codex_capacity_drop_vsl_probe_cli `
-  --T-total 720
+python -B -m experiments.run_experiment `
+  --config src/config/default.yaml `
+  --scenario peak_demand `
+  --baseline fixed_signal_fixed_speed `
+  --controller stackelberg_mpc `
+  --T-total 360 `
+  --follower-solver-mode distributed `
+  --leader-candidate-count 5 `
+  --max-nash-iter 3 `
+  --output outputs\codex_distributed_player_peak_360_v2
 ```
+
+결과:
+
+| 항목 | 값 |
+|---|---:|
+| Total TTT baseline | 30.974 |
+| Total TTT distributed proposed | 28.410 |
+| Improvement | 8.28% |
+| Final acceptance | FAIL |
+| distributed player active | 1.0 |
+| urban agents | 4 |
+| freeway agents | 2 |
+
+Acceptance가 FAIL인 이유:
+
+- Total TTT 기준은 통과했습니다.
+- offset validation은 수정 후 PASS입니다.
+- 남은 실패는 boundary balance입니다.
+  - `urban_net_inflow_tracking_error_veh_h=257.6`
+  - `urban_accumulation_abs_error_veh=84.05`
 
 ### 검증
 
-- `python -B -m py_compile src\experiments\capacity_drop_vsl_probe.py experiments\capacity_drop_vsl_probe.py src\tests\test_constraints.py`
-- `python -B -m unittest src.tests.test_constraints.ConstraintTests.test_freeway_follower_activates_vsl_under_capacity_drop -v`
-- `python -B -m experiments.capacity_drop_vsl_probe --output outputs\codex_capacity_drop_vsl_probe_cli --T-total 720`
+- `python -B -m py_compile src\controllers\distributed_coordinator.py src\controllers\stackelberg_mpc.py src\experiments\run_experiment.py src\models\state.py src\tests\test_constraints.py src\tests\test_metanet_equations.py`
+- `python -B -m unittest src.tests.test_constraints.ConstraintTests.test_distributed_agent_partition_matches_topology src.tests.test_constraints.ConstraintTests.test_distributed_coordinator_returns_per_agent_diagnostics src.tests.test_metanet_equations.MetanetEquationTests.test_config_rejects_invalid_follower_solver_mode -v`
+- `python -B -m unittest src.tests.test_constraints.ConstraintTests.test_stackelberg_can_use_distributed_follower_solver -v`
+- `python -B -m experiments.run_experiment --config src/config/default.yaml --scenario peak_demand --baseline fixed_signal_fixed_speed --controller stackelberg_mpc --T-total 360 --follower-solver-mode distributed --leader-candidate-count 5 --max-nash-iter 3 --output outputs\codex_distributed_player_peak_360_v2`
 - `python -B -m unittest discover -s src\tests -v`
 
 결과:
 
-- Capacity drop/VSL probe: `capacity_drop_active_steps=4`, `vsl_active_steps=4`, `overlap_steps=4`, `lambda_min=1.250007`
-- 전체 tests: `50 tests OK`
+- Distributed smoke: `FAIL improvement=8.28%`
+- 전체 tests: `54 tests OK`
+
+### 다음 작업 제안
+
+1. Urban agent local solve를 기존 global `UrbanFollower` 추출 방식에서 signal별 직접 계산으로 더 분리합니다.
+2. Freeway agent local solve를 현재 heuristic에서 링크별 horizon scoring으로 강화합니다.
+3. Boundary balance 실패를 줄이기 위해 distributed urban agent가 `N_P_star` net inflow target을 agent별로 분담하도록 수정합니다.

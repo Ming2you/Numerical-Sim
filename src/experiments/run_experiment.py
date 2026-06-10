@@ -92,6 +92,12 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--T-total", type=float, default=None, help="Optional short-run override for smoke tests.")
     parser.add_argument("--mpc-horizon-steps", type=int, default=None, help="Optional MPC horizon override.")
     parser.add_argument("--leader-candidate-count", type=int, default=None, help="Optional leader candidate override.")
+    parser.add_argument(
+        "--follower-solver-mode",
+        choices=["two_block", "distributed"],
+        default=None,
+        help="Optional follower solver override.",
+    )
     parser.add_argument("--max-nash-iter", type=int, default=None, help="Optional Nash iteration override.")
     parser.add_argument("--freeway-horizon-beam-width", type=int, default=None, help="Optional freeway beam width override.")
     parser.add_argument("--freeway-ramp-candidate-limit", type=int, default=None, help="Optional ramp candidate override.")
@@ -107,6 +113,8 @@ def main(argv: list[str] | None = None) -> None:
         overrides.setdefault("mpc", {})["horizon_steps"] = args.mpc_horizon_steps
     if args.leader_candidate_count is not None:
         overrides.setdefault("mpc", {})["leader_candidate_count"] = args.leader_candidate_count
+    if args.follower_solver_mode is not None:
+        overrides.setdefault("mpc", {})["follower_solver_mode"] = args.follower_solver_mode
     if args.max_nash_iter is not None:
         overrides.setdefault("mpc", {})["max_nash_iter"] = args.max_nash_iter
     if args.freeway_horizon_beam_width is not None:

@@ -138,6 +138,13 @@ class MetanetEquationTests(unittest.TestCase):
                 {"freeway_offramp_capacity_drop": {"b": 0.0}},
             )
 
+    def test_config_rejects_invalid_follower_solver_mode(self):
+        with self.assertRaises(ValueError):
+            ExperimentConfig.from_file(
+                "src/config/default.yaml",
+                {"mpc": {"follower_solver_mode": "centralized"}},
+            )
+
     def test_traffic_state_stores_freeway_flow(self):
         cfg = ExperimentConfig.from_file("src/config/default.yaml")
         state = TrafficState.initial(cfg)

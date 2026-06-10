@@ -1,0 +1,534 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Dict, Iterable, Mapping, Optional
+
+import numpy as np
+
+from src.controllers.freeway_follower import FreewayFollowerResult
+from src.controllers.leader import LeaderAction
+from src.controllers.nash_solver import NashResult, _relax_map
+from src.controllers.urban_follower import UrbanFollower
+from src.models.demand import DemandStep
+from src.models.metanet import effective_lane_profile
+from src.models.state import ControlAction, ExperimentConfig, TrafficState
+from src.models.urban_queue_model import (
+    ensure_urban_state,
+    estimate_onramp_green_release_flows,
+    movement_specs,
+)
+
+
+@dataclass(frozen=True)
+class AgentSpec:
+    id: str
+    kind: str
+    signal: str = ""
+    link: str = ""
+    movements: tuple[str, ...] = ()
+    ramps: tuple[str, ...] = ()
+    off_ramps: tuple[str, ...] = ()
+    neighbors: tuple[str, ...] = ()
+
+
+@dataclass
+class AgentSolve:
+    agent_id: str
+    objective: float
+    ramp_metering: Dict[str, float] = field(default_factory=dict)
+    vsl: Dict[str, float] = field(default_factory=dict)
+    green_times: Dict[str, float] = field(default_factory=dict)
+    offsets: Dict[str, float] = field(default_factory=dict)
+    allocation: Dict[str, float] = field(default_factory=dict)
+    infeasibility: Dict[str, float] = field(default_factory=dict)
+    diagnostics: Dict[str, float] = field(default_factory=dict)
+
+
+def _freeway_agent_id(link: str) -> str:
+    suffix = link.split("_")[-1] if "_" in link else link
+    return f"F_{suffix}"
+
+
+def _urban_agent_id(signal: str) -> str:
+    return f"U_{signal}"
+
+
+def build_agent_specs(cfg: ExperimentConfig) -> tuple[list[AgentSpec], list[AgentSpec]]:
+    """현재 topology에서 Wu식 urban/freeway agent 분할을 자동 유도한다."""
+    net = cfg.network
+    specs = movement_specs(cfg)
+    urban_agents: list[AgentSpec] = []
+    for signal in net.signals:
+        movements = tuple(
+            movement
+            for movement, spec in specs.items()
+            if spec.get("signal") == signal
+        )
+        ramps = tuple(
+            ramp for ramp, movement in net.on_ramp_to_movement.items()
+            if movement in movements
+        )
+        off_ramps = tuple(
+            off_ramp for off_ramp, movement in net.off_ramp_to_movement.items()
+            if movement in movements
+        )
+        neighbors = sorted({
+            _freeway_agent_id(net.ramp_to_freeway[ramp])
+            for ramp in ramps
+        } | {
+            _freeway_agent_id(net.off_ramp_from_freeway[off_ramp])
+            for off_ramp in off_ramps
+        })
+        urban_agents.append(AgentSpec(
+            id=_urban_agent_id(signal),
+            kind="urban",
+            signal=signal,
+            movements=movements,
+            ramps=ramps,
+            off_ramps=off_ramps,
+            neighbors=tuple(neighbors),
+        ))
+
+    urban_by_ramp = {
+        ramp: _urban_agent_id(str(specs[movement].get("signal", "")))
+        for ramp, movement in net.on_ramp_to_movement.items()
+        if movement in specs
+    }
+    urban_by_offramp = {
+        off_ramp: _urban_agent_id(str(specs[movement].get("signal", "")))
+        for off_ramp, movement in net.off_ramp_to_movement.items()
+        if movement in specs
+    }
+    freeway_agents: list[AgentSpec] = []
+    for link in net.freeway_links:
+        ramps = tuple(ramp for ramp in net.ramps if net.ramp_to_freeway.get(ramp) == link)
+        off_ramps = tuple(
+            off_ramp
+            for off_ramp in net.off_ramps
+            if net.off_ramp_from_freeway.get(off_ramp) == link
+        )
+        neighbors = sorted({
+            urban_by_ramp[ramp]
+            for ramp in ramps
+            if ramp in urban_by_ramp
+        } | {
+            urban_by_offramp[off_ramp]
+            for off_ramp in off_ramps
+            if off_ramp in urban_by_offramp
+        })
+        freeway_agents.append(AgentSpec(
+            id=_freeway_agent_id(link),
+            kind="freeway",
+            link=link,
+            ramps=ramps,
+            off_ramps=off_ramps,
+            neighbors=tuple(neighbors),
+        ))
+    return urban_agents, freeway_agents
+
+
+def _project_to_target(target: float, upper: Mapping[str, float], weights: Mapping[str, float]) -> Dict[str, float]:
+    release = {key: 0.0 for key in upper}
+    remaining = float(np.clip(target, 0.0, sum(max(v, 0.0) for v in upper.values())))
+    active = {key for key, value in upper.items() if value > 1.0e-9}
+    while remaining > 1.0e-9 and active:
+        w_sum = sum(max(weights.get(key, 1.0), 1.0e-9) for key in active)
+        if w_sum <= 1.0e-9:
+            break
+        changed = False
+        for key in list(active):
+            proposed = remaining * max(weights.get(key, 1.0), 1.0e-9) / w_sum
+            spare = max(0.0, upper[key] - release[key])
+            if proposed >= spare - 1.0e-9:
+                release[key] += spare
+                remaining -= spare
+                active.remove(key)
+                changed = True
+        if not changed:
+            for key in active:
+                release[key] += remaining * max(weights.get(key, 1.0), 1.0e-9) / w_sum
+            remaining = 0.0
+    return {key: float(min(max(value, 0.0), upper[key])) for key, value in release.items()}
+
+
+class DistributedCoordinator:
+    """Wu §IV-D 형태의 agent별 follower coordinator.
+
+    이 1차 구현은 기존 follower 휴리스틱을 재사용하되, 적용 변수는 agent 소유 변수로
+    제한하고 coupling variable 변화량으로 반복 종료를 판단한다.
+    """
+
+    def __init__(self, cfg: ExperimentConfig):
+        self.cfg = cfg
+        self.urban_agents, self.freeway_agents = build_agent_specs(cfg)
+        self.urban_follower = UrbanFollower(cfg)
+
+    def solve(
+        self,
+        state: TrafficState,
+        leader: LeaderAction,
+        demand: DemandStep | Iterable[DemandStep],
+        previous_control: Optional[ControlAction] = None,
+    ) -> NashResult:
+        forecast = [demand] if isinstance(demand, DemandStep) else list(demand)
+        if not forecast:
+            raise ValueError("DistributedCoordinator requires at least one demand step.")
+        first_demand = forecast[0]
+        reference_control = previous_control or ControlAction.fixed(self.cfg)
+        current = reference_control
+        current.N_P_star = leader.N_P_star
+        current.N_UF_star = leader.N_UF_star
+        coupling = self._extract_coupling(state, current, first_demand)
+        best_control = current
+        best_obj = np.inf
+        best_diag: Dict[str, float] = {}
+        residual = np.inf
+        converged = False
+        iteration = 0
+
+        for iteration in range(1, self.cfg.mpc.max_nash_iter + 1):
+            freeway_solves = [
+                self._solve_freeway_agent(agent, state, leader, first_demand, current, coupling)
+                for agent in self.freeway_agents
+            ]
+            freeway_response = self._freeway_response(freeway_solves)
+            urban_solves = [
+                self._solve_urban_agent(agent, state, leader, first_demand, freeway_response, current)
+                for agent in self.urban_agents
+            ]
+            candidate = self._merge_agent_controls(
+                leader,
+                current,
+                freeway_solves,
+                urban_solves,
+            )
+            candidate.offsets = self._clamp_offsets_to_reference(candidate.offsets, reference_control)
+            new_coupling = self._extract_coupling(state, candidate, first_demand)
+            residual = self._coupling_residual(coupling, new_coupling)
+            obj = sum(s.objective for s in freeway_solves) + sum(s.objective for s in urban_solves)
+            diagnostics = self._diagnostics(freeway_solves, urban_solves, residual, iteration)
+            if obj < best_obj:
+                best_obj = float(obj)
+                best_control = candidate
+                best_diag = diagnostics
+            current = candidate
+            coupling = new_coupling
+            if residual < self.cfg.mpc.distributed_coupling_tol:
+                converged = True
+                best_control = candidate
+                best_obj = float(obj)
+                best_diag = diagnostics
+                break
+
+        best_control.diagnostics.update(best_diag)
+        best_control.diagnostics["nash_converged"] = converged
+        best_control.diagnostics["nash_iterations"] = iteration
+        return NashResult(
+            control=best_control,
+            objective_value=float(best_obj if np.isfinite(best_obj) else 0.0),
+            iterations=iteration,
+            converged=converged,
+            residual_objective=float(residual if np.isfinite(residual) else 0.0),
+            residual_control=float(residual if np.isfinite(residual) else 0.0),
+            diagnostics=best_diag,
+        )
+
+    def _solve_freeway_agent(
+        self,
+        agent: AgentSpec,
+        state: TrafficState,
+        leader: LeaderAction,
+        demand: DemandStep,
+        current: ControlAction,
+        coupling: Mapping[str, float],
+    ) -> AgentSolve:
+        net = self.cfg.network
+        dt_h = self.cfg.simulation.T_f_h
+        link_capacity = sum(net.ramp_capacity_veh_h[ramp] for ramp in agent.ramps)
+        total_capacity = max(sum(net.ramp_capacity_veh_h.values()), 1.0e-9)
+        target = max(0.0, leader.N_UF_star) * link_capacity / total_capacity
+        upper: Dict[str, float] = {}
+        weights: Dict[str, float] = {}
+        min_receiving = 1.0
+        for ramp in agent.ramps:
+            merge_idx = len(state.freeway_density[agent.link]) // 2
+            rho_merge = state.freeway_density[agent.link][merge_idx]
+            receiving = float(np.clip(
+                (net.rho_max - rho_merge) / max(net.rho_max - net.rho_crit, 1.0e-9),
+                0.0,
+                1.0,
+            ))
+            min_receiving = min(min_receiving, receiving)
+            urban_release = max(0.0, coupling.get(f"u_on_{ramp}", 0.0))
+            available = state.ramp_queue.get(ramp, 0.0) / max(dt_h, 1.0e-9) + urban_release
+            upper[ramp] = min(net.ramp_capacity_veh_h[ramp], available, net.freeway_capacity_veh_h * receiving)
+            weights[ramp] = state.ramp_queue.get(ramp, 0.0) + urban_release * self.cfg.simulation.T_c_h + 1.0
+        ramp_metering = _project_to_target(target, upper, weights)
+        lane_profile, lane_diag = effective_lane_profile(state, self.cfg)
+        rhos = state.freeway_density.get(agent.link, [])
+        max_density = max(rhos) if rhos else 0.0
+        density_ratio = max_density / max(net.rho_crit, 1.0e-9)
+        lane_loss = max(0.0, net.freeway_lanes - (lane_profile.get(agent.link, [net.freeway_lanes])[-1]))
+        desired = self._agent_vsl(density_ratio, lane_loss, current.vsl.get(agent.link, max(self.cfg.freeway_follower.vsl_set)))
+        density_excess = sum(max(0.0, rho - net.rho_crit) for rho in rhos)
+        metering_error = abs(sum(ramp_metering.values()) - target)
+        objective = (
+            sum(max(0.0, rho) * net.freeway_segment_length_km * net.freeway_lanes for rho in rhos)
+            + self.cfg.freeway_follower.density_penalty * density_excess
+            + 0.01 * metering_error
+        )
+        diagnostics = {
+            f"agent_{agent.id}_density_excess": float(density_excess),
+            f"agent_{agent.id}_metering_error": float(metering_error),
+            f"agent_{agent.id}_min_receiving_factor": float(min_receiving),
+            f"agent_{agent.id}_lane_loss": float(lane_loss),
+        }
+        diagnostics.update({f"agent_{agent.id}_{key}": value for key, value in lane_diag.items()})
+        return AgentSolve(
+            agent_id=agent.id,
+            objective=float(objective),
+            ramp_metering=ramp_metering,
+            vsl={agent.link: desired},
+            infeasibility={
+                "metering_tracking_residual": float(metering_error),
+                "density_excess": float(density_excess),
+                "min_ramp_receiving_factor": float(min_receiving),
+                "ramp_projection_first_step_capacity": float(sum(upper.values())),
+            },
+            diagnostics=diagnostics,
+        )
+
+    def _agent_vsl(self, density_ratio: float, lane_loss: float, previous_vsl: float) -> float:
+        vsl_set = sorted(float(v) for v in self.cfg.freeway_follower.vsl_set)
+        max_vsl = max(vsl_set)
+        if lane_loss > 0.5 or density_ratio > 1.25:
+            target = min(vsl_set)
+        elif lane_loss > 0.1 or density_ratio > 1.05:
+            target = 60.0
+        elif density_ratio > 0.95:
+            target = 80.0
+        else:
+            target = max_vsl
+        low = previous_vsl - self.cfg.freeway_follower.max_vsl_step
+        high = previous_vsl + self.cfg.freeway_follower.max_vsl_step
+        feasible = [v for v in vsl_set if low - 1.0e-9 <= v <= high + 1.0e-9]
+        feasible = feasible or vsl_set
+        return float(min(feasible, key=lambda value: (abs(value - target), value)))
+
+    def _solve_urban_agent(
+        self,
+        agent: AgentSpec,
+        state: TrafficState,
+        leader: LeaderAction,
+        demand: DemandStep,
+        freeway_response: FreewayFollowerResult,
+        current: ControlAction,
+    ) -> AgentSolve:
+        result = self.urban_follower.solve(state.copy(), leader, demand, freeway_response, current)
+        specs = movement_specs(self.cfg)
+        green = {
+            key: value
+            for key, value in result.green_times.items()
+            if key.startswith(f"{agent.signal}_")
+        }
+        offsets = {agent.signal: result.offsets.get(agent.signal, current.offsets.get(agent.signal, 0.0))}
+        allocation = {
+            movement: result.inflow_outflow_allocation.get(movement, 0.0)
+            for movement in agent.movements
+        }
+        for movement in agent.movements:
+            spec = specs.get(movement, {})
+            origin = str(spec.get("origin", ""))
+            destination = str(spec.get("destination", ""))
+            if origin in self.cfg.network.boundary_in_links:
+                allocation[origin] = allocation.get(origin, 0.0) + allocation[movement]
+            if destination in self.cfg.network.boundary_out_links:
+                allocation[destination] = allocation.get(destination, 0.0) + allocation[movement]
+        local_queue = sum(state.urban_movement_queue.get(movement, 0.0) for movement in agent.movements)
+        local_objective = float(local_queue + result.objective_value / max(len(self.urban_agents), 1))
+        diagnostics = {
+            f"agent_{agent.id}_local_queue": float(local_queue),
+            f"agent_{agent.id}_freeway_pressure_used": float(result.metrics.get("freeway_response_used", 0.0)),
+        }
+        return AgentSolve(
+            agent_id=agent.id,
+            objective=local_objective,
+            green_times=green,
+            offsets=offsets,
+            allocation=allocation,
+            infeasibility=dict(result.infeasibility),
+            diagnostics=diagnostics,
+        )
+
+    def _freeway_response(self, solves: list[AgentSolve]) -> FreewayFollowerResult:
+        ramp_metering: Dict[str, float] = {}
+        vsl: Dict[str, float] = {}
+        objective = 0.0
+        density_excess = 0.0
+        metering_residual = 0.0
+        step_capacity = 0.0
+        min_receiving = 1.0
+        for solve in solves:
+            ramp_metering.update(solve.ramp_metering)
+            vsl.update(solve.vsl)
+            objective += solve.objective
+            density_excess += solve.infeasibility.get("density_excess", 0.0)
+            metering_residual += solve.infeasibility.get("metering_tracking_residual", 0.0)
+            step_capacity += solve.infeasibility.get("ramp_projection_first_step_capacity", 0.0)
+            min_receiving = min(min_receiving, solve.infeasibility.get("min_ramp_receiving_factor", 1.0))
+        return FreewayFollowerResult(
+            ramp_metering=ramp_metering,
+            vsl=vsl,
+            objective_value=float(objective),
+            infeasibility={
+                "density_excess": float(density_excess),
+                "metering_tracking_residual": float(metering_residual),
+                "ramp_projection_first_step_capacity": float(step_capacity),
+                "min_ramp_receiving_factor": float(min_receiving),
+                "freeway_follower_coupled_prediction": 0.0,
+                "freeway_follower_lightweight_prediction": 1.0,
+            },
+        )
+
+    def _merge_agent_controls(
+        self,
+        leader: LeaderAction,
+        current: ControlAction,
+        freeway_solves: list[AgentSolve],
+        urban_solves: list[AgentSolve],
+    ) -> ControlAction:
+        alpha = float(np.clip(self.cfg.mpc.nash_relaxation_alpha, 0.0, 1.0))
+        ramp_metering = dict(current.ramp_metering)
+        vsl = dict(current.vsl)
+        green_times = dict(current.green_times)
+        offsets = dict(current.offsets)
+        allocation = dict(current.inflow_outflow_allocation)
+        infeasibility: Dict[str, float] = {}
+        diagnostics: Dict[str, float] = {}
+        for solve in freeway_solves:
+            ramp_metering.update(solve.ramp_metering)
+            vsl.update(solve.vsl)
+            infeasibility.update(solve.infeasibility)
+            diagnostics.update(solve.diagnostics)
+        for solve in urban_solves:
+            green_times.update(solve.green_times)
+            offsets.update(solve.offsets)
+            allocation.update(solve.allocation)
+            infeasibility.update(solve.infeasibility)
+            diagnostics.update(solve.diagnostics)
+        allocation.update(self._legacy_boundary_allocations(allocation))
+        return ControlAction(
+            N_P_star=leader.N_P_star,
+            N_UF_star=leader.N_UF_star,
+            ramp_metering=_relax_map(current.ramp_metering, ramp_metering, alpha),
+            vsl=vsl,
+            green_times=_relax_map(current.green_times, green_times, alpha),
+            offsets=_relax_map(current.offsets, offsets, alpha),
+            inflow_outflow_allocation=_relax_map(current.inflow_outflow_allocation, allocation, alpha),
+            infeasibility=infeasibility,
+            diagnostics=diagnostics,
+        )
+
+    def _clamp_offsets_to_reference(
+        self,
+        offsets: Mapping[str, float],
+        reference: ControlAction,
+    ) -> Dict[str, float]:
+        """분산 내부 iteration이 실제 control-interval offset 제약을 누적 위반하지 않게 막는다."""
+        cycle = self.cfg.network.cycle_length
+        max_step = self.cfg.urban_follower.max_offset_step
+        out: Dict[str, float] = {}
+        for signal in self.cfg.network.signals:
+            prev = reference.offsets.get(signal, 0.0)
+            value = offsets.get(signal, prev)
+            delta = (value - prev + 0.5 * cycle) % cycle - 0.5 * cycle
+            delta = float(np.clip(delta, -max_step, max_step))
+            out[signal] = float((prev + delta) % cycle)
+        return out
+
+    def _legacy_boundary_allocations(self, allocation: Mapping[str, float]) -> Dict[str, float]:
+        specs = movement_specs(self.cfg)
+        out: Dict[str, float] = {}
+        for link in self.cfg.network.boundary_in_links:
+            out[link] = float(sum(
+                allocation.get(movement, 0.0)
+                for movement, spec in specs.items()
+                if spec.get("origin") == link and spec.get("kind") == "boundary_in"
+            ))
+        for link in self.cfg.network.boundary_out_links:
+            out[link] = float(sum(
+                allocation.get(movement, 0.0)
+                for movement, spec in specs.items()
+                if spec.get("destination") == link and spec.get("kind") == "off_ramp"
+            ))
+        return out
+
+    def _extract_coupling(
+        self,
+        state: TrafficState,
+        control: ControlAction,
+        demand: DemandStep,
+    ) -> Dict[str, float]:
+        ensure_urban_state(state, self.cfg)
+        net = self.cfg.network
+        onramp = estimate_onramp_green_release_flows(
+            state.copy(),
+            control,
+            demand,
+            self.cfg,
+            interval_h=self.cfg.simulation.T_f_h,
+        )
+        values: Dict[str, float] = {}
+        for ramp, value in onramp.items():
+            values[f"u_on_{ramp}"] = float(value)
+            values[f"w_ramp_{ramp}"] = float(state.ramp_queue.get(ramp, 0.0))
+        for off_ramp in net.off_ramps:
+            link = net.off_ramp_from_freeway[off_ramp]
+            split = net.off_ramp_split_ratio.get(off_ramp, 0.0)
+            flow = state.freeway_flow.get(link, [0.0])[-1] if state.freeway_flow.get(link) else 0.0
+            values[f"q_off_{off_ramp}"] = float(max(0.0, flow * split))
+        for link in net.freeway_links:
+            rhos = state.freeway_density.get(link, [])
+            speeds = state.freeway_speed.get(link, [])
+            values[f"rho_boundary_{link}"] = float(rhos[-1] if rhos else 0.0)
+            values[f"speed_boundary_{link}"] = float(speeds[-1] if speeds else 0.0)
+        for agent in self.urban_agents:
+            values[f"n_{agent.id}"] = float(sum(
+                state.urban_movement_queue.get(movement, 0.0)
+                for movement in agent.movements
+            ))
+        return values
+
+    @staticmethod
+    def _coupling_residual(old: Mapping[str, float], new: Mapping[str, float]) -> float:
+        residual = 0.0
+        for key in set(old) | set(new):
+            a = float(old.get(key, 0.0))
+            b = float(new.get(key, 0.0))
+            residual = max(residual, abs(a - b) / max(1.0, abs(a), abs(b)))
+        return float(residual)
+
+    def _diagnostics(
+        self,
+        freeway_solves: list[AgentSolve],
+        urban_solves: list[AgentSolve],
+        residual: float,
+        iteration: int,
+    ) -> Dict[str, float]:
+        out: Dict[str, float] = {
+            "distributed_player_active": 1.0,
+            "nash_per_agent_active": 1.0,
+            "distributed_urban_agent_count": float(len(self.urban_agents)),
+            "distributed_freeway_agent_count": float(len(self.freeway_agents)),
+            "distributed_coupling_residual": float(residual if np.isfinite(residual) else 0.0),
+            "distributed_iterations": float(iteration),
+            "nash_mutual_response_active": 1.0,
+            "nash_urban_used_freeway_response": 1.0,
+            "nash_freeway_used_coupled_prediction": 0.0,
+        }
+        for agent in self.urban_agents + self.freeway_agents:
+            out[f"distributed_agent_{agent.id}_active"] = 1.0
+        for solve in freeway_solves + urban_solves:
+            out[f"agent_{solve.agent_id}_objective"] = float(solve.objective)
+            out.update(solve.diagnostics)
+        return out

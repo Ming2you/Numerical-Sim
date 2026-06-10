@@ -310,10 +310,12 @@ class CapacityDropConfig:
 class MPCConfig:
     horizon_steps: int = 3
     leader_candidate_count: int = 15
+    follower_solver_mode: str = "two_block"
     max_nash_iter: int = 10
     nash_obj_tol: float = 1.0e-3
     nash_control_tol: float = 1.0e-3
     nash_relaxation_alpha: float = 0.8
+    distributed_coupling_tol: float = 1.0e-3
     control_horizon_steps: int = 3
     urban_freeway_tts_weight_alpha: float = 1.0
     optimizer_maxiter: int = 40
@@ -417,6 +419,10 @@ class ExperimentConfig:
 
     def validate(self) -> None:
         self.simulation.validate()
+        if self.mpc.follower_solver_mode not in {"two_block", "distributed"}:
+            raise ValueError("mpc.follower_solver_mode must be two_block or distributed.")
+        if self.mpc.distributed_coupling_tol <= 0.0:
+            raise ValueError("mpc.distributed_coupling_tol must be positive.")
         cap_drop = self.freeway_offramp_capacity_drop
         if cap_drop.lane_reduction < 0.0:
             raise ValueError("freeway_offramp_capacity_drop.lane_reduction must be non-negative.")

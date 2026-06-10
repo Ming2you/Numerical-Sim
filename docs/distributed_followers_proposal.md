@@ -80,3 +80,25 @@ for s in 1..S_max:
 2. 결과가 2-블록 대비 **동등 이상**(TTT 악화 없어야 — 분산화는 성능 개선이 아니라 구조 변경).
 3. per-agent best-response가 실제 상호 반영되는지(U_i가 q_off에, F_p가 u_on에 반응).
 4. (선택) 더 큰 합성망에서 agent 수 늘렸을 때 decision 비용이 전체망 재시뮬보다 완만히 증가하는지.
+
+## 구현 상태 — 2026-06-10
+
+- `src/controllers/distributed_coordinator.py`에 1차 distributed player가 구현됐다.
+- `mpc.follower_solver_mode: distributed`로 활성화한다. 기본값은 이전 결과 보존을 위해 `two_block`이다.
+- agent partition은 현재 topology에서 자동 유도한다.
+  - urban agents: `U_A`, `U_C`, `U_D`, `U_F`
+  - freeway agents: `F_W`, `F_E`
+- coordinator는 coupling variables를 교환하고 normalized coupling residual로 반복 종료를 판단한다.
+- diagnostics:
+  - `distributed_player_active`
+  - `nash_per_agent_active`
+  - `distributed_coupling_residual`
+  - `distributed_urban_agent_count`
+  - `distributed_freeway_agent_count`
+  - `agent_*_objective`
+
+남은 차이:
+
+- Urban agent는 아직 MILP가 아니며, 기존 `UrbanFollower` 휴리스틱 결과에서 자기 signal/movement 변수만 추출한다.
+- Freeway agent는 아직 SQP/NLP가 아니며, 링크별 local heuristic으로 ramp metering/VSL을 산정한다.
+- agent별 `N_P_star` 분담이 약해 distributed smoke에서 boundary net inflow tracking은 아직 실패한다.

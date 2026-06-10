@@ -1,6 +1,7 @@
 import unittest
 from unittest.mock import patch
 
+from src.controllers.distributed_coordinator import DistributedCoordinator, build_agent_specs
 from src.controllers.freeway_follower import FreewayFollower, FreewayFollowerResult
 from src.controllers.leader import Leader, LeaderAction
 from src.controllers.stackelberg_mpc import StackelbergMPCController
@@ -30,6 +31,58 @@ class ConstraintTests(unittest.TestCase):
         demand = DemandProfile(cfg, ScenarioConfig("test")).horizon(0.0, 2)
         control = StackelbergMPCController(cfg).decide(TrafficState.initial(cfg), demand)
         self.assertTrue(all(v in cfg.freeway_follower.vsl_set for v in control.vsl.values()))
+
+    def test_distributed_agent_partition_matches_topology(self):
+        cfg = short_config()
+        urban_agents, freeway_agents = build_agent_specs(cfg)
+        self.assertEqual(len(urban_agents), 4)
+        self.assertEqual(len(freeway_agents), 2)
+        self.assertEqual({agent.id for agent in urban_agents}, {"U_A", "U_C", "U_D", "U_F"})
+        self.assertEqual({agent.id for agent in freeway_agents}, {"F_W", "F_E"})
+
+    def test_distributed_coordinator_returns_per_agent_diagnostics(self):
+        cfg = ExperimentConfig.from_file(
+            "src/config/default.yaml",
+            {
+                "simulation": {"T_total": 360.0},
+                "mpc": {
+                    "follower_solver_mode": "distributed",
+                    "max_nash_iter": 2,
+                    "leader_candidate_count": 2,
+                },
+            },
+        )
+        state = TrafficState.initial(cfg)
+        demand = DemandProfile(cfg, ScenarioConfig("test")).horizon(0.0, 1)
+        result = DistributedCoordinator(cfg).solve(
+            state,
+            LeaderAction(cfg.leader.N_P_crit_veh, 1200.0),
+            demand,
+            ControlAction.fixed(cfg),
+        )
+        self.assertEqual(result.control.diagnostics["distributed_player_active"], 1.0)
+        self.assertEqual(result.control.diagnostics["distributed_urban_agent_count"], 4.0)
+        self.assertEqual(result.control.diagnostics["distributed_freeway_agent_count"], 2.0)
+        self.assertIn("agent_U_A_objective", result.control.diagnostics)
+        self.assertIn("agent_F_W_objective", result.control.diagnostics)
+        self.assertEqual(set(result.control.vsl), set(cfg.network.freeway_links))
+
+    def test_stackelberg_can_use_distributed_follower_solver(self):
+        cfg = ExperimentConfig.from_file(
+            "src/config/default.yaml",
+            {
+                "simulation": {"T_total": 360.0},
+                "mpc": {
+                    "follower_solver_mode": "distributed",
+                    "max_nash_iter": 2,
+                    "leader_candidate_count": 2,
+                },
+            },
+        )
+        demand = DemandProfile(cfg, ScenarioConfig("test")).horizon(0.0, 1)
+        control = StackelbergMPCController(cfg).decide(TrafficState.initial(cfg), demand)
+        self.assertEqual(control.diagnostics["distributed_player_active"], 1.0)
+        self.assertEqual(control.diagnostics["nash_per_agent_active"], 1.0)
 
     def test_green_times_sum_to_cycle_length(self):
         cfg = short_config()

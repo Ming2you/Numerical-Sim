@@ -206,4 +206,15 @@ If convergence is not achieved:
 - log the number of iterations and residual values
 - apply a penalty to the leader objective
 
+The follower layer can be selected by configuration:
+
+```yaml
+mpc:
+  follower_solver_mode: two_block      # legacy FreewayFollower + UrbanFollower Nash loop
+  # or
+  follower_solver_mode: distributed    # urban/freeway agent coordinator
+```
+
+In `distributed` mode, partition the current topology into urban signal agents and freeway link agents, exchange coupling variables between neighboring agents, and terminate iterations by coupling residual rather than raw mixed-unit control-vector difference. The first implementation may reuse deterministic local follower heuristics, but it must expose per-agent diagnostics so later MILP/SQP local optimizers can replace the heuristic pieces without changing the outer Stackelberg interface.
+
 ---

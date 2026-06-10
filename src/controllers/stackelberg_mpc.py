@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, Iterable, Optional
 
+from src.controllers.distributed_coordinator import DistributedCoordinator
 from src.controllers.leader import Leader, LeaderAction, leader_metadata
 from src.controllers.nash_solver import NashResult, NashSolver
 from src.models.demand import DemandStep
@@ -30,9 +31,14 @@ class StackelbergMPCController:
     def __init__(self, cfg: ExperimentConfig):
         self.cfg = cfg
         self.leader = Leader(cfg)
-        self.nash_solver = NashSolver(cfg)
+        self.nash_solver = self._make_follower_solver(cfg)
         self.previous_control: Optional[ControlAction] = None
         self.last_decision: Optional[DecisionResult] = None
+
+    def _make_follower_solver(self, cfg: ExperimentConfig):
+        if cfg.mpc.follower_solver_mode == "distributed":
+            return DistributedCoordinator(cfg)
+        return NashSolver(cfg)
 
     def decide(
         self,
@@ -54,7 +60,7 @@ class StackelbergMPCController:
         if config is not None and config is not self.cfg:
             self.cfg = config
             self.leader = Leader(config)
-            self.nash_solver = NashSolver(config)
+            self.nash_solver = self._make_follower_solver(config)
         forecast = list(demand_forecast)
         if not forecast:
             raise ValueError("StackelbergMPCController requires a non-empty demand forecast.")

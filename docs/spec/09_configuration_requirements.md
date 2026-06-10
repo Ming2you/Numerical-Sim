@@ -15,10 +15,12 @@ simulation:
 mpc:
   horizon_steps: 5
   leader_candidate_count: 15
+  follower_solver_mode: two_block  # two_block | distributed
   max_nash_iter: 10
   nash_obj_tol: 1.0e-3
   nash_control_tol: 1.0e-3
   nash_relaxation_alpha: 0.8
+  distributed_coupling_tol: 1.0e-3
 
 leader:
   objective_mode: state_accumulation
