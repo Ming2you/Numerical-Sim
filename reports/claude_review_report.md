@@ -52,11 +52,24 @@ round-5에서 본 "목표 333 → 누적 폭주" 메커니즘이 사라졌다.
    재평가** 필요(이전 권고 유지).
 3. metering 여전히 느슨(mean error 475→262 개선, max 2235) — freeway 부하 증가와 맞물림.
 
+## ★ 다음 요구사항 2건 (제안 문서 작성 완료, Codex 한 번에 구현)
+
+VSL이 안 켜지는 근본 원인은 "이 METANET에 capacity drop이 없어 VSL이 켜질 유인이 없음"이고,
+follower는 여전히 2-블록 중앙집중이다. 두 제안 문서를 만들어 두었다 — Codex가 spec 통합 + 코드
+구현을 함께 수행할 것. **우선순위: ① capacity-drop(성능 직결) → ② 분산화(아키텍처).**
+
+- **① capacity-drop**: [docs/capacity_drop_proposal.md](../docs/capacity_drop_proposal.md) — Wu(2022)
+  식(22) off-ramp spill-back 차로수 감소(`lambda_eff`)를 마지막 세그먼트에 적용해 mainline
+  through-capacity까지 떨어뜨림 → VSL/metering이 통합적으로 의미를 가짐. plant·예측 둘 다 적용 필수.
+- **② follower 공간 분산화**: [docs/distributed_followers_proposal.md](../docs/distributed_followers_proposal.md)
+  — urban 4(A/C/D/F) + freeway 2(FW_W/FW_E) agent로 분해, `NashSolver`→Wu §IV-D `DistributedCoordinator`
+  (이웃 결합변수 고정+교환). 이 망 크기엔 속도 이득 없음 — 가치는 genuine Nash·연구 충실도·확장성.
+
 ## Recommended Fixes for Codex (우선순위)
 
 - **① (신규 1순위) freeway VSL/metering이 새로 생긴 freeway 혼잡에 반응하게.** density_exceedance=23인데
-  VSL 0회 활성. 활성화 임계·VSL 후보 평가가 freeway 밀도에 실제로 반응하는지 점검. urban 개선으로
-  freeway에 실린 부하를 VSL/metering이 받아야 freeway TTT 악화(+43%)를 되돌림.
+  VSL 0회 활성 — 근본 원인은 위 capacity-drop 제안(VSL이 켜질 유인 부재). capacity-drop 도입 후
+  VSL/metering이 freeway 밀도에 반응하는지 점검. urban 개선으로 freeway에 실린 부하(+43%)를 받아야 함.
 - **② 제어 가능한 시나리오로 재평가** — peak_demand는 urban 과포화(누적~1000)라 accumulation 추적·
   overflow 지표가 구조적으로 FAIL. demand가 용량 근처인 시나리오로 perimeter 효과를 공정 판정.
 - **③ metering N_UF 추적 안정화**(mean error 262, max 2235) — ①과 연동.
