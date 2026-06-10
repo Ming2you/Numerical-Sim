@@ -166,6 +166,11 @@ network:
   urban_avg_speed_km_h: 50.0
   green_min_fraction: 0.2
   green_max_fraction: 0.8
+freeway_offramp_capacity_drop:
+  enabled: true
+  lane_reduction: 0.35
+  gamma: 0.5
+  b: 2.0
 mpc:
   horizon_steps: 3
   leader_candidate_count: 15

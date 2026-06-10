@@ -54,14 +54,21 @@ term is added; the temporal lag is provided by the off-ramp queue dynamics
 `lambda_m = 2`, the last-segment capacity is roughly halved at full spill-back.
 
 Use `lambda_eff[m,N_m](k)` in place of the constant `lanes[m]` for segment
-`(m, N_m)` in the segment flow (3.1.1) and the density update (3.1.2):
+`(m, N_m)`, but keep the segment vehicle count as the conserved state. Directly
+changing only the density denominator can delete vehicles when `lambda_eff`
+changes between steps.
 
 ```text
-q[m,N_m](k)        = rho[m,N_m](k) * v[m,N_m](k) * lambda_eff[m,N_m](k)
-rho[m,N_m](k+1)    = rho[m,N_m](k)
-                     + T_f_h / (L[m] * lambda_eff[m,N_m](k))
-                       * (q[m,N_m-1](k) - q[m,N_m](k))
+N_current(k)       = rho_stored(k) * L[m] * lambda_prev(k)
+rho_for_flow(k)    = N_current(k) / (L[m] * lambda_eff(k))
+q(k)               = rho_for_flow(k) * v(k) * lambda_eff(k)
+N_next(k+1)        = N_current(k) + T_f_h * (q_in(k) - q_out(k))
+rho_next(k+1)      = N_next(k+1) / (L[m] * lambda_eff(k))
 ```
+
+The desired-speed, VSL-effective-speed, and anticipation terms must also use
+`rho_for_flow`; otherwise vehicles are conserved but the capacity drop has no
+speed/flow effect.
 
 Because the reduced lane number lowers the capacity of the WHOLE segment (not only
 the off-ramp split flow), the mainline through-flow is choked during spill-back.
@@ -82,7 +89,7 @@ Configuration (explicit):
 ```yaml
 freeway_offramp_capacity_drop:
   enabled: true
-  lane_reduction: 1     # lanes lost at full spill-back (lambda_m -> lambda_m - 1)
+  lane_reduction: 0.35  # fractional lanes lost at full spill-back
   gamma: 0.5            # gamma[m,d], occupancy scale (fraction of C at onset)
   b: 2.0               # b_cd, transition sharpness
 ```
@@ -93,16 +100,17 @@ freeway_offramp_capacity_drop:
 ```
 
 ## 구현 지시 (코드)
-- `src/models/metanet.py` `freeway_substep`: 마지막 세그먼트 outflow/density에 상수 `lanes`
-  대신 `lambda_eff` 적용. 기존 `offramp_capacity_veh_h`(유출 cap)는 식(22)로 대체.
+- `src/models/metanet.py` `freeway_substep`: 마지막 세그먼트는 `N`을 보존량으로 두고
+  `lambda_eff`로 `rho_for_flow`를 재유도한다.
 - `src/models/state.py`/config: `n[m,d] = urban_link_storage_veh[storage_link] - urban_link_storage[storage_link]`.
-- **`src/controllers/freeway_follower.py` `_lightweight_transition`에도 동일 `lambda_eff` 반영**
+- **controller prediction도 simulator plant와 동일 `lambda_eff`/`rho_for_flow` 반영**
   (예측-plant 일치). 안 하면 follower가 VSL 가치를 못 봄.
-- 단위 테스트: `lambda_eff(n=0)=lambda_m`, `n→큰값→lambda_m-1`, full spill-back 시 마지막 세그먼트
-  용량 ~50% 감소(lambda_m=2).
+- 단위 테스트: `lambda_eff(n=0)=lambda_m`, `n=C→lambda_m-lane_reduction`,
+  `lambda_eff` 변화 시 `N = rho * L * lambda_eff` 보존, spill-back 상태에서 VSL이 속도식에 반응.
 
 ## 파라미터
-- `gamma=0.5, b=2`는 Wu가 고정값 안 줘서 시작값(calibration 대상). `lane_reduction=1`은 원문대로.
+- `gamma=0.5, b=2`는 Wu가 고정값 안 줘서 시작값(calibration 대상). 2차로 네트워크에서
+  `lane_reduction=1`은 50% 차로 감소라 과격하므로 기본값은 `0.35`로 둔다.
 - hysteresis 없음(원문 충실 — 회복 지연은 off-ramp 큐가 비워지는 시간이 대신).
 
 ## 검증 (구현 후)

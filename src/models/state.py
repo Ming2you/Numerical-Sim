@@ -299,6 +299,14 @@ class NetworkConfig:
 
 
 @dataclass
+class CapacityDropConfig:
+    enabled: bool = True
+    lane_reduction: float = 0.35
+    gamma: float = 0.5
+    b: float = 2.0
+
+
+@dataclass
 class MPCConfig:
     horizon_steps: int = 3
     leader_candidate_count: int = 15
@@ -383,6 +391,7 @@ class AutoTuningConfig:
 class ExperimentConfig:
     simulation: SimulationConfig = field(default_factory=SimulationConfig)
     network: NetworkConfig = field(default_factory=NetworkConfig)
+    freeway_offramp_capacity_drop: CapacityDropConfig = field(default_factory=CapacityDropConfig)
     mpc: MPCConfig = field(default_factory=MPCConfig)
     leader: LeaderConfig = field(default_factory=LeaderConfig)
     freeway_follower: FreewayFollowerConfig = field(default_factory=FreewayFollowerConfig)
@@ -395,6 +404,7 @@ class ExperimentConfig:
         cfg = cls(
             simulation=SimulationConfig(**raw.get("simulation", {})),
             network=NetworkConfig(**raw.get("network", {})),
+            freeway_offramp_capacity_drop=CapacityDropConfig(**raw.get("freeway_offramp_capacity_drop", {})),
             mpc=MPCConfig(**raw.get("mpc", {})),
             leader=LeaderConfig(**raw.get("leader", {})),
             freeway_follower=FreewayFollowerConfig(**raw.get("freeway_follower", {})),
@@ -407,6 +417,15 @@ class ExperimentConfig:
 
     def validate(self) -> None:
         self.simulation.validate()
+        cap_drop = self.freeway_offramp_capacity_drop
+        if cap_drop.lane_reduction < 0.0:
+            raise ValueError("freeway_offramp_capacity_drop.lane_reduction must be non-negative.")
+        if cap_drop.lane_reduction >= self.network.freeway_lanes:
+            raise ValueError("freeway_offramp_capacity_drop.lane_reduction must be less than freeway_lanes.")
+        if cap_drop.gamma <= 0.0:
+            raise ValueError("freeway_offramp_capacity_drop.gamma must be positive.")
+        if cap_drop.b <= 0.0:
+            raise ValueError("freeway_offramp_capacity_drop.b must be positive.")
         if self.leader.objective_mode not in {"state_accumulation", "follower_ttt"}:
             raise ValueError("leader.objective_mode must be state_accumulation or follower_ttt.")
         if self.leader.N_P_star_unit != "veh":
@@ -442,6 +461,7 @@ class TrafficState:
     ramp_queue: Dict[str, float]
     urban_queue: Dict[str, float]
     boundary_queue: Dict[str, float]
+    freeway_effective_lanes: Dict[str, List[float]] = field(default_factory=dict)
     urban_movement_queue: Dict[str, float] = field(default_factory=dict)
     urban_link_storage: Dict[str, float] = field(default_factory=dict)
     urban_arrival_buffer: Dict[str, Dict[int, float]] = field(default_factory=dict)
@@ -466,6 +486,10 @@ class TrafficState:
             ]
             for link in net.freeway_links
         }
+        lanes = {
+            link: [float(net.freeway_lanes) for _ in range(net.freeway_segments_per_link)]
+            for link in net.freeway_links
+        }
         return cls(
             freeway_density=density,
             freeway_speed=speed,
@@ -473,6 +497,7 @@ class TrafficState:
             ramp_queue={r: 0.0 for r in net.ramps},
             urban_queue={m: 20.0 for m in net.movement_links},
             boundary_queue={m: 20.0 for m in net.movement_links},
+            freeway_effective_lanes=lanes,
             urban_movement_queue={
                 movement: (0.0 if spec.get("kind") == "on_ramp" else 20.0)
                 for movement, spec in net.urban_movements.items()
@@ -485,22 +510,51 @@ class TrafficState:
     def copy(self) -> "TrafficState":
         return copy.deepcopy(self)
 
+    def ensure_freeway_lane_profile(self, net: NetworkConfig) -> None:
+        for link in net.freeway_links:
+            count = len(self.freeway_density.get(link, []))
+            lanes = self.freeway_effective_lanes.get(link, [])
+            if len(lanes) != count:
+                self.freeway_effective_lanes[link] = [float(net.freeway_lanes) for _ in range(count)]
+
+    def freeway_vehicle_count_by_link(self, net: NetworkConfig) -> Dict[str, List[float]]:
+        self.ensure_freeway_lane_profile(net)
+        out: Dict[str, List[float]] = {}
+        for link in net.freeway_links:
+            out[link] = [
+                max(0.0, rho) * net.freeway_segment_length_km * max(lane, 1.0e-9)
+                for rho, lane in zip(
+                    self.freeway_density.get(link, []),
+                    self.freeway_effective_lanes.get(link, []),
+                )
+            ]
+        return out
+
     def refresh_freeway_flow(self, net: NetworkConfig) -> None:
+        self.ensure_freeway_lane_profile(net)
         self.freeway_flow = {
             link: [
-                max(0.0, rho) * max(0.0, speed) * max(0.0, net.freeway_lanes)
-                for rho, speed in zip(
+                max(0.0, rho) * max(0.0, speed) * max(0.0, lane)
+                for rho, speed, lane in zip(
                     self.freeway_density.get(link, []),
                     self.freeway_speed.get(link, []),
+                    self.freeway_effective_lanes.get(link, []),
                 )
             ]
             for link in net.freeway_links
         }
 
     def total_freeway_vehicles(self, net: NetworkConfig) -> float:
+        self.ensure_freeway_lane_profile(net)
         return float(sum(
-            sum(rhos) * net.freeway_segment_length_km * net.freeway_lanes
-            for rhos in self.freeway_density.values()
+            sum(
+                max(0.0, rho) * net.freeway_segment_length_km * max(lane, 1.0e-9)
+                for rho, lane in zip(
+                    self.freeway_density.get(link, []),
+                    self.freeway_effective_lanes.get(link, []),
+                )
+            )
+            for link in net.freeway_links
         ) + sum(self.ramp_queue.values()))
 
     def total_urban_vehicles(self) -> float:

@@ -1,53 +1,45 @@
 # Codex 실행 리포트
 
-## 2026-06-10 13:06:17 +09:00
+## 2026-06-10 15:45:11 +09:00
 
 ### 이번 수정 요약
 
-- `docs/spec/04_controller.md`의 수정된 leader objective를 기준으로 `src/controllers/leader.py`를 재작성했다.
-- 기본 leader objective mode를 `state_accumulation`으로 변경했다.
-- `N_P_star` 후보를 임의 `[0, 500]` 격자가 아니라 `N_P_crit_veh` 주변 band로 생성하도록 수정했다.
-- leader objective의 urban penalty는 `max(n_P - N_P_crit, 0)` 기준으로 계산하도록 고쳤다.
-- `N_P_crit_veh`와 candidate band 설정을 config/dataclass validation에 추가했다.
-- urban follower가 on-ramp movement allocation까지 직접 결정하도록 연결했다.
-- p2 green이 짧을 때도 `N_UF_star`를 받칠 수 있도록 on-ramp saturation flow를 green fraction 기준으로 역산했다.
-- off-ramp discharge phase가 최소 green에 고정되어 urban outflow가 굶지 않도록 D/F 계열 p1 green floor를 추가했다.
-- boundary/urban net inflow 진단은 follower가 allocation을 만들 때 사용한 control-interval target과 비교하도록 정리했다.
+- Wu et al. Eq.(22) 계열의 off-ramp spill-back capacity drop을 `lambda_eff` 형태로 구현했습니다.
+- 2차로 네트워크에서 `lane_reduction=1`은 과격하므로 기본값은 분수 감소 `0.35`로 두었습니다.
+- `TrafficState`에 `freeway_effective_lanes`를 추가하고, flow/TTT/state timeseries가 유효 차로 수를 일관되게 쓰도록 정리했습니다.
+- λ가 바뀌는 순간 차량이 사라지지 않도록 density를 직접 보존량으로 두지 않고, `N = rho * L * lambda`를 보존량으로 사용했습니다.
+- 속도식도 저장 density가 아니라 `rho_for_flow = N / (L * lambda_eff)`를 사용하게 수정했습니다. desired speed, VSL effective speed, anticipation 모두 이 보정 density를 봅니다.
+- `rho_max * L * lambda_eff` 상한 projection으로 차량이 삭제될 수 있어, 차량 수는 음수만 막고 상한 초과는 congestion diagnostic으로 남기는 방식으로 바꿨습니다.
+- controller prediction, coupling aggregate diagnostics, simulator state logging도 `capacity_drop_active`, `lambda_eff_*`, `capacity_drop_lane_loss_*`를 전달하도록 맞췄습니다.
+- 10번 튜닝 단계는 제외했습니다. horizon, penalty, `N_UF_star` 후보 범위는 이번 커밋에서 조정하지 않았습니다.
 
 ### 검증 결과
 
-| 실행 | 결과 | 주요 수치 |
-|---|---|---|
-| Unit tests | PASS | `python -B -m unittest discover -s src\tests -v`, 44 tests OK |
+| 항목 | 결과 | 메모 |
+|---|---:|---|
+| `py_compile` | PASS | state/metanet/freeway_follower/coupling/simulator/tests |
+| METANET unit tests | PASS | 18 tests OK |
+| 전체 unit tests | PASS | 49 tests OK |
 | `peak_demand`, 360 s | PASS | Total TTT `30.974 -> 26.763`, improvement `13.60%` |
-| `peak_demand`, 1800 s | FAIL | Total TTT `455.517 -> 308.027`, improvement `32.38%` |
+| `peak_demand`, 1800 s | FAIL | Total TTT `455.517 -> 302.195`, improvement `33.66%`, validation 일부 실패 |
 
-### 360초 acceptance 상세
+### Capacity Drop 진단
 
-- Total TTT improvement: `13.60%`로 기준 `8%`를 통과했다.
-- Ramp metering validation: PASS
-  - mean error `73.35 veh/h`
-  - max violation `94.97 veh/h`
-- Boundary balance validation: PASS
-  - Boundary CV `0.160 -> 0.098`
-  - boundary queue balance improvement `38.71%`
-  - urban net inflow tracking error `62.41 veh/h`
+- 강제 spill-back 단위 테스트에서는 `lambda_eff` 경계값, λ 변화 시 차량 보존, `rho_for_flow` 기반 속도 저하, VSL 속도 반응을 모두 확인했습니다.
+- 기본 `peak_demand` 360초 run에서는 `capacity_drop_active=0`, `lambda_eff_FW_W_last=2.0`, `lambda_eff_FW_E_last=2.0`였습니다.
+- 기본 `peak_demand` 1800초 run에서도 `capacity_drop_active=0`, `lambda_eff_FW_W_last=2.0`, `lambda_eff_FW_E_last=2.0`였습니다.
+- 즉, 이번 구현은 capacity-drop 메커니즘을 심은 상태이고, 기본 시나리오에서는 off-ramp storage가 spill-back 임계까지 차지 않아 실제 차로 감소가 발화하지 않았습니다.
 
-### 1800초 장기 run 잔여 진단
+### 1800초 run 잔여 실패
 
-장기 run은 Total TTT 관점에서는 크게 개선되지만 아직 acceptance는 실패한다.
+- Total TTT improvement는 `33.66%`로 8% 기준을 넘었습니다.
+- Ramp metering은 활성화됐습니다: `metering_active_steps=10`.
+- VSL은 활성화되지 않았습니다: `vsl_active_steps=0`, `density_exceedance_duration=4`.
+- Boundary balance는 아직 실패입니다: `urban_net_inflow_tracking_error_veh_h=493.3`, `urban_accumulation_abs_error_veh=289.9`.
+- 현재 결과만 보면 VSL 미활성은 capacity-drop 코드 오류라기보다, 기본 부하/저장공간/목적함수 조합에서 spill-back 메커니즘이 실제 plant에서 켜지지 않는 문제에 가깝습니다.
 
-- VSL/density validation 실패:
-  - `vsl_active_steps = 0`
-  - `density_exceedance_duration = 2`
-  - 일부 freeway segment가 `rho_crit`를 넘는 순간이 있는데 VSL 또는 N_UF 억제가 충분히 반응하지 못한다.
-- Boundary tracking validation 실패:
-  - urban net inflow tracking error `545.3 veh/h`
-  - 후반부에 `net_inflow_target = -800 veh/h`까지 내려가지만 실제 net inflow가 양수로 튀는 구간이 남아 있다.
+### 다음 단계
 
-### 다음 수정 후보
-
-1. Leader의 congestion 판단을 평균 density가 아니라 max 또는 percentile density 기준으로 바꿔 일부 segment 병목에도 `N_UF_star`가 줄어들게 한다.
-2. `w_F` 또는 freeway follower density penalty를 키워 장기 run에서 rho_crit 초과를 더 강하게 회피한다.
-3. Urban follower의 후반부 과포화 상황에서 boundary-in green과 off-ramp/on-ramp discharge 우선순위를 더 직접적으로 최적화한다.
-4. VSL compliance `alpha_vsl`가 0인 현재 설정에서 VSL activation 검증을 어떻게 해석할지 별도 정책을 정한다.
+1. 10번 튜닝 단계에서 VSL 메커니즘을 켜는 방향으로 horizon, freeway density penalty, `N_UF_star` 후보 범위, spill-back 민감도(`gamma`, `lane_reduction`)를 분리 실험합니다.
+2. 기본 시나리오가 아니라 forced spill-back 또는 high off-ramp demand scenario를 하나 추가해 `lambda_eff < lanes`가 실제 closed-loop run에서 관측되는지 확인합니다.
+3. VISSIM 연동을 염두에 두고 `lambda_eff`, off-ramp storage occupancy, VSL activation, ramp metering residual을 외부 plant adapter에서 읽기 쉬운 diagnostic schema로 고정합니다.

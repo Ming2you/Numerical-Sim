@@ -4,9 +4,12 @@ import unittest
 from src.models.demand import DemandStep
 from src.models.metanet import (
     desired_speed_kmh,
+    effective_lane_profile,
     effective_desired_speed_kmh,
+    freeway_substep,
     freeway_step,
     metanet_speed_update_kmh,
+    offramp_spillback_lambda_eff,
     segment_flow_veh_h,
 )
 from src.models.state import ControlAction, ExperimentConfig, TrafficState
@@ -91,6 +94,9 @@ class MetanetEquationTests(unittest.TestCase):
         self.assertIn("R1", cfg.network.on_ramp_to_movement)
         self.assertIn("OR_W", cfg.network.off_ramps)
         self.assertIn("OR_W_D", cfg.network.urban_link_storage_veh)
+        self.assertTrue(cfg.freeway_offramp_capacity_drop.enabled)
+        self.assertGreaterEqual(cfg.freeway_offramp_capacity_drop.lane_reduction, 0.0)
+        self.assertLess(cfg.freeway_offramp_capacity_drop.lane_reduction, cfg.network.freeway_lanes)
 
     def test_config_rejects_non_integer_time_ratios(self):
         with self.assertRaises(ValueError):
@@ -115,19 +121,163 @@ class MetanetEquationTests(unittest.TestCase):
                 {"leader": {"N_P_candidate_lower_factor": 1.1, "N_P_candidate_upper_factor": 0.9}},
             )
 
+    def test_config_rejects_invalid_capacity_drop_parameters(self):
+        with self.assertRaises(ValueError):
+            ExperimentConfig.from_file(
+                "src/config/default.yaml",
+                {"freeway_offramp_capacity_drop": {"lane_reduction": 2.0}},
+            )
+        with self.assertRaises(ValueError):
+            ExperimentConfig.from_file(
+                "src/config/default.yaml",
+                {"freeway_offramp_capacity_drop": {"gamma": 0.0}},
+            )
+        with self.assertRaises(ValueError):
+            ExperimentConfig.from_file(
+                "src/config/default.yaml",
+                {"freeway_offramp_capacity_drop": {"b": 0.0}},
+            )
+
     def test_traffic_state_stores_freeway_flow(self):
         cfg = ExperimentConfig.from_file("src/config/default.yaml")
         state = TrafficState.initial(cfg)
         for link in cfg.network.freeway_links:
-            for rho, speed, flow in zip(
+            for rho, speed, lane, flow in zip(
                 state.freeway_density[link],
                 state.freeway_speed[link],
+                state.freeway_effective_lanes[link],
                 state.freeway_flow[link],
             ):
                 self.assertAlmostEqual(
                     flow,
-                    segment_flow_veh_h(rho, speed, cfg.network.freeway_lanes),
+                    segment_flow_veh_h(rho, speed, lane),
                 )
+
+    def test_capacity_drop_lambda_eff_boundaries(self):
+        self.assertAlmostEqual(
+            offramp_spillback_lambda_eff(0.0, 120.0, 2.0, 0.35, 0.5, 2.0),
+            2.0,
+        )
+        self.assertAlmostEqual(
+            offramp_spillback_lambda_eff(120.0, 120.0, 2.0, 0.35, 0.5, 2.0),
+            1.65,
+        )
+
+    def test_capacity_drop_preserves_vehicle_count_when_lambda_changes(self):
+        cfg = ExperimentConfig.from_file(
+            "src/config/default.yaml",
+            {
+                "simulation": {"T_total": 10.0, "T_f": 10.0, "T_u": 5.0, "control_interval": 10.0},
+                "network": {"freeway_segments_per_link": 1},
+                "freeway_offramp_capacity_drop": {"enabled": True, "lane_reduction": 0.35},
+            },
+        )
+        state = TrafficState.initial(cfg)
+        for link in cfg.network.freeway_links:
+            state.freeway_density[link] = [cfg.network.rho_max]
+            state.freeway_speed[link] = [0.0]
+            state.freeway_effective_lanes[link] = [2.0]
+        for storage_link in cfg.network.off_ramp_storage_link.values():
+            state.urban_link_storage[storage_link] = 0.0
+        before = state.total_freeway_vehicles(cfg.network)
+        demand = DemandStep(
+            freeway_mainline={link: 0.0 for link in cfg.network.freeway_links},
+            urban_boundary={link: 0.0 for link in cfg.network.movement_links},
+            ramp_arrival={ramp: 0.0 for ramp in cfg.network.ramps},
+        )
+        control = ControlAction.fixed(cfg)
+        control.ramp_metering = {ramp: 0.0 for ramp in cfg.network.ramps}
+
+        freeway_substep(state, control, demand, cfg, include_ramp_queue_ttt=False)
+
+        after = state.total_freeway_vehicles(cfg.network)
+        self.assertAlmostEqual(after, before)
+        self.assertAlmostEqual(state.freeway_effective_lanes["FW_W"][0], 1.65)
+        self.assertAlmostEqual(
+            state.freeway_density["FW_W"][0] * 0.5 * 1.65,
+            cfg.network.rho_max * 0.5 * 2.0,
+        )
+
+    def test_capacity_drop_uses_lane_corrected_density_for_speed_update(self):
+        cfg = ExperimentConfig.from_file(
+            "src/config/default.yaml",
+            {
+                "simulation": {"T_total": 10.0, "T_f": 10.0, "T_u": 5.0, "control_interval": 10.0},
+                "network": {"freeway_segments_per_link": 1},
+                "freeway_offramp_capacity_drop": {"enabled": True, "lane_reduction": 0.35},
+            },
+        )
+        base = TrafficState.initial(cfg)
+        drop = TrafficState.initial(cfg)
+        for state in (base, drop):
+            for link in cfg.network.freeway_links:
+                state.freeway_density[link] = [20.0]
+                state.freeway_speed[link] = [80.0]
+                state.freeway_effective_lanes[link] = [2.0]
+        for storage_link in cfg.network.off_ramp_storage_link.values():
+            drop.urban_link_storage[storage_link] = 0.0
+
+        lane_profile, _ = effective_lane_profile(drop, cfg)
+        rho_drop = 20.0 * 2.0 / lane_profile["FW_W"][0]
+        self.assertGreater(rho_drop, 20.0)
+        self.assertLess(
+            desired_speed_kmh(rho_drop, cfg.network.v_free, cfg.network.rho_crit, cfg.network.metanet_a_m),
+            desired_speed_kmh(20.0, cfg.network.v_free, cfg.network.rho_crit, cfg.network.metanet_a_m),
+        )
+
+        demand = DemandStep(
+            freeway_mainline={link: segment_flow_veh_h(20.0, 80.0, 2.0) for link in cfg.network.freeway_links},
+            urban_boundary={link: 0.0 for link in cfg.network.movement_links},
+            ramp_arrival={ramp: 0.0 for ramp in cfg.network.ramps},
+        )
+        control = ControlAction.fixed(cfg)
+        control.ramp_metering = {ramp: 0.0 for ramp in cfg.network.ramps}
+        freeway_substep(base, control, demand, cfg, include_ramp_queue_ttt=False)
+        freeway_substep(drop, control, demand, cfg, include_ramp_queue_ttt=False)
+
+        self.assertLess(drop.freeway_speed["FW_W"][0], base.freeway_speed["FW_W"][0])
+
+    def test_vsl_changes_speed_mechanism_under_spillback_density(self):
+        cfg = ExperimentConfig.from_file(
+            "src/config/default.yaml",
+            {
+                "simulation": {"T_total": 10.0, "T_f": 10.0, "T_u": 5.0, "control_interval": 10.0},
+                "network": {"freeway_segments_per_link": 1},
+                "freeway_offramp_capacity_drop": {"enabled": True, "lane_reduction": 0.35},
+            },
+        )
+        no_vsl = TrafficState.initial(cfg)
+        with_vsl = TrafficState.initial(cfg)
+        for state in (no_vsl, with_vsl):
+            for link in cfg.network.freeway_links:
+                state.freeway_density[link] = [20.0]
+                state.freeway_speed[link] = [90.0]
+                state.freeway_effective_lanes[link] = [2.0]
+            for storage_link in cfg.network.off_ramp_storage_link.values():
+                state.urban_link_storage[storage_link] = 0.0
+
+        lane_profile, _ = effective_lane_profile(with_vsl, cfg)
+        rho_for_flow = 20.0 * 2.0 / lane_profile["FW_W"][0]
+        self.assertLess(
+            effective_desired_speed_kmh(rho_for_flow, 100.0, 33.5, 60.0, alpha_vsl=0.0),
+            effective_desired_speed_kmh(rho_for_flow, 100.0, 33.5, 100.0, alpha_vsl=0.0),
+        )
+
+        demand = DemandStep(
+            freeway_mainline={link: segment_flow_veh_h(20.0, 90.0, 2.0) for link in cfg.network.freeway_links},
+            urban_boundary={link: 0.0 for link in cfg.network.movement_links},
+            ramp_arrival={ramp: 0.0 for ramp in cfg.network.ramps},
+        )
+        control_100 = ControlAction.fixed(cfg)
+        control_60 = ControlAction.fixed(cfg)
+        control_60.vsl = {link: 60.0 for link in cfg.network.freeway_links}
+        for control in (control_100, control_60):
+            control.ramp_metering = {ramp: 0.0 for ramp in cfg.network.ramps}
+
+        freeway_substep(no_vsl, control_100, demand, cfg, include_ramp_queue_ttt=False)
+        freeway_substep(with_vsl, control_60, demand, cfg, include_ramp_queue_ttt=False)
+
+        self.assertLess(with_vsl.freeway_speed["FW_W"][0], no_vsl.freeway_speed["FW_W"][0])
 
     def test_freeway_step_density_uses_metanet_conservation(self):
         cfg = ExperimentConfig.from_file(

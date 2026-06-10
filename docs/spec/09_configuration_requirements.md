@@ -28,6 +28,12 @@ leader:
   N_P_star_range: [0, 500]
   N_UF_star_range: [0, 6000]
 
+freeway_offramp_capacity_drop:
+  enabled: true
+  lane_reduction: 0.35
+  gamma: 0.5
+  b: 2.0
+
 freeway_follower:
   eps_F: 100
   vsl_set: [50, 60, 70, 80, 90, 100]

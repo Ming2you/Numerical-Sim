@@ -88,6 +88,74 @@ lanes[m]: number of lanes on link m
 
 This is a conservation equation. Do not add or remove vehicles inside a link except through explicit boundary, ramp, or node flows.
 
+#### 3.1.2a Off-ramp spill-back capacity drop
+
+When an off-ramp storage link is occupied, represent spill-back as an effective lane-number reduction on the upstream freeway link's last segment. Let:
+
+```text
+N[m,i](k)          = rho[m,i](k) * L[m] * lambda_prev[m,i](k)  # vehicles
+n_off[m,d](k)      = C[m,d] - available_storage[m,d](k)
+lambda_m           = nominal lane number
+delta_lambda       = configured lane reduction, possibly fractional
+gamma[m,d], b_cd   = spill-back shape parameters
+```
+
+Use a generalized Wu-style effective lane number:
+
+```text
+lambda_eff[m,last](k)
+    = lambda_m
+      - delta_lambda
+        * (1 - exp( -(1 / b_cd) * (n_off[m,d](k) / (gamma[m,d] * C[m,d])) ** b_cd ))
+```
+
+with exact boundary behaviour:
+
+```text
+n_off = 0      -> lambda_eff = lambda_m
+n_off = C      -> lambda_eff = lambda_m - delta_lambda
+```
+
+For links without active off-ramp spill-back, `lambda_eff = lambda_m`.
+
+Because `rho` is a per-lane density, changing `lambda_eff` must preserve vehicles. Do not update density by only changing the denominator in the original conservation equation. Instead use segment vehicle count as the conserved quantity:
+
+```text
+N_current(k)       = rho_stored(k) * L * lambda_prev(k)
+rho_for_flow(k)    = N_current(k) / (L * lambda_eff(k))
+q(k)               = rho_for_flow(k) * v(k) * lambda_eff(k)
+N_next(k+1)        = N_current(k) + T_f_h * (q_in(k) - q_out(k))
+rho_next(k+1)      = N_next(k+1) / (L * lambda_eff(k))
+```
+
+The speed equation must also be evaluated with the lane-corrected density:
+
+```text
+V_no_vsl(k)      = V_no_vsl(rho_for_flow(k))
+V_eff(k)         = V_eff(rho_for_flow(k), vsl(k))
+anticipation     uses rho_for_flow[m,i+1](k) - rho_for_flow[m,i](k)
+```
+
+This is the intended mechanism:
+
+```text
+lambda_eff decreases
+-> rho_for_flow increases for the same N
+-> desired speed and anticipation terms reduce speed
+-> q decreases through speed, not through an ad-hoc capacity cap
+```
+
+Freeway TTT must be counted from vehicles:
+
+```text
+TTT_freeway += sum_i N_next[m,i](k+1) * T_f_h
+```
+
+When lane count changes, `N_next` is the conserved state. Do not upper-project
+`N_next` only because `lambda_eff` decreased; otherwise vehicles disappear at the
+capacity-drop boundary. If the derived `rho_next` exceeds `rho_max`, keep the
+vehicles and report the density exceedance as congestion diagnostics.
+
 #### 3.1.3 Desired speed without VSL
 
 ```text

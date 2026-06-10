@@ -239,3 +239,32 @@ This file records human-readable update notes for each direct push.
 - `python -B -m experiments.run_experiment --config src/config/default.yaml --scenario peak_demand --baseline fixed_signal_fixed_speed --controller stackelberg_mpc --T-total 360 --output outputs/codex_leader_objective_peak_360_v5`
 - `python -B -m experiments.run_experiment --config src/config/default.yaml --scenario peak_demand --baseline fixed_signal_fixed_speed --controller stackelberg_mpc --T-total 1800 --output outputs/codex_leader_objective_peak_1800_v2`
 - Result: 44 tests passed. `peak_demand 360 s`는 PASS, Total TTT improvement `13.60%`. `peak_demand 1800 s`는 Total TTT improvement `32.38%`였지만 density/VSL validation과 장기 urban net inflow tracking validation이 남아 FAIL입니다.
+
+## 2026-06-10 15:45:11 +09:00
+
+### Scope
+
+- Wu et al. Eq.(22) 계열 off-ramp spill-back capacity drop을 `lambda_eff`로 구현했습니다.
+- `lane_reduction`은 2차로 네트워크에서 과격한 1차로 감소 대신 기본 `0.35` 분수 감소로 설정했습니다.
+- `TrafficState.freeway_effective_lanes`를 추가하고, freeway flow/TTT/state logging이 유효 차로 수를 사용하도록 수정했습니다.
+- λ 변화 시 차량이 사라지지 않도록 `rho`가 아니라 `N = rho * L * lambda`를 보존량으로 다루도록 `freeway_substep`을 수정했습니다.
+- speed/desired-speed/VSL-effective-speed/anticipation 계산이 `rho_for_flow = N / (L * lambda_eff)`를 쓰도록 정리했습니다.
+- `rho_max * L * lambda_eff` 상한 projection은 차량 삭제를 만들 수 있어 제거하고, 음수 차량 수만 projection하도록 바꿨습니다.
+- simulator plant, freeway follower prediction, coupling aggregate diagnostics가 `capacity_drop_active`, `lambda_eff_*`, `capacity_drop_lane_loss_*`를 일관되게 전달하도록 맞췄습니다.
+- `docs/capacity_drop_proposal.md`와 canonical spec을 현재 구현 원칙에 맞게 갱신했습니다.
+
+### Notes
+
+- 10번 튜닝은 제외했습니다. horizon, penalty, `N_UF_star` 후보 범위는 이번 변경에서 조정하지 않았습니다.
+- 강제 spill-back unit test에서는 `lambda_eff` 경계값, 차량 보존, `rho_for_flow` 기반 속도 저하, VSL 속도 반응을 확인했습니다.
+- 기본 `peak_demand` 360초/1800초 run에서는 `capacity_drop_active=0`, `lambda_eff_FW_W_last=2.0`, `lambda_eff_FW_E_last=2.0`으로 실제 차로 감소가 발화하지 않았습니다.
+- 따라서 현재 VSL 미활성은 capacity-drop 수식 미구현 문제가 아니라, 기본 시나리오에서 off-ramp storage가 spill-back 임계까지 차지 않는 문제로 보는 것이 맞습니다.
+
+### Validation
+
+- `python -B -m py_compile src\\models\\state.py src\\models\\metanet.py src\\controllers\\freeway_follower.py src\\simulation\\coupling.py src\\simulation\\simulator.py src\\tests\\test_metanet_equations.py`
+- `python -B -m unittest src.tests.test_metanet_equations -v`
+- `python -B -m unittest discover -s src\\tests -v`
+- `python -B -m experiments.run_experiment --config src/config/default.yaml --scenario peak_demand --baseline fixed_signal_fixed_speed --controller stackelberg_mpc --T-total 360 --output outputs/codex_capacity_drop_peak_360_v2`
+- `python -B -m experiments.run_experiment --config src/config/default.yaml --scenario peak_demand --baseline fixed_signal_fixed_speed --controller stackelberg_mpc --T-total 1800 --output outputs/codex_capacity_drop_peak_1800_v2`
+- Result: 49 tests passed. `peak_demand 360 s`는 PASS, Total TTT improvement `13.60%`. `peak_demand 1800 s`는 Total TTT improvement `33.66%`였지만 VSL/density validation과 boundary balance validation이 남아 FAIL입니다.

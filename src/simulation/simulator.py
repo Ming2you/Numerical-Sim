@@ -51,6 +51,7 @@ class MixedTrafficSimulator:
 
 
 def state_row(state: TrafficState, cfg: ExperimentConfig, step: int) -> Dict[str, Any]:
+    state.ensure_freeway_lane_profile(cfg.network)
     row: Dict[str, Any] = {
         "step": step,
         "time_sec": state.time_sec,
@@ -63,6 +64,9 @@ def state_row(state: TrafficState, cfg: ExperimentConfig, step: int) -> Dict[str
         row[f"speed_{link}_mean"] = sum(values) / len(values)
     for link, values in state.freeway_flow.items():
         row[f"flow_{link}_mean"] = sum(values) / len(values)
+    for link, values in state.freeway_effective_lanes.items():
+        row[f"lambda_eff_{link}_mean"] = sum(values) / len(values)
+        row[f"lambda_eff_{link}_last"] = values[-1] if values else cfg.network.freeway_lanes
     for ramp, value in state.ramp_queue.items():
         row[f"ramp_queue_{ramp}"] = value
     for link, value in state.boundary_queue.items():

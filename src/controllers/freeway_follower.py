@@ -68,9 +68,16 @@ def _aggregate_prediction_diagnostics(rows: list[Dict[str, float]]) -> Dict[str,
     keys = set().union(*(row.keys() for row in rows))
     for key in keys:
         values = [float(row.get(key, 0.0)) for row in rows]
-        if key in avg_keys or key.startswith("offramp_flow_") or key.startswith("offramp_blocked_flow_"):
+        if (
+            key in avg_keys
+            or key.startswith("offramp_flow_")
+            or key.startswith("offramp_blocked_flow_")
+            or key.startswith("lambda_eff_")
+            or key.startswith("capacity_drop_lane_loss_")
+            or key.startswith("offramp_occupancy_ratio_")
+        ):
             out[key] = float(sum(values) / max(len(values), 1))
-        elif key in {"metering_target_infeasible", "offramp_storage_binding"}:
+        elif key in {"metering_target_infeasible", "offramp_storage_binding", "capacity_drop_active"}:
             out[key] = float(max(values))
         else:
             out[key] = float(sum(values))
