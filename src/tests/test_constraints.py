@@ -6,6 +6,7 @@ from src.controllers.leader import Leader, LeaderAction
 from src.controllers.stackelberg_mpc import StackelbergMPCController
 from src.controllers.urban_follower import UrbanFollower
 from src.models.demand import DemandProfile, ScenarioConfig
+from src.models.metanet import effective_lane_profile
 from src.models.state import ControlAction, ExperimentConfig, TrafficState
 from src.models.urban_queue_model import (
     sync_onramp_queues_from_freeway,
@@ -257,6 +258,60 @@ class ConstraintTests(unittest.TestCase):
             )
 
         self.assertIn(60.0, second_step_vsl_values)
+
+    def test_freeway_follower_activates_vsl_under_capacity_drop(self):
+        cfg = ExperimentConfig.from_file(
+            "src/config/default.yaml",
+            {
+                "simulation": {"T_total": 180.0},
+                "mpc": {"horizon_steps": 3},
+                "network": {"off_ramp_split_ratio": {"OR_W": 0.5, "OR_E": 0.5}},
+                "freeway_offramp_capacity_drop": {
+                    "enabled": True,
+                    "lane_reduction": 0.75,
+                    "gamma": 0.2,
+                    "b": 2.0,
+                },
+                "freeway_follower": {
+                    "vsl_smoothness_weight": 0.0,
+                    "horizon_beam_width": 4,
+                    "horizon_vsl_candidate_limit_per_link": 3,
+                },
+            },
+        )
+        state = TrafficState.initial(cfg)
+        for link in cfg.network.freeway_links:
+            state.freeway_density[link] = [28.0, 34.0, 45.0]
+            state.freeway_speed[link] = [90.0, 75.0, 45.0]
+            state.freeway_effective_lanes[link] = [2.0, 2.0, 2.0]
+        for storage_link in cfg.network.off_ramp_storage_link.values():
+            state.urban_link_storage[storage_link] = 0.0
+
+        _, lane_diag = effective_lane_profile(state, cfg)
+        self.assertEqual(lane_diag["capacity_drop_active"], 1.0)
+        self.assertLess(lane_diag["lambda_eff_FW_W_last"], cfg.network.freeway_lanes)
+
+        demand = DemandProfile(
+            cfg,
+            ScenarioConfig(
+                "forced_capacity_drop",
+                urban_scale=0.0,
+                freeway_scale=1.4,
+                ramp_scale=0.8,
+                incident_capacity_factor=1.0,
+            ),
+        ).horizon(0.0, cfg.mpc.horizon_steps)
+        result = FreewayFollower(cfg).solve(
+            state,
+            LeaderAction(0.0, 0.0),
+            demand,
+            ControlAction.fixed(cfg),
+        )
+
+        self.assertTrue(any(
+            value < max(cfg.freeway_follower.vsl_set) - 0.5
+            for value in result.vsl.values()
+        ))
 
     def test_boundary_queue_balance_safe_division(self):
         from src.models.urban_queue_model import safe_balance_index

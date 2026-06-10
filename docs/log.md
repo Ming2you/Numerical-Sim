@@ -268,3 +268,44 @@ This file records human-readable update notes for each direct push.
 - `python -B -m experiments.run_experiment --config src/config/default.yaml --scenario peak_demand --baseline fixed_signal_fixed_speed --controller stackelberg_mpc --T-total 360 --output outputs/codex_capacity_drop_peak_360_v2`
 - `python -B -m experiments.run_experiment --config src/config/default.yaml --scenario peak_demand --baseline fixed_signal_fixed_speed --controller stackelberg_mpc --T-total 1800 --output outputs/codex_capacity_drop_peak_1800_v2`
 - Result: 49 tests passed. `peak_demand 360 s`는 PASS, Total TTT improvement `13.60%`. `peak_demand 1800 s`는 Total TTT improvement `33.66%`였지만 VSL/density validation과 boundary balance validation이 남아 FAIL입니다.
+
+## 2026-06-10 17:36:31 +09:00
+
+### Scope
+
+- Capacity drop이 실제로 발생하는 stress tuning에서 VSL이 activate되는지 확인했습니다.
+- 빠른 regression test `test_freeway_follower_activates_vsl_under_capacity_drop`를 추가했습니다.
+- 재현 가능한 probe CLI `experiments.capacity_drop_vsl_probe`를 추가했습니다.
+- `reports/codex_run_report.md`를 capacity-drop/VSL 튜닝 결과 기준으로 갱신했습니다.
+
+### Tuning
+
+- `off_ramp_split_ratio`: `0.90`
+- `OR_W_D`, `OR_E_F` storage: `20 veh`
+- `urban_avg_speed_km_h`: `3.0`
+- `urban_avg_vehicle_length_m`: `15.0`
+- `lane_reduction`: `0.75`
+- `gamma`: `0.2`
+- `vsl_smoothness_weight`: `0.0`
+- `horizon_steps`: `3`
+
+### Result
+
+- `capacity_drop_active_steps=4`
+- `vsl_active_steps=4`
+- `overlap_steps=4`
+- `lambda_min=1.250007`
+- baseline total TTT `249.168`, proposed total TTT `250.111`, proposed_without_vsl total TTT `249.763`
+
+### Notes
+
+- 결론: capacity drop이 실제로 발화하면 현재 controller도 VSL을 activate할 수 있습니다.
+- 단, 이 stress tuning에서 VSL이 TTT를 개선하지는 않았습니다. 다음 튜닝은 VSL activation 자체가 아니라 VSL 강도/penalty, ramp metering과의 분담, leader objective의 freeway spill-back penalty를 조정하는 방향이 맞습니다.
+
+### Validation
+
+- `python -B -m py_compile src\\experiments\\capacity_drop_vsl_probe.py experiments\\capacity_drop_vsl_probe.py src\\tests\\test_constraints.py`
+- `python -B -m unittest src.tests.test_constraints.ConstraintTests.test_freeway_follower_activates_vsl_under_capacity_drop -v`
+- `python -B -m experiments.capacity_drop_vsl_probe --output outputs\\codex_capacity_drop_vsl_probe_cli --T-total 720`
+- `python -B -m unittest discover -s src\\tests -v`
+- Result: probe reproduced `capacity_drop_active_steps=4`, `vsl_active_steps=4`, `overlap_steps=4`; 50 tests passed.

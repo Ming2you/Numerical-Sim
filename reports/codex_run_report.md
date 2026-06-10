@@ -1,45 +1,69 @@
 # Codex 실행 리포트
 
-## 2026-06-10 15:45:11 +09:00
+## 2026-06-10 17:36:31 +09:00
 
-### 이번 수정 요약
+### 질문
 
-- Wu et al. Eq.(22) 계열의 off-ramp spill-back capacity drop을 `lambda_eff` 형태로 구현했습니다.
-- 2차로 네트워크에서 `lane_reduction=1`은 과격하므로 기본값은 분수 감소 `0.35`로 두었습니다.
-- `TrafficState`에 `freeway_effective_lanes`를 추가하고, flow/TTT/state timeseries가 유효 차로 수를 일관되게 쓰도록 정리했습니다.
-- λ가 바뀌는 순간 차량이 사라지지 않도록 density를 직접 보존량으로 두지 않고, `N = rho * L * lambda`를 보존량으로 사용했습니다.
-- 속도식도 저장 density가 아니라 `rho_for_flow = N / (L * lambda_eff)`를 사용하게 수정했습니다. desired speed, VSL effective speed, anticipation 모두 이 보정 density를 봅니다.
-- `rho_max * L * lambda_eff` 상한 projection으로 차량이 삭제될 수 있어, 차량 수는 음수만 막고 상한 초과는 congestion diagnostic으로 남기는 방식으로 바꿨습니다.
-- controller prediction, coupling aggregate diagnostics, simulator state logging도 `capacity_drop_active`, `lambda_eff_*`, `capacity_drop_lane_loss_*`를 전달하도록 맞췄습니다.
-- 10번 튜닝 단계는 제외했습니다. horizon, penalty, `N_UF_star` 후보 범위는 이번 커밋에서 조정하지 않았습니다.
+capacity drop이 실제로 발생하는 조건까지 튜닝했을 때, VSL이 activate되는지 확인했습니다.
 
-### 검증 결과
+### 결론
 
-| 항목 | 결과 | 메모 |
-|---|---:|---|
-| `py_compile` | PASS | state/metanet/freeway_follower/coupling/simulator/tests |
-| METANET unit tests | PASS | 18 tests OK |
-| 전체 unit tests | PASS | 49 tests OK |
-| `peak_demand`, 360 s | PASS | Total TTT `30.974 -> 26.763`, improvement `13.60%` |
-| `peak_demand`, 1800 s | FAIL | Total TTT `455.517 -> 302.195`, improvement `33.66%`, validation 일부 실패 |
+- 예. stress tuning에서 capacity drop이 실제로 발화하면 VSL도 activate됩니다.
+- `outputs/codex_capacity_drop_vsl_probe_cli` run에서 `capacity_drop_active_steps=4`, `vsl_active_steps=4`, `overlap_steps=4`였습니다.
+- 최소 effective lane은 `lambda_min=1.250007`로, 2차로에서 약 `0.75`차로 감소가 실제 run log에 기록됐습니다.
+- 단, 이 결과는 “VSL이 켜지는가”에 대한 positive check입니다. “VSL이 항상 TTT를 개선하는가”는 아직 positive proof가 아닙니다.
 
-### Capacity Drop 진단
+### Stress Tuning
 
-- 강제 spill-back 단위 테스트에서는 `lambda_eff` 경계값, λ 변화 시 차량 보존, `rho_for_flow` 기반 속도 저하, VSL 속도 반응을 모두 확인했습니다.
-- 기본 `peak_demand` 360초 run에서는 `capacity_drop_active=0`, `lambda_eff_FW_W_last=2.0`, `lambda_eff_FW_E_last=2.0`였습니다.
-- 기본 `peak_demand` 1800초 run에서도 `capacity_drop_active=0`, `lambda_eff_FW_W_last=2.0`, `lambda_eff_FW_E_last=2.0`였습니다.
-- 즉, 이번 구현은 capacity-drop 메커니즘을 심은 상태이고, 기본 시나리오에서는 off-ramp storage가 spill-back 임계까지 차지 않아 실제 차로 감소가 발화하지 않았습니다.
+기본 `peak_demand`에서는 off-ramp storage가 충분히 차지 않아 `capacity_drop_active=0`이었습니다. 그래서 capacity drop 발화를 확인하기 위해 아래 stress 조건을 사용했습니다.
 
-### 1800초 run 잔여 실패
+- `off_ramp_split_ratio`: `0.90`
+- `OR_W_D`, `OR_E_F` storage: `20 veh`
+- `urban_avg_speed_km_h`: `3.0`
+- `urban_avg_vehicle_length_m`: `15.0`
+- `lane_reduction`: `0.75`
+- `gamma`: `0.2`
+- `vsl_smoothness_weight`: `0.0`
+- `horizon_steps`: `3`
+- `T_total`: `720 s`
 
-- Total TTT improvement는 `33.66%`로 8% 기준을 넘었습니다.
-- Ramp metering은 활성화됐습니다: `metering_active_steps=10`.
-- VSL은 활성화되지 않았습니다: `vsl_active_steps=0`, `density_exceedance_duration=4`.
-- Boundary balance는 아직 실패입니다: `urban_net_inflow_tracking_error_veh_h=493.3`, `urban_accumulation_abs_error_veh=289.9`.
-- 현재 결과만 보면 VSL 미활성은 capacity-drop 코드 오류라기보다, 기본 부하/저장공간/목적함수 조합에서 spill-back 메커니즘이 실제 plant에서 켜지지 않는 문제에 가깝습니다.
+### 실행 결과
 
-### 다음 단계
+| run | total TTT | freeway TTT | urban TTT | capacity drop active | lambda min | VSL active | overlap |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| baseline | 249.168 | 136.497 | 112.671 | 4 | 1.250009 | 0 | 0 |
+| proposed | 250.111 | 123.387 | 126.723 | 4 | 1.250007 | 4 | 4 |
+| proposed_without_vsl | 249.763 | 123.071 | 126.692 | 4 | 1.250009 | 0 | 0 |
 
-1. 10번 튜닝 단계에서 VSL 메커니즘을 켜는 방향으로 horizon, freeway density penalty, `N_UF_star` 후보 범위, spill-back 민감도(`gamma`, `lane_reduction`)를 분리 실험합니다.
-2. 기본 시나리오가 아니라 forced spill-back 또는 high off-ramp demand scenario를 하나 추가해 `lambda_eff < lanes`가 실제 closed-loop run에서 관측되는지 확인합니다.
-3. VISSIM 연동을 염두에 두고 `lambda_eff`, off-ramp storage occupancy, VSL activation, ramp metering residual을 외부 plant adapter에서 읽기 쉬운 diagnostic schema로 고정합니다.
+### 해석
+
+- Capacity drop과 VSL activation은 같은 control step에서 함께 관측됐습니다.
+- Proposed controller는 capacity drop 상황에서 VSL `50 km/h`를 선택했습니다.
+- Proposed는 baseline 대비 freeway TTT는 낮췄지만 urban TTT가 올라 전체 TTT는 약간 나빠졌습니다.
+- `proposed_without_vsl`과 비교하면 VSL이 이 stress setting에서 TTT를 개선하지는 않았습니다.
+- 따라서 다음 튜닝 목표는 “VSL activation”이 아니라, VSL이 너무 강하게 `50 km/h`까지 떨어지지 않도록 VSL cost/benefit을 재조정하거나, capacity drop 대응을 ramp metering과 분담하게 만드는 것입니다.
+
+### 추가된 재현 도구
+
+- `src/experiments/capacity_drop_vsl_probe.py`
+- `experiments/capacity_drop_vsl_probe.py`
+
+재실행 명령:
+
+```powershell
+python -B -m experiments.capacity_drop_vsl_probe `
+  --output outputs\codex_capacity_drop_vsl_probe_cli `
+  --T-total 720
+```
+
+### 검증
+
+- `python -B -m py_compile src\experiments\capacity_drop_vsl_probe.py experiments\capacity_drop_vsl_probe.py src\tests\test_constraints.py`
+- `python -B -m unittest src.tests.test_constraints.ConstraintTests.test_freeway_follower_activates_vsl_under_capacity_drop -v`
+- `python -B -m experiments.capacity_drop_vsl_probe --output outputs\codex_capacity_drop_vsl_probe_cli --T-total 720`
+- `python -B -m unittest discover -s src\tests -v`
+
+결과:
+
+- Capacity drop/VSL probe: `capacity_drop_active_steps=4`, `vsl_active_steps=4`, `overlap_steps=4`, `lambda_min=1.250007`
+- 전체 tests: `50 tests OK`
