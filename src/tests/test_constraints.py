@@ -12,7 +12,7 @@ from src.models.urban_queue_model import (
     sync_onramp_queues_to_freeway,
     urban_substep,
 )
-from src.simulation.coupling import CoupledStepResult
+from src.simulation.coupling import CoupledStepResult, run_coupled_interval
 from src.simulation.simulator import MixedTrafficSimulator
 
 
@@ -105,15 +105,20 @@ class ConstraintTests(unittest.TestCase):
         demand = DemandProfile(cfg, ScenarioConfig("test")).horizon(0.0, 3)
         used_demand_ids = []
 
-        def fake_coupled_step(*args):
-            used_demand_ids.append(id(args[2]))
-            return CoupledStepResult(
-                freeway_ttt=1.0,
-                urban_ttt=0.0,
-                diagnostics={"total_metering_error": 0.0, "mean_ramp_receiving_factor": 1.0},
+        def fake_lightweight_transition(*args):
+            state_arg = args[-3]
+            demand_step = args[-1]
+            used_demand_ids.append(id(demand_step))
+            return (
+                state_arg.copy(),
+                1.0,
+                {"total_metering_error": 0.0, "mean_ramp_receiving_factor": 1.0},
             )
 
-        with patch("src.controllers.freeway_follower.run_coupled_interval", side_effect=fake_coupled_step):
+        with patch(
+            "src.controllers.freeway_follower.FreewayFollower._lightweight_transition",
+            side_effect=fake_lightweight_transition,
+        ):
             result = FreewayFollower(cfg).solve(
                 state,
                 LeaderAction(0.0, 1200.0),
@@ -144,24 +149,28 @@ class ConstraintTests(unittest.TestCase):
         demand = DemandProfile(cfg, ScenarioConfig("test")).horizon(0.0, 2)
         second_step_vsl_values = []
 
-        def fake_coupled_step(*args):
-            control = args[1]
-            demand_step = args[2]
+        def fake_lightweight_transition(*args):
+            state_arg = args[-3]
+            control = args[-2]
+            demand_step = args[-1]
             if demand_step is demand[1]:
                 second_step_vsl_values.extend(control.vsl.values())
             if demand_step is demand[0] and min(control.vsl.values()) < 100.0:
-                return CoupledStepResult(
-                    freeway_ttt=1.0,
-                    urban_ttt=0.0,
-                    diagnostics={"total_metering_error": 0.0, "mean_ramp_receiving_factor": 1.0},
+                return (
+                    state_arg.copy(),
+                    1.0,
+                    {"total_metering_error": 0.0, "mean_ramp_receiving_factor": 1.0},
                 )
-            return CoupledStepResult(
-                freeway_ttt=10.0,
-                urban_ttt=0.0,
-                diagnostics={"total_metering_error": 0.0, "mean_ramp_receiving_factor": 1.0},
+            return (
+                state_arg.copy(),
+                10.0,
+                {"total_metering_error": 0.0, "mean_ramp_receiving_factor": 1.0},
             )
 
-        with patch("src.controllers.freeway_follower.run_coupled_interval", side_effect=fake_coupled_step):
+        with patch(
+            "src.controllers.freeway_follower.FreewayFollower._lightweight_transition",
+            side_effect=fake_lightweight_transition,
+        ):
             FreewayFollower(cfg).solve(
                 state,
                 LeaderAction(0.0, 1200.0),
@@ -259,6 +268,46 @@ class ConstraintTests(unittest.TestCase):
         self.assertGreater(high.ramp_queue["R1"], low.ramp_queue["R1"])
         self.assertGreater(high_diag["onramp_green_releases_veh"], low_diag["onramp_green_releases_veh"])
 
+    def test_coupling_passes_actual_ramp_release_to_freeway_step(self):
+        cfg = ExperimentConfig.from_file(
+            "src/config/default.yaml",
+            {"simulation": {"T_total": 10.0, "T_f": 10.0, "T_u": 5.0, "control_interval": 10.0}},
+        )
+        state = TrafficState.initial(cfg)
+        for ramp in cfg.network.ramps:
+            state.ramp_queue[ramp] = 0.0
+            state.urban_movement_queue[cfg.network.on_ramp_to_movement[ramp]] = 0.0
+        control = ControlAction.fixed(cfg)
+        demand = DemandProfile(cfg, ScenarioConfig("test", ramp_scale=0.0)).at(0.0)
+        requested_release = {ramp: 1000.0 for ramp in cfg.network.ramps}
+        seen_release = []
+
+        def fake_compute_release(*_args, **_kwargs):
+            return requested_release, {
+                "total_metering_flow": sum(requested_release.values()),
+                "total_no_meter_flow": sum(requested_release.values()),
+                "mean_ramp_receiving_factor": 1.0,
+            }
+
+        def fake_freeway_substep(*_args, **kwargs):
+            actual = dict(kwargs["ramp_release_veh_h"])
+            seen_release.append(actual)
+            return 0.0, {
+                "total_metering_flow": sum(actual.values()),
+                "total_metering_error": 0.0,
+                "mean_ramp_receiving_factor": 1.0,
+                "offramp_flow_total": 0.0,
+                "offramp_blocked_flow_total": 0.0,
+            }
+
+        with patch("src.simulation.coupling.compute_ramp_release_flows", side_effect=fake_compute_release):
+            with patch("src.simulation.coupling.freeway_substep", side_effect=fake_freeway_substep):
+                result = run_coupled_interval(state, control, demand, cfg)
+
+        self.assertTrue(seen_release)
+        self.assertTrue(all(value == 0.0 for value in seen_release[0].values()))
+        self.assertGreater(result.diagnostics["ramp_metering_release_shortfall_veh"], 0.0)
+
     def test_offramp_storage_limits_freeway_boundary_flow(self):
         cfg = ExperimentConfig.from_file(
             "src/config/default.yaml",
@@ -321,18 +370,24 @@ class ConstraintTests(unittest.TestCase):
         previous.green_times["A_p2"] = cfg.network.effective_green_total - cfg.network.green_min
         seen_green = []
 
-        def fake_coupled_step(*args):
-            seen_green.append(dict(args[1].green_times))
-            return CoupledStepResult(
-                freeway_ttt=1.0,
-                urban_ttt=0.0,
-                diagnostics={"total_metering_error": 0.0, "mean_ramp_receiving_factor": 1.0},
+        def fake_lightweight_transition(*args):
+            state_arg = args[-3]
+            control = args[-2]
+            seen_green.append(dict(control.green_times))
+            return (
+                state_arg.copy(),
+                1.0,
+                {"total_metering_error": 0.0, "mean_ramp_receiving_factor": 1.0},
             )
 
-        with patch("src.controllers.freeway_follower.run_coupled_interval", side_effect=fake_coupled_step):
+        with patch(
+            "src.controllers.freeway_follower.FreewayFollower._lightweight_transition",
+            side_effect=fake_lightweight_transition,
+        ):
             result = FreewayFollower(cfg).solve(state, LeaderAction(0.0, 1200.0), demand, previous)
 
-        self.assertEqual(result.infeasibility["freeway_follower_coupled_prediction"], 1.0)
+        self.assertEqual(result.infeasibility["freeway_follower_coupled_prediction"], 0.0)
+        self.assertEqual(result.infeasibility["freeway_follower_lightweight_prediction"], 1.0)
         self.assertTrue(seen_green)
         self.assertEqual(seen_green[0]["A_p1"], previous.green_times["A_p1"])
 

@@ -8,8 +8,13 @@ import numpy as np
 
 from src.controllers.leader import LeaderAction
 from src.models.demand import DemandStep
+from src.models.metanet import compute_ramp_release_flows, freeway_substep
 from src.models.state import ControlAction, ExperimentConfig, TrafficState
-from src.simulation.coupling import run_coupled_interval
+from src.models.urban_queue_model import (
+    ensure_urban_state,
+    estimate_onramp_green_release_flows,
+    off_ramp_capacity_by_freeway_link,
+)
 
 
 @dataclass
@@ -48,6 +53,30 @@ class _SequenceNode:
     first_projection: Optional[Dict[str, float]] = None
 
 
+def _aggregate_prediction_diagnostics(rows: list[Dict[str, float]]) -> Dict[str, float]:
+    if not rows:
+        return {}
+    avg_keys = {
+        "total_metering_flow",
+        "total_metering_error",
+        "mean_ramp_receiving_factor",
+        "mean_segment_flow",
+        "offramp_flow_total",
+        "offramp_blocked_flow_total",
+    }
+    out: Dict[str, float] = {}
+    keys = set().union(*(row.keys() for row in rows))
+    for key in keys:
+        values = [float(row.get(key, 0.0)) for row in rows]
+        if key in avg_keys or key.startswith("offramp_flow_") or key.startswith("offramp_blocked_flow_"):
+            out[key] = float(sum(values) / max(len(values), 1))
+        elif key in {"metering_target_infeasible", "offramp_storage_binding"}:
+            out[key] = float(max(values))
+        else:
+            out[key] = float(sum(values))
+    return out
+
+
 class FreewayFollower:
     """Freeway follower solved by sequence-scored feasible projection.
 
@@ -80,11 +109,24 @@ class FreewayFollower:
             return int(np.clip(float(configured[ramp]), 0.0, float(n_segments - 1)))
         return n_segments // 2
 
-    def _ramp_upper_bounds(self, state: TrafficState, demand: DemandStep) -> tuple[np.ndarray, Dict[str, float]]:
+    def _ramp_upper_bounds(
+        self,
+        state: TrafficState,
+        demand: DemandStep,
+        previous_control: Optional[ControlAction],
+    ) -> tuple[np.ndarray, Dict[str, float]]:
         net = self.cfg.network
         dt_h = self.cfg.simulation.T_f_h
         cap_factor = getattr(demand, "incident_capacity_factor", 1.0)
         downstream_cap = net.freeway_capacity_veh_h * cap_factor
+        urban_control = previous_control or ControlAction.fixed(self.cfg)
+        green_inflow = estimate_onramp_green_release_flows(
+            state.copy(),
+            urban_control,
+            demand,
+            self.cfg,
+            interval_h=dt_h,
+        )
         upper = []
         receiving: Dict[str, float] = {}
         for ramp in net.ramps:
@@ -97,7 +139,7 @@ class FreewayFollower:
                 1.0,
             ))
             receiving[ramp] = factor
-            available = demand.ramp_arrival.get(ramp, 0.0) + state.ramp_queue.get(ramp, 0.0) / max(dt_h, 1.0e-9)
+            available = state.ramp_queue.get(ramp, 0.0) / max(dt_h, 1.0e-9) + green_inflow.get(ramp, 0.0)
             upper.append(min(
                 net.ramp_capacity_veh_h[ramp],
                 max(0.0, available),
@@ -136,12 +178,13 @@ class FreewayFollower:
         previous_control: Optional[ControlAction],
     ) -> tuple[list[Dict[str, float]], Dict[str, float]]:
         net = self.cfg.network
-        upper, receiving = self._ramp_upper_bounds(state, forecast[0])
+        upper, receiving = self._ramp_upper_bounds(state, forecast[0], previous_control)
         target = self._nuf_target_flow(leader)
         projected_total = float(np.clip(target, 0.0, float(np.sum(upper))))
 
         future_queue_pressure = np.asarray([
             state.ramp_queue.get(r, 0.0)
+            + state.urban_movement_queue.get(net.on_ramp_to_movement.get(r, ""), 0.0)
             + sum(d.ramp_arrival.get(r, 0.0) * self.cfg.simulation.T_c_h for d in forecast)
             for r in net.ramps
         ], dtype=float)
@@ -193,6 +236,146 @@ class FreewayFollower:
             out[link] = sorted(feasible, key=lambda v: (abs(v - prev), v))[:limit]
         return out
 
+    def _apply_onramp_boundary_forecast(
+        self,
+        state: TrafficState,
+        control: ControlAction,
+        demand: DemandStep,
+    ) -> Dict[str, float]:
+        """고정된 urban control에서 x_on -> w_r boundary 유입을 한 T_f만큼 예측/반영한다."""
+        ensure_urban_state(state, self.cfg)
+        net = self.cfg.network
+        dt_h = self.cfg.simulation.T_f_h
+        green_flow = estimate_onramp_green_release_flows(
+            state,
+            control,
+            demand,
+            self.cfg,
+            interval_h=dt_h,
+        )
+        for ramp, movement in net.on_ramp_to_movement.items():
+            arrival_veh = max(0.0, demand.ramp_arrival.get(ramp, 0.0)) * dt_h
+            available_x_on = max(0.0, state.urban_movement_queue.get(movement, 0.0)) + arrival_veh
+            ramp_before = max(0.0, state.ramp_queue.get(ramp, 0.0))
+            ramp_space = max(0.0, net.ramp_queue_max_veh - ramp_before)
+            green_veh = min(
+                max(0.0, green_flow.get(ramp, 0.0)) * dt_h,
+                available_x_on,
+                ramp_space,
+            )
+            state.urban_movement_queue[movement] = max(0.0, available_x_on - green_veh)
+            state.ramp_queue[ramp] = min(net.ramp_queue_max_veh, ramp_before + green_veh)
+        return green_flow
+
+    def _actual_metering_release(
+        self,
+        state: TrafficState,
+        control: ControlAction,
+        demand: DemandStep,
+    ) -> tuple[Dict[str, float], Dict[str, float]]:
+        """w_r에 실제 존재하는 차량만 metering release로 인정한다."""
+        dt_h = self.cfg.simulation.T_f_h
+        requested_release, requested_diag = compute_ramp_release_flows(
+            state,
+            control,
+            demand,
+            self.cfg,
+            include_current_arrivals=False,
+        )
+        actual_release: Dict[str, float] = {}
+        request_veh_total = 0.0
+        actual_veh_total = 0.0
+        shortfall_veh_total = 0.0
+        diag = dict(requested_diag)
+        for ramp in self.cfg.network.ramps:
+            requested_veh = max(0.0, requested_release.get(ramp, 0.0)) * dt_h
+            before = max(0.0, state.ramp_queue.get(ramp, 0.0))
+            actual_veh = min(before, requested_veh)
+            shortfall_veh = max(0.0, requested_veh - actual_veh)
+            state.ramp_queue[ramp] = max(0.0, before - actual_veh)
+            actual_release[ramp] = actual_veh / max(dt_h, 1.0e-9)
+            request_veh_total += requested_veh
+            actual_veh_total += actual_veh
+            shortfall_veh_total += shortfall_veh
+            diag[f"ramp_metering_release_request_{ramp}_veh"] = float(requested_veh)
+            diag[f"ramp_metering_release_actual_{ramp}_veh"] = float(actual_veh)
+            diag[f"ramp_metering_release_shortfall_{ramp}_veh"] = float(shortfall_veh)
+        diag["total_metering_flow"] = float(sum(actual_release.values()))
+        diag["total_no_meter_flow"] = float(max(
+            requested_diag.get("total_no_meter_flow", 0.0),
+            diag["total_metering_flow"],
+        ))
+        diag["ramp_metering_release_request_veh"] = float(request_veh_total)
+        diag["ramp_metering_releases_veh"] = float(actual_veh_total)
+        diag["ramp_metering_release_shortfall_veh"] = float(shortfall_veh_total)
+        return actual_release, diag
+
+    def _consume_lightweight_offramp_storage(
+        self,
+        state: TrafficState,
+        fw_diag: Dict[str, float],
+    ) -> None:
+        """경량 예측에서도 off-ramp storage가 계속 비워지지 않는 착시를 막는다."""
+        net = self.cfg.network
+        dt_h = self.cfg.simulation.T_f_h
+        for off_ramp in net.off_ramps:
+            link = net.off_ramp_from_freeway[off_ramp]
+            link_ratio_total = sum(
+                ratio
+                for candidate, ratio in net.off_ramp_split_ratio.items()
+                if net.off_ramp_from_freeway.get(candidate) == link
+            )
+            share = net.off_ramp_split_ratio.get(off_ramp, 0.0) / max(link_ratio_total, 1.0e-9)
+            vehicles = fw_diag.get(f"offramp_flow_{link}", 0.0) * share * dt_h
+            storage_link = net.off_ramp_storage_link[off_ramp]
+            before = max(0.0, state.urban_link_storage.get(storage_link, 0.0))
+            state.urban_link_storage[storage_link] = max(0.0, before - vehicles)
+
+    def _lightweight_transition(
+        self,
+        state: TrafficState,
+        control: ControlAction,
+        demand: DemandStep,
+    ) -> tuple[TrafficState, float, Dict[str, float]]:
+        """후보 평가용 경량 plant: urban 전체 재시뮬레이션 없이 freeway와 boundary만 전진한다."""
+        probe = state.copy()
+        ensure_urban_state(probe, self.cfg)
+        sim = self.cfg.simulation
+        total_ttt = 0.0
+        rows: list[Dict[str, float]] = []
+        onramp_green_flow_total = 0.0
+
+        for _ in range(sim.K_cf):
+            green_flow = self._apply_onramp_boundary_forecast(probe, control, demand)
+            onramp_green_flow_total += sum(green_flow.values())
+            actual_release, ramp_diag = self._actual_metering_release(probe, control, demand)
+            offramp_capacity = off_ramp_capacity_by_freeway_link(
+                probe.copy(),
+                self.cfg,
+                interval_h=sim.T_f_h,
+            )
+            fw_ttt, fw_diag = freeway_substep(
+                probe,
+                control,
+                demand,
+                self.cfg,
+                offramp_capacity_veh_h=offramp_capacity,
+                ramp_release_veh_h=actual_release,
+                ramp_release_diagnostics=ramp_diag,
+                update_ramp_queues=False,
+                include_ramp_queue_ttt=False,
+            )
+            self._consume_lightweight_offramp_storage(probe, fw_diag)
+            total_ttt += fw_ttt
+            rows.append(fw_diag)
+
+        diag = _aggregate_prediction_diagnostics(rows)
+        diag["freeway_follower_lightweight_prediction"] = 1.0
+        diag["freeway_follower_coupled_prediction"] = 0.0
+        diag["freeway_follower_boundary_forecast_active"] = 1.0
+        diag["onramp_green_forecast_flow"] = float(onramp_green_flow_total / max(sim.K_cf, 1))
+        return probe, float(total_ttt), diag
+
     def _transition_node(
         self,
         node: _SequenceNode,
@@ -214,10 +397,8 @@ class FreewayFollower:
             offsets=dict(node.last_control.offsets),
             inflow_outflow_allocation=dict(node.last_control.inflow_outflow_allocation),
         )
-        result = run_coupled_interval(probe, control, demand, self.cfg)
+        probe, fw_ttt, diag = self._lightweight_transition(probe, control, demand)
         probe.time_sec += self.cfg.simulation.control_interval
-        fw_ttt = result.freeway_ttt
-        diag = result.diagnostics
         metering_error = float(diag.get("total_metering_error", 0.0))
         receiving = float(diag.get("mean_ramp_receiving_factor", 1.0))
         queue_overflow = sum(max(0.0, q - net.ramp_queue_max_veh) for q in probe.ramp_queue.values())
@@ -367,6 +548,7 @@ class FreewayFollower:
                 "freeway_follower_beam_width": float(fc.horizon_beam_width),
                 "freeway_follower_expanded_nodes": float(evaluation.expanded_nodes),
                 "ramp_projection_first_step_capacity": float(projection["step_capacity"]),
-                "freeway_follower_coupled_prediction": 1.0,
+                "freeway_follower_coupled_prediction": 0.0,
+                "freeway_follower_lightweight_prediction": 1.0,
             },
         )

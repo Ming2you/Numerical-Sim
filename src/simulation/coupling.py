@@ -48,6 +48,35 @@ def _aggregate_freeway_diagnostics(rows: list[Dict[str, float]]) -> Dict[str, fl
     return out
 
 
+def _actual_ramp_release_flows(
+    rows: list[Dict[str, float]],
+    cfg: ExperimentConfig,
+) -> Dict[str, float]:
+    """이번 T_f 안에서 w_r에서 실제로 빠진 metering 차량만 freeway 유입으로 사용한다."""
+    interval_h = cfg.simulation.T_f_h
+    return {
+        ramp: float(sum(
+            row.get(f"ramp_metering_release_actual_{ramp}_veh", 0.0)
+            for row in rows
+        ) / max(interval_h, 1.0e-9))
+        for ramp in cfg.network.ramps
+    }
+
+
+def _with_actual_ramp_diagnostics(
+    requested_diag: Dict[str, float],
+    actual_release: Dict[str, float],
+) -> Dict[str, float]:
+    diag = dict(requested_diag)
+    actual_total = float(sum(actual_release.values()))
+    diag["total_metering_flow"] = actual_total
+    diag["total_no_meter_flow"] = float(max(
+        requested_diag.get("total_no_meter_flow", 0.0),
+        actual_total,
+    ))
+    return diag
+
+
 def run_coupled_interval(
     state: TrafficState,
     control: ControlAction,
@@ -78,6 +107,7 @@ def run_coupled_interval(
         )
 
         # freeway 한 스텝 사이에 들어있는 urban substep들을 먼저 진행해 off-ramp storage 여유를 갱신한다.
+        urban_rows_in_freeway_step: list[Dict[str, float]] = []
         for urban_offset in range(sim.K_fu):
             step_idx = start_urban_step + freeway_substep_index * sim.K_fu + urban_offset
             ur_ttt, ur_diag = urban_substep(
@@ -90,7 +120,11 @@ def run_coupled_interval(
             )
             urban_ttt += ur_ttt
             urban_rows.append(ur_diag)
+            urban_rows_in_freeway_step.append(ur_diag)
         sync_onramp_queues_to_freeway(state, cfg)
+
+        actual_ramp_release = _actual_ramp_release_flows(urban_rows_in_freeway_step, cfg)
+        actual_ramp_diag = _with_actual_ramp_diagnostics(ramp_diag, actual_ramp_release)
 
         offramp_capacity = off_ramp_capacity_by_freeway_link(
             state,
@@ -103,8 +137,8 @@ def run_coupled_interval(
             demand,
             cfg,
             offramp_capacity_veh_h=offramp_capacity,
-            ramp_release_veh_h=ramp_release,
-            ramp_release_diagnostics=ramp_diag,
+            ramp_release_veh_h=actual_ramp_release,
+            ramp_release_diagnostics=actual_ramp_diag,
             update_ramp_queues=False,
             include_ramp_queue_ttt=False,
         )

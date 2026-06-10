@@ -229,6 +229,41 @@ def _storage_occupancy(state: TrafficState, cfg: ExperimentConfig) -> float:
     return float(total)
 
 
+def estimate_onramp_green_release_flows(
+    state: TrafficState,
+    control: ControlAction,
+    demand: DemandStep,
+    cfg: ExperimentConfig,
+    interval_h: float | None = None,
+) -> Dict[str, float]:
+    """on-ramp 접근부 x_on에서 ramp queue w_r로 넘어갈 수 있는 유량을 예측한다.
+
+    Freeway follower의 경량 예측에서는 urban follower를 후보마다 다시 풀지 않고,
+    현재 green/allocation을 고정한 boundary forecast만 사용한다. 이 helper는 상태를
+    직접 갱신하지 않고 veh/h 단위의 예상 유량만 돌려준다.
+    """
+    ensure_urban_state(state, cfg)
+    net = cfg.network
+    specs = movement_specs(cfg)
+    horizon_h = cfg.simulation.T_f_h if interval_h is None else interval_h
+    release: Dict[str, float] = {}
+    for ramp, movement in net.on_ramp_to_movement.items():
+        spec = specs.get(movement)
+        if spec is None:
+            release[ramp] = 0.0
+            continue
+        current_x_on = max(0.0, state.urban_movement_queue.get(movement, 0.0))
+        arrival = max(0.0, demand.ramp_arrival.get(ramp, 0.0)) * horizon_h
+        available = current_x_on + arrival
+        cap_flow = _movement_capacity_flow(control, cfg, movement, spec)
+        green_fraction = _phase_green_fraction(control, cfg, spec)
+        green_capacity = horizon_h * green_fraction * cap_flow
+        ramp_space = max(0.0, net.ramp_queue_max_veh - state.ramp_queue.get(ramp, 0.0))
+        actual_veh = min(available, green_capacity, ramp_space)
+        release[ramp] = actual_veh / max(horizon_h, 1.0e-9)
+    return release
+
+
 def urban_substep(
     state: TrafficState,
     control: ControlAction,
@@ -259,6 +294,9 @@ def urban_substep(
     ramp_metering_release_request_veh = 0.0
     ramp_metering_releases_veh = 0.0
     ramp_metering_release_shortfall_veh = 0.0
+    ramp_metering_request_by_ramp: Dict[str, float] = {ramp: 0.0 for ramp in net.ramps}
+    ramp_metering_actual_by_ramp: Dict[str, float] = {ramp: 0.0 for ramp in net.ramps}
+    ramp_metering_shortfall_by_ramp: Dict[str, float] = {ramp: 0.0 for ramp in net.ramps}
     off_ramp_departures: Dict[str, float] = {r: 0.0 for r in net.off_ramps}
     step_idx = _urban_step_index(state, cfg) if urban_step_index is None else urban_step_index
 
@@ -297,10 +335,14 @@ def urban_substep(
             requested = max(0.0, release_flow) * sim.T_u_h
             before = max(0.0, state.ramp_queue.get(ramp, 0.0))
             actual = min(before, requested)
+            shortfall = max(0.0, requested - actual)
             state.ramp_queue[ramp] = max(0.0, before - actual)
             ramp_metering_release_request_veh += requested
             ramp_metering_releases_veh += actual
-            ramp_metering_release_shortfall_veh += max(0.0, requested - actual)
+            ramp_metering_release_shortfall_veh += shortfall
+            ramp_metering_request_by_ramp[ramp] = ramp_metering_request_by_ramp.get(ramp, 0.0) + requested
+            ramp_metering_actual_by_ramp[ramp] = ramp_metering_actual_by_ramp.get(ramp, 0.0) + actual
+            ramp_metering_shortfall_by_ramp[ramp] = ramp_metering_shortfall_by_ramp.get(ramp, 0.0) + shortfall
 
     # urban green은 접근부 저수지 x_on에서 freeway ramp 저수지 w_r로 보내는 흐름이다.
     for ramp, movement in net.on_ramp_to_movement.items():
@@ -407,6 +449,16 @@ def urban_substep(
     diagnostics["ramp_metering_release_request_veh"] = float(ramp_metering_release_request_veh)
     diagnostics["ramp_metering_releases_veh"] = float(ramp_metering_releases_veh)
     diagnostics["ramp_metering_release_shortfall_veh"] = float(ramp_metering_release_shortfall_veh)
+    for ramp in net.ramps:
+        diagnostics[f"ramp_metering_release_request_{ramp}_veh"] = float(
+            ramp_metering_request_by_ramp.get(ramp, 0.0)
+        )
+        diagnostics[f"ramp_metering_release_actual_{ramp}_veh"] = float(
+            ramp_metering_actual_by_ramp.get(ramp, 0.0)
+        )
+        diagnostics[f"ramp_metering_release_shortfall_{ramp}_veh"] = float(
+            ramp_metering_shortfall_by_ramp.get(ramp, 0.0)
+        )
     diagnostics["onramp_approach_queue_veh"] = float(sum(
         state.urban_movement_queue.get(movement, 0.0)
         for movement in net.on_ramp_to_movement.values()
@@ -452,7 +504,11 @@ def aggregate_urban_diagnostics(
         "offramp_departures_veh",
     }
     for key in set().union(*(row.keys() for row in diagnostics_rows)):
-        if key in sum_keys or (key.startswith("offramp_departures_") and key.endswith("_veh")):
+        if (
+            key in sum_keys
+            or (key.startswith("offramp_departures_") and key.endswith("_veh"))
+            or (key.startswith("ramp_metering_release_") and key.endswith("_veh"))
+        ):
             out[key] = float(sum(row.get(key, 0.0) for row in diagnostics_rows))
         elif key in {
             "movement_queue_model_active",

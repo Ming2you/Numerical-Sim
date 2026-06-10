@@ -158,3 +158,30 @@ This file records human-readable update notes for each direct push.
 - `python -B -c "<first StackelbergMPCController.decide timing probe>"`
 - `python -B -m unittest discover -s src\\tests -v`
 - Result: 37 tests passed. First default-config control decision completed in 78.7 sec.
+
+## 2026-06-10 10:19:06 +09:00
+
+### Scope
+
+- Wu et al.(2022) 문헌 PDF를 `docs/`에 추가해 integrated urban-freeway distributed control 구현 기준 문헌으로 보존했습니다.
+- on-ramp metering release를 요청량이 아니라 `w_r`에서 실제로 빠진 차량 수 기준으로 freeway METANET에 주입하도록 수정했습니다.
+- `urban_substep` diagnostics에 ramp별 metering request/actual/shortfall 차량 수를 추가했습니다.
+- Freeway follower 후보 평가에서 full `run_coupled_interval` 호출을 제거하고, 고정된 urban control로부터 on-ramp green release와 off-ramp storage capacity를 예측하는 lightweight boundary forecast 경로를 추가했습니다.
+- 2저수지 구조에 맞게 ramp metering 상한 계산에서 raw ramp demand를 바로 쓰지 않고, `x_on -> w_r` 예상 green release를 사용하도록 수정했습니다.
+- follower prediction diagnostics에 `freeway_follower_lightweight_prediction`을 추가하고, 더 이상 coupled prediction을 사용하지 않음을 표시했습니다.
+- actual ramp release만 freeway substep에 전달되는지 확인하는 regression test를 추가했습니다.
+
+### Notes
+
+- 이번 변경은 Wu et al. 방식의 “경계 상호작용 변수는 고정/예측하고 local problem은 가볍게 푸는” 방향으로 freeway follower의 계산 병목을 먼저 제거한 단계입니다.
+- 짧은 `peak_demand` smoke에서는 실행 가능성은 확인됐지만, total TTT improvement는 아직 -2.56%로 목표 8%를 만족하지 못했습니다.
+- 다음 단계에서는 objective/leader 후보와 boundary balance, metering infeasibility 처리 쪽을 조정해야 합니다.
+
+### Validation
+
+- `python -B -m py_compile src\\models\\urban_queue_model.py src\\simulation\\coupling.py src\\controllers\\freeway_follower.py`
+- `python -B -m py_compile src\\tests\\test_constraints.py`
+- `python -B -m unittest src.tests.test_constraints -v`
+- `python -B -m unittest discover -s src\\tests -v`
+- `python -B -m experiments.run_experiment --config src/config/default.yaml --scenario peak_demand --baseline fixed_signal_fixed_speed --controller stackelberg_mpc --T-total 360 --output outputs/codex_lightweight_peak_smoke`
+- Result: 38 tests passed. Short peak smoke completed in about 45 sec and printed `FAIL improvement=-2.56%`.
