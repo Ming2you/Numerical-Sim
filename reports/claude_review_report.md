@@ -1,83 +1,60 @@
 # Claude Review Report
 
-_검토 커밋: `a4910dd` "Align leader objective with N_P_crit" (직전 검토는 `a785494`)._
-_요청: 사용자가 발견한 root cause(leader objective가 임계 대신 결정변수를 penalty 기준으로 사용)
-수정이 반영됐는지, 그리고 풀 7200s run에서 −6.57%가 개선되는지. 코드 + 풀 진단 run으로 확인._
+_검토 커밋: `9ab1e44` (capacity-drop `5630e4a` + VSL probe `2b5cf64` + distributed coordinator `9ab1e44`).
+직전 검토는 `a4910dd`._
+_요청: capacity-drop(lane closure) 구현 검증 + 풀 진단 run. 코드·테스트·풀 run·stress probe로 확인._
 
 ## Verdict
 
-**FAIL (단, main metric는 처음으로 PASS)** — Total TTT **+15.14%** (≥8% 임계 초과). 4라운드만에
-**처음으로 baseline을 이겼다.** root cause 수정이 결정적이었다. 전체 verdict가 FAIL인 건
-이제 **freeway VSL/density 검증**과 boundary overflow 때문이며(아래), 핵심 문제가 urban
-setpoint에서 freeway 쪽으로 **이동**했다.
+**FAIL (main metric는 PASS 유지)** — Total TTT **+14.00%**(round-6 +15.14%에서 미세 하락).
+capacity-drop 구현은 정확하나 **현실 시나리오에선 무발화(dormant)**, 강제 발화시켜도 **VSL이
+TTT를 개선하지 않음**. 즉 capacity-drop은 올바르지만 이 망에선 **저효용(low-ROI)** 이다.
 
-## ✅ root cause 수정 검증 (사용자 발견 → 정확히 반영)
+## ✅ capacity-drop 구현 — 정확 (코드+테스트 검증)
 
-- **스펙 대칭 복원**: `docs/spec/04_controller.md:39`이 `n_P(t) − n_P_crit`으로 수정(이전 `n_P_star` 오타).
-  freeway 항 `rho − rho_crit`과 대칭.
-- **코드**: `leader.py:182` `target_penalty += w_P·max(0, n_p − lc.N_P_crit_veh)` — 고정 임계 기준
-  (자기참조 `N_P_star` 제거). freeway `max(0, rho − rho_crit)`과 대칭.
-- **config**: `N_P_crit_veh: 172.225`(= 캘리브레이션 n_crit), 밴드 factor `[0.9, 1.05]`, 그리고
-  `_np_candidate_bounds`가 누적 ≥ crit이면 상한을 crit로 캡(`leader.py:65-66`) — overshoot 차단.
-- **결과**: run_log에서 N_P_star 후보가 **172.2로 수렴**(N_P_max=N_P_min=172.2). round-5의 임의
-  목표 333이 사라지고 목표가 임계와 일치. objective_mode도 spec 기본형 `state_accumulation`으로.
+- **N 보존**: `freeway_substep`이 `N=ρ·L·λ`를 보존량으로 다룸(`vehicles→rho_for_flow→vehicle_raw→rho_new`).
+  λ 변화 시 차량 증발 없음. ρ_max 클리핑 제거(차량 삭제 방지).
+- **속도식이 `rho_for_flow`(λ 보정 밀도) 사용**: `effective_desired_speed_kmh(rho,…)`·METANET 속도식
+  모두 λ 보정 밀도 → λ↓ → 밀도↑ → 속도↓ → capacity drop이 실제로 문다. (제가 강조한 핵심 반영)
+- **테스트**: 차량 보존(λ 2→1.65), lambda_eff 경계값, lane-corrected speed, VSL 속도 반응 — 49개 통과.
 
-## 풀 진단 run 결과 (peak_demand 7200s, `outputs/claude_diag_peak_full_r6/`)
+## ✅ 메커니즘 end-to-end — capacity drop 발화 시 VSL 활성 (stress probe)
 
-| 지표 | baseline | r5 (−6.57%) | **r6 (+15.14%)** |
-|---|---:|---:|---:|
-| **Total TTT** | 2889.8 | 3079.6 | **2452.1 (+15.14%, PASS)** |
-| Urban TTT | 2702.0 | 2881.6 | **2184.5** (대폭 개선) |
-| Freeway TTT | 187.8 | 198.0 | 267.7 (악화 ↓) |
-| Boundary CV | 0.145 | 0.228 | **0.064** (baseline보다 좋음) |
-| corridor_delay_change | +179.6 | — | **−517.5** (progression 개선) |
-| boundary_balance_improvement | — | −56.8% | **+56.1%** (양전환) |
+Codex stress probe(`capacity_drop_vsl_probe`, split 0.90·storage 20·urban_avg_speed 3·lane_reduction 0.75):
+- `capacity_drop_active_steps=4`, `vsl_active_steps=4`, `overlap_steps=4`, `lambda_min=1.25`.
+→ **off-ramp가 실제로 막히면 capacity drop이 발화하고, follower가 VSL을 활성화함.** "capacity drop이
+VSL을 의미있게 만드는가"의 메커니즘은 입증됨.
 
-urban이 극적으로 좋아졌다(TTT −19%, CV·corridor·balance 모두 baseline 우위). root cause 수정 하나로
-round-5에서 본 "목표 333 → 누적 폭주" 메커니즘이 사라졌다.
+## ★ 그러나 두 가지 한계 (실험적 사실)
 
-## ❌ 남은 FAIL — 문제가 freeway로 이동 + 과포화 artifact
+1. **현실 시나리오에선 무발화.** 풀 peak_demand run + 내 spill-back probe(split 0.45·storage 40·고수요)
+   모두 **off-ramp 점유율 정확히 0, `lambda_eff=2.0`, `capacity_drop_active=0`**. off-ramp는 urban이
+   바로 비워서 **현실적 방출 속도에선 절대 안 막힘**. Codex가 발화시키려고 `urban_avg_speed=3km/h`
+   (비현실적)까지 낮춰야 했음. → **realistic peak_demand에선 VSL-off가 정상**이고, freeway 혼잡은
+   on-ramp 합류 → ramp metering 영역. VSL validation FAIL은 비-spillback 시나리오에선 false alarm.
+2. **VSL이 켜져도 TTT 개선 안 함.** stress probe: proposed `250.111` > proposed_without_vsl `249.763`
+   > baseline `249.168`. VSL 활성이 **오히려 미세하게 나쁨**. 이유: off-ramp capacity drop은
+   **urban이 해소**하는 거라 VSL은 상류 큐를 옮길 뿐 off-ramp-제한 용량을 회복 못 함 → throughput
+   이득 없음(자유류 차량만 늦춤). 즉 off-ramp-only drop에선 VSL이 transient 관리는 해도 TTT를 못 줄임.
 
-1. **★ 신규 1순위: freeway가 악화됐는데 VSL이 안 켜짐.** freeway TTT 188→268(+43%),
-   `density_exceedance_duration=23`(freeway가 rho_crit 초과)인데 **`vsl_active_steps=0`**.
-   dominant failure = `freeway_density_or_vsl_validation_failed`. 원인 해석: urban 처리량이
-   좋아지며 **on-ramp로 더 많은 흐름이 freeway에 실림** → freeway 혼잡↑. 그런데 freeway
-   follower의 VSL이 활성화 임계(`vsl_activation_density_ratio=0.95`)나 후보 로직에서 안 걸림.
-   CLAUDE.md §5 기준 "density 초과인데 VSL 미활성 = controller-objective 실패". **다음 라운드 핵심.**
-2. **boundary_balance FAIL은 일부 과포화 artifact.** `CV_boundary=0.064`(개선)인데
-   `OverflowRatio_boundary=0.5`, `urban_accumulation_abs_error_veh=765.7`,
-   `urban_net_inflow_tracking_error=701`로 FAIL. 누적이 ~1000(target 172의 ~6배)로 여전히 높음 —
-   이는 **peak_demand가 demand>>capacity인 과포화**라 누적을 172에 못 잡는 시나리오 성질이지
-   컨트롤러 결함이 아니다(그럼에도 baseline보다 처리량은 우수). **제어 가능한(비포화) 시나리오에서
-   재평가** 필요(이전 권고 유지).
-3. metering 여전히 느슨(mean error 475→262 개선, max 2235) — freeway 부하 증가와 맞물림.
+## 결론 / 권고
 
-## ★ 다음 요구사항 2건 (제안 문서 작성 완료, Codex 한 번에 구현)
+- capacity-drop은 **정확히 구현·검증**됐고 VSL 활성 메커니즘도 작동. 하지만 이 망에선
+  **(a) 현실 수요에선 off-ramp가 안 막혀 무발화, (b) 발화해도 VSL이 TTT 개선 못 함** → **저효용.**
+- **realistic peak_demand에선 VSL-off가 맞는 거동**이다. validation을 "off-ramp spill-back이 실제
+  발생할 때만 VSL 활성 기대"로 바꾸거나, VSL FAIL을 이 시나리오에선 false alarm으로 처리할 것.
+- **VSL이 TTT에 도움되려면**: off-ramp 큐가 through 교통/merge를 막는 **spillback 외부효과**가
+  지배적이어야 하거나, **merge(on-ramp)측 capacity drop**(VSL이 직접 해소 가능)이 필요. 현재
+  off-ramp-only drop으론 한계. — 단 freeway TTT(~270)가 urban(~2200)에 비해 작아 **ROI 낮음**.
+- **높은 ROI 다음 작업**: ① urban 측(지배적 TTT), ② **distributed coordinator(#2, 1차 구현됨)**
+  검증 — genuine per-agent Nash. VSL 강도/penalty 튜닝은 후순위.
 
-VSL이 안 켜지는 근본 원인은 "이 METANET에 capacity drop이 없어 VSL이 켜질 유인이 없음"이고,
-follower는 여전히 2-블록 중앙집중이다. 두 제안 문서를 만들어 두었다 — Codex가 spec 통합 + 코드
-구현을 함께 수행할 것. **우선순위: ① capacity-drop(성능 직결) → ② 분산화(아키텍처).**
+## 다음 검토 대상 — distributed coordinator (이번에 1차 landing)
 
-- **① capacity-drop**: [docs/capacity_drop_proposal.md](../docs/capacity_drop_proposal.md) — Wu(2022)
-  식(22) off-ramp spill-back 차로수 감소(`lambda_eff`)를 마지막 세그먼트에 적용해 mainline
-  through-capacity까지 떨어뜨림 → VSL/metering이 통합적으로 의미를 가짐. plant·예측 둘 다 적용 필수.
-- **② follower 공간 분산화**: [docs/distributed_followers_proposal.md](../docs/distributed_followers_proposal.md)
-  — urban 4(A/C/D/F) + freeway 2(FW_W/FW_E) agent로 분해, `NashSolver`→Wu §IV-D `DistributedCoordinator`
-  (이웃 결합변수 고정+교환). 이 망 크기엔 속도 이득 없음 — 가치는 genuine Nash·연구 충실도·확장성.
-
-## Recommended Fixes for Codex (우선순위)
-
-- **① (신규 1순위) freeway VSL/metering이 새로 생긴 freeway 혼잡에 반응하게.** density_exceedance=23인데
-  VSL 0회 활성 — 근본 원인은 위 capacity-drop 제안(VSL이 켜질 유인 부재). capacity-drop 도입 후
-  VSL/metering이 freeway 밀도에 반응하는지 점검. urban 개선으로 freeway에 실린 부하(+43%)를 받아야 함.
-- **② 제어 가능한 시나리오로 재평가** — peak_demand는 urban 과포화(누적~1000)라 accumulation 추적·
-  overflow 지표가 구조적으로 FAIL. demand가 용량 근처인 시나리오로 perimeter 효과를 공정 판정.
-- **③ metering N_UF 추적 안정화**(mean error 262, max 2235) — ①과 연동.
-- (유지) green damping/offset 도시링크 기반 — 단 corridor_delay가 이미 −517로 좋아져 우선순위 낮음.
-
-## Should Codex Rerun Simulation?
-
-**①(freeway VSL 반응) 수정 후 재실행.** main metric는 이미 +15.14%로 PASS이므로, 남은 건
-freeway density/VSL 검증과 boundary overflow다. ①을 고치면 freeway TTT 악화가 줄어 전체 verdict가
-PASS로 갈 가능성이 큼. 그리고 ②(비포화 시나리오)로 boundary 지표가 artifact인지 확인할 것.
-**이번 라운드는 setpoint root cause가 닫혔고 컨트롤러가 처음으로 baseline을 이긴, 결정적 전환점이다.**
+`distributed_coordinator.py`가 추가됨(`mpc.follower_solver_mode: distributed`, 기본 `two_block`).
+- ✅ agent partition·이웃맵을 config에서 **자동 유도**(검증함: U_D=[F_W,F_E], F_E=[U_D,U_F] 올바름).
+  proposal doc의 손-작성 이웃맵 오류는 코드와 무관(문서만 정정 push 완료).
+- Codex 자인 남은 차이: urban agent가 MILP 아님(기존 휴리스틱서 자기 변수만 추출), freeway agent SQP
+  아님, agent별 N_P_star 분담 약해 distributed smoke의 boundary tracking 실패.
+- → 다음 라운드: `follower_solver_mode: distributed`로 풀 run 돌려 (a) coordinator가 실제 agent별
+  local solve+ỹ 교환으로 도는지, (b) 2-블록 대비 동등 이상인지, (c) genuine 상호 best-response 확인.
