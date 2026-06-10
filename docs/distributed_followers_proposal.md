@@ -21,11 +21,18 @@
 
 ## 2. agent별 결정 / 상태 / 목적
 
+> ★ green **총량**은 agent가 직접 안 정한다. 별도 **Inflow-Outflow Allocation Module**(perimeter
+> 전체, leader N_P로 decision당 1회)이 §3.2 density-balancing으로 movement별 green 기준값 `g_{i,m}`(=R_U)을
+> 산출 → 각 urban agent는 그 기준의 **국소 미세조정 + offset**만 한다. 상세: [inflow_outflow_allocation_proposal.md](inflow_outflow_allocation_proposal.md).
+> (균등화는 gate들 *사이*의 문제라 교차로 1개 agent로 쪼개면 깨짐 — 그래서 모듈 분리.)
+
 **Urban agent U_i** (i ∈ {A,B,C,D,F})
-- 결정: 신호 i의 green split·offset φ_i·movement allocation.
+- 결정: R_U의 `g_{i,m}`를 setpoint로 받아 **green 미세조정 `g* ∈ [g_{i,m}−δ, g_{i,m}+δ]`(밴드폭 δ 파라미터)
+  + offset φ_i**. (movement allocation 자체는 안 풂 — 모듈이 이미 줌.)
 - 상태: 자기 교차로 movement 큐(grid 진입/통과/회전) + 자기 접근부 storage + (D/F면) x_on(on-ramp 회전 큐)·off-ramp storage.
 - 목적(자기 TTS): 자기 movement 큐 + **x_on**(접근부) + **off-ramp storage/배출** + 제어 평활.
-- 제약: green 범위·cycle 합, 경계/순유입 몫.
+- 제약: `g*`는 `g_{i,m}±δ` 범위·cycle 합. **순누적 보존**: offset φ는 net inflow를 안 바꾸므로
+  agent는 offset 위주 + green은 작은 δ로 → Allocation의 Eq 10(`Σ(in−out)=N_P`)이 fine-tune 후에도 유지.
 
 **Freeway agent F_{m,s}** (세그먼트 s of link m)
 - 결정: 세그먼트 VSL. (merge 세그먼트 W1/E1: + 램프 metering. off-ramp 세그먼트 W2/E2: + off-ramp 경계.)
@@ -52,6 +59,7 @@ U_A↔U_B, U_B↔U_C, U_A↔U_D, U_C↔U_F,  (U_D–E–U_F, U_B–E–…: E �
 
 ## 4. 조율 루프 — `DistributedCoordinator` (Wu §IV-D 6단계, `NashSolver` 대체)
 ```text
+# (Nash 진입 전 1회) Allocation Module: g_{i,m} ← solve §3.2(N_P)   # perimeter, decision당 1회
 ỹ ← 직전 제어주기 값으로 초기화
 for s in 1..S_max:
     for agent in (U_A..U_F, F_W0..F_E2)  (병렬 가능):
@@ -68,10 +76,12 @@ for s in 1..S_max:
 
 ## 5. 재사용 / 신규
 - 재사용: 경량 freeway 예측(`_lightweight_transition`)을 **세그먼트 1개로 제한**해 freeway-agent local solve로;
-  urban green/offset/alloc 로직을 **교차로 1개로 제한**해 urban-agent local solve로. 2저수지(x_on/w_r)는 plant에 이미 있음.
-- 신규: `build_agent_specs` **재작성**(on-ramp를 제어신호=phase 기준으로 묶고, E 제외, 세그먼트 agent 생성),
+  urban green/offset 로직을 **교차로 1개로 제한**해 urban-agent local solve로. 2저수지(x_on/w_r)는 plant에 이미 있음.
+- 신규: **Inflow-Outflow Allocation Module**(perimeter §3.2, decision당 1회 → `g_{i,m}`. 별도 doc),
+  `build_agent_specs` **재작성**(on-ramp를 제어신호=phase 기준으로 묶고, E 제외, 세그먼트 agent 생성),
   `CouplingVars` 인터페이스, `DistributedCoordinator`.
-- 리더: N_P_star(누적목표)·N_UF_star를 agent별 몫으로 분배.
+- 리더: N_P→Allocation Module이 `g_{i,m}` 기준값으로 변환(agent별 몫). N_UF_star는 freeway agent별 분배.
+  (agent별 N_P 직접 분배가 아니라 **movement별 green 기준값**으로 내려주는 게 핵심.)
 
 ## 6. 진단 / 검증
 - 진단: `nash_per_agent_active`, agent별 `local_objective`, `coupling_residual`(‖Δỹ‖), `s_iterations`,
