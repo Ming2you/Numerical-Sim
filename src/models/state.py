@@ -320,7 +320,11 @@ class LeaderConfig:
     w_L: float = 0.05
     N_P_star_range: List[float] = field(default_factory=lambda: [0.0, 500.0])
     N_UF_star_range: List[float] = field(default_factory=lambda: [0.0, 6000.0])
+    N_P_star_unit: str = "veh"
     N_UF_star_unit: str = "veh_per_hour"
+    N_P_feedback_horizon_h: float = 0.5
+    N_P_feedback_flow_limit_veh_h: float = 800.0
+    N_UF_feasible_margin: float = 0.95
     non_convergence_penalty: float = 500.0
     metering_congestion_weight: float = 0.45
     metering_queue_weight: float = 4.0
@@ -400,6 +404,8 @@ class ExperimentConfig:
 
     def validate(self) -> None:
         self.simulation.validate()
+        if self.leader.N_P_star_unit != "veh":
+            raise ValueError("leader.N_P_star_unit must be veh.")
         if self.leader.N_UF_star_unit not in {"veh_per_hour", "veh_per_control_interval"}:
             raise ValueError("leader.N_UF_star_unit must be veh_per_hour or veh_per_control_interval.")
 

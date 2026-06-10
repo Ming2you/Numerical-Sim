@@ -80,6 +80,7 @@ class MetanetEquationTests(unittest.TestCase):
         self.assertEqual(cfg.simulation.K_fu, 2)
         self.assertEqual(cfg.simulation.K_cf, 18)
         self.assertEqual(cfg.simulation.K_cu, 36)
+        self.assertEqual(cfg.leader.N_P_star_unit, "veh")
         self.assertEqual(cfg.leader.N_UF_star_unit, "veh_per_hour")
         self.assertGreaterEqual(cfg.freeway_follower.horizon_beam_width, 1)
         self.assertGreaterEqual(cfg.freeway_follower.horizon_ramp_candidate_limit, 1)
@@ -95,6 +96,10 @@ class MetanetEquationTests(unittest.TestCase):
     def test_config_rejects_unknown_nuf_unit(self):
         with self.assertRaises(ValueError):
             ExperimentConfig.from_file("src/config/default.yaml", {"leader": {"N_UF_star_unit": "vehicles"}})
+
+    def test_config_rejects_unknown_np_unit(self):
+        with self.assertRaises(ValueError):
+            ExperimentConfig.from_file("src/config/default.yaml", {"leader": {"N_P_star_unit": "veh_per_hour"}})
 
     def test_traffic_state_stores_freeway_flow(self):
         cfg = ExperimentConfig.from_file("src/config/default.yaml")

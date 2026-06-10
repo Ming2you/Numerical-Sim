@@ -1,154 +1,79 @@
-# Codex Run Report
+# Codex 실행 리포트
 
-## Status
+## 현재 상태
 
-The controller objective and activation diagnostics were updated, then baseline and proposed simulations were rerun with `peak_demand` demand doubled.
+현재 모델은 아직 인증 기준을 만족하지 못합니다.
 
-Final verdict: **FAIL**.
+Claude가 `ee85ee1` 기준으로 `peak_demand`, `7200 s` full diagnostic run을 수행했고,
+결과는 proposed Stackelberg MPC가 fixed baseline보다 **Total TTT 기준 10.64% 악화**였습니다.
 
-The proposed controller now activates VSL and ramp metering, but Total TTT is still worse than baseline by **0.33%**, which is below the required **8.00%** improvement threshold.
+이번 run의 핵심 의미는 계산 병목이 아니라 다음 병목을 확인했다는 점입니다.
+Freeway follower 경량화 이후 full run은 가능해졌고, 이제 실패 원인은 주로 urban setpoint와
+urban follower 제어 로직으로 좁혀졌습니다.
 
-## What Changed Before This Run
+## 현재 Full Diagnostic 결과
 
-- Added activation-based review requirements to `CLAUDE.md`.
-- Added `metering_active_steps` and `vsl_active_steps` to control validation metrics.
-- Added congestion-aware `N_UF_star` heuristic candidates for the leader.
-- Added leader objective penalties for:
-  - excessive `N_UF_star` when freeway density is high
-  - overly restrictive `N_UF_star` when ramp queues are high
-- Relaxed VSL activation to use `90 km/h` rather than aggressive `80 km/h` in ordinary congestion.
-
-## Why `N_UF_star` Previously Stayed at 6000
-
-`N_UF_star` is selected by the leader from candidate values. Before the objective change, the leader objective mainly saw:
-
-- lower ramp metering target -> larger ramp queues -> higher TTT
-- full ramp metering target -> no ramp queue penalty
-
-The simplified freeway model did not give enough objective credit for reducing freeway inflow under congestion. Therefore, `N_UF_star = 6000`, equal to total ramp capacity, was repeatedly selected. In that state, ramp metering had no practical meaning because all ramps were effectively fully open.
-
-The revised leader objective now includes congestion-aware penalties and heuristic candidates around a density/queue-based `N_UF_star`, so `N_UF_star` can move below capacity when congestion is high.
-
-## Run Configuration
-
-- Scenario: `peak_demand_2x`
-- Demand scaling relative to original `peak_demand`:
-  - `urban_scale`: `1.25 -> 2.50`
-  - `freeway_scale`: `1.20 -> 2.40`
-  - `ramp_scale`: `1.25 -> 2.50`
+- 검토 커밋: `ee85ee1`
+- 시나리오: `peak_demand`
 - Baseline mode: `fixed_signal_fixed_speed`
 - Controller mode: `stackelberg_mpc`
-- Config: `src/config/default.yaml`
-- Scenario config: `outputs/demand_2x_scenarios.yaml`
 - Simulation horizon: `7200 s`
-- Control interval: `180 s`
-- Random seed: `42`
-- Output directory: `outputs/codex_run_peak_demand_2x_objective_v6`
+- Claude 확인 출력: `outputs/claude_diag_peak_full/`
 
-## Command Run
+| 지표 | Baseline | Proposed | 결과 |
+|---|---:|---:|---:|
+| Total TTT | 2889.8 | 3197.3 | -10.64% |
+| Freeway TTT | 187.8 | 195.8 | 소폭 악화 |
+| Urban TTT | 2702.0 | 3001.5 | +11.1% 악화 |
+| Boundary CV | 0.145 | 0.305 | 악화 |
 
-```powershell
-& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m experiments.run_experiment --config src/config/default.yaml --scenarios-config outputs/demand_2x_scenarios.yaml --scenario peak_demand_2x --baseline fixed_signal_fixed_speed --controller stackelberg_mpc --output outputs/codex_run_peak_demand_2x_objective_v6
-```
+## 해결된 부분
 
-## Main Metric Result
+- Freeway follower 후보 평가에서 full `run_coupled_interval` 재시뮬레이션을 제거했습니다.
+- 후보 평가는 고정 urban control에서 on-ramp/off-ramp boundary만 예측하는 lightweight plant를 사용합니다.
+- on-ramp metering은 요청량이 아니라 `w_r`에서 실제 drain된 차량만 freeway에 주입합니다.
+- 관련 regression test가 추가됐고, `python -m unittest discover -s src/tests` 기준 38개 테스트가 통과했습니다.
+- 첫 default MPC decision 실측은 약 `78.7 s -> 17.5 s`로 감소했습니다.
 
-| Metric | Baseline | Proposed | Improvement | Pass |
-|---|---:|---:|---:|---:|
-| Total TTT | 17203.570 | 17261.157 | -0.33% | No |
-| Freeway TTT | 2730.566 | 2788.152 | -2.11% | No |
-| Urban TTT | 14473.005 | 14473.005 | 0.00% | No |
+## 현재 실패 진단
 
-The required improvement is `>= 8.00%`; the observed result is `-0.3347%`.
+1. `peak_demand`에서는 freeway가 거의 혼잡하지 않아 VSL이 한 번도 활성화되지 않습니다.
+   - `vsl_active_steps = 0`
+   - freeway density exceedance도 사실상 없습니다.
+   - 이 시나리오는 freeway 제어 검증보다는 urban 제어 진단에 가깝습니다.
 
-## Control Activation
+2. Leader의 `N_UF_star`가 초기에 추적 불가능한 값을 선택합니다.
+   - 예: `4000`, `6000 veh/h`
+   - 실제 ramp release capacity와 downstream receiving을 반영하지 않아 metering residual이 커집니다.
 
-| Control | Active Steps | Evidence |
-|---|---:|---|
-| Ramp metering | 2 / 40 | `N_UF_star` selected values: `5325.738`, `5935.655`, `6000.000` |
-| VSL | 39 / 40 | minimum VSL was `90 km/h` on both freeway directions |
+3. 가장 큰 문제는 `N_P_star` 의미가 코드 내에서 불일치한다는 점입니다.
+   - leader objective에서는 `N_P_star`를 urban accumulation, 즉 누적 차량 수처럼 사용합니다.
+   - urban follower와 diagnostics에서는 `N_P_star`를 net inflow, 즉 `veh/h`처럼 사용했습니다.
+   - 같은 값이 한쪽에서는 `veh`, 다른 쪽에서는 `veh/h`로 해석되어 urban control target이 물리적으로 꼬였습니다.
 
-Ramp metering did activate materially in the early part of the run:
+4. Urban follower가 baseline보다 boundary balance를 악화시킵니다.
+   - Boundary CV가 `0.145 -> 0.305`로 증가했습니다.
+   - MaxMin boundary queue가 시간에 따라 누적 증가했습니다.
+   - offset control도 corridor delay를 증가시키는 징후가 있습니다.
 
-- min R1 metering: `1189.536 veh/h`
-- min R2 metering: `1257.796 veh/h`
-- min R3 metering: `1378.407 veh/h`
-- min R4 metering: `1500.000 veh/h`
+## 이번 구현 방향
 
-So the latest failure is **not** because controls never activate. It is because the activated controls do not yet produce a positive Total TTT response in the simplified model.
+이번 단계의 수정 범위는 다음과 같습니다.
 
-## Boundary Queue Balancing
+1. no-control 또는 fixed baseline demand sweep으로 도시 MFD calibration scaffold를 만듭니다.
+2. `N_P_star`를 도시 목표 누적 차량 수, 단위 `veh`로 통일합니다.
+3. Urban follower는 `N_P_star`를 직접 net inflow target으로 쓰지 않고, 현재 urban accumulation과 목표 accumulation의 차이에서 허용 net inflow를 유도합니다.
+4. `N_UF_star` 후보는 total ramp capacity가 아니라 현재 ramp queue, on-ramp green forecast, downstream receiving, mainline density 여유를 반영한 feasible capacity 기반으로 만듭니다.
 
-| Boundary Metric | Baseline | Proposed | Change | Pass |
-|---|---:|---:|---:|---:|
-| CV_boundary | 0.1124 | 0.1106 | 1.56% improvement | Partial |
-| MaxMin_boundary | 797.989 | 787.624 | Reduced | Partial |
-| OverflowRatio_boundary | 1.000 | 1.000 | No improvement | No |
-| Net inflow tracking error | 0.000 | 264.595 | Worse | No |
+## 검증 계획
 
-Boundary queue dispersion improved slightly by CV, but boundary validation does **not** pass because overflow ratio remained at `1.0` and net inflow tracking error exceeded `eps_U = 100`.
+1. Unit tests
+2. 짧은 `peak_demand` smoke, 예: `T_total=360`
+3. `peak_demand 7200 s` full rerun
+4. `oversaturated_demand` 또는 `incident_or_capacity_drop`에서 VSL/ramp metering activation 별도 확인
 
-## Control Validation Summary
+## 결론
 
-| Control | Pass | Key Result |
-|---|---:|---|
-| Ramp metering | No | active steps = 2, mean total metering error = 4.114, max violation = 130.000, ramp queue overflow duration = 27 |
-| VSL | Yes | active steps = 39, feasible rate = 1.000, smoothness violations = 0 |
-| Green time allocation | Yes | cycle sum error = 0, min/max violations = 0 |
-| Offset control | Yes | range violations = 0, smoothness violations = 0 |
-| Boundary allocation | No | net inflow tracking error = 264.595 |
-
-## Interpretation
-
-The objective update fixed the earlier non-activation problem:
-
-- `N_UF_star` is no longer always equal to total ramp capacity.
-- Ramp metering activates in early congested steps.
-- VSL activates for most congested steps.
-
-However, Total TTT still does not improve. The proposed controller increases freeway TTT by about `57.587 veh*h`, while urban TTT is unchanged. This suggests the simplified model still does not reward freeway inflow control enough to offset ramp queue and speed-control effects.
-
-The next issue is therefore not "controls are off"; it is "controls are on, but the plant/objective coupling is not yet producing useful system-level benefit."
-
-## Diagnostics
-
-Detected failure modes:
-
-- `main_improvement_below_target`
-- `ramp_metering_or_queue_validation_failed`
-- `boundary_queue_balance_failed`
-
-Dominant failure mode:
-
-- `main_improvement_below_target`
-
-Recommended next modifications:
-
-- Strengthen the coupling between ramp metering and downstream freeway density/speed recovery.
-- Add explicit ramp queue overflow penalty to the leader objective, not only follower objective.
-- Revisit the simplified VSL model so VSL can reduce density exceedance or speed-drop cost instead of only capping desired speed.
-- Strengthen the coupling between green allocation, boundary discharge, and urban TTT.
-- Recheck whether the baseline is too permissive under oversaturated demand.
-
-## Comparison Across Runs
-
-| Run | Baseline Total TTT | Proposed Total TTT | Improvement | Activation Summary |
-|---|---:|---:|---:|---|
-| Original `peak_demand` before objective update | 5888.578 | 5886.190 | 0.04% | weak/no practical activation |
-| `peak_demand_2x` before objective update | 17203.570 | 17203.570 | 0.00% | VSL inactive, ramp metering effectively full open |
-| `peak_demand_2x` after objective update | 17203.570 | 17261.157 | -0.33% | VSL active 39/40, ramp metering active 2/40 |
-
-## Output Artifacts
-
-- `outputs/codex_run_peak_demand_2x_objective_v6/report.md`
-- `outputs/codex_run_peak_demand_2x_objective_v6/attempt_0/metrics_summary.json`
-- `outputs/codex_run_peak_demand_2x_objective_v6/attempt_0/diagnostics.json`
-- `outputs/codex_run_peak_demand_2x_objective_v6/attempt_0/baseline/run_log.csv`
-- `outputs/codex_run_peak_demand_2x_objective_v6/attempt_0/proposed/run_log.csv`
-- `outputs/codex_run_peak_demand_2x_objective_v6/attempt_0/proposed/control_timeseries.csv`
-- `outputs/codex_run_peak_demand_2x_objective_v6/attempt_0/proposed/state_timeseries.csv`
-
-## Conclusion
-
-The latest controller version makes `N_UF_star` meaningful enough to activate ramp metering and VSL, but it still fails the 8% Total TTT criterion. The next development step should improve the plant/objective coupling so activated controls can actually reduce freeway density exceedance, ramp overflow, or urban accumulation rather than merely changing feasible control values.
-
+계산 병목은 닫혔습니다. 다음 병목은 setpoint calibration과 urban accumulation control입니다.
+이제 목표는 "controller가 켜지는지"가 아니라 "물리적으로 의미 있는 target을 주고,
+fixed baseline보다 urban queue balance를 악화시키지 않는지"를 확인하는 것입니다.

@@ -229,6 +229,20 @@ def _storage_occupancy(state: TrafficState, cfg: ExperimentConfig) -> float:
     return float(total)
 
 
+def urban_accumulation_feedback_flow(
+    state: TrafficState,
+    cfg: ExperimentConfig,
+    target_accumulation_veh: float,
+) -> float:
+    """목표 도시 누적(N_P_star, veh)을 추적하기 위한 허용 순유입(veh/h)을 계산한다."""
+    ensure_urban_state(state, cfg)
+    error_veh = float(target_accumulation_veh) - state.total_urban_vehicles()
+    feedback_h = max(float(cfg.leader.N_P_feedback_horizon_h), 1.0e-9)
+    raw_flow = error_veh / feedback_h
+    limit = max(0.0, float(cfg.leader.N_P_feedback_flow_limit_veh_h))
+    return float(np.clip(raw_flow, -limit, limit))
+
+
 def estimate_onramp_green_release_flows(
     state: TrafficState,
     control: ControlAction,
@@ -285,6 +299,7 @@ def urban_substep(
     }
     overflow_count = 0.0
     projection_count = 0.0
+    total_departures_veh = 0.0
     inbound_service_veh = 0.0
     outbound_service_veh = 0.0
     onramp_arrivals_veh = 0.0
@@ -394,6 +409,7 @@ def urban_substep(
         spec = specs[movement]
         before = state.urban_movement_queue.get(movement, 0.0)
         actual = min(before, departed)
+        total_departures_veh += actual
         state.urban_movement_queue[movement] = max(0.0, before - actual)
         receiving_link = str(spec.get("receiving_link", ""))
         if receiving_link in state.urban_link_storage:
@@ -432,10 +448,16 @@ def urban_substep(
     inbound = inbound_service_veh / max(sim.T_u_h, 1.0e-9)
     outbound = outbound_service_veh / max(sim.T_u_h, 1.0e-9)
     net_inflow = inbound - outbound
+    net_inflow_target = urban_accumulation_feedback_flow(state, cfg, control.N_P_star)
     diagnostics["inbound_service_veh"] = float(inbound_service_veh)
     diagnostics["outbound_service_veh"] = float(outbound_service_veh)
+    diagnostics["urban_total_departures_veh"] = float(total_departures_veh)
     diagnostics["net_inflow"] = float(net_inflow)
-    diagnostics["net_inflow_tracking_error"] = abs(net_inflow - control.N_P_star)
+    diagnostics["net_inflow_target"] = float(net_inflow_target)
+    diagnostics["urban_accumulation_veh"] = float(state.total_urban_vehicles())
+    diagnostics["urban_accumulation_target_veh"] = float(control.N_P_star)
+    diagnostics["urban_accumulation_error_veh"] = float(state.total_urban_vehicles() - control.N_P_star)
+    diagnostics["net_inflow_tracking_error"] = abs(net_inflow - net_inflow_target)
     diagnostics["B_in"] = safe_balance_index(state.boundary_queue[l] for l in net.boundary_in_links)
     diagnostics["B_out"] = safe_balance_index(state.boundary_queue[l] for l in net.boundary_out_links)
     diagnostics.update(boundary_indices(state.boundary_queue.values(), net.boundary_queue_max_veh))
@@ -479,19 +501,23 @@ def aggregate_urban_diagnostics(
     """여러 `urban_substep` diagnostics를 하나의 control/freeway interval 값으로 묶는다."""
     diagnostics_rows = [dict(row) for row in rows]
     if not diagnostics_rows:
+        net_inflow_target = 0.0
         return {
             "movement_queue_model_active": 1.0,
             "urban_storage_active": 1.0,
             "urban_substep_active": 1.0,
             "onramp_two_reservoir_active": 1.0,
             "net_inflow": 0.0,
-            "net_inflow_tracking_error": abs(control.N_P_star),
+            "net_inflow_target": net_inflow_target,
+            "urban_accumulation_target_veh": float(control.N_P_star),
+            "net_inflow_tracking_error": abs(net_inflow_target),
         }
 
     out = dict(diagnostics_rows[-1])
     sum_keys = {
         "inbound_service_veh",
         "outbound_service_veh",
+        "urban_total_departures_veh",
         "queue_overflow_count",
         "movement_queue_projection_veh",
         "onramp_arrivals_veh",
@@ -522,8 +548,9 @@ def aggregate_urban_diagnostics(
     inbound = out.get("inbound_service_veh", 0.0) / max(horizon_h, 1.0e-9)
     outbound = out.get("outbound_service_veh", 0.0) / max(horizon_h, 1.0e-9)
     net_inflow = inbound - outbound
+    net_inflow_target = float(out.get("net_inflow_target", 0.0))
     out["net_inflow"] = float(net_inflow)
-    out["net_inflow_tracking_error"] = abs(net_inflow - control.N_P_star)
+    out["net_inflow_tracking_error"] = abs(net_inflow - net_inflow_target)
     return out
 
 

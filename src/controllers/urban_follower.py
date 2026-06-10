@@ -8,7 +8,13 @@ import numpy as np
 from src.controllers.leader import LeaderAction
 from src.models.demand import DemandStep
 from src.models.state import ControlAction, ExperimentConfig, TrafficState
-from src.models.urban_queue_model import boundary_indices, ensure_urban_state, movement_specs, safe_balance_index
+from src.models.urban_queue_model import (
+    boundary_indices,
+    ensure_urban_state,
+    movement_specs,
+    safe_balance_index,
+    urban_accumulation_feedback_flow,
+)
 
 
 @dataclass
@@ -133,10 +139,11 @@ class UrbanFollower:
         state: TrafficState,
         leader: LeaderAction,
         freeway_response: object | None = None,
-    ) -> tuple[Dict[str, float], float]:
+    ) -> tuple[Dict[str, float], float, float]:
         net = self.cfg.network
         specs = movement_specs(self.cfg)
         pressure = self._freeway_pressure(freeway_response)
+        target_net_inflow = urban_accumulation_feedback_flow(state, self.cfg, leader.N_P_star)
         inbound_movements = [
             movement for movement, spec in specs.items()
             if spec.get("kind") == "boundary_in"
@@ -148,8 +155,8 @@ class UrbanFollower:
         in_cap = len(inbound_movements) * net.movement_capacity_veh_h
         out_cap = len(outbound_movements) * net.movement_capacity_veh_h
         total_service = 0.62 * (in_cap + out_cap)
-        desired_in = np.clip((total_service + leader.N_P_star) / 2.0, 0.0, in_cap)
-        desired_out = np.clip(desired_in - leader.N_P_star, 0.0, out_cap)
+        desired_in = np.clip((total_service + target_net_inflow) / 2.0, 0.0, in_cap)
+        desired_out = np.clip(desired_in - target_net_inflow, 0.0, out_cap)
         if pressure["used"] > 0.0 and outbound_movements:
             # freeway가 막히면 off-ramp storage를 더 빨리 비우도록 outbound service 목표를 살짝 올린다.
             desired_out = np.clip(
@@ -157,10 +164,10 @@ class UrbanFollower:
                 0.0,
                 out_cap,
             )
-            desired_in = np.clip(desired_out + leader.N_P_star, 0.0, in_cap)
-        if abs((desired_in - desired_out) - leader.N_P_star) > self.cfg.urban_follower.eps_U:
-            desired_out = np.clip(desired_in - leader.N_P_star, 0.0, out_cap)
-            desired_in = np.clip(desired_out + leader.N_P_star, 0.0, in_cap)
+            desired_in = np.clip(desired_out + target_net_inflow, 0.0, in_cap)
+        if abs((desired_in - desired_out) - target_net_inflow) > self.cfg.urban_follower.eps_U:
+            desired_out = np.clip(desired_in - target_net_inflow, 0.0, out_cap)
+            desired_in = np.clip(desired_out + target_net_inflow, 0.0, in_cap)
 
         alloc: Dict[str, float] = {}
         for group, total in ((inbound_movements, desired_in), (outbound_movements, desired_out)):
@@ -189,9 +196,9 @@ class UrbanFollower:
         residual = abs(
             sum(alloc.get(m, 0.0) for m in inbound_movements)
             - sum(alloc.get(m, 0.0) for m in outbound_movements)
-            - leader.N_P_star
+            - target_net_inflow
         )
-        return alloc, float(residual)
+        return alloc, float(residual), float(target_net_inflow)
 
     def solve(
         self,
@@ -205,7 +212,7 @@ class UrbanFollower:
         pressure = self._freeway_pressure(freeway_response)
         green = self._green_times(state, previous_control, freeway_response)
         offsets = self._offsets(state, previous_control)
-        allocation, residual = self._allocation(state, leader, freeway_response)
+        allocation, residual, target_net_inflow = self._allocation(state, leader, freeway_response)
         b_in = safe_balance_index(state.boundary_queue.get(l, 0.0) for l in self.cfg.network.boundary_in_links)
         b_out = safe_balance_index(state.boundary_queue.get(l, 0.0) for l in self.cfg.network.boundary_out_links)
         metrics = {
@@ -217,6 +224,10 @@ class UrbanFollower:
             "freeway_density_pressure": pressure["density_pressure"],
             "freeway_receiving_pressure": pressure["receiving_pressure"],
             "freeway_total_pressure": pressure["total_pressure"],
+            "urban_accumulation_veh": float(state.total_urban_vehicles()),
+            "urban_accumulation_target_veh": float(leader.N_P_star),
+            "urban_accumulation_error_veh": float(state.total_urban_vehicles() - leader.N_P_star),
+            "urban_net_inflow_target_veh_h": float(target_net_inflow),
         }
         metrics.update(boundary_indices(state.boundary_queue.values(), self.cfg.network.boundary_queue_max_veh))
         smooth = 0.0

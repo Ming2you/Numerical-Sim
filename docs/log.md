@@ -185,3 +185,33 @@ This file records human-readable update notes for each direct push.
 - `python -B -m unittest discover -s src\\tests -v`
 - `python -B -m experiments.run_experiment --config src/config/default.yaml --scenario peak_demand --baseline fixed_signal_fixed_speed --controller stackelberg_mpc --T-total 360 --output outputs/codex_lightweight_peak_smoke`
 - Result: 38 tests passed. Short peak smoke completed in about 45 sec and printed `FAIL improvement=-2.56%`.
+
+## 2026-06-10 11:19:23 +09:00
+
+### Scope
+
+- Claude full diagnostic run 결과를 기준으로 `reports/codex_run_report.md`를 갱신했습니다.
+- `N_P_star`의 의미를 urban accumulation target, 단위 `veh`로 명시했습니다.
+- urban follower가 `N_P_star`를 직접 veh/h 순유입으로 쓰지 않고, 현재 urban accumulation과 목표 accumulation의 차이에서 `net_inflow_target`을 유도하도록 수정했습니다.
+- `urban_queue_model` diagnostics에 `net_inflow_target`, `urban_accumulation_veh`, `urban_accumulation_target_veh`, `urban_accumulation_error_veh`를 추가했습니다.
+- leader의 `N_UF_star` 후보를 total ramp capacity가 아니라 현재 ramp queue, 예상 on-ramp green release, downstream receiving, mainline density headroom 기반 feasible capacity 안에서 생성하도록 수정했습니다.
+- no-control/fixed baseline MFD sweep용 `experiments.calibrate_setpoints` CLI scaffold를 추가했습니다.
+- 자동 생성 experiment report의 `N_P_star`/`N_UF_star` 단위 설명을 현재 코드 의미에 맞게 수정했습니다.
+
+### Notes
+
+- 짧은 `peak_demand`, `T_total=360` smoke에서는 Total TTT improvement가 `6.85%`로 나왔습니다.
+- 아직 acceptance 기준 `8%`와 boundary balance validation은 통과하지 못했습니다.
+- 다음 단계는 full `peak_demand 7200s` 재실행 전, boundary balance와 metering residual을 줄이는 안정화입니다.
+
+### Validation
+
+- `python -B -m py_compile src\\models\\state.py src\\models\\urban_queue_model.py src\\controllers\\leader.py src\\controllers\\urban_follower.py src\\controllers\\stackelberg_mpc.py src\\experiments\\calibrate_setpoints.py experiments\\calibrate_setpoints.py src\\tests\\test_closed_loop_smoke.py src\\tests\\test_metanet_equations.py`
+- `python -B -m unittest src.tests.test_metanet_equations -v`
+- `python -B -m unittest src.tests.test_closed_loop_smoke -v`
+- `python -B -m unittest src.tests.test_constraints -v`
+- `python -B -m unittest src.tests.test_metrics -v`
+- `python -B -m unittest discover -s src\\tests -v`
+- `python -B -m experiments.calibrate_setpoints --config src/config/default.yaml --scenario peak_demand --baseline fixed_signal_fixed_speed --urban-scales 0.75,1.0,1.25 --T-total 360 --output outputs/codex_setpoint_calibration_smoke`
+- `python -B -m experiments.run_experiment --config src/config/default.yaml --scenario peak_demand --baseline fixed_signal_fixed_speed --controller stackelberg_mpc --T-total 360 --output outputs/codex_setpoint_peak_smoke`
+- Result: 40 tests passed. Calibration smoke estimated `n_crit=172.225 veh`, `max_production=1306.667 veh/h`. Short peak smoke printed `FAIL improvement=6.85%`.

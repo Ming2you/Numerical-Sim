@@ -188,7 +188,11 @@ leader:
   N_UF_star_range:
   - 0.0
   - 6000.0
+  N_P_star_unit: veh
   N_UF_star_unit: veh_per_hour
+  N_P_feedback_horizon_h: 0.5
+  N_P_feedback_flow_limit_veh_h: 800.0
+  N_UF_feasible_margin: 0.95
   non_convergence_penalty: 500.0
   metering_congestion_weight: 0.45
   metering_queue_weight: 4.0

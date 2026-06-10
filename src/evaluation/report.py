@@ -87,7 +87,7 @@ def render_report(
         "",
         "## Caveats",
         "- This implementation uses deterministic grid/heuristic follower solvers when nonlinear optimization dependencies are unavailable.",
-        "- `N_P_star` and `N_UF_star` are interpreted as vehicles per hour and converted internally by the simulation time step.",
+        "- `N_P_star` is an urban accumulation target in vehicles; `N_UF_star` is a freeway on-ramp flow target in vehicles per hour.",
         "- Boundary queue balancing is evaluated separately from Total TTT.",
     ])
     return "\n".join(lines) + "\n"

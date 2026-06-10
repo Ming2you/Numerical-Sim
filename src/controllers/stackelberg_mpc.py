@@ -59,7 +59,7 @@ class StackelbergMPCController:
         if not forecast:
             raise ValueError("StackelbergMPCController requires a non-empty demand forecast.")
         previous = previous_control or self.previous_control or ControlAction.fixed(self.cfg)
-        candidates = self.leader.candidates(state, previous)
+        candidates = self.leader.candidates(state, previous, forecast[0])
         best: Optional[DecisionResult] = None
         for action in candidates:
             nash = self.nash_solver.solve(state.copy(), action, forecast, previous)
