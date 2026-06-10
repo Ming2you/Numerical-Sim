@@ -72,6 +72,13 @@ proposed=stackelberg_mpc. **Total TTT 2889.8 → 3197.3 (−10.64%)**. 분해와
 것이다. freeway 쪽은 (이 시나리오에서) 유휴. 따라서 −10.64%의 원인은 거의 전부 urban follower의
 green/offset/allocation 휴리스틱이 boundary balance·corridor 지체를 **악화**시키는 데 있다.
 
+> **더 상류의 근본 원인 — 리더 setpoint 미캘리브레이션.** `N_P_star`/`N_UF_star`가 분석이 아니라
+> 임의 그리드값이고(`leader.py:26`, `:54`), `N_P_star`는 리더(누적 veh, `:92-93`)와 도시(순유입
+> veh/h)에서 **단위가 불일치**한다. 타겟이 임계점(MFD n_crit / 수용량)과 무관하면 control law가
+> 옳아도 망을 혼잡 가지로 민다. no-control 수요 sweep로 n_crit·rho_crit를 실측해 setpoint를
+> 캘리브레이션하는 **구현 사양을 [docs/setpoint_calibration_spec.md](../docs/setpoint_calibration_spec.md)**
+> 에 정리했다. control-law 버그(③④⑤)보다 **이 캘리브레이션이 선행**이다.
+
 ## Critical Issues
 
 1. **proposed가 baseline보다 −10.64% 나쁨, 원인은 urban 제어.** 위 이상 징후 3·4 참조.
