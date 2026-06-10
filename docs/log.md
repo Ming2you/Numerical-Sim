@@ -340,3 +340,41 @@ This file records human-readable update notes for each direct push.
 - `python -B -m experiments.run_experiment --config src/config/default.yaml --scenario peak_demand --baseline fixed_signal_fixed_speed --controller stackelberg_mpc --T-total 360 --follower-solver-mode distributed --leader-candidate-count 5 --max-nash-iter 3 --output outputs\\codex_distributed_player_peak_360_v2`
 - `python -B -m unittest discover -s src\\tests -v`
 - Result: 54 tests passed. Distributed smoke는 Total TTT improvement `8.28%`로 main metric은 통과했지만, boundary balance validation이 남아 최종 acceptance는 FAIL입니다.
+
+## 2026-06-11 00:38:59 +09:00
+
+### Scope
+
+- canonical extended 6-intersection grid 구조를 기본 config/state에 반영했습니다.
+- on-ramp/off-ramp를 D/F 교차로와 FW_W/FW_E 양방향 interface로 확장했습니다.
+- 독립 `InflowOutflowAllocationModule`을 추가해 leader의 `N_P_star`를 movement별 inflow/outflow service와 green setpoint로 변환하도록 했습니다.
+- `UrbanFollower`는 allocation module 결과를 기준으로 green을 band 안에서 fine-tune하고 offset을 계산하도록 정리했습니다.
+- freeway response pressure가 들어오면 off-ramp storage를 비우는 도시 유입 phase를 우선하도록 수정했습니다.
+- `DistributedCoordinator`를 교차로 agent 5개(`U_A`, `U_B`, `U_C`, `U_D`, `U_F`)와 freeway segment agent 6개(`F_W0..F_W2`, `F_E0..F_E2`) 구조로 확장했습니다.
+- `w_r` ramp queue delay는 freeway TTT에 귀속하고, urban TTT에서는 on-ramp 접근부 `x_on`과 off-ramp storage만 계상되도록 정리했습니다.
+- `docs/wu2022_distributed_reference.md`의 repo mapping도 새 topology와 agent partition 기준으로 갱신했습니다.
+
+### Validation
+
+- `python -B -m py_compile src\\controllers\\inflow_outflow_allocation.py src\\controllers\\urban_follower.py src\\controllers\\distributed_coordinator.py src\\models\\state.py src\\models\\urban_queue_model.py src\\simulation\\coupling.py src\\experiments\\capacity_drop_vsl_probe.py src\\tests\\test_constraints.py src\\tests\\test_metanet_equations.py`
+- `python -B -m unittest discover -s src\\tests`
+- Result: 54 tests passed.
+
+## 2026-06-11 00:48:56 +09:00
+
+### Scope
+
+- extended distributed smoke run 중 발견된 boundary-out legacy aggregate 덮어쓰기 버그를 수정했습니다.
+- `DistributedCoordinator._legacy_boundary_allocations`가 `boundary_out` movement 합을 사용하도록 고치고 regression assertion을 추가했습니다.
+
+### Run
+
+- `python -B -m src.experiments.run_experiment --config src/config/default.yaml --scenario peak_demand --baseline fixed_signal_fixed_speed --controller stackelberg_mpc --T-total 360 --follower-solver-mode distributed --leader-candidate-count 5 --max-nash-iter 3 --output outputs\\codex_extended_distributed_peak_360_v2`
+- Result: execution OK, Total TTT improvement `19.54%`, final evaluation `FAIL`.
+- Failure reason: `boundary_queue_balance_failed`; proposed Boundary CV `1.151` vs baseline `1.032`, urban net inflow tracking error `2352.50 veh/h`.
+- Activation: distributed player active with 5 urban agents and 6 freeway agents; ramp metering active; green/offset active; VSL inactive under this non-spillback smoke scenario.
+
+### Validation
+
+- `python -B -m unittest discover -s src\\tests`
+- Result: 54 tests passed.

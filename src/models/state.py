@@ -185,91 +185,101 @@ class NetworkConfig:
     rho_crit: float = 33.5
     rho_max: float = 180.0
     freeway_capacity_veh_h: float = 3600.0
-    ramps: List[str] = field(default_factory=lambda: ["R1", "R2", "R3", "R4"])
+    ramps: List[str] = field(default_factory=lambda: ["R_D_W", "R_F_W", "R_D_E", "R_F_E"])
     ramp_to_freeway: Dict[str, str] = field(default_factory=lambda: {
-        "R1": "FW_W", "R2": "FW_W", "R3": "FW_E", "R4": "FW_E"
+        "R_D_W": "FW_W", "R_F_W": "FW_W", "R_D_E": "FW_E", "R_F_E": "FW_E"
     })
     ramp_capacity_veh_h: Dict[str, float] = field(default_factory=lambda: {
-        "R1": 1500.0, "R2": 1500.0, "R3": 1500.0, "R4": 1500.0
+        "R_D_W": 1500.0, "R_F_W": 1500.0, "R_D_E": 1500.0, "R_F_E": 1500.0
+    })
+    ramp_merge_segment_index: Dict[str, int] = field(default_factory=lambda: {
+        "R_D_W": 1, "R_F_W": 1, "R_D_E": 1, "R_F_E": 1
     })
     ramp_queue_max_veh: float = 180.0
-    signals: List[str] = field(default_factory=lambda: ["A", "C", "D", "F"])
+    signals: List[str] = field(default_factory=lambda: ["A", "B", "C", "D", "F"])
+    uncontrolled_nodes: List[str] = field(default_factory=lambda: ["E"])
+    urban_links: List[str] = field(default_factory=lambda: [
+        "A_B", "B_C", "A_D", "B_E", "C_F", "D_E", "E_F"
+    ])
     cycle_length: float = 120.0
     lost_time: float = 8.0
     green_min: float = 20.0
     green_max: float = 92.0
-    boundary_in_links: List[str] = field(default_factory=lambda: ["in_A", "in_C"])
-    boundary_out_links: List[str] = field(default_factory=lambda: ["out_D", "out_F"])
+    boundary_in_links: List[str] = field(default_factory=lambda: [
+        "in_A_top", "in_A_left", "in_B_top", "in_C_top", "in_C_right", "in_D_left", "in_F_right"
+    ])
+    boundary_out_links: List[str] = field(default_factory=lambda: [
+        "out_A_top", "out_A_left", "out_B_top", "out_C_top", "out_C_right", "out_D_left", "out_F_right"
+    ])
     boundary_queue_max_veh: float = 240.0
     movement_capacity_veh_h: float = 1400.0
     urban_movements: Dict[str, Dict[str, Any]] = field(default_factory=lambda: {
-        "in_A_to_out_D": {
-            "origin": "in_A", "signal": "A", "destination": "out_D",
-            "receiving_link": "A_out_D", "phase": "A_p1", "kind": "boundary_in",
-        },
-        "in_C_to_out_F": {
-            "origin": "in_C", "signal": "C", "destination": "out_F",
-            "receiving_link": "C_out_F", "phase": "C_p1", "kind": "boundary_in",
-        },
-        "R1_onramp": {
-            "origin": "A", "signal": "R1", "destination": "FW_W",
-            "receiving_link": "A_R1", "phase": "A_p2", "kind": "on_ramp", "ramp": "R1",
-        },
-        "R2_onramp": {
-            "origin": "C", "signal": "R2", "destination": "FW_W",
-            "receiving_link": "C_R2", "phase": "C_p2", "kind": "on_ramp", "ramp": "R2",
-        },
-        "R3_onramp": {
-            "origin": "D", "signal": "R3", "destination": "FW_E",
-            "receiving_link": "D_R3", "phase": "D_p2", "kind": "on_ramp", "ramp": "R3",
-        },
-        "R4_onramp": {
-            "origin": "F", "signal": "R4", "destination": "FW_E",
-            "receiving_link": "F_R4", "phase": "F_p2", "kind": "on_ramp", "ramp": "R4",
-        },
-        "OR_W_to_out_D": {
-            "origin": "OR_W", "signal": "D", "destination": "out_D",
-            "receiving_link": "D_out_D", "phase": "D_p1", "kind": "off_ramp", "off_ramp": "OR_W",
-        },
-        "OR_E_to_out_F": {
-            "origin": "OR_E", "signal": "F", "destination": "out_F",
-            "receiving_link": "F_out_F", "phase": "F_p1", "kind": "off_ramp", "off_ramp": "OR_E",
-        },
+        "A_top_in_to_grid": {"origin": "in_A_top", "signal": "A", "destination": "grid", "receiving_link": "A_entry_top", "phase": "A_p1", "kind": "boundary_in"},
+        "A_left_in_to_grid": {"origin": "in_A_left", "signal": "A", "destination": "grid", "receiving_link": "A_entry_left", "phase": "A_p1", "kind": "boundary_in"},
+        "B_top_in_to_grid": {"origin": "in_B_top", "signal": "B", "destination": "grid", "receiving_link": "B_entry_top", "phase": "B_p1", "kind": "boundary_in"},
+        "C_top_in_to_grid": {"origin": "in_C_top", "signal": "C", "destination": "grid", "receiving_link": "C_entry_top", "phase": "C_p1", "kind": "boundary_in"},
+        "C_right_in_to_grid": {"origin": "in_C_right", "signal": "C", "destination": "grid", "receiving_link": "C_entry_right", "phase": "C_p1", "kind": "boundary_in"},
+        "D_left_in_to_grid": {"origin": "in_D_left", "signal": "D", "destination": "grid", "receiving_link": "D_entry_left", "phase": "D_p1", "kind": "boundary_in"},
+        "F_right_in_to_grid": {"origin": "in_F_right", "signal": "F", "destination": "grid", "receiving_link": "F_entry_right", "phase": "F_p1", "kind": "boundary_in"},
+        "A_grid_to_top_out": {"origin": "grid", "signal": "A", "destination": "out_A_top", "receiving_link": "A_top_out", "phase": "A_p2", "kind": "boundary_out"},
+        "A_grid_to_left_out": {"origin": "grid", "signal": "A", "destination": "out_A_left", "receiving_link": "A_left_out", "phase": "A_p2", "kind": "boundary_out"},
+        "B_grid_to_top_out": {"origin": "grid", "signal": "B", "destination": "out_B_top", "receiving_link": "B_top_out", "phase": "B_p2", "kind": "boundary_out"},
+        "C_grid_to_top_out": {"origin": "grid", "signal": "C", "destination": "out_C_top", "receiving_link": "C_top_out", "phase": "C_p2", "kind": "boundary_out"},
+        "C_grid_to_right_out": {"origin": "grid", "signal": "C", "destination": "out_C_right", "receiving_link": "C_right_out", "phase": "C_p2", "kind": "boundary_out"},
+        "D_grid_to_left_out": {"origin": "grid", "signal": "D", "destination": "out_D_left", "receiving_link": "D_left_out", "phase": "D_p2", "kind": "boundary_out"},
+        "F_grid_to_right_out": {"origin": "grid", "signal": "F", "destination": "out_F_right", "receiving_link": "F_right_out", "phase": "F_p2", "kind": "boundary_out"},
+        "D_on_FW_W": {"origin": "D", "signal": "D", "destination": "FW_W", "receiving_link": "D_R_W", "phase": "D_p2", "kind": "on_ramp", "ramp": "R_D_W"},
+        "F_on_FW_W": {"origin": "F", "signal": "F", "destination": "FW_W", "receiving_link": "F_R_W", "phase": "F_p2", "kind": "on_ramp", "ramp": "R_F_W"},
+        "D_on_FW_E": {"origin": "D", "signal": "D", "destination": "FW_E", "receiving_link": "D_R_E", "phase": "D_p2", "kind": "on_ramp", "ramp": "R_D_E"},
+        "F_on_FW_E": {"origin": "F", "signal": "F", "destination": "FW_E", "receiving_link": "F_R_E", "phase": "F_p2", "kind": "on_ramp", "ramp": "R_F_E"},
+        "OR_D_W_to_D_grid": {"origin": "OR_D_W", "signal": "D", "destination": "grid", "receiving_link": "D_from_OR_D_W", "phase": "D_p1", "kind": "off_ramp", "off_ramp": "OR_D_W"},
+        "OR_F_W_to_F_grid": {"origin": "OR_F_W", "signal": "F", "destination": "grid", "receiving_link": "F_from_OR_F_W", "phase": "F_p1", "kind": "off_ramp", "off_ramp": "OR_F_W"},
+        "OR_D_E_to_D_grid": {"origin": "OR_D_E", "signal": "D", "destination": "grid", "receiving_link": "D_from_OR_D_E", "phase": "D_p1", "kind": "off_ramp", "off_ramp": "OR_D_E"},
+        "OR_F_E_to_F_grid": {"origin": "OR_F_E", "signal": "F", "destination": "grid", "receiving_link": "F_from_OR_F_E", "phase": "F_p1", "kind": "off_ramp", "off_ramp": "OR_F_E"},
     })
     urban_link_storage_veh: Dict[str, float] = field(default_factory=lambda: {
-        "A_out_D": 220.0,
-        "C_out_F": 220.0,
-        "A_R1": 180.0,
-        "C_R2": 180.0,
-        "D_R3": 180.0,
-        "F_R4": 180.0,
-        "OR_W_D": 120.0,
-        "OR_E_F": 120.0,
-        "D_out_D": 220.0,
-        "F_out_F": 220.0,
+        "A_entry_top": 220.0, "A_entry_left": 220.0, "B_entry_top": 220.0,
+        "C_entry_top": 220.0, "C_entry_right": 220.0, "D_entry_left": 220.0, "F_entry_right": 220.0,
+        "A_top_out": 220.0, "A_left_out": 220.0, "B_top_out": 220.0,
+        "C_top_out": 220.0, "C_right_out": 220.0, "D_left_out": 220.0, "F_right_out": 220.0,
+        "D_R_W": 180.0, "F_R_W": 180.0, "D_R_E": 180.0, "F_R_E": 180.0,
+        "OR_D_W_storage": 120.0, "OR_F_W_storage": 120.0, "OR_D_E_storage": 120.0, "OR_F_E_storage": 120.0,
+        "D_from_OR_D_W": 220.0, "F_from_OR_F_W": 220.0,
+        "D_from_OR_D_E": 220.0, "F_from_OR_F_E": 220.0,
     })
     on_ramp_to_movement: Dict[str, str] = field(default_factory=lambda: {
-        "R1": "R1_onramp",
-        "R2": "R2_onramp",
-        "R3": "R3_onramp",
-        "R4": "R4_onramp",
+        "R_D_W": "D_on_FW_W",
+        "R_F_W": "F_on_FW_W",
+        "R_D_E": "D_on_FW_E",
+        "R_F_E": "F_on_FW_E",
     })
-    off_ramps: List[str] = field(default_factory=lambda: ["OR_W", "OR_E"])
+    off_ramps: List[str] = field(default_factory=lambda: ["OR_D_W", "OR_F_W", "OR_D_E", "OR_F_E"])
     off_ramp_from_freeway: Dict[str, str] = field(default_factory=lambda: {
-        "OR_W": "FW_W",
-        "OR_E": "FW_E",
+        "OR_D_W": "FW_W",
+        "OR_F_W": "FW_W",
+        "OR_D_E": "FW_E",
+        "OR_F_E": "FW_E",
+    })
+    off_ramp_segment_index: Dict[str, int] = field(default_factory=lambda: {
+        "OR_D_W": 2, "OR_F_W": 2, "OR_D_E": 2, "OR_F_E": 2
     })
     off_ramp_storage_link: Dict[str, str] = field(default_factory=lambda: {
-        "OR_W": "OR_W_D",
-        "OR_E": "OR_E_F",
+        "OR_D_W": "OR_D_W_storage",
+        "OR_F_W": "OR_F_W_storage",
+        "OR_D_E": "OR_D_E_storage",
+        "OR_F_E": "OR_F_E_storage",
     })
     off_ramp_to_movement: Dict[str, str] = field(default_factory=lambda: {
-        "OR_W": "OR_W_to_out_D",
-        "OR_E": "OR_E_to_out_F",
+        "OR_D_W": "OR_D_W_to_D_grid",
+        "OR_F_W": "OR_F_W_to_F_grid",
+        "OR_D_E": "OR_D_E_to_D_grid",
+        "OR_F_E": "OR_F_E_to_F_grid",
     })
     off_ramp_split_ratio: Dict[str, float] = field(default_factory=lambda: {
-        "OR_W": 0.12,
-        "OR_E": 0.12,
+        "OR_D_W": 0.06,
+        "OR_F_W": 0.06,
+        "OR_D_E": 0.06,
+        "OR_F_E": 0.06,
     })
     v_min: float = 5.0
     alpha_vsl: float = 0.0
@@ -372,6 +382,9 @@ class UrbanFollowerConfig:
     offset_smoothness_weight: float = 0.1
     green_smoothness_weight: float = 0.1
     receiving_space_rule: str = "proportional"
+    allocation_pso_particles: int = 18
+    allocation_pso_iterations: int = 24
+    allocation_green_band_sec: float = 5.0
 
 
 @dataclass

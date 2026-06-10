@@ -147,7 +147,7 @@ def run_coupled_interval(
             ramp_release_veh_h=actual_ramp_release,
             ramp_release_diagnostics=actual_ramp_diag,
             update_ramp_queues=False,
-            include_ramp_queue_ttt=False,
+            include_ramp_queue_ttt=True,
         )
         freeway_ttt += fw_ttt
         freeway_rows.append(fw_diag)

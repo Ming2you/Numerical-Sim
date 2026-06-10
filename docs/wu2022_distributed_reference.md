@@ -140,12 +140,14 @@ agent i가 시각 `k_c`에 제어를 정하는 절차(모든 agent 병렬 수행
 
 ## 7. 이 repo 네트워크로의 매핑 (구현 지시)
 
-현재 망: freeway 링크 FW_W·FW_E, 신호 A·C·D·F, on-ramp R1~R4, off-ramp OR_W·OR_E.
+현재 망: freeway 링크 FW_W·FW_E, 신호 A·B·C·D·F(E는 비신호), on-ramp R_D_W·R_F_W·R_D_E·R_F_E,
+off-ramp OR_D_W·OR_F_W·OR_D_E·OR_F_E.
 
 **제안 분할**:
-- **Urban agent 4개** = {A, C, D, F} 각 1개. 각 agent = 그 신호 + 진입 movement +
-  그 교차로로 들어오는 off-ramp movement(OR_W→D, OR_E→F 등 토폴로지에 맞게).
-- **Freeway agent 2개** = {FW_W + R1,R2 + (OR_W)}, {FW_E + R3,R4 + (OR_E)} (off-ramp ≤1/agent 충족).
+- **Urban agent 5개** = {A, B, C, D, F} 각 1개. 각 agent = 그 신호 + 진입/유출 movement +
+  D/F의 경우 자기 교차로 on-ramp movement와 그 교차로로 들어오는 off-ramp movement.
+- **Freeway segment agent 6개** = {F_W0, F_W1, F_W2, F_E0, F_E1, F_E2}.
+  F_W1/F_E1은 on-ramp merge segment, F_W2/F_E2는 off-ramp boundary segment를 담당한다.
 
 **결합변수 `y` (agent 간 교환할 것)**:
 - urban i → freeway p: on-ramp로 보내는 방출률 `α^leave_i`(=현재 2저수지의 `u_on`),

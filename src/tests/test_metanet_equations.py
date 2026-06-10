@@ -91,9 +91,9 @@ class MetanetEquationTests(unittest.TestCase):
         self.assertGreaterEqual(cfg.freeway_follower.horizon_beam_width, 1)
         self.assertGreaterEqual(cfg.freeway_follower.horizon_ramp_candidate_limit, 1)
         self.assertGreaterEqual(cfg.freeway_follower.horizon_vsl_candidate_limit_per_link, 1)
-        self.assertIn("R1", cfg.network.on_ramp_to_movement)
-        self.assertIn("OR_W", cfg.network.off_ramps)
-        self.assertIn("OR_W_D", cfg.network.urban_link_storage_veh)
+        self.assertIn("R_D_W", cfg.network.on_ramp_to_movement)
+        self.assertIn("OR_D_W", cfg.network.off_ramps)
+        self.assertIn("OR_D_W_storage", cfg.network.urban_link_storage_veh)
         self.assertTrue(cfg.freeway_offramp_capacity_drop.enabled)
         self.assertGreaterEqual(cfg.freeway_offramp_capacity_drop.lane_reduction, 0.0)
         self.assertLess(cfg.freeway_offramp_capacity_drop.lane_reduction, cfg.network.freeway_lanes)
@@ -331,10 +331,10 @@ class MetanetEquationTests(unittest.TestCase):
         demand = DemandStep(
             freeway_mainline={link: 0.0 for link in cfg.network.freeway_links},
             urban_boundary={link: 0.0 for link in cfg.network.movement_links},
-            ramp_arrival={ramp: (900.0 if ramp == "R1" else 0.0) for ramp in cfg.network.ramps},
+            ramp_arrival={ramp: (900.0 if ramp == "R_D_W" else 0.0) for ramp in cfg.network.ramps},
         )
         control = ControlAction.fixed(cfg)
-        control.ramp_metering = {ramp: (900.0 if ramp == "R1" else 0.0) for ramp in cfg.network.ramps}
+        control.ramp_metering = {ramp: (900.0 if ramp == "R_D_W" else 0.0) for ramp in cfg.network.ramps}
         control.N_UF_star = 900.0
         freeway_step(state, control, demand, cfg)
         expected_merge_density = 10.0 + cfg.simulation.T_f_h / (

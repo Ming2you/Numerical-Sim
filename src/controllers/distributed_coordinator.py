@@ -6,6 +6,7 @@ from typing import Dict, Iterable, Mapping, Optional
 import numpy as np
 
 from src.controllers.freeway_follower import FreewayFollowerResult
+from src.controllers.inflow_outflow_allocation import AllocationResult
 from src.controllers.leader import LeaderAction
 from src.controllers.nash_solver import NashResult, _relax_map
 from src.controllers.urban_follower import UrbanFollower
@@ -29,6 +30,7 @@ class AgentSpec:
     ramps: tuple[str, ...] = ()
     off_ramps: tuple[str, ...] = ()
     neighbors: tuple[str, ...] = ()
+    segment_index: int = -1
 
 
 @dataclass
@@ -44,25 +46,48 @@ class AgentSolve:
     diagnostics: Dict[str, float] = field(default_factory=dict)
 
 
-def _freeway_agent_id(link: str) -> str:
+def _freeway_agent_id(link: str, segment_index: int | None = None) -> str:
     suffix = link.split("_")[-1] if "_" in link else link
-    return f"F_{suffix}"
+    if segment_index is None:
+        return f"F_{suffix}"
+    return f"F_{suffix}{segment_index}"
 
 
 def _urban_agent_id(signal: str) -> str:
     return f"U_{signal}"
 
 
+def _urban_signal_for_movement(spec: Mapping[str, object], signals: Iterable[str]) -> str:
+    signal_set = set(signals)
+    phase = str(spec.get("phase", ""))
+    if "_" in phase:
+        owner = phase.split("_", 1)[0]
+        if owner in signal_set:
+            return owner
+    signal = str(spec.get("signal", ""))
+    return signal if signal in signal_set else ""
+
+
+def _configured_segment_index(mapping: object, key: str, fallback: int, n_segments: int) -> int:
+    if isinstance(mapping, Mapping) and key in mapping:
+        return int(np.clip(float(mapping[key]), 0.0, float(n_segments - 1)))
+    return int(np.clip(float(fallback), 0.0, float(n_segments - 1)))
+
+
 def build_agent_specs(cfg: ExperimentConfig) -> tuple[list[AgentSpec], list[AgentSpec]]:
     """현재 topology에서 Wu식 urban/freeway agent 분할을 자동 유도한다."""
     net = cfg.network
     specs = movement_specs(cfg)
+    movement_owner = {
+        movement: _urban_signal_for_movement(spec, net.signals)
+        for movement, spec in specs.items()
+    }
     urban_agents: list[AgentSpec] = []
     for signal in net.signals:
         movements = tuple(
             movement
             for movement, spec in specs.items()
-            if spec.get("signal") == signal
+            if movement_owner.get(movement) == signal
         )
         ramps = tuple(
             ramp for ramp, movement in net.on_ramp_to_movement.items()
@@ -90,40 +115,57 @@ def build_agent_specs(cfg: ExperimentConfig) -> tuple[list[AgentSpec], list[Agen
         ))
 
     urban_by_ramp = {
-        ramp: _urban_agent_id(str(specs[movement].get("signal", "")))
+        ramp: _urban_agent_id(movement_owner[movement])
         for ramp, movement in net.on_ramp_to_movement.items()
-        if movement in specs
+        if movement in specs and movement_owner.get(movement)
     }
     urban_by_offramp = {
-        off_ramp: _urban_agent_id(str(specs[movement].get("signal", "")))
+        off_ramp: _urban_agent_id(movement_owner[movement])
         for off_ramp, movement in net.off_ramp_to_movement.items()
-        if movement in specs
+        if movement in specs and movement_owner.get(movement)
     }
     freeway_agents: list[AgentSpec] = []
     for link in net.freeway_links:
-        ramps = tuple(ramp for ramp in net.ramps if net.ramp_to_freeway.get(ramp) == link)
-        off_ramps = tuple(
-            off_ramp
-            for off_ramp in net.off_ramps
-            if net.off_ramp_from_freeway.get(off_ramp) == link
-        )
-        neighbors = sorted({
-            urban_by_ramp[ramp]
-            for ramp in ramps
-            if ramp in urban_by_ramp
-        } | {
-            urban_by_offramp[off_ramp]
-            for off_ramp in off_ramps
-            if off_ramp in urban_by_offramp
-        })
-        freeway_agents.append(AgentSpec(
-            id=_freeway_agent_id(link),
-            kind="freeway",
-            link=link,
-            ramps=ramps,
-            off_ramps=off_ramps,
-            neighbors=tuple(neighbors),
-        ))
+        for segment_index in range(net.freeway_segments_per_link):
+            ramps = tuple(
+                ramp for ramp in net.ramps
+                if net.ramp_to_freeway.get(ramp) == link
+                and _configured_segment_index(
+                    getattr(net, "ramp_merge_segment_index", {}),
+                    ramp,
+                    net.freeway_segments_per_link // 2,
+                    net.freeway_segments_per_link,
+                ) == segment_index
+            )
+            off_ramps = tuple(
+                off_ramp
+                for off_ramp in net.off_ramps
+                if net.off_ramp_from_freeway.get(off_ramp) == link
+                and _configured_segment_index(
+                    getattr(net, "off_ramp_segment_index", {}),
+                    off_ramp,
+                    net.freeway_segments_per_link - 1,
+                    net.freeway_segments_per_link,
+                ) == segment_index
+            )
+            neighbors = sorted({
+                urban_by_ramp[ramp]
+                for ramp in ramps
+                if ramp in urban_by_ramp
+            } | {
+                urban_by_offramp[off_ramp]
+                for off_ramp in off_ramps
+                if off_ramp in urban_by_offramp
+            })
+            freeway_agents.append(AgentSpec(
+                id=_freeway_agent_id(link, segment_index),
+                kind="freeway",
+                link=link,
+                ramps=ramps,
+                off_ramps=off_ramps,
+                neighbors=tuple(neighbors),
+                segment_index=segment_index,
+            ))
     return urban_agents, freeway_agents
 
 
@@ -178,6 +220,7 @@ class DistributedCoordinator:
         current = reference_control
         current.N_P_star = leader.N_P_star
         current.N_UF_star = leader.N_UF_star
+        allocation_plan = self.urban_follower.allocation_module.solve(state, leader)
         coupling = self._extract_coupling(state, current, first_demand)
         best_control = current
         best_obj = np.inf
@@ -193,7 +236,7 @@ class DistributedCoordinator:
             ]
             freeway_response = self._freeway_response(freeway_solves)
             urban_solves = [
-                self._solve_urban_agent(agent, state, leader, first_demand, freeway_response, current)
+                self._solve_urban_agent(agent, state, leader, first_demand, freeway_response, current, allocation_plan)
                 for agent in self.urban_agents
             ]
             candidate = self._merge_agent_controls(
@@ -251,7 +294,7 @@ class DistributedCoordinator:
         weights: Dict[str, float] = {}
         min_receiving = 1.0
         for ramp in agent.ramps:
-            merge_idx = len(state.freeway_density[agent.link]) // 2
+            merge_idx = agent.segment_index if agent.segment_index >= 0 else len(state.freeway_density[agent.link]) // 2
             rho_merge = state.freeway_density[agent.link][merge_idx]
             receiving = float(np.clip(
                 (net.rho_max - rho_merge) / max(net.rho_max - net.rho_crit, 1.0e-9),
@@ -265,7 +308,8 @@ class DistributedCoordinator:
             weights[ramp] = state.ramp_queue.get(ramp, 0.0) + urban_release * self.cfg.simulation.T_c_h + 1.0
         ramp_metering = _project_to_target(target, upper, weights)
         lane_profile, lane_diag = effective_lane_profile(state, self.cfg)
-        rhos = state.freeway_density.get(agent.link, [])
+        all_rhos = state.freeway_density.get(agent.link, [])
+        rhos = [all_rhos[agent.segment_index]] if 0 <= agent.segment_index < len(all_rhos) else all_rhos
         max_density = max(rhos) if rhos else 0.0
         density_ratio = max_density / max(net.rho_crit, 1.0e-9)
         lane_loss = max(0.0, net.freeway_lanes - (lane_profile.get(agent.link, [net.freeway_lanes])[-1]))
@@ -323,8 +367,9 @@ class DistributedCoordinator:
         demand: DemandStep,
         freeway_response: FreewayFollowerResult,
         current: ControlAction,
+        allocation_plan: AllocationResult,
     ) -> AgentSolve:
-        result = self.urban_follower.solve(state.copy(), leader, demand, freeway_response, current)
+        result = self.urban_follower.solve(state.copy(), leader, demand, freeway_response, current, allocation_plan)
         specs = movement_specs(self.cfg)
         green = {
             key: value
@@ -349,6 +394,7 @@ class DistributedCoordinator:
         diagnostics = {
             f"agent_{agent.id}_local_queue": float(local_queue),
             f"agent_{agent.id}_freeway_pressure_used": float(result.metrics.get("freeway_response_used", 0.0)),
+            f"agent_{agent.id}_allocation_module_used": float(result.metrics.get("allocation_module_active", 0.0)),
         }
         return AgentSolve(
             agent_id=agent.id,
@@ -459,7 +505,7 @@ class DistributedCoordinator:
             out[link] = float(sum(
                 allocation.get(movement, 0.0)
                 for movement, spec in specs.items()
-                if spec.get("destination") == link and spec.get("kind") == "off_ramp"
+                if spec.get("destination") == link and spec.get("kind") == "boundary_out"
             ))
         return out
 

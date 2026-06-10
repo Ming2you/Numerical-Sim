@@ -1,10 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Optional
+from typing import Dict, Mapping, Optional
 
 import numpy as np
 
+from src.controllers.inflow_outflow_allocation import (
+    AllocationResult,
+    INFLOW_KINDS,
+    OUTFLOW_KINDS,
+    InflowOutflowAllocationModule,
+)
 from src.controllers.leader import LeaderAction
 from src.models.demand import DemandStep
 from src.models.state import ControlAction, ExperimentConfig, TrafficState
@@ -13,7 +19,6 @@ from src.models.urban_queue_model import (
     ensure_urban_state,
     movement_specs,
     safe_balance_index,
-    urban_accumulation_feedback_flow,
 )
 
 
@@ -37,6 +42,7 @@ class UrbanFollower:
 
     def __init__(self, cfg: ExperimentConfig):
         self.cfg = cfg
+        self.allocation_module = InflowOutflowAllocationModule(cfg)
 
     def _freeway_pressure(self, freeway_response: object | None) -> Dict[str, float]:
         """Freeway follower 결과를 urban 신호/배분이 사용할 압력 지표로 바꾼다."""
@@ -84,10 +90,12 @@ class UrbanFollower:
         state: TrafficState,
         previous: Optional[ControlAction],
         freeway_response: object | None = None,
+        allocation_plan: Optional[AllocationResult] = None,
     ) -> Dict[str, float]:
         net = self.cfg.network
         specs = movement_specs(self.cfg)
         pressure = self._freeway_pressure(freeway_response)
+        phase_setpoints = self._allocation_phase_setpoints(allocation_plan)
         green: Dict[str, float] = {}
         total = net.effective_green_total
         for signal in net.signals:
@@ -101,17 +109,13 @@ class UrbanFollower:
                 for movement, spec in specs.items()
                 if spec.get("phase") == f"{signal}_p2"
             )
-            has_onramp_phase = any(
-                spec.get("phase") == f"{signal}_p2" and spec.get("kind") == "on_ramp"
-                for spec in specs.values()
-            )
             has_offramp_discharge_phase = any(
                 spec.get("phase") == f"{signal}_p1" and spec.get("kind") == "off_ramp"
                 for spec in specs.values()
             )
-            if has_onramp_phase:
-                # ramp 병목 압력이 높으면 on-ramp 대기열을 green split 산정에서 더 크게 본다.
-                p2_queue += pressure["total_pressure"] * net.ramp_queue_max_veh
+            if has_offramp_discharge_phase:
+                # freeway 압력이 높으면 off-ramp storage를 비우는 도시 유입 phase를 우선한다.
+                p1_queue += pressure["total_pressure"] * net.ramp_queue_max_veh
             ratio = p1_queue / max(p1_queue + p2_queue, 1.0e-9) if p1_queue + p2_queue > 0 else 0.5
             p1 = float(np.clip(total * ratio, net.green_min, net.green_max))
             p2 = total - p1
@@ -127,9 +131,57 @@ class UrbanFollower:
             if p2 > net.green_max:
                 p2 = net.green_max
                 p1 = total - p2
+            if allocation_plan is not None:
+                p1, p2 = self._clamp_green_to_allocation_band(signal, p1, p2, phase_setpoints)
             green[f"{signal}_p1"] = float(p1)
             green[f"{signal}_p2"] = float(p2)
         return green
+
+    def _allocation_phase_setpoints(
+        self,
+        allocation_plan: Optional[AllocationResult],
+    ) -> Dict[str, float]:
+        if allocation_plan is None:
+            return {}
+        specs = movement_specs(self.cfg)
+        by_phase: Dict[str, list[float]] = {}
+        for movement, green_sec in allocation_plan.movement_green_sec.items():
+            phase = str(specs.get(movement, {}).get("phase", ""))
+            if phase:
+                by_phase.setdefault(phase, []).append(float(green_sec))
+        return {
+            phase: float(np.mean(values))
+            for phase, values in by_phase.items()
+            if values
+        }
+
+    def _clamp_green_to_allocation_band(
+        self,
+        signal: str,
+        p1: float,
+        p2: float,
+        phase_setpoints: Mapping[str, float],
+    ) -> tuple[float, float]:
+        net = self.cfg.network
+        total = net.effective_green_total
+        band = max(0.0, float(self.cfg.urban_follower.allocation_green_band_sec))
+        p1_key = f"{signal}_p1"
+        p2_key = f"{signal}_p2"
+        p1_target = phase_setpoints.get(p1_key, p1)
+        p2_target = phase_setpoints.get(p2_key, p2)
+        low = max(net.green_min, p1_target - band, total - (p2_target + band))
+        high = min(net.green_max, p1_target + band, total - (p2_target - band))
+        if low > high:
+            low, high = net.green_min, net.green_max
+        p1_new = float(np.clip(p1, low, high))
+        p2_new = total - p1_new
+        if p2_new < net.green_min:
+            p2_new = net.green_min
+            p1_new = total - p2_new
+        if p2_new > net.green_max:
+            p2_new = net.green_max
+            p1_new = total - p2_new
+        return float(p1_new), float(p2_new)
 
     def _offsets(self, state: TrafficState, previous: Optional[ControlAction]) -> Dict[str, float]:
         net = self.cfg.network
@@ -150,95 +202,23 @@ class UrbanFollower:
         leader: LeaderAction,
         freeway_response: object | None = None,
         green_times: Optional[Dict[str, float]] = None,
-    ) -> tuple[Dict[str, float], float, float]:
+        allocation_plan: Optional[AllocationResult] = None,
+    ) -> tuple[Dict[str, float], float, float, Dict[str, float]]:
         net = self.cfg.network
         specs = movement_specs(self.cfg)
-        pressure = self._freeway_pressure(freeway_response)
-        target_net_inflow = urban_accumulation_feedback_flow(state, self.cfg, leader.N_P_star)
-        inbound_movements = [
-            movement for movement, spec in specs.items()
-            if spec.get("kind") == "boundary_in"
-        ]
-        outbound_movements = [
-            movement for movement, spec in specs.items()
-            if spec.get("kind") == "off_ramp"
-        ]
-        onramp_movements = [
-            movement for movement, spec in specs.items()
-            if spec.get("kind") == "on_ramp"
-        ]
-        in_cap = len(inbound_movements) * net.movement_capacity_veh_h
-        out_cap = len(outbound_movements) * net.movement_capacity_veh_h
-        current_accumulation = state.total_urban_vehicles()
-        target_accumulation = max(float(leader.N_P_star), 1.0e-9)
-        overload_ratio = float(np.clip(
-            (current_accumulation - target_accumulation) / max(self.cfg.leader.N_P_crit_veh, 1.0e-9),
-            0.0,
-            1.0,
-        ))
-        if target_net_inflow < 0.0 or overload_ratio > 0.0:
-            # 도시 누적이 목표를 넘으면 inbound를 먼저 조이고 outbound service를 우선 배정한다.
-            desired_out = np.clip(
-                0.62 * out_cap + max(0.0, -target_net_inflow) + overload_ratio * 0.25 * out_cap,
-                0.0,
-                out_cap,
-            )
-            desired_in = np.clip(desired_out + target_net_inflow, 0.0, in_cap)
-            desired_in *= max(0.0, 1.0 - 0.85 * overload_ratio)
-            desired_out = np.clip(max(desired_out, desired_in - target_net_inflow), 0.0, out_cap)
-        else:
-            total_service = 0.62 * (in_cap + out_cap)
-            desired_in = np.clip((total_service + target_net_inflow) / 2.0, 0.0, in_cap)
-            desired_out = np.clip(desired_in - target_net_inflow, 0.0, out_cap)
-        if pressure["used"] > 0.0 and outbound_movements:
-            # freeway가 막히면 off-ramp storage를 더 빨리 비우도록 outbound service 목표를 살짝 올린다.
-            desired_out = np.clip(
-                desired_out + pressure["total_pressure"] * 0.08 * out_cap,
-                0.0,
-                out_cap,
-            )
-            desired_in = np.clip(desired_out + target_net_inflow, 0.0, in_cap)
-        if abs((desired_in - desired_out) - target_net_inflow) > self.cfg.urban_follower.eps_U:
-            desired_out = np.clip(desired_in - target_net_inflow, 0.0, out_cap)
-            desired_in = np.clip(desired_out + target_net_inflow, 0.0, in_cap)
-
+        plan = allocation_plan or self.allocation_module.solve(state, leader)
         alloc: Dict[str, float] = {}
-        for group, total in ((inbound_movements, desired_in), (outbound_movements, desired_out)):
-            if not group:
-                continue
-            q = np.asarray([state.urban_movement_queue.get(movement, 0.0) + 1.0 for movement in group], dtype=float)
-            if group is outbound_movements:
-                q = q * (1.0 + pressure["total_pressure"])
-            w = q / max(float(np.sum(q)), 1.0e-9)
-            for idx, movement in enumerate(group):
-                alloc[movement] = float(min(net.movement_capacity_veh_h, total * w[idx]))
-
-        if onramp_movements:
-            # on-ramp 접근부 x_on -> w_r 방출도 follower decision으로 둔다.
-            # green fraction이 짧은 phase에서는 같은 N_UF_star를 받치기 위해 더 큰 saturation flow가 필요하다.
-            q = np.asarray([
-                state.urban_movement_queue.get(movement, 0.0) + 1.0
-                for movement in onramp_movements
-            ], dtype=float)
-            w = q / max(float(np.sum(q)), 1.0e-9)
-            default_green = net.effective_green_total / 2.0
-            for idx, movement in enumerate(onramp_movements):
-                spec = specs[movement]
-                phase = str(spec.get("phase", ""))
-                green_sec = (
-                    green_times.get(phase, default_green)
-                    if green_times is not None
-                    else default_green
-                )
-                green_fraction = float(np.clip(green_sec / max(net.cycle_length, 1.0e-9), 1.0e-6, 1.0))
-                target_release_flow = max(0.0, leader.N_UF_star) * w[idx]
-                required_saturation = target_release_flow / green_fraction
-                if overload_ratio > 0.0:
-                    required_saturation = max(
-                        required_saturation,
-                        net.movement_capacity_veh_h * (0.5 + 0.5 * overload_ratio),
-                    )
-                alloc[movement] = float(np.clip(required_saturation, 0.0, net.movement_capacity_veh_h))
+        default_green = net.effective_green_total / 2.0
+        for movement, target_flow in plan.movement_flows.items():
+            spec = specs.get(movement, {})
+            phase = str(spec.get("phase", ""))
+            green_sec = green_times.get(phase, default_green) if green_times else default_green
+            green_fraction = float(np.clip(green_sec / max(net.cycle_length, 1.0e-9), 1.0e-6, 1.0))
+            alloc[movement] = float(np.clip(
+                max(0.0, target_flow) / green_fraction,
+                0.0,
+                net.movement_capacity_veh_h,
+            ))
 
         for link in net.boundary_in_links:
             related = [
@@ -249,16 +229,22 @@ class UrbanFollower:
         for link in net.boundary_out_links:
             related = [
                 movement for movement, spec in specs.items()
-                if spec.get("destination") == link and spec.get("kind") == "off_ramp"
+                if spec.get("destination") == link and spec.get("kind") == "boundary_out"
             ]
             alloc[link] = float(sum(alloc.get(movement, 0.0) for movement in related))
 
-        residual = abs(
-            sum(alloc.get(m, 0.0) for m in inbound_movements)
-            - sum(alloc.get(m, 0.0) for m in outbound_movements)
-            - target_net_inflow
+        inflow = sum(
+            plan.movement_flows.get(movement, 0.0)
+            for movement, spec in specs.items()
+            if spec.get("kind") in INFLOW_KINDS
         )
-        return alloc, float(residual), float(target_net_inflow)
+        outflow = sum(
+            plan.movement_flows.get(movement, 0.0)
+            for movement, spec in specs.items()
+            if spec.get("kind") in OUTFLOW_KINDS
+        )
+        residual = abs(inflow - outflow - plan.target_net_inflow_veh_h)
+        return alloc, float(residual), float(plan.target_net_inflow_veh_h), dict(plan.diagnostics)
 
     def solve(
         self,
@@ -267,12 +253,20 @@ class UrbanFollower:
         demand: DemandStep,
         freeway_response: object | None = None,
         previous_control: Optional[ControlAction] = None,
+        allocation_plan: Optional[AllocationResult] = None,
     ) -> UrbanFollowerResult:
         ensure_urban_state(state, self.cfg)
         pressure = self._freeway_pressure(freeway_response)
-        green = self._green_times(state, previous_control, freeway_response)
+        plan = allocation_plan or self.allocation_module.solve(state, leader)
+        green = self._green_times(state, previous_control, freeway_response, plan)
         offsets = self._offsets(state, previous_control)
-        allocation, residual, target_net_inflow = self._allocation(state, leader, freeway_response, green)
+        allocation, residual, target_net_inflow, allocation_metrics = self._allocation(
+            state,
+            leader,
+            freeway_response,
+            green,
+            plan,
+        )
         b_in = safe_balance_index(state.boundary_queue.get(l, 0.0) for l in self.cfg.network.boundary_in_links)
         b_out = safe_balance_index(state.boundary_queue.get(l, 0.0) for l in self.cfg.network.boundary_out_links)
         metrics = {
@@ -289,6 +283,7 @@ class UrbanFollower:
             "urban_accumulation_error_veh": float(state.total_urban_vehicles() - leader.N_P_star),
             "urban_net_inflow_target_veh_h": float(target_net_inflow),
         }
+        metrics.update(allocation_metrics)
         metrics.update(boundary_indices(state.boundary_queue.values(), self.cfg.network.boundary_queue_max_veh))
         smooth = 0.0
         if previous_control:

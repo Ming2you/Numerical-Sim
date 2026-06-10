@@ -378,6 +378,8 @@ def urban_substep(
             net.ramp_queue_max_veh,
             max(0.0, state.ramp_queue.get(ramp, 0.0) + actual),
         )
+        total_departures_veh += actual
+        outbound_service_veh += actual
         onramp_green_release_request_veh += requested
         onramp_green_releases_veh += actual
         onramp_green_release_shortfall_veh += max(0.0, requested - actual)
@@ -429,9 +431,11 @@ def urban_substep(
         if spec.get("kind") == "off_ramp":
             off_ramp = str(spec.get("off_ramp", ""))
             off_ramp_departures[off_ramp] = off_ramp_departures.get(off_ramp, 0.0) + actual
-            outbound_service_veh += actual
+            inbound_service_veh += actual
         elif spec.get("kind") == "boundary_in":
             inbound_service_veh += actual
+        elif spec.get("kind") == "boundary_out":
+            outbound_service_veh += actual
 
     for movement, spec in specs.items():
         qmax = _queue_max(cfg, movement, spec)
@@ -443,7 +447,6 @@ def urban_substep(
 
     urban_ttt = (
         sum(state.urban_movement_queue.values())
-        + sum(state.ramp_queue.values())
         + _storage_occupancy(state, cfg)
     ) * sim.T_u_h
 

@@ -35,10 +35,16 @@ class ConstraintTests(unittest.TestCase):
     def test_distributed_agent_partition_matches_topology(self):
         cfg = short_config()
         urban_agents, freeway_agents = build_agent_specs(cfg)
-        self.assertEqual(len(urban_agents), 4)
-        self.assertEqual(len(freeway_agents), 2)
-        self.assertEqual({agent.id for agent in urban_agents}, {"U_A", "U_C", "U_D", "U_F"})
-        self.assertEqual({agent.id for agent in freeway_agents}, {"F_W", "F_E"})
+        self.assertEqual(len(urban_agents), 5)
+        self.assertEqual(len(freeway_agents), 6)
+        self.assertEqual({agent.id for agent in urban_agents}, {"U_A", "U_B", "U_C", "U_D", "U_F"})
+        self.assertEqual({agent.id for agent in freeway_agents}, {"F_W0", "F_W1", "F_W2", "F_E0", "F_E1", "F_E2"})
+        d_agent = next(agent for agent in urban_agents if agent.id == "U_D")
+        self.assertIn("D_on_FW_W", d_agent.movements)
+        self.assertIn("OR_D_W_to_D_grid", d_agent.movements)
+        fw_merge_agent = next(agent for agent in freeway_agents if agent.id == "F_W1")
+        self.assertIn("R_D_W", fw_merge_agent.ramps)
+        self.assertIn("R_F_W", fw_merge_agent.ramps)
 
     def test_distributed_coordinator_returns_per_agent_diagnostics(self):
         cfg = ExperimentConfig.from_file(
@@ -61,11 +67,20 @@ class ConstraintTests(unittest.TestCase):
             ControlAction.fixed(cfg),
         )
         self.assertEqual(result.control.diagnostics["distributed_player_active"], 1.0)
-        self.assertEqual(result.control.diagnostics["distributed_urban_agent_count"], 4.0)
-        self.assertEqual(result.control.diagnostics["distributed_freeway_agent_count"], 2.0)
+        self.assertEqual(result.control.diagnostics["distributed_urban_agent_count"], 5.0)
+        self.assertEqual(result.control.diagnostics["distributed_freeway_agent_count"], 6.0)
         self.assertIn("agent_U_A_objective", result.control.diagnostics)
-        self.assertIn("agent_F_W_objective", result.control.diagnostics)
+        self.assertIn("agent_F_W1_objective", result.control.diagnostics)
         self.assertEqual(set(result.control.vsl), set(cfg.network.freeway_links))
+        boundary_out_total = sum(
+            result.control.inflow_outflow_allocation[movement]
+            for movement, spec in cfg.network.urban_movements.items()
+            if spec.get("destination") == "out_A_left" and spec.get("kind") == "boundary_out"
+        )
+        self.assertAlmostEqual(
+            result.control.inflow_outflow_allocation["out_A_left"],
+            boundary_out_total,
+        )
 
     def test_stackelberg_can_use_distributed_follower_solver(self):
         cfg = ExperimentConfig.from_file(
@@ -142,7 +157,7 @@ class ConstraintTests(unittest.TestCase):
         congested = state.copy()
         for movement in congested.urban_movement_queue:
             congested.urban_movement_queue[movement] = 0.0
-        congested.urban_movement_queue["in_A_to_out_D"] = 220.0
+        congested.urban_movement_queue["A_top_in_to_grid"] = 220.0
         congested_actions = Leader(cfg).candidates(congested, previous, demand)
         self.assertTrue(all(action.N_P_star <= 172.0 + 1.0e-9 for action in congested_actions))
 
@@ -163,7 +178,7 @@ class ConstraintTests(unittest.TestCase):
         state = TrafficState.initial(cfg)
         for movement in state.urban_movement_queue:
             state.urban_movement_queue[movement] = 0.0
-        state.urban_movement_queue["in_A_to_out_D"] = 120.0
+        state.urban_movement_queue["A_top_in_to_grid"] = 120.0
         for link in cfg.network.freeway_links:
             state.freeway_density[link] = [cfg.network.rho_crit + 2.0 for _ in state.freeway_density[link]]
             state.freeway_speed[link] = [cfg.network.v_free for _ in state.freeway_speed[link]]
@@ -318,7 +333,14 @@ class ConstraintTests(unittest.TestCase):
             {
                 "simulation": {"T_total": 180.0},
                 "mpc": {"horizon_steps": 3},
-                "network": {"off_ramp_split_ratio": {"OR_W": 0.5, "OR_E": 0.5}},
+                "network": {
+                    "off_ramp_split_ratio": {
+                        "OR_D_W": 0.25,
+                        "OR_F_W": 0.25,
+                        "OR_D_E": 0.25,
+                        "OR_F_E": 0.25,
+                    }
+                },
                 "freeway_offramp_capacity_drop": {
                     "enabled": True,
                     "lane_reduction": 0.75,
@@ -402,14 +424,14 @@ class ConstraintTests(unittest.TestCase):
     def test_onramp_uses_two_reservoirs_instead_of_syncing_queues(self):
         cfg = short_config()
         state = TrafficState.initial(cfg)
-        state.ramp_queue["R1"] = 30.0
-        state.urban_movement_queue["R1_onramp"] = 70.0
+        state.ramp_queue["R_D_W"] = 30.0
+        state.urban_movement_queue["D_on_FW_W"] = 70.0
         sync_onramp_queues_from_freeway(state, cfg)
-        self.assertAlmostEqual(state.ramp_queue["R1"], 30.0)
-        self.assertAlmostEqual(state.urban_movement_queue["R1_onramp"], 70.0)
+        self.assertAlmostEqual(state.ramp_queue["R_D_W"], 30.0)
+        self.assertAlmostEqual(state.urban_movement_queue["D_on_FW_W"], 70.0)
         sync_onramp_queues_to_freeway(state, cfg)
-        self.assertAlmostEqual(state.ramp_queue["R1"], 30.0)
-        self.assertAlmostEqual(state.urban_movement_queue["R1_onramp"], 70.0)
+        self.assertAlmostEqual(state.ramp_queue["R_D_W"], 30.0)
+        self.assertAlmostEqual(state.urban_movement_queue["D_on_FW_W"], 70.0)
 
     def test_onramp_demand_enters_urban_movement_queue_when_metering_closed(self):
         cfg = short_config()
@@ -442,16 +464,16 @@ class ConstraintTests(unittest.TestCase):
 
         low_control = ControlAction.fixed(cfg)
         high_control = ControlAction.fixed(cfg)
-        low_control.green_times["A_p2"] = cfg.network.green_min
-        high_control.green_times["A_p2"] = cfg.network.green_max
-        low_control.inflow_outflow_allocation["R1_onramp"] = cfg.network.movement_capacity_veh_h
-        high_control.inflow_outflow_allocation["R1_onramp"] = cfg.network.movement_capacity_veh_h
+        low_control.green_times["D_p2"] = cfg.network.green_min
+        high_control.green_times["D_p2"] = cfg.network.green_max
+        low_control.inflow_outflow_allocation["D_on_FW_W"] = cfg.network.movement_capacity_veh_h
+        high_control.inflow_outflow_allocation["D_on_FW_W"] = cfg.network.movement_capacity_veh_h
         ramp_release = {ramp: 0.0 for ramp in cfg.network.ramps}
 
         _, low_diag = urban_substep(low, low_control, demand, cfg, urban_step_index=0, ramp_release_veh_h=ramp_release)
         _, high_diag = urban_substep(high, high_control, demand, cfg, urban_step_index=0, ramp_release_veh_h=ramp_release)
 
-        self.assertGreater(high.ramp_queue["R1"], low.ramp_queue["R1"])
+        self.assertGreater(high.ramp_queue["R_D_W"], low.ramp_queue["R_D_W"])
         self.assertGreater(high_diag["onramp_green_releases_veh"], low_diag["onramp_green_releases_veh"])
 
     def test_coupling_passes_actual_ramp_release_to_freeway_step(self):
@@ -501,16 +523,10 @@ class ConstraintTests(unittest.TestCase):
                 "simulation": {"T_total": 360.0},
                 "network": {
                     "urban_link_storage_veh": {
-                        "A_out_D": 220.0,
-                        "C_out_F": 220.0,
-                        "A_R1": 180.0,
-                        "C_R2": 180.0,
-                        "D_R3": 180.0,
-                        "F_R4": 180.0,
-                        "OR_W_D": 0.0,
-                        "OR_E_F": 0.0,
-                        "D_out_D": 220.0,
-                        "F_out_F": 220.0,
+                        "OR_D_W_storage": 0.0,
+                        "OR_F_W_storage": 0.0,
+                        "OR_D_E_storage": 0.0,
+                        "OR_F_E_storage": 0.0,
                     }
                 },
             },
@@ -602,8 +618,18 @@ class ConstraintTests(unittest.TestCase):
             movement for movement, spec in cfg.network.urban_movements.items()
             if spec.get("kind") == "off_ramp"
         ]
-        no_out = sum(no_response.inflow_outflow_allocation.get(movement, 0.0) for movement in outbound)
-        yes_out = sum(with_response.inflow_outflow_allocation.get(movement, 0.0) for movement in outbound)
+        no_out = sum(
+            min(no_response.inflow_outflow_allocation.get(movement, 0.0), cfg.network.movement_capacity_veh_h)
+            * no_response.green_times[cfg.network.urban_movements[movement]["phase"]]
+            / cfg.network.cycle_length
+            for movement in outbound
+        )
+        yes_out = sum(
+            min(with_response.inflow_outflow_allocation.get(movement, 0.0), cfg.network.movement_capacity_veh_h)
+            * with_response.green_times[cfg.network.urban_movements[movement]["phase"]]
+            / cfg.network.cycle_length
+            for movement in outbound
+        )
         self.assertEqual(with_response.metrics["freeway_response_used"], 1.0)
         self.assertGreater(with_response.metrics["freeway_total_pressure"], 0.0)
         self.assertGreaterEqual(yes_out, no_out)

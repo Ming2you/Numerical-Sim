@@ -11,7 +11,7 @@ from src.simulation.closed_loop_runner import run_closed_loop
 
 
 def tuned_capacity_drop_config(base_path: str, t_total: float) -> ExperimentConfig:
-    """capacity drop과 VSL activation을 동시에 관측하기 위한 stress tuning config를 만든다."""
+    """Capacity drop과 VSL activation을 동시에 관측하기 위한 stress tuning config를 만든다."""
     return ExperimentConfig.from_file(base_path).with_updates({
         "simulation": {"T_total": t_total},
         "mpc": {
@@ -20,8 +20,19 @@ def tuned_capacity_drop_config(base_path: str, t_total: float) -> ExperimentConf
             "max_nash_iter": 10,
         },
         "network": {
-            "off_ramp_split_ratio": {"OR_W": 0.90, "OR_E": 0.90},
-            "urban_link_storage_veh": {"OR_W_D": 20.0, "OR_E_F": 20.0},
+            # W/E freeway 각각 D/F 두 off-ramp가 있으므로 split ratio 합이 1을 넘지 않게 둔다.
+            "off_ramp_split_ratio": {
+                "OR_D_W": 0.45,
+                "OR_F_W": 0.45,
+                "OR_D_E": 0.45,
+                "OR_F_E": 0.45,
+            },
+            "urban_link_storage_veh": {
+                "OR_D_W_storage": 20.0,
+                "OR_F_W_storage": 20.0,
+                "OR_D_E_storage": 20.0,
+                "OR_F_E_storage": 20.0,
+            },
             "urban_avg_speed_km_h": 3.0,
             "urban_avg_vehicle_length_m": 15.0,
         },
@@ -115,12 +126,12 @@ def _write_report(path: Path, summary: Mapping[str, Any]) -> None:
 
 ## 목적
 
-이 probe는 기본 `peak_demand`가 아니라, off-ramp spill-back을 의도적으로 발화시키는 stress tuning에서 VSL이 실제로 activate되는지 확인한다.
+이 probe는 기본 `peak_demand`가 아니라 off-ramp spill-back을 의도적으로 악화시킨 stress tuning에서 VSL이 실제로 activate되는지 확인한다.
 
 ## Tuning
 
-- `off_ramp_split_ratio`: `0.90`
-- `OR_W_D`, `OR_E_F` storage: `20 veh`
+- `off_ramp_split_ratio`: each off-ramp `0.45`
+- `OR_*_storage`: `20 veh`
 - `urban_avg_speed_km_h`: `3.0`
 - `urban_avg_vehicle_length_m`: `15.0`
 - `lane_reduction`: `0.75`
@@ -138,8 +149,8 @@ def _write_report(path: Path, summary: Mapping[str, Any]) -> None:
 
 ## 해석
 
-- 이 stress tuning에서는 capacity drop과 VSL activation이 같은 control step에서 함께 관측된다.
-- 다만 proposed total TTT가 `proposed_without_vsl`보다 낮지는 않다. 따라서 이 결과는 "VSL이 켜지는가"에 대한 positive check이지, "VSL이 항상 성능을 개선하는가"에 대한 positive proof는 아니다.
+- 이 stress tuning에서는 capacity drop과 VSL activation이 같은 control step에서 함께 관측되는지를 확인한다.
+- 다만 proposed total TTT가 `proposed_without_vsl`보다 항상 낮다는 보장은 없다. 따라서 이 결과는 "VSL이 켜지는가"에 대한 positive check이며, "VSL이 항상 성능을 개선하는가"에 대한 positive proof는 아니다.
 """
     path.write_text(text, encoding="utf-8")
 
