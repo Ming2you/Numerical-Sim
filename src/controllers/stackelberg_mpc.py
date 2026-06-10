@@ -68,11 +68,12 @@ class StackelbergMPCController:
                 predicted_states,
                 nash.control,
                 previous,
-                follower_ttt + nash.objective_value,
+                follower_ttt,
                 nash.converged,
             )
             metadata = leader_metadata(candidates)
             metadata.update({
+                "N_P_crit": float(self.cfg.leader.N_P_crit_veh),
                 "nash_iterations": float(nash.iterations),
                 "nash_converged": 1.0 if nash.converged else 0.0,
                 "nash_residual_control": nash.residual_control,

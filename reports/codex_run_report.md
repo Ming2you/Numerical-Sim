@@ -1,79 +1,53 @@
 # Codex 실행 리포트
 
-## 현재 상태
+## 2026-06-10 13:06:17 +09:00
 
-현재 모델은 아직 인증 기준을 만족하지 못합니다.
+### 이번 수정 요약
 
-Claude가 `ee85ee1` 기준으로 `peak_demand`, `7200 s` full diagnostic run을 수행했고,
-결과는 proposed Stackelberg MPC가 fixed baseline보다 **Total TTT 기준 10.64% 악화**였습니다.
+- `docs/spec/04_controller.md`의 수정된 leader objective를 기준으로 `src/controllers/leader.py`를 재작성했다.
+- 기본 leader objective mode를 `state_accumulation`으로 변경했다.
+- `N_P_star` 후보를 임의 `[0, 500]` 격자가 아니라 `N_P_crit_veh` 주변 band로 생성하도록 수정했다.
+- leader objective의 urban penalty는 `max(n_P - N_P_crit, 0)` 기준으로 계산하도록 고쳤다.
+- `N_P_crit_veh`와 candidate band 설정을 config/dataclass validation에 추가했다.
+- urban follower가 on-ramp movement allocation까지 직접 결정하도록 연결했다.
+- p2 green이 짧을 때도 `N_UF_star`를 받칠 수 있도록 on-ramp saturation flow를 green fraction 기준으로 역산했다.
+- off-ramp discharge phase가 최소 green에 고정되어 urban outflow가 굶지 않도록 D/F 계열 p1 green floor를 추가했다.
+- boundary/urban net inflow 진단은 follower가 allocation을 만들 때 사용한 control-interval target과 비교하도록 정리했다.
 
-이번 run의 핵심 의미는 계산 병목이 아니라 다음 병목을 확인했다는 점입니다.
-Freeway follower 경량화 이후 full run은 가능해졌고, 이제 실패 원인은 주로 urban setpoint와
-urban follower 제어 로직으로 좁혀졌습니다.
+### 검증 결과
 
-## 현재 Full Diagnostic 결과
+| 실행 | 결과 | 주요 수치 |
+|---|---|---|
+| Unit tests | PASS | `python -B -m unittest discover -s src\tests -v`, 44 tests OK |
+| `peak_demand`, 360 s | PASS | Total TTT `30.974 -> 26.763`, improvement `13.60%` |
+| `peak_demand`, 1800 s | FAIL | Total TTT `455.517 -> 308.027`, improvement `32.38%` |
 
-- 검토 커밋: `ee85ee1`
-- 시나리오: `peak_demand`
-- Baseline mode: `fixed_signal_fixed_speed`
-- Controller mode: `stackelberg_mpc`
-- Simulation horizon: `7200 s`
-- Claude 확인 출력: `outputs/claude_diag_peak_full/`
+### 360초 acceptance 상세
 
-| 지표 | Baseline | Proposed | 결과 |
-|---|---:|---:|---:|
-| Total TTT | 2889.8 | 3197.3 | -10.64% |
-| Freeway TTT | 187.8 | 195.8 | 소폭 악화 |
-| Urban TTT | 2702.0 | 3001.5 | +11.1% 악화 |
-| Boundary CV | 0.145 | 0.305 | 악화 |
+- Total TTT improvement: `13.60%`로 기준 `8%`를 통과했다.
+- Ramp metering validation: PASS
+  - mean error `73.35 veh/h`
+  - max violation `94.97 veh/h`
+- Boundary balance validation: PASS
+  - Boundary CV `0.160 -> 0.098`
+  - boundary queue balance improvement `38.71%`
+  - urban net inflow tracking error `62.41 veh/h`
 
-## 해결된 부분
+### 1800초 장기 run 잔여 진단
 
-- Freeway follower 후보 평가에서 full `run_coupled_interval` 재시뮬레이션을 제거했습니다.
-- 후보 평가는 고정 urban control에서 on-ramp/off-ramp boundary만 예측하는 lightweight plant를 사용합니다.
-- on-ramp metering은 요청량이 아니라 `w_r`에서 실제 drain된 차량만 freeway에 주입합니다.
-- 관련 regression test가 추가됐고, `python -m unittest discover -s src/tests` 기준 38개 테스트가 통과했습니다.
-- 첫 default MPC decision 실측은 약 `78.7 s -> 17.5 s`로 감소했습니다.
+장기 run은 Total TTT 관점에서는 크게 개선되지만 아직 acceptance는 실패한다.
 
-## 현재 실패 진단
+- VSL/density validation 실패:
+  - `vsl_active_steps = 0`
+  - `density_exceedance_duration = 2`
+  - 일부 freeway segment가 `rho_crit`를 넘는 순간이 있는데 VSL 또는 N_UF 억제가 충분히 반응하지 못한다.
+- Boundary tracking validation 실패:
+  - urban net inflow tracking error `545.3 veh/h`
+  - 후반부에 `net_inflow_target = -800 veh/h`까지 내려가지만 실제 net inflow가 양수로 튀는 구간이 남아 있다.
 
-1. `peak_demand`에서는 freeway가 거의 혼잡하지 않아 VSL이 한 번도 활성화되지 않습니다.
-   - `vsl_active_steps = 0`
-   - freeway density exceedance도 사실상 없습니다.
-   - 이 시나리오는 freeway 제어 검증보다는 urban 제어 진단에 가깝습니다.
+### 다음 수정 후보
 
-2. Leader의 `N_UF_star`가 초기에 추적 불가능한 값을 선택합니다.
-   - 예: `4000`, `6000 veh/h`
-   - 실제 ramp release capacity와 downstream receiving을 반영하지 않아 metering residual이 커집니다.
-
-3. 가장 큰 문제는 `N_P_star` 의미가 코드 내에서 불일치한다는 점입니다.
-   - leader objective에서는 `N_P_star`를 urban accumulation, 즉 누적 차량 수처럼 사용합니다.
-   - urban follower와 diagnostics에서는 `N_P_star`를 net inflow, 즉 `veh/h`처럼 사용했습니다.
-   - 같은 값이 한쪽에서는 `veh`, 다른 쪽에서는 `veh/h`로 해석되어 urban control target이 물리적으로 꼬였습니다.
-
-4. Urban follower가 baseline보다 boundary balance를 악화시킵니다.
-   - Boundary CV가 `0.145 -> 0.305`로 증가했습니다.
-   - MaxMin boundary queue가 시간에 따라 누적 증가했습니다.
-   - offset control도 corridor delay를 증가시키는 징후가 있습니다.
-
-## 이번 구현 방향
-
-이번 단계의 수정 범위는 다음과 같습니다.
-
-1. no-control 또는 fixed baseline demand sweep으로 도시 MFD calibration scaffold를 만듭니다.
-2. `N_P_star`를 도시 목표 누적 차량 수, 단위 `veh`로 통일합니다.
-3. Urban follower는 `N_P_star`를 직접 net inflow target으로 쓰지 않고, 현재 urban accumulation과 목표 accumulation의 차이에서 허용 net inflow를 유도합니다.
-4. `N_UF_star` 후보는 total ramp capacity가 아니라 현재 ramp queue, on-ramp green forecast, downstream receiving, mainline density 여유를 반영한 feasible capacity 기반으로 만듭니다.
-
-## 검증 계획
-
-1. Unit tests
-2. 짧은 `peak_demand` smoke, 예: `T_total=360`
-3. `peak_demand 7200 s` full rerun
-4. `oversaturated_demand` 또는 `incident_or_capacity_drop`에서 VSL/ramp metering activation 별도 확인
-
-## 결론
-
-계산 병목은 닫혔습니다. 다음 병목은 setpoint calibration과 urban accumulation control입니다.
-이제 목표는 "controller가 켜지는지"가 아니라 "물리적으로 의미 있는 target을 주고,
-fixed baseline보다 urban queue balance를 악화시키지 않는지"를 확인하는 것입니다.
+1. Leader의 congestion 판단을 평균 density가 아니라 max 또는 percentile density 기준으로 바꿔 일부 segment 병목에도 `N_UF_star`가 줄어들게 한다.
+2. `w_F` 또는 freeway follower density penalty를 키워 장기 run에서 rho_crit 초과를 더 강하게 회피한다.
+3. Urban follower의 후반부 과포화 상황에서 boundary-in green과 off-ramp/on-ramp discharge 우선순위를 더 직접적으로 최적화한다.
+4. VSL compliance `alpha_vsl`가 0인 현재 설정에서 VSL activation 검증을 어떻게 해석할지 별도 정책을 정한다.

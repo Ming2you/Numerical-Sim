@@ -105,12 +105,22 @@ class UrbanFollower:
                 spec.get("phase") == f"{signal}_p2" and spec.get("kind") == "on_ramp"
                 for spec in specs.values()
             )
+            has_offramp_discharge_phase = any(
+                spec.get("phase") == f"{signal}_p1" and spec.get("kind") == "off_ramp"
+                for spec in specs.values()
+            )
             if has_onramp_phase:
                 # ramp 병목 압력이 높으면 on-ramp 대기열을 green split 산정에서 더 크게 본다.
                 p2_queue += pressure["total_pressure"] * net.ramp_queue_max_veh
             ratio = p1_queue / max(p1_queue + p2_queue, 1.0e-9) if p1_queue + p2_queue > 0 else 0.5
             p1 = float(np.clip(total * ratio, net.green_min, net.green_max))
             p2 = total - p1
+            if has_offramp_discharge_phase:
+                # off-ramp 방출 phase가 최소 green에 묶이면 urban net outflow가 구조적으로 부족해진다.
+                p1_floor = max(net.green_min, 0.35 * total)
+                if p1 < p1_floor:
+                    p1 = p1_floor
+                    p2 = total - p1
             if p2 < net.green_min:
                 p2 = net.green_min
                 p1 = total - p2
@@ -139,6 +149,7 @@ class UrbanFollower:
         state: TrafficState,
         leader: LeaderAction,
         freeway_response: object | None = None,
+        green_times: Optional[Dict[str, float]] = None,
     ) -> tuple[Dict[str, float], float, float]:
         net = self.cfg.network
         specs = movement_specs(self.cfg)
@@ -152,11 +163,33 @@ class UrbanFollower:
             movement for movement, spec in specs.items()
             if spec.get("kind") == "off_ramp"
         ]
+        onramp_movements = [
+            movement for movement, spec in specs.items()
+            if spec.get("kind") == "on_ramp"
+        ]
         in_cap = len(inbound_movements) * net.movement_capacity_veh_h
         out_cap = len(outbound_movements) * net.movement_capacity_veh_h
-        total_service = 0.62 * (in_cap + out_cap)
-        desired_in = np.clip((total_service + target_net_inflow) / 2.0, 0.0, in_cap)
-        desired_out = np.clip(desired_in - target_net_inflow, 0.0, out_cap)
+        current_accumulation = state.total_urban_vehicles()
+        target_accumulation = max(float(leader.N_P_star), 1.0e-9)
+        overload_ratio = float(np.clip(
+            (current_accumulation - target_accumulation) / max(self.cfg.leader.N_P_crit_veh, 1.0e-9),
+            0.0,
+            1.0,
+        ))
+        if target_net_inflow < 0.0 or overload_ratio > 0.0:
+            # 도시 누적이 목표를 넘으면 inbound를 먼저 조이고 outbound service를 우선 배정한다.
+            desired_out = np.clip(
+                0.62 * out_cap + max(0.0, -target_net_inflow) + overload_ratio * 0.25 * out_cap,
+                0.0,
+                out_cap,
+            )
+            desired_in = np.clip(desired_out + target_net_inflow, 0.0, in_cap)
+            desired_in *= max(0.0, 1.0 - 0.85 * overload_ratio)
+            desired_out = np.clip(max(desired_out, desired_in - target_net_inflow), 0.0, out_cap)
+        else:
+            total_service = 0.62 * (in_cap + out_cap)
+            desired_in = np.clip((total_service + target_net_inflow) / 2.0, 0.0, in_cap)
+            desired_out = np.clip(desired_in - target_net_inflow, 0.0, out_cap)
         if pressure["used"] > 0.0 and outbound_movements:
             # freeway가 막히면 off-ramp storage를 더 빨리 비우도록 outbound service 목표를 살짝 올린다.
             desired_out = np.clip(
@@ -179,6 +212,33 @@ class UrbanFollower:
             w = q / max(float(np.sum(q)), 1.0e-9)
             for idx, movement in enumerate(group):
                 alloc[movement] = float(min(net.movement_capacity_veh_h, total * w[idx]))
+
+        if onramp_movements:
+            # on-ramp 접근부 x_on -> w_r 방출도 follower decision으로 둔다.
+            # green fraction이 짧은 phase에서는 같은 N_UF_star를 받치기 위해 더 큰 saturation flow가 필요하다.
+            q = np.asarray([
+                state.urban_movement_queue.get(movement, 0.0) + 1.0
+                for movement in onramp_movements
+            ], dtype=float)
+            w = q / max(float(np.sum(q)), 1.0e-9)
+            default_green = net.effective_green_total / 2.0
+            for idx, movement in enumerate(onramp_movements):
+                spec = specs[movement]
+                phase = str(spec.get("phase", ""))
+                green_sec = (
+                    green_times.get(phase, default_green)
+                    if green_times is not None
+                    else default_green
+                )
+                green_fraction = float(np.clip(green_sec / max(net.cycle_length, 1.0e-9), 1.0e-6, 1.0))
+                target_release_flow = max(0.0, leader.N_UF_star) * w[idx]
+                required_saturation = target_release_flow / green_fraction
+                if overload_ratio > 0.0:
+                    required_saturation = max(
+                        required_saturation,
+                        net.movement_capacity_veh_h * (0.5 + 0.5 * overload_ratio),
+                    )
+                alloc[movement] = float(np.clip(required_saturation, 0.0, net.movement_capacity_veh_h))
 
         for link in net.boundary_in_links:
             related = [
@@ -212,7 +272,7 @@ class UrbanFollower:
         pressure = self._freeway_pressure(freeway_response)
         green = self._green_times(state, previous_control, freeway_response)
         offsets = self._offsets(state, previous_control)
-        allocation, residual, target_net_inflow = self._allocation(state, leader, freeway_response)
+        allocation, residual, target_net_inflow = self._allocation(state, leader, freeway_response, green)
         b_in = safe_balance_index(state.boundary_queue.get(l, 0.0) for l in self.cfg.network.boundary_in_links)
         b_out = safe_balance_index(state.boundary_queue.get(l, 0.0) for l in self.cfg.network.boundary_out_links)
         metrics = {

@@ -36,7 +36,7 @@ Implement the leader objective as configurable, with this default form:
 ```text
 J_L = sum_over_horizon[
         n_P(t) + n_F(t)
-        + w_P * positive_part(n_P(t) - n_P_star)
+        + w_P * positive_part(n_P(t) - n_P_crit)
         + w_F * sum_m sum_i L[m] * lanes[m] * positive_part(rho[m,i](t) - rho_crit[m])
         + w_L * L1_norm(U_L(t) - U_L(t-1))
       ]

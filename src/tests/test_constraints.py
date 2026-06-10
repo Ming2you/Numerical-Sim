@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import patch
 
 from src.controllers.freeway_follower import FreewayFollower, FreewayFollowerResult
-from src.controllers.leader import LeaderAction
+from src.controllers.leader import Leader, LeaderAction
 from src.controllers.stackelberg_mpc import StackelbergMPCController
 from src.controllers.urban_follower import UrbanFollower
 from src.models.demand import DemandProfile, ScenarioConfig
@@ -51,7 +51,7 @@ class ConstraintTests(unittest.TestCase):
         control = StackelbergMPCController(cfg).decide(TrafficState.initial(cfg), demand)
         movement_keys = [
             movement for movement, spec in cfg.network.urban_movements.items()
-            if spec.get("kind") != "on_ramp"
+            if spec.get("kind") in {"boundary_in", "off_ramp", "on_ramp"}
         ]
         self.assertTrue(all(movement in control.inflow_outflow_allocation for movement in movement_keys))
 
@@ -62,6 +62,84 @@ class ConstraintTests(unittest.TestCase):
         for value in control.offsets.values():
             self.assertGreaterEqual(value, 0.0)
             self.assertLess(value, cfg.network.cycle_length)
+
+    def test_leader_np_candidates_use_calibrated_crit_band(self):
+        cfg = ExperimentConfig.from_file(
+            "src/config/default.yaml",
+            {
+                "mpc": {"leader_candidate_count": 6},
+                "leader": {
+                    "N_P_crit_veh": 172.0,
+                    "N_P_candidate_lower_factor": 0.9,
+                    "N_P_candidate_upper_factor": 1.05,
+                },
+            },
+        )
+        state = TrafficState.initial(cfg)
+        demand = DemandProfile(cfg, ScenarioConfig("test")).at(0.0)
+        previous = ControlAction.fixed(cfg)
+        previous.N_P_star = 333.0
+
+        actions = Leader(cfg).candidates(state, previous, demand)
+        nps = [action.N_P_star for action in actions]
+        self.assertTrue(all(0.9 * 172.0 <= value <= 1.05 * 172.0 for value in nps))
+        self.assertTrue(any(abs(value - 172.0) <= 1.0e-9 for value in nps))
+
+        congested = state.copy()
+        for movement in congested.urban_movement_queue:
+            congested.urban_movement_queue[movement] = 0.0
+        congested.urban_movement_queue["in_A_to_out_D"] = 220.0
+        congested_actions = Leader(cfg).candidates(congested, previous, demand)
+        self.assertTrue(all(action.N_P_star <= 172.0 + 1.0e-9 for action in congested_actions))
+
+    def test_leader_objective_matches_spec_accumulation_form(self):
+        cfg = ExperimentConfig.from_file(
+            "src/config/default.yaml",
+            {
+                "leader": {
+                    "objective_mode": "state_accumulation",
+                    "w_P": 2.0,
+                    "w_F": 3.0,
+                    "w_L": 0.5,
+                    "N_P_crit_veh": 100.0,
+                    "non_convergence_penalty": 0.0,
+                }
+            },
+        )
+        state = TrafficState.initial(cfg)
+        for movement in state.urban_movement_queue:
+            state.urban_movement_queue[movement] = 0.0
+        state.urban_movement_queue["in_A_to_out_D"] = 120.0
+        for link in cfg.network.freeway_links:
+            state.freeway_density[link] = [cfg.network.rho_crit + 2.0 for _ in state.freeway_density[link]]
+            state.freeway_speed[link] = [cfg.network.v_free for _ in state.freeway_speed[link]]
+        state.refresh_freeway_flow(cfg.network)
+
+        action = ControlAction.fixed(cfg)
+        action.N_P_star = 170.0
+        action.N_UF_star = 300.0
+        previous = ControlAction.fixed(cfg)
+        previous.N_P_star = 160.0
+        previous.N_UF_star = 250.0
+
+        n_p = state.total_urban_vehicles()
+        n_f = state.total_freeway_vehicles(cfg.network)
+        density_excess = sum(
+            cfg.network.freeway_segment_length_km
+            * cfg.network.freeway_lanes
+            * max(0.0, rho - cfg.network.rho_crit)
+            for values in state.freeway_density.values()
+            for rho in values
+        )
+        expected = (
+            n_p
+            + n_f
+            + 2.0 * max(0.0, n_p - 100.0)
+            + 3.0 * density_excess
+            + 0.5 * (abs(170.0 - 160.0) + abs(300.0 - 250.0))
+        )
+        actual = Leader(cfg).objective([state], action, previous, follower_objective=9999.0, nash_converged=True)
+        self.assertAlmostEqual(actual, expected)
 
     def test_ramp_metering_bounds(self):
         cfg = short_config()

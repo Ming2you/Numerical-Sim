@@ -21,7 +21,7 @@ mpc:
   nash_relaxation_alpha: 0.8
 
 leader:
-  objective_mode: follower_ttt
+  objective_mode: state_accumulation
   w_P: 1.0
   w_F: 1.0
   w_L: 0.05

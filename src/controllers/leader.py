@@ -30,7 +30,9 @@ class Leader:
         count = max(3, self.cfg.mpc.leader_candidate_count)
         n_np = max(2, int(round(np.sqrt(count))))
         n_nuf = max(2, int(np.ceil(count / n_np)))
-        np_values = np.linspace(leader.N_P_star_range[0], leader.N_P_star_range[1], n_np)
+        np_lower, np_upper = self._np_candidate_bounds(state)
+        np_values = set(float(v) for v in np.linspace(np_lower, np_upper, n_np))
+        np_values.add(float(np.clip(leader.N_P_crit_veh, np_lower, np_upper)))
         feasible_nuf = self._feasible_nuf_capacity(state, previous, demand)
         nuf_upper = min(leader.N_UF_star_range[1], feasible_nuf)
         nuf_upper = max(leader.N_UF_star_range[0], nuf_upper)
@@ -45,10 +47,25 @@ class Leader:
                 nuf_upper,
             )))
         nuf_values = sorted(nuf_values)
+        np_values = sorted(np_values)
         out = [LeaderAction(float(np_), float(nuf)) for np_ in np_values for nuf in nuf_values]
         if previous is not None:
-            out.append(LeaderAction(previous.N_P_star, previous.N_UF_star))
+            out.append(LeaderAction(
+                float(np.clip(previous.N_P_star, np_lower, np_upper)),
+                previous.N_UF_star,
+            ))
         return out[:count + 1]
+
+    def _np_candidate_bounds(self, state: TrafficState) -> tuple[float, float]:
+        """Calibration된 n_P_crit 주변으로 leader의 도시 누적 목표 후보를 제한한다."""
+        leader = self.cfg.leader
+        crit = float(leader.N_P_crit_veh)
+        lower = crit * float(leader.N_P_candidate_lower_factor)
+        upper = crit * float(leader.N_P_candidate_upper_factor)
+        if state.total_urban_vehicles() >= crit:
+            upper = crit
+        lower = max(0.0, min(lower, upper))
+        return float(lower), float(upper)
 
     def _ramp_merge_index(self, ramp: str, n_segments: int) -> int:
         configured = getattr(self.cfg.network, "ramp_merge_segment_index", {})
@@ -160,20 +177,10 @@ class Leader:
             base = sum(s.total_freeway_vehicles(net) + s.total_urban_vehicles() for s in states)
         target_penalty = 0.0
         density_penalty = 0.0
-        metering_penalty = 0.0
-        density_weight = lc.w_F if lc.objective_mode != "follower_ttt" else 0.05 * lc.w_F
         for s in states:
             n_p = s.total_urban_vehicles()
-            target_penalty += lc.w_P * max(0.0, n_p - action.N_P_star)
-            density_ratio = self._density_ratio(s)
-            queue_pressure = self._ramp_queue_pressure(s)
-            recommended_nuf = self._heuristic_nuf_target(s)
-            nuf_excess = max(0.0, action.N_UF_star - recommended_nuf)
-            nuf_shortage = max(0.0, recommended_nuf - action.N_UF_star)
-            congestion_term = max(0.0, density_ratio - lc.metering_activation_density_ratio)
-            metering_penalty += lc.metering_congestion_weight * congestion_term * nuf_excess
-            metering_penalty += lc.metering_queue_weight * queue_pressure * nuf_shortage
-            density_penalty += density_weight * sum(
+            target_penalty += lc.w_P * max(0.0, n_p - lc.N_P_crit_veh)
+            density_penalty += lc.w_F * sum(
                 net.freeway_segment_length_km * net.freeway_lanes * max(0.0, rho - net.rho_crit)
                 for values in s.freeway_density.values()
                 for rho in values
@@ -185,7 +192,7 @@ class Leader:
                 + abs(action.N_UF_star - previous.N_UF_star)
             )
         conv = 0.0 if nash_converged else lc.non_convergence_penalty
-        return float(base + target_penalty + density_penalty + metering_penalty + smooth + conv)
+        return float(base + target_penalty + density_penalty + smooth + conv)
 
 
 def leader_metadata(actions: Iterable[LeaderAction]) -> Dict[str, float]:

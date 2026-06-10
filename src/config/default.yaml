@@ -178,7 +178,7 @@ mpc:
   optimizer_maxiter: 40
   optimizer_n_starts: 2
 leader:
-  objective_mode: follower_ttt
+  objective_mode: state_accumulation
   w_P: 1.0
   w_F: 1.0
   w_L: 0.05
@@ -188,6 +188,9 @@ leader:
   N_UF_star_range:
   - 0.0
   - 6000.0
+  N_P_crit_veh: 172.2252769877888
+  N_P_candidate_lower_factor: 0.9
+  N_P_candidate_upper_factor: 1.05
   N_P_star_unit: veh
   N_UF_star_unit: veh_per_hour
   N_P_feedback_horizon_h: 0.5

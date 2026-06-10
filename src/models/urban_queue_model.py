@@ -297,6 +297,9 @@ def urban_substep(
         "urban_substep_active": 1.0,
         "onramp_two_reservoir_active": 1.0,
     }
+    initial_accumulation = state.total_urban_vehicles()
+    interval_net_inflow_target = urban_accumulation_feedback_flow(state, cfg, control.N_P_star)
+    initial_accumulation_error = initial_accumulation - control.N_P_star
     overflow_count = 0.0
     projection_count = 0.0
     total_departures_veh = 0.0
@@ -448,16 +451,22 @@ def urban_substep(
     inbound = inbound_service_veh / max(sim.T_u_h, 1.0e-9)
     outbound = outbound_service_veh / max(sim.T_u_h, 1.0e-9)
     net_inflow = inbound - outbound
-    net_inflow_target = urban_accumulation_feedback_flow(state, cfg, control.N_P_star)
+    accumulation_error = state.total_urban_vehicles() - control.N_P_star
+    net_inflow_error = abs(net_inflow - interval_net_inflow_target)
     diagnostics["inbound_service_veh"] = float(inbound_service_veh)
     diagnostics["outbound_service_veh"] = float(outbound_service_veh)
     diagnostics["urban_total_departures_veh"] = float(total_departures_veh)
     diagnostics["net_inflow"] = float(net_inflow)
-    diagnostics["net_inflow_target"] = float(net_inflow_target)
+    diagnostics["net_inflow_target"] = float(interval_net_inflow_target)
+    diagnostics["urban_net_inflow_target_veh_h"] = float(interval_net_inflow_target)
+    diagnostics["urban_accumulation_initial_veh"] = float(initial_accumulation)
+    diagnostics["urban_accumulation_initial_error_veh"] = float(initial_accumulation_error)
     diagnostics["urban_accumulation_veh"] = float(state.total_urban_vehicles())
     diagnostics["urban_accumulation_target_veh"] = float(control.N_P_star)
-    diagnostics["urban_accumulation_error_veh"] = float(state.total_urban_vehicles() - control.N_P_star)
-    diagnostics["net_inflow_tracking_error"] = abs(net_inflow - net_inflow_target)
+    diagnostics["urban_accumulation_error_veh"] = float(accumulation_error)
+    diagnostics["urban_accumulation_abs_error_veh"] = abs(float(accumulation_error))
+    diagnostics["urban_net_inflow_tracking_error_veh_h"] = float(net_inflow_error)
+    diagnostics["net_inflow_tracking_error"] = float(net_inflow_error)
     diagnostics["B_in"] = safe_balance_index(state.boundary_queue[l] for l in net.boundary_in_links)
     diagnostics["B_out"] = safe_balance_index(state.boundary_queue[l] for l in net.boundary_out_links)
     diagnostics.update(boundary_indices(state.boundary_queue.values(), net.boundary_queue_max_veh))
@@ -509,7 +518,10 @@ def aggregate_urban_diagnostics(
             "onramp_two_reservoir_active": 1.0,
             "net_inflow": 0.0,
             "net_inflow_target": net_inflow_target,
+            "urban_net_inflow_target_veh_h": net_inflow_target,
             "urban_accumulation_target_veh": float(control.N_P_star),
+            "urban_accumulation_abs_error_veh": 0.0,
+            "urban_net_inflow_tracking_error_veh_h": abs(net_inflow_target),
             "net_inflow_tracking_error": abs(net_inflow_target),
         }
 
@@ -548,9 +560,17 @@ def aggregate_urban_diagnostics(
     inbound = out.get("inbound_service_veh", 0.0) / max(horizon_h, 1.0e-9)
     outbound = out.get("outbound_service_veh", 0.0) / max(horizon_h, 1.0e-9)
     net_inflow = inbound - outbound
-    net_inflow_target = float(out.get("net_inflow_target", 0.0))
+    # 제어 검증에서는 follower가 allocation을 만들 때 사용한 control-interval 목표와 비교한다.
+    net_inflow_target = float(control.diagnostics.get(
+        "urban_net_inflow_target_veh_h",
+        out.get("urban_net_inflow_target_veh_h", out.get("net_inflow_target", 0.0)),
+    ))
+    net_inflow_error = abs(net_inflow - net_inflow_target)
     out["net_inflow"] = float(net_inflow)
-    out["net_inflow_tracking_error"] = abs(net_inflow - net_inflow_target)
+    out["net_inflow_target"] = float(net_inflow_target)
+    out["urban_net_inflow_target_veh_h"] = float(net_inflow_target)
+    out["urban_net_inflow_tracking_error_veh_h"] = float(net_inflow_error)
+    out["net_inflow_tracking_error"] = float(net_inflow_error)
     return out
 
 

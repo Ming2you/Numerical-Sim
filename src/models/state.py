@@ -314,12 +314,15 @@ class MPCConfig:
 
 @dataclass
 class LeaderConfig:
-    objective_mode: str = "follower_ttt"
+    objective_mode: str = "state_accumulation"
     w_P: float = 1.0
     w_F: float = 1.0
     w_L: float = 0.05
     N_P_star_range: List[float] = field(default_factory=lambda: [0.0, 500.0])
     N_UF_star_range: List[float] = field(default_factory=lambda: [0.0, 6000.0])
+    N_P_crit_veh: float = 172.2252769877888
+    N_P_candidate_lower_factor: float = 0.90
+    N_P_candidate_upper_factor: float = 1.05
     N_P_star_unit: str = "veh"
     N_UF_star_unit: str = "veh_per_hour"
     N_P_feedback_horizon_h: float = 0.5
@@ -404,8 +407,16 @@ class ExperimentConfig:
 
     def validate(self) -> None:
         self.simulation.validate()
+        if self.leader.objective_mode not in {"state_accumulation", "follower_ttt"}:
+            raise ValueError("leader.objective_mode must be state_accumulation or follower_ttt.")
         if self.leader.N_P_star_unit != "veh":
             raise ValueError("leader.N_P_star_unit must be veh.")
+        if self.leader.N_P_crit_veh <= 0.0:
+            raise ValueError("leader.N_P_crit_veh must be positive.")
+        if self.leader.N_P_candidate_lower_factor <= 0.0:
+            raise ValueError("leader.N_P_candidate_lower_factor must be positive.")
+        if self.leader.N_P_candidate_upper_factor < self.leader.N_P_candidate_lower_factor:
+            raise ValueError("leader.N_P_candidate_upper_factor must be >= lower factor.")
         if self.leader.N_UF_star_unit not in {"veh_per_hour", "veh_per_control_interval"}:
             raise ValueError("leader.N_UF_star_unit must be veh_per_hour or veh_per_control_interval.")
 

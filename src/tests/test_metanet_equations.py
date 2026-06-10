@@ -80,7 +80,10 @@ class MetanetEquationTests(unittest.TestCase):
         self.assertEqual(cfg.simulation.K_fu, 2)
         self.assertEqual(cfg.simulation.K_cf, 18)
         self.assertEqual(cfg.simulation.K_cu, 36)
+        self.assertEqual(cfg.leader.objective_mode, "state_accumulation")
         self.assertEqual(cfg.leader.N_P_star_unit, "veh")
+        self.assertGreater(cfg.leader.N_P_crit_veh, 0.0)
+        self.assertLessEqual(cfg.leader.N_P_candidate_lower_factor, cfg.leader.N_P_candidate_upper_factor)
         self.assertEqual(cfg.leader.N_UF_star_unit, "veh_per_hour")
         self.assertGreaterEqual(cfg.freeway_follower.horizon_beam_width, 1)
         self.assertGreaterEqual(cfg.freeway_follower.horizon_ramp_candidate_limit, 1)
@@ -100,6 +103,17 @@ class MetanetEquationTests(unittest.TestCase):
     def test_config_rejects_unknown_np_unit(self):
         with self.assertRaises(ValueError):
             ExperimentConfig.from_file("src/config/default.yaml", {"leader": {"N_P_star_unit": "veh_per_hour"}})
+
+    def test_config_rejects_unknown_leader_objective_mode(self):
+        with self.assertRaises(ValueError):
+            ExperimentConfig.from_file("src/config/default.yaml", {"leader": {"objective_mode": "bad_mode"}})
+
+    def test_config_rejects_invalid_np_candidate_band(self):
+        with self.assertRaises(ValueError):
+            ExperimentConfig.from_file(
+                "src/config/default.yaml",
+                {"leader": {"N_P_candidate_lower_factor": 1.1, "N_P_candidate_upper_factor": 0.9}},
+            )
 
     def test_traffic_state_stores_freeway_flow(self):
         cfg = ExperimentConfig.from_file("src/config/default.yaml")

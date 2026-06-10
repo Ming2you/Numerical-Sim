@@ -31,6 +31,14 @@ def summarize_run(result: Mapping[str, Any], cfg: ExperimentConfig) -> Dict[str,
     rows = result.get("run_rows", [])
     final_state = result.get("final_state")
     boundary_values = final_state.boundary_queue.values() if final_state is not None else []
+    net_inflow_errors = [
+        r.get("urban_net_inflow_tracking_error_veh_h", r.get("net_inflow_tracking_error", 0.0))
+        for r in rows
+    ]
+    accumulation_errors = [
+        r.get("urban_accumulation_abs_error_veh", abs(r.get("urban_accumulation_error_veh", 0.0)))
+        for r in rows
+    ]
     return {
         "freeway_ttt": float(result.get("freeway_ttt", 0.0)),
         "urban_ttt": float(result.get("urban_ttt", 0.0)),
@@ -39,7 +47,9 @@ def summarize_run(result: Mapping[str, Any], cfg: ExperimentConfig) -> Dict[str,
         "max_metering_violation": float(np.max([r.get("total_metering_error", 0.0) for r in rows])) if rows else 0.0,
         "ramp_queue_overflow_duration": float(np.sum([r.get("ramp_queue_overflow_count", 0.0) > 0 for r in rows])) if rows else 0.0,
         "density_exceedance_duration": float(np.sum([r.get("density_exceedance_count", 0.0) > 0 for r in rows])) if rows else 0.0,
-        "net_inflow_tracking_error": float(np.mean([r.get("net_inflow_tracking_error", 0.0) for r in rows])) if rows else 0.0,
+        "urban_net_inflow_tracking_error_veh_h": float(np.mean(net_inflow_errors)) if rows else 0.0,
+        "net_inflow_tracking_error": float(np.mean(net_inflow_errors)) if rows else 0.0,
+        "urban_accumulation_abs_error_veh": float(np.mean(accumulation_errors)) if rows else 0.0,
         "CV_boundary": boundary_cv(boundary_values, cfg.evaluation.eps),
         "B_in": safe_balance_index(
             final_state.boundary_queue[l] for l in cfg.network.boundary_in_links
@@ -174,9 +184,10 @@ def validate_controls(
                 "lower_is_better",
                 cfg.evaluation.eps,
             ),
-            "net_inflow_tracking_error": proposed_summary["net_inflow_tracking_error"],
+            "urban_net_inflow_tracking_error_veh_h": proposed_summary["urban_net_inflow_tracking_error_veh_h"],
+            "urban_accumulation_abs_error_veh": proposed_summary["urban_accumulation_abs_error_veh"],
             "pass": proposed_summary["CV_boundary"] <= baseline_summary["CV_boundary"] + 1e-9
             and proposed_summary["OverflowRatio_boundary"] <= baseline_summary["OverflowRatio_boundary"] + 1e-9
-            and proposed_summary["net_inflow_tracking_error"] <= cfg.urban_follower.eps_U + 1e-9,
+            and proposed_summary["urban_net_inflow_tracking_error_veh_h"] <= cfg.urban_follower.eps_U + 1e-9,
         },
     }

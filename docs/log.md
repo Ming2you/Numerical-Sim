@@ -215,3 +215,27 @@ This file records human-readable update notes for each direct push.
 - `python -B -m experiments.calibrate_setpoints --config src/config/default.yaml --scenario peak_demand --baseline fixed_signal_fixed_speed --urban-scales 0.75,1.0,1.25 --T-total 360 --output outputs/codex_setpoint_calibration_smoke`
 - `python -B -m experiments.run_experiment --config src/config/default.yaml --scenario peak_demand --baseline fixed_signal_fixed_speed --controller stackelberg_mpc --T-total 360 --output outputs/codex_setpoint_peak_smoke`
 - Result: 40 tests passed. Calibration smoke estimated `n_crit=172.225 veh`, `max_production=1306.667 veh/h`. Short peak smoke printed `FAIL improvement=6.85%`.
+
+## 2026-06-10 13:06:17 +09:00
+
+### Scope
+
+- `docs/spec/04_controller.md`의 수정된 leader objective를 기준으로 `leader.py` objective를 `n_P + n_F + N_P_crit 초과 penalty + freeway density 초과 penalty + leader action L1 smoothness` 형태로 정리했습니다.
+- 기본 `leader.objective_mode`를 `state_accumulation`으로 바꾸고, `follower_ttt`는 선택 모드로 남겼습니다.
+- `N_P_star` 후보를 기존 임의 `[0, 500]` 균등 grid 대신 `N_P_crit_veh` 주변 band에서 생성하도록 수정했습니다.
+- urban follower가 on-ramp movement allocation도 직접 결정하도록 연결했습니다.
+- p2 green fraction이 짧을 때도 `N_UF_star`를 받칠 수 있도록 on-ramp saturation flow를 green fraction 기준으로 역산했습니다.
+- off-ramp discharge phase가 최소 green에 묶여 urban outflow가 부족해지는 문제를 막기 위해 p1 green floor를 추가했습니다.
+- urban net inflow tracking 진단은 follower가 allocation을 만들 때 사용한 control-interval target과 비교하도록 정리했습니다.
+- `reports/codex_run_report.md`를 이번 검증 결과 기준으로 갱신했습니다.
+
+### Validation
+
+- `python -B -m py_compile src\\models\\state.py src\\controllers\\leader.py src\\controllers\\stackelberg_mpc.py src\\controllers\\urban_follower.py src\\models\\urban_queue_model.py src\\evaluation\\metrics.py src\\tests\\test_constraints.py src\\tests\\test_metanet_equations.py`
+- `python -B -m unittest src.tests.test_metanet_equations -v`
+- `python -B -m unittest src.tests.test_constraints -v`
+- `python -B -m unittest src.tests.test_metrics -v`
+- `python -B -m unittest discover -s src\\tests -v`
+- `python -B -m experiments.run_experiment --config src/config/default.yaml --scenario peak_demand --baseline fixed_signal_fixed_speed --controller stackelberg_mpc --T-total 360 --output outputs/codex_leader_objective_peak_360_v5`
+- `python -B -m experiments.run_experiment --config src/config/default.yaml --scenario peak_demand --baseline fixed_signal_fixed_speed --controller stackelberg_mpc --T-total 1800 --output outputs/codex_leader_objective_peak_1800_v2`
+- Result: 44 tests passed. `peak_demand 360 s`는 PASS, Total TTT improvement `13.60%`. `peak_demand 1800 s`는 Total TTT improvement `32.38%`였지만 density/VSL validation과 장기 urban net inflow tracking validation이 남아 FAIL입니다.
