@@ -59,7 +59,7 @@ def _extract_mfd_points(
             "urban_scale": float(urban_scale),
             "step": int(run_row.get("step", state_row.get("step", 0))),
             "time_sec": float(run_row.get("time_sec", state_row.get("time_sec", 0.0))),
-            "urban_accumulation_veh": float(state_row.get("urban_vehicles", 0.0)),
+            "urban_accumulation_veh": float(state_row.get("urban_protected_accumulation_veh", state_row.get("urban_vehicles", 0.0))),
             "urban_production_veh_h": production_veh_h,
             "net_inflow_veh_h": float(run_row.get("net_inflow", 0.0)),
             "urban_total_departures_veh": production_veh,

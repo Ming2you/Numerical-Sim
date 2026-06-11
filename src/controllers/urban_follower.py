@@ -285,9 +285,9 @@ class UrbanFollower:
             "freeway_density_pressure": pressure["density_pressure"],
             "freeway_receiving_pressure": pressure["receiving_pressure"],
             "freeway_total_pressure": pressure["total_pressure"],
-            "urban_accumulation_veh": float(state.total_urban_vehicles()),
+            "urban_accumulation_veh": float(state.protected_accumulation_veh(self.cfg.network)),
             "urban_accumulation_target_veh": float(leader.N_P_star),
-            "urban_accumulation_error_veh": float(state.total_urban_vehicles() - leader.N_P_star),
+            "urban_accumulation_error_veh": float(state.protected_accumulation_veh(self.cfg.network) - leader.N_P_star),
             "urban_net_inflow_target_veh_h": float(target_net_inflow),
         }
         metrics.update(allocation_metrics)

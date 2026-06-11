@@ -62,7 +62,7 @@ class Leader:
         crit = float(leader.N_P_crit_veh)
         lower = crit * float(leader.N_P_candidate_lower_factor)
         upper = crit * float(leader.N_P_candidate_upper_factor)
-        if state.total_urban_vehicles() >= crit:
+        if state.protected_accumulation_veh(self.cfg.network) >= crit:
             upper = crit
         lower = max(0.0, min(lower, upper))
         return float(lower), float(upper)
@@ -178,7 +178,7 @@ class Leader:
         target_penalty = 0.0
         density_penalty = 0.0
         for s in states:
-            n_p = s.total_urban_vehicles()
+            n_p = s.protected_accumulation_veh(net)
             target_penalty += lc.w_P * max(0.0, n_p - lc.N_P_crit_veh)
             density_penalty += lc.w_F * sum(
                 net.freeway_segment_length_km * net.freeway_lanes * max(0.0, rho - net.rho_crit)

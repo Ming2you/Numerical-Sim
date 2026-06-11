@@ -352,7 +352,7 @@ leader:
   N_UF_star_range:
   - 0.0
   - 6000.0
-  N_P_crit_veh: 354.809
+  N_P_crit_veh: 166.045
   N_P_candidate_lower_factor: 0.9
   N_P_candidate_upper_factor: 1.05
   N_P_star_unit: veh

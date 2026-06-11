@@ -225,11 +225,15 @@ def _pop_buffer(buffer: Dict[str, Dict[int, float]], key: str, step: int) -> flo
 
 
 def _link_delay_steps(state: TrafficState, cfg: ExperimentConfig, storage_link: str) -> int:
+    """내부 link travel delay(substep 수) — spec §3.3.5.
+
+    큐 꼬리까지의 이동거리 = 가용 여유공간 S(=available). 빈 링크일수록 꼬리가 멀어 통과시간↑ →
+    차량이 체류(내부 누적 형성). 큐가 차면 꼬리가 입구에 있어 즉시 도달. (이전 구현은 S 대신
+    occupied=capacity−available를 써서 빈 링크 통과≈0 → 누적이 안 생기던 버그였다.)"""
     net = cfg.network
     capacity = net.urban_link_storage_veh.get(storage_link, net.boundary_queue_max_veh)
     available = max(0.0, state.urban_link_storage.get(storage_link, capacity))
-    occupied = max(0.0, capacity - available)
-    distance_km = occupied * net.urban_avg_vehicle_length_m / 1000.0
+    distance_km = available * net.urban_avg_vehicle_length_m / 1000.0
     travel_time_h = distance_km / max(net.urban_avg_speed_km_h, 1.0e-9)
     return max(1, int(math.ceil(travel_time_h / max(cfg.simulation.T_u_h, 1.0e-9))))
 
@@ -300,10 +304,7 @@ def _sync_legacy_queues(state: TrafficState, cfg: ExperimentConfig) -> None:
 
 
 def _storage_occupancy(state: TrafficState, cfg: ExperimentConfig) -> float:
-    total = 0.0
-    for link, capacity in cfg.network.urban_link_storage_veh.items():
-        total += max(0.0, capacity - state.urban_link_storage.get(link, capacity))
-    return float(total)
+    return state.protected_accumulation_veh(cfg.network)
 
 
 def urban_accumulation_feedback_flow(
@@ -313,7 +314,7 @@ def urban_accumulation_feedback_flow(
 ) -> float:
     """목표 도시 누적(N_P_star, veh)을 추적하기 위한 허용 순유입(veh/h)을 계산한다."""
     ensure_urban_state(state, cfg)
-    error_veh = float(target_accumulation_veh) - state.total_urban_vehicles()
+    error_veh = float(target_accumulation_veh) - state.protected_accumulation_veh(cfg.network)
     feedback_h = max(float(cfg.leader.N_P_feedback_horizon_h), 1.0e-9)
     raw_flow = error_veh / feedback_h
     limit = max(0.0, float(cfg.leader.N_P_feedback_flow_limit_veh_h))
@@ -374,7 +375,7 @@ def urban_substep(
         "urban_substep_active": 1.0,
         "onramp_two_reservoir_active": 1.0,
     }
-    initial_accumulation = state.total_urban_vehicles()
+    initial_accumulation = state.protected_accumulation_veh(cfg.network)
     interval_net_inflow_target = urban_accumulation_feedback_flow(state, cfg, control.N_P_star)
     initial_accumulation_error = initial_accumulation - control.N_P_star
     overflow_count = 0.0
@@ -531,7 +532,7 @@ def urban_substep(
     inbound = inbound_service_veh / max(sim.T_u_h, 1.0e-9)
     outbound = outbound_service_veh / max(sim.T_u_h, 1.0e-9)
     net_inflow = inbound - outbound
-    accumulation_error = state.total_urban_vehicles() - control.N_P_star
+    accumulation_error = state.protected_accumulation_veh(cfg.network) - control.N_P_star
     net_inflow_error = abs(net_inflow - interval_net_inflow_target)
     diagnostics["inbound_service_veh"] = float(inbound_service_veh)
     diagnostics["outbound_service_veh"] = float(outbound_service_veh)
@@ -541,7 +542,7 @@ def urban_substep(
     diagnostics["urban_net_inflow_target_veh_h"] = float(interval_net_inflow_target)
     diagnostics["urban_accumulation_initial_veh"] = float(initial_accumulation)
     diagnostics["urban_accumulation_initial_error_veh"] = float(initial_accumulation_error)
-    diagnostics["urban_accumulation_veh"] = float(state.total_urban_vehicles())
+    diagnostics["urban_accumulation_veh"] = float(state.protected_accumulation_veh(cfg.network))
     diagnostics["urban_accumulation_target_veh"] = float(control.N_P_star)
     diagnostics["urban_accumulation_error_veh"] = float(accumulation_error)
     diagnostics["urban_accumulation_abs_error_veh"] = abs(float(accumulation_error))

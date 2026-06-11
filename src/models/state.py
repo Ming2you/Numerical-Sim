@@ -590,6 +590,16 @@ class TrafficState:
             return float(sum(self.urban_movement_queue.values()))
         return float(sum(self.urban_queue.values()) + sum(self.boundary_queue.values()))
 
+    def protected_accumulation_veh(self, net) -> float:
+        """보호영역(내부 urban 링크) 점유 차량 수 = perimeter 제어 대상 누적 N_P.
+
+        진입 대기열(boundary_in movement)·on-ramp 접근 대기열(x_on)은 경계 미터링 큐이므로
+        보호영역 누적에서 제외된다. 여기서는 내부 링크 storage 점유(cap−available)만 집계한다."""
+        total = 0.0
+        for link, capacity in net.urban_link_storage_veh.items():
+            total += max(0.0, capacity - self.urban_link_storage.get(link, capacity))
+        return float(total)
+
     def boundary_vector(self) -> List[float]:
         return [float(v) for v in self.boundary_queue.values()]
 

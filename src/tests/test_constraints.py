@@ -188,6 +188,9 @@ class ConstraintTests(unittest.TestCase):
         for movement in state.urban_movement_queue:
             state.urban_movement_queue[movement] = 0.0
         state.urban_movement_queue["A_top_in_to_grid"] = 120.0
+        # 보호영역 누적(내부 link storage 점유)을 perimeter penalty 경로가 동작하도록 설정한다.
+        entry_cap = cfg.network.urban_link_storage_veh["A_entry_top"]
+        state.urban_link_storage["A_entry_top"] = entry_cap - 150.0
         for link in cfg.network.freeway_links:
             state.freeway_density[link] = [cfg.network.rho_crit + 2.0 for _ in state.freeway_density[link]]
             state.freeway_speed[link] = [cfg.network.v_free for _ in state.freeway_speed[link]]
@@ -201,6 +204,7 @@ class ConstraintTests(unittest.TestCase):
         previous.N_UF_star = 250.0
 
         n_p = state.total_urban_vehicles()
+        n_p_protected = state.protected_accumulation_veh(cfg.network)
         n_f = state.total_freeway_vehicles(cfg.network)
         density_excess = sum(
             cfg.network.freeway_segment_length_km
@@ -212,7 +216,7 @@ class ConstraintTests(unittest.TestCase):
         expected = (
             n_p
             + n_f
-            + 2.0 * max(0.0, n_p - 100.0)
+            + 2.0 * max(0.0, n_p_protected - 100.0)
             + 3.0 * density_excess
             + 0.5 * (abs(170.0 - 160.0) + abs(300.0 - 250.0))
         )

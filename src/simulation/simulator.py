@@ -57,6 +57,7 @@ def state_row(state: TrafficState, cfg: ExperimentConfig, step: int) -> Dict[str
         "time_sec": state.time_sec,
         "freeway_vehicles": state.total_freeway_vehicles(cfg.network),
         "urban_vehicles": state.total_urban_vehicles(),
+        "urban_protected_accumulation_veh": state.protected_accumulation_veh(cfg.network),
     }
     for link, values in state.freeway_density.items():
         row[f"rho_{link}_mean"] = sum(values) / len(values)
