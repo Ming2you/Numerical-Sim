@@ -1,0 +1,78 @@
+{
+  "config": "src/config/default.yaml",
+  "scenario": "peak_demand",
+  "baseline": "fixed_signal_fixed_speed",
+  "urban_scales": [
+    0.5,
+    0.75,
+    1.0,
+    1.5,
+    2.0,
+    2.5,
+    3.0
+  ],
+  "estimate": {
+    "n_crit_veh": 476.80074870914535,
+    "max_production_veh_h": 20045.039415052066,
+    "source_urban_scale": 3.0,
+    "source_time_sec": 720.0
+  },
+  "runs": [
+    {
+      "scenario": "peak_demand_urban_scale_0.5",
+      "urban_scale": 0.5,
+      "total_ttt": 345.4359189446465,
+      "urban_ttt": 277.69329995768936,
+      "points": 10,
+      "path": "outputs\\calib_gridrouting\\urban_scale_0.5"
+    },
+    {
+      "scenario": "peak_demand_urban_scale_0.75",
+      "urban_scale": 0.75,
+      "total_ttt": 411.7161349549871,
+      "urban_ttt": 341.9276587977569,
+      "points": 10,
+      "path": "outputs\\calib_gridrouting\\urban_scale_0.75"
+    },
+    {
+      "scenario": "peak_demand_urban_scale_1",
+      "urban_scale": 1.0,
+      "total_ttt": 506.13316454994407,
+      "urban_ttt": 433.97599411071246,
+      "points": 10,
+      "path": "outputs\\calib_gridrouting\\urban_scale_1"
+    },
+    {
+      "scenario": "peak_demand_urban_scale_1.5",
+      "urban_scale": 1.5,
+      "total_ttt": 740.3377640647366,
+      "urban_ttt": 659.2742143984387,
+      "points": 10,
+      "path": "outputs\\calib_gridrouting\\urban_scale_1.5"
+    },
+    {
+      "scenario": "peak_demand_urban_scale_2",
+      "urban_scale": 2.0,
+      "total_ttt": 1043.8981181894846,
+      "urban_ttt": 915.3853682619185,
+      "points": 10,
+      "path": "outputs\\calib_gridrouting\\urban_scale_2"
+    },
+    {
+      "scenario": "peak_demand_urban_scale_2.5",
+      "urban_scale": 2.5,
+      "total_ttt": 1366.1772058582974,
+      "urban_ttt": 1157.577842460124,
+      "points": 10,
+      "path": "outputs\\calib_gridrouting\\urban_scale_2.5"
+    },
+    {
+      "scenario": "peak_demand_urban_scale_3",
+      "urban_scale": 3.0,
+      "total_ttt": 1639.8095632720745,
+      "urban_ttt": 1369.815900454756,
+      "points": 10,
+      "path": "outputs\\calib_gridrouting\\urban_scale_3"
+    }
+  ]
+}
