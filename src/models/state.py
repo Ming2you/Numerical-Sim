@@ -599,10 +599,19 @@ class TrafficState:
             for link in net.freeway_links
         ) + sum(self.ramp_queue.values()))
 
-    def total_urban_vehicles(self) -> float:
-        if self.urban_movement_queue:
-            return float(sum(self.urban_movement_queue.values()))
-        return float(sum(self.urban_queue.values()) + sum(self.boundary_queue.values()))
+    def total_urban_vehicles(self, net=None) -> float:
+        """urban 총 차량 수. net을 주면 링크 in-transit 점유까지 포함한다.
+
+        그리드 라우팅 이후 urban 차량의 상당수가 movement 큐가 아니라 링크 transit에
+        있으므로, leader objective처럼 '총 urban 차량'이 필요한 곳은 net을 넘겨야 한다
+        (큐만 세면 그리드 과충전이 비용 0으로 보이는 왜곡이 생긴다)."""
+        total = float(sum(self.urban_movement_queue.values())) if self.urban_movement_queue else (
+            float(sum(self.urban_queue.values()) + sum(self.boundary_queue.values()))
+        )
+        if net is not None:
+            for link, capacity in net.urban_link_storage_veh.items():
+                total += max(0.0, capacity - self.urban_link_storage.get(link, capacity))
+        return total
 
     def protected_accumulation_veh(self, net) -> float:
         """보호영역 누적 N_P = 링크 in-transit 점유(cap−available) + 보호영역 내부 movement 대기열.

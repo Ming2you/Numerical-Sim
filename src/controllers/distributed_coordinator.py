@@ -393,9 +393,12 @@ class DistributedCoordinator:
             if key.startswith(f"{agent.signal}_")
         }
         offsets = {agent.signal: result.offsets.get(agent.signal, current.offsets.get(agent.signal, 0.0))}
+        # follower allocation에 없는 movement(internal 등)는 0이 아니라 "비제어"다 —
+        # 0으로 머지하면 내부 그리드 이동이 동결돼 출구 보급이 끊긴다(그리드 라우팅 후 치명적).
         allocation = {
-            movement: result.inflow_outflow_allocation.get(movement, 0.0)
+            movement: result.inflow_outflow_allocation[movement]
             for movement in agent.movements
+            if movement in result.inflow_outflow_allocation
         }
         for movement in agent.movements:
             spec = specs.get(movement, {})

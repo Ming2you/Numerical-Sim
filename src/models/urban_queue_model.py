@@ -255,9 +255,12 @@ def _link_delay_steps(state: TrafficState, cfg: ExperimentConfig, storage_link: 
 
 
 def _queue_max(cfg: ExperimentConfig, movement: str, spec: Mapping[str, object]) -> float:
-    if spec.get("kind") == "on_ramp":
-        return cfg.network.boundary_queue_max_veh
-    return cfg.network.boundary_queue_max_veh
+    """movement 큐 클립 상한 — 사실상 비활성(점큐 모델, 보존 우선).
+
+    큐 클립은 차량을 삭제해 보존 회계와 베이스라인 대비 공정성을 깬다(큐를 캡에
+    잡아두는 쪽이 삭제 보조를 받음). 공간 제약(spillback)은 receiving-space
+    allocation이 담당하므로 여기서는 수치 가드 수준의 큰 값만 둔다."""
+    return 1.0e9
 
 
 def _phase_green_fraction(control: ControlAction, cfg: ExperimentConfig, spec: Mapping[str, object]) -> float:

@@ -84,3 +84,65 @@
 - `D_R_W` 등 ramp 접근 storage 링크는 현 모델에서 점유 미사용(기존과 동일, receiving_link
   명목 유지). 정밀화하려면 x_on→D_R_W transit→w_r 3단계로 확장 가능.
 - 4-phase 정밀화는 proposal대로 후속 옵션(현행 2-phase 확정).
+
+---
+
+# 추가 작업 — distributed MPC 재튜닝 (improvement PASS 달성)
+
+목표: 그리드 라우팅 plant에서 distributed MPC의 improvement −7.7%(900s)/−31.6%(7200s)를
+main metric 기준선(≥8%)까지 끌어올리기.
+
+## 결과
+
+**풀 7200s peak_demand distributed: Total TTT +15.55% (main metric PASS, 8% 기준)**
+- Freeway TTT 985.5 → 296.8 (−70%), Urban TTT 6766.0 → 6249.2 (−7.6%).
+- boundary_out sink 9117 → 9885 veh(+768대 실제 배출 — 처리량 개선).
+- projection(큐 클립 삭제) = 0 양 런 — 차량 보존 하 정직한 수치.
+- 결과: `outputs/tune_V4_full7200`, 리포트 사본 `2026-06-11/results/tune_V4_full7200_report.md`.
+
+## 진단 → 수정 경로 (A/B 런으로 각각 검증)
+
+1. **distributed agent의 internal movement 동결 (지배적 버그, −30%대의 주범)** —
+   `_solve_urban_agent`가 follower allocation에 없는 movement를 0.0으로 머지 →
+   `_movement_capacity_flow` 용량 0 → 내부 그리드 이동 정지 → 출구 보급 단절 →
+   N_P 폭주(3600s에서 2,028 vs baseline 442)·sink 붕괴. 구 plant에선 internal movement가
+   없어 잠복. 수정: allocation에 있는 movement만 머지(비제어=이전값 유지).
+   효과: 3600s −36.8% → +5.0%.
+2. **자유류 강제 metering** — leader가 N_UF 후보 상한을 `_feasible_nuf_capacity`(T_f 10초
+   추정)로 캡 → 본선 ρ≈26(<crit 33.5)인데도 metering이 수요 아래로 잠겨 w_r 순수 대기
+   (rampQ 9→297). 수정: 평균밀도 ≤ `metering_activation_density_ratio`(0.95)면 후보 상한을
+   ramp 총용량까지 개방(leader.py).
+3. **allocation 하한이 perimeter 권한 무력화** — movement당 하한 g_min/cycle×1400=233이
+   그리드 라우팅 후 유입 movement 35개로 늘며 하한 합 8.2k veh/h > 수요 → 게이트를 조일 수
+   없었음. 수정: 하한 0 (2-phase 공유 green에서 phase green_min은 movement별 최소 유량이
+   아님).
+4. **B_out 균형화의 자유 sink 교살** — boundary_out movement를 allocation으로 조이면 내부
+   누적 폭주(round-9 "outflow 균등화 ill-posed" 확정). 수정: boundary_out은 최대 서비스 고정.
+5. **on_ramp 전이 N_UF_star 공유** — urban→w_r 전이 상한 = N_UF_star 용량비 배분(중복 제어
+   방지). 전이를 완전 개방(V5)하면 적체가 x_on→freeway로 자리만 옮겨 총 TTT 동일/본선 위험
+   (3600s A/B: V4 +3.02% vs V5 +2.81%) — 결합 유지 채택.
+6. **leader가 in-transit 차량을 못 봄** — `total_urban_vehicles()`가 movement 큐만 집계(링크
+   점유 제외, 그리드 라우팅 후 urban 차량의 다수) → 그리드 과충전이 비용 0으로 보임. 수정:
+   `total_urban_vehicles(net)`이 점유 포함, leader objective에 적용.
+7. **큐 클립 삭제 비활성(`_queue_max`→1e9)** — x_on 캡(240)에서 양 런 모두 차량 삭제됐고
+   (V3 +5.03% 중 ~2%p가 proposed의 삭제 보조), 보존 원칙·비교 공정성 위반. 점큐 모델에서
+   spillback은 receiving-space가 담당. 수정 후 정직 측정 V4 3600s +3.02% → 7200s +15.55%.
+
+## 남은 acceptance FAIL (improvement 외 — 기존 이슈, 다음 라운드)
+
+- **vsl validation**: density_exceedance_duration=8 vs vsl_active_steps=7 (round-6부터 알려진
+  VSL 미활성). dominant failure로 표시됨.
+- **boundary_balance**: degenerate=1 (empty_ratio 0.65 — 피크 후 게이트 큐 공큐 다수,
+  round-9에서 확정한 지표 ill-posed 문제). eps_balance=0.03 vs B_in 0.124.
+- **ramp_metering validation**: mean_total_metering_error=1678 — N_UF 추적 잔차 지표가
+  자유류 개방(상한 개방)과 충돌(목표 6000 vs 물리 상한). 지표 재정의 필요.
+- 셋 다 `docs/next_step_spillback_aware_controller_proposal.md`(타 세션 push)의 범위와 합류.
+
+## 한계/주의
+
+- +15.55%는 peak_demand·seed 42·deterministic 휴리스틱 follower 기준 단일 런.
+- x_on(램프 접근) 적체는 양 런 공통 구조(피크 램프행 수요 4.1k > 흡수 3.5k veh/h) — 제어로
+  제거 불가, 위치만 이동(고통 보존). x_on은 N_P에서 제외돼 perimeter가 관리 안 함 — 차기
+  spillback-aware 설계에서 다룰 것.
+- 큐 클립 비활성은 plant 거동 변화(점큐 무한 성장 허용) — n_crit에는 영향 없음(보호영역
+  projection은 원래 0이었음).

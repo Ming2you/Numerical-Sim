@@ -204,7 +204,7 @@ class ConstraintTests(unittest.TestCase):
         previous.N_P_star = 160.0
         previous.N_UF_star = 250.0
 
-        n_p = state.total_urban_vehicles()
+        n_p = state.total_urban_vehicles(cfg.network)
         n_p_protected = state.protected_accumulation_veh(cfg.network)
         n_f = state.total_freeway_vehicles(cfg.network)
         density_excess = sum(

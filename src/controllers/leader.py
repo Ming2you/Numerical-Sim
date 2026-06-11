@@ -34,6 +34,12 @@ class Leader:
         np_values = set(float(v) for v in np.linspace(np_lower, np_upper, n_np))
         np_values.add(float(np.clip(leader.N_P_crit_veh, np_lower, np_upper)))
         feasible_nuf = self._feasible_nuf_capacity(state, previous, demand)
+        # 자유류(평균밀도 ≤ metering 활성화 임계)에서는 T_f 단위 feasible 추정이
+        # metering을 강제하지 않도록 후보 상한을 ramp 총용량까지 열어둔다.
+        # (feasible은 다음 T_f에 추적가능한 유량 추정이라 지속 수요를 과소평가 —
+        # 이를 ceiling으로 쓰면 본선이 한가해도 w_r에 순수 대기손실이 쌓인다.)
+        if self._density_ratio(state) <= leader.metering_activation_density_ratio:
+            feasible_nuf = max(feasible_nuf, self.cfg.network.total_ramp_capacity)
         nuf_upper = min(leader.N_UF_star_range[1], feasible_nuf)
         nuf_upper = max(leader.N_UF_star_range[0], nuf_upper)
         nuf_values = set(float(v) for v in np.linspace(leader.N_UF_star_range[0], nuf_upper, n_nuf))
@@ -174,7 +180,7 @@ class Leader:
         if lc.objective_mode == "follower_ttt":
             base = follower_objective
         else:
-            base = sum(s.total_freeway_vehicles(net) + s.total_urban_vehicles() for s in states)
+            base = sum(s.total_freeway_vehicles(net) + s.total_urban_vehicles(net) for s in states)
         target_penalty = 0.0
         density_penalty = 0.0
         for s in states:

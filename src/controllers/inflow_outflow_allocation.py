@@ -53,7 +53,7 @@ class InflowOutflowAllocationModule:
             return AllocationResult({}, {}, 0.0, 0.0, 0.0, {"allocation_module_active": 1.0})
 
         target = urban_accumulation_feedback_flow(state, self.cfg, leader.N_P_star)
-        lower, upper = self._bounds(movements)
+        lower, upper = self._bounds(movements, specs, leader)
         kinds = [str(specs[m].get("kind", "")) for m in movements]
         target = self._clip_target(target, lower, upper, kinds)
         # 같은 state/leader에서는 호출 순서와 무관하게 같은 allocation plan을 재현한다.
@@ -85,16 +85,46 @@ class InflowOutflowAllocationModule:
         }
         return AllocationResult(flows, green, float(target), float(net), float(residual), diagnostics)
 
-    def _bounds(self, movements: Iterable[str]) -> tuple[np.ndarray, np.ndarray]:
+    def _bounds(
+        self,
+        movements: list[str],
+        specs: Mapping[str, Mapping[str, object]],
+        leader: LeaderAction,
+    ) -> tuple[np.ndarray, np.ndarray]:
         net = self.cfg.network
-        g_min = float(net.green_min)
-        g_max = float(net.green_max)
-        saturation = float(net.movement_capacity_veh_h)
+        flow_max = float(net.green_max) / max(net.cycle_length, 1.0e-9) * float(net.movement_capacity_veh_h)
+        # on_ramp 상한 = leader N_UF_star의 ramp 용량비 배분. urban→ramp 전이와 freeway
+        # metering이 같은 N_UF_star를 공유해(중복 제어 방지) 피크에 본선이 받을 수 없는
+        # 유량을 w_r로 밀어넣지 않는다. (전이를 풀면 적체가 x_on→w_r/본선으로 자리만
+        # 옮겨 총 TTT는 같고, 피크 본선 붕괴 위험만 커지는 것을 3600s A/B로 확인.)
+        ramp_counts: Dict[str, int] = {}
+        for movement in movements:
+            ramp = str(specs[movement].get("ramp", ""))
+            if ramp and str(specs[movement].get("kind", "")) == "on_ramp":
+                ramp_counts[ramp] = ramp_counts.get(ramp, 0) + 1
+        total_ramp_cap = max(float(net.total_ramp_capacity), 1.0e-9)
+        nuf_total = max(0.0, float(leader.N_UF_star))
         lower = []
         upper = []
-        for _movement in movements:
-            lower.append(g_min / max(net.cycle_length, 1.0e-9) * saturation)
-            upper.append(g_max / max(net.cycle_length, 1.0e-9) * saturation)
+        for movement in movements:
+            kind = str(specs[movement].get("kind", ""))
+            if kind == "boundary_out":
+                # 자유 유출 sink는 균형화 대상이 아니다 — 항상 최대 서비스로 고정
+                # (B_out 균형화가 출구를 조이면 내부 누적이 폭주한다).
+                lower.append(flow_max)
+                upper.append(flow_max)
+            elif kind == "on_ramp":
+                ramp = str(specs[movement].get("ramp", ""))
+                share = float(net.ramp_capacity_veh_h.get(ramp, 0.0)) / total_ramp_cap
+                per_movement = nuf_total * share / max(ramp_counts.get(ramp, 1), 1)
+                lower.append(0.0)
+                upper.append(float(np.clip(per_movement, 0.0, flow_max)))
+            else:
+                # 하한 0: 2-phase 공유 green에서 phase green_min은 movement별 최소
+                # 유량이 아니다. 그리드 라우팅 후 유입 movement 35개의 g_min 하한 합
+                # (≈8.2k veh/h)이 수요를 넘어 perimeter 게이팅을 무력화했던 것을 복원.
+                lower.append(0.0)
+                upper.append(flow_max)
         return np.asarray(lower, dtype=float), np.asarray(upper, dtype=float)
 
     def _clip_target(
