@@ -20,15 +20,19 @@ turning ratio β로 자연 분산하며 그리드를 통과**하도록 한다.
 - **경계 게이트(외부 in/out)**: A(상·좌), B(상), C(상·우), D(좌), F(우). E 없음.
 - **램프**: D·F 각각 on/off, 양 freeway(FW_W·FW_E)에 연결.
 
-**노드별 인접(들어오고 나가는 방향)**:
-```text
-A: ↔B(A_B) ↔D(A_D) | 경계 in/out(top,left)
-B: ↔A ↔C(B_C) ↔E(B_E) | 경계(top)
-C: ↔B ↔F(C_F) | 경계(top,right)
-D: ↔A ↔E(D_E) | 경계(left) | on/off-ramp(W,E)
-E: ↔B ↔D ↔F(E_F) | (경계·신호 없음)
-F: ↔C ↔E | 경계(right) | on/off-ramp(W,E)
-```
+**노드별 leg (방위별 — phase·직진 정의의 기준)**:
+
+| 교차로 | N | S | E | W | leg수 |
+|---|---|---|---|---|---|
+| A | 경계(top) | D(grid) | B(grid) | 경계(left) | 4 |
+| B | 경계(top) | E(grid) | C(grid) | A(grid) | 4 |
+| C | 경계(top) | F(grid) | 경계(right) | B(grid) | 4 |
+| D | A(grid) | **램프(on/off)** | E(grid) | 경계(left) | 4 |
+| E | B(grid) | — | F(grid) | D(grid) | 3 (T) |
+| F | C(grid) | **램프(on/off)** | 경계(right) | E(grid) | 4 |
+
+- A·B·C·D·F = **4-leg**(램프·경계가 grid 외 leg를 채움). **E만 3-leg(T)**: N=B, W=D, E=F, 남쪽 없음.
+- 램프(D·S, F·S)는 양 freeway(FW_W·FW_E)에 연결.
 
 ## 2. 그리드 링크 storage + transit (신규)
 
@@ -42,10 +46,16 @@ F: ↔C ↔E | 경계(right) | on/off-ramp(W,E)
 
 - **movement = (incoming approach o, intersection s, outgoing direction d)** — spec §3.3 `x[o,s,d]`.
   각 교차로에서 들어온 방향 o에서 나가는 방향 d로 가는 대기 큐. **U-turn 제외**(d≠o).
-- 예) D: incoming {A_D, D_E, in_D_left, off_ramp_W, off_ramp_E} × outgoing {A_D, D_E, out_D_left,
-  on_ramp_W, on_ramp_E}, U-turn 빼고. 각 (o→d)가 movement.
-- **신호 phase**: 통제 교차로(A,B,C,D,F)는 내부 movement도 phase로 서비스(green이 m_dep_int 결정,
-  spec §3.3.1). **E는 신호 없이 통과**(green=1 상당, β로 전달만).
+- 예) D: incoming {A(N), E(E), 경계(W), off_ramp(S)} × outgoing {A(N), 램프(S), E(E), 경계(W)}, U-turn 빼고.
+- ★ **movement·next_movement는 손으로 나열하지 말고 §1 leg 인접 그래프에서 자동 유도**(교차로 수십~100개라
+  hand-list는 실수 범벅). 코드가 토폴로지+β로 생성.
+- **★ 신호 = 2-phase(NS / EW) 확정** (4-phase 아님 — urban_follower/allocation/leader 재작성 회피). 현재
+  교차로당 2-phase(p1/p2) 구조 **그대로 재사용**. **phase 배정 규칙: 들어온 approach o의 축**.
+  - `p1 = NS phase` : N 또는 S leg에서 들어온 movement.
+  - `p2 = EW phase` : E 또는 W leg에서 들어온 movement.
+  - 회전·직진 무관하게 **incoming approach 축으로 phase 결정** → 2-phase로 깔끔히 떨어짐. green split은
+    기존 `urban_follower._green_times`(p1/p2)가 그대로 처리 → **신호 제어부 구조 변경 없음**.
+  - **E는 신호 없이 통과**(green=1 상당, β로 전달만). 4-phase 정밀화는 후속 옵션.
 - 경계/램프 movement는 이 체계의 **특수 케이스**: boundary_in = 외부→그리드 진입(o=외부), boundary_out =
   그리드→외부 **system sink**(d=외부, 모델 이탈), on_ramp = 그리드→freeway **transfer**(d=ramp, sink 아님 —
   freeway로 핸드오프해 계속 system 내), off_ramp = freeway→그리드 진입(o=ramp, freeway에서 transfer).
@@ -54,8 +64,11 @@ F: ↔C ↔E | 경계(right) | on/off-ramp(W,E)
 
 - **β[o,s,d]**: 교차로 s에서 방향 o로 들어온 차량이 방향 d로 갈 분율. spec §3.3.5:
   `m_arr[o,s,d] = β[o,s,d] · arrived_to_queue_tail[o,s]`, `Σ_d β[o,s,d] = 1`, U-turn β[o,s,o]=0.
-- **config 신규** `turning_ratios`(교차로별). **기본값(확정): 직진 우대** — 직진(있으면) 0.5, 나머지
-  가용 outgoing(U-turn 제외)에 균등 분배. (직진 없는 노드는 가용에 균등.) Σ=1 보장. corridor 흐름 현실적.
+- **config 신규** `turning_ratios`(교차로별). **기본값(확정): 직진 우대.**
+  - **직진 = 들어온 approach o의 정반대 leg**(N↔S, E↔W). §1 leg 표 기준.
+  - 직진 leg가 존재하면 **β(직진)=0.5**, 나머지 가용 outgoing(U-turn 제외)에 균등 분배.
+  - 직진 leg 없으면(예: E에서 N(B) 들어옴 — 남쪽 없음) 가용 outgoing에 **균등**.
+  - 4-leg(A,B,C,D,F)는 직진 명확, E(3-leg)만 일부 균등. Σ_d β=1, U-turn β=0 보장.
 - **목적지별 처리**:
   - d=boundary_out → **system sink**: 서비스 후 모델 이탈(외부세계).
   - d=on_ramp → **freeway로 transfer**: x_on→w_r→freeway(기존 coupling). 그리드는 떠나지만 system 내 계속.
@@ -68,13 +81,17 @@ F: ↔C ↔E | 경계(right) | on/off-ramp(W,E)
 ## 5. 흐름 체인 (spec §3.3.5 — 이미 명세, 미구현)
 
 ```text
-movement (o,s,d) 서비스(green) → receiving_link l_{s,d}에 deposit
-  → 링크 travel delay(_link_delay_steps) 후 arrival_buffer[next_movement]에 도착
-  → 다음 교차로 s'에서 β[d,s',·]로 분산 → 반복
-  → d=boundary_out이면 system sink 이탈; d=on_ramp이면 freeway로 transfer(계속); 그 외 다음 교차로로
+movement (o,s,d) 서비스(green) → receiving_link(=링크 s→s') 에 deposit
+  → 링크 travel delay(_link_delay_steps) 후 다음 교차로 s'에 "방향 d로 도착"
+  → ★ 단일 next_movement 아님: s'에서 incoming=d 로 보고 β[d,s',·]로 여러 (d,s',d') movement에 분할
+       (spec §3.3.5: m_arr[d,s',d'] = β[d,s',d'] · arrived[d,s'])
+  → 각 (d,s',d')가 다시 green 받아 서비스 → 반복
+  → d'=boundary_out이면 system sink 이탈; d'=on_ramp이면 freeway로 transfer(계속); 그 외 내부링크면 다음 교차로로
 ```
-- `next_movement`: receiving_link이 도달하는 다음 교차로의 movement. **모든 내부 movement에 설정**(현재 0개).
-- off-ramp/boundary_in 진입: arrival_buffer로 해당 교차로 movement에 주입 후 동일 체인.
+- ★ **arrival 처리 = "다음 노드 도착 → β 분할"** (1:1 next_movement 체인 아님). 구현 시 arrival_buffer를
+  `(incoming 방향 d, 교차로 s')` 단위로 쌓고 β로 (d,s',d') 큐들에 나눠 넣을 것. (단일 next_movement로 짜면
+  분기가 안 돼 한 방향으로만 흐름 — 흔한 실수.)
+- off-ramp/boundary_in 진입: 그 교차로에 "해당 방향에서 도착"으로 주입 후 동일 β 분할 체인.
 - **off-ramp 종료 제거**: `OR_*_to_*_grid`의 destination을 "grid"(종료)가 아니라 **그 교차로의 내부
   movement로 연결**해 β 분산에 합류.
 
@@ -101,7 +118,10 @@ movement (o,s,d) 서비스(green) → receiving_link l_{s,d}에 deposit
 
 ## 9. 주의 / 순서
 
-- 이건 urban model 핵심 추가라 단계적으로: (1) 그리드 링크 storage + 방향 directed link, (2) 내부
-  movement·β·next_movement, (3) off-ramp 종료 제거→β 합류, (4) E 통과 노드, (5) 재calibration.
+- 이건 urban model 핵심 추가라 단계적으로: (1) 그리드 directed 링크(14개, cap220) storage, (2) 내부
+  movement·β를 **토폴로지에서 자동 유도** + arrival→β 분할 체인, (3) off-ramp 종료 제거→β 합류,
+  (4) E 통과 노드, (5) 2-phase(NS/EW) 매핑, (6) 재calibration.
+- **신호는 2-phase(NS/EW) 확정** — 기존 urban_follower/allocation/leader **구조 유지**(4-phase 재작성 회피).
+- **β = 직진우대(직진=정반대 leg, 0.5 / 나머지 균등; E 일부 균등)** 확정.
 - 기존 transit 버그수정(`occupied→available`)·N_P 보호영역 재정의는 **유지**(이 작업의 전제).
-- β 기본=균등이나, 현실성 위해 직진 우대 등 사용자 값 받으면 반영.
+- ★ 차량 보존 절대 — on_ramp는 소멸 아니라 freeway 핸드오프. sink는 boundary_out(+freeway 본선)만.
