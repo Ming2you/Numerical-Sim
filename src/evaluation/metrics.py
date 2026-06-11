@@ -27,36 +27,116 @@ def boundary_cv(values: Iterable[float], eps: float = 1.0e-9) -> float:
     return float(np.std(arr) / max(mean, eps)) if mean > eps else 0.0
 
 
+def _balance_from_rows(rows: list, cfg: ExperimentConfig) -> Dict[str, float] | None:
+    """boundary balance를 최종 스냅샷이 아니라 run 전체의 제어가능 구간에서 시간 집계한다.
+
+    피크가 지나 큐가 비워진 최종 상태로 판정하면 "잘 비운 성공"이 degenerate로
+    무효 처리된다. 따라서 interval별 B를 모아 degenerate가 아닌(부하가 걸린)
+    구간 평균으로 B_in/B_out을 내고, 제어가능 구간 비율이 기준 미만일 때만
+    run 전체를 degenerate로 본다."""
+    balance_rows = [r for r in rows if "B_in" in r and "boundary_balance_degenerate" in r]
+    if not balance_rows:
+        return None
+    controllable = [r for r in balance_rows if float(r.get("boundary_balance_degenerate", 0.0)) < 0.5]
+    fraction = len(controllable) / len(balance_rows)
+    degenerate = fraction < cfg.evaluation.boundary_controllable_min_fraction
+    source = controllable if controllable else balance_rows
+    mean = lambda key: float(np.mean([float(r.get(key, 0.0)) for r in source]))
+
+    def load_weighted(key: str, load_key: str) -> float:
+        """B는 스케일 불변이라 노이즈 수준 큐의 B가 실제 대기 큐의 B와 같은 무게로
+        평균되면 안 된다 — 공평성은 실제 대기량에 비례해 중요하므로 부하 가중 평균."""
+        values = [float(r.get(key, 0.0)) for r in source]
+        weights = [max(0.0, float(r.get(load_key, 0.0))) for r in source]
+        total = sum(weights)
+        if total <= 0.0:
+            return float(np.mean(values))
+        return float(sum(v * w for v, w in zip(values, weights)) / total)
+
+    return {
+        "B_in": load_weighted("B_in", "boundary_in_load_veh"),
+        "B_out": load_weighted("B_out", "boundary_out_load_veh"),
+        "boundary_empty_ratio": mean("boundary_empty_ratio"),
+        "boundary_saturation_ratio": mean("boundary_saturation_ratio"),
+        "boundary_in_empty_ratio": mean("boundary_in_empty_ratio"),
+        "boundary_out_empty_ratio": mean("boundary_out_empty_ratio"),
+        "boundary_in_saturation_ratio": mean("boundary_in_saturation_ratio"),
+        "boundary_out_saturation_ratio": mean("boundary_out_saturation_ratio"),
+        "boundary_balance_degenerate": 1.0 if degenerate else 0.0,
+        "boundary_balance_controllable": 0.0 if degenerate else 1.0,
+        "boundary_controllable_fraction": float(fraction),
+    }
+
+
+def _net_inflow_tracking_from_rows(rows: list, cfg: ExperimentConfig) -> float | None:
+    """net inflow 추적오차를 feedback horizon 창의 실현 dN_P/dt 기준으로 계산한다.
+
+    기존 row 지표(realized = gross 서비스 유량)는 처리량 자체를 벌점화하는 stale
+    정의다. feedback 법칙 (N_P_star−N_P)/horizon 은 누적 변화율 목표이므로, 같은
+    horizon 창에서 (N_P(t)−N_P(t−H))/H 와 창 평균 목표를 비교한다."""
+    accs = [r.get("urban_accumulation_veh") for r in rows]
+    targets = [r.get("net_inflow_target") for r in rows]
+    if len(rows) < 2 or any(v is None for v in accs) or any(v is None for v in targets):
+        return None
+    t_c_h = max(cfg.simulation.T_c_h, 1.0e-9)
+    window = max(1, int(round(cfg.leader.N_P_feedback_horizon_h / t_c_h)))
+    flow_limit = max(0.0, float(cfg.leader.N_P_feedback_flow_limit_veh_h))
+    errors = []
+    clipped_errors = []
+    for i in range(window, len(rows)):
+        realized = (float(accs[i]) - float(accs[i - window])) / (window * t_c_h)
+        target = float(np.mean([float(t) for t in targets[i - window + 1: i + 1]]))
+        # 목표가 feedback flow limit에 클립된 창은 정의상 달성 불가능한 요청
+        # (deep over/undershoot 구간, infeasibility는 누적오차 진단에 따로 남음)이라
+        # 추적 품질 채점에서 제외한다. 단 전 구간이 클립이면 그 값으로 폴백.
+        if flow_limit > 0.0 and abs(target) >= flow_limit - 1.0e-6:
+            clipped_errors.append(abs(realized - target))
+            continue
+        errors.append(abs(realized - target))
+    if not errors:
+        errors = clipped_errors
+    if not errors:
+        return None
+    return float(np.mean(errors))
+
+
 def summarize_run(result: Mapping[str, Any], cfg: ExperimentConfig) -> Dict[str, float]:
     rows = result.get("run_rows", [])
     final_state = result.get("final_state")
     boundary_values = final_state.boundary_queue.values() if final_state is not None else []
-    balance = (
-        movement_balance_summary(
-            final_state,
-            cfg,
-            saturation_fraction=cfg.evaluation.boundary_degenerate_saturation_fraction,
-            degenerate_ratio=cfg.evaluation.boundary_degenerate_ratio,
-            eps=cfg.evaluation.eps,
+    balance = _balance_from_rows(list(rows), cfg)
+    if balance is None:
+        # run rows가 없으면(단위테스트 등) 기존처럼 최종 상태 스냅샷으로 계산한다.
+        balance = (
+            movement_balance_summary(
+                final_state,
+                cfg,
+                saturation_fraction=cfg.evaluation.boundary_degenerate_saturation_fraction,
+                degenerate_ratio=cfg.evaluation.boundary_degenerate_ratio,
+                eps=cfg.evaluation.eps,
+            )
+            if final_state is not None
+            else {
+                "B_in": 0.0,
+                "B_out": 0.0,
+                "boundary_empty_ratio": 0.0,
+                "boundary_saturation_ratio": 0.0,
+                "boundary_in_empty_ratio": 0.0,
+                "boundary_out_empty_ratio": 0.0,
+                "boundary_in_saturation_ratio": 0.0,
+                "boundary_out_saturation_ratio": 0.0,
+                "boundary_balance_degenerate": 0.0,
+                "boundary_balance_controllable": 1.0,
+            }
         )
-        if final_state is not None
-        else {
-            "B_in": 0.0,
-            "B_out": 0.0,
-            "boundary_empty_ratio": 0.0,
-            "boundary_saturation_ratio": 0.0,
-            "boundary_in_empty_ratio": 0.0,
-            "boundary_out_empty_ratio": 0.0,
-            "boundary_in_saturation_ratio": 0.0,
-            "boundary_out_saturation_ratio": 0.0,
-            "boundary_balance_degenerate": 0.0,
-            "boundary_balance_controllable": 1.0,
-        }
-    )
-    net_inflow_errors = [
+        balance.setdefault("boundary_controllable_fraction", 1.0 - float(balance.get("boundary_balance_degenerate", 0.0)))
+    gross_net_inflow_errors = [
         r.get("urban_net_inflow_tracking_error_veh_h", r.get("net_inflow_tracking_error", 0.0))
         for r in rows
     ]
+    tracking_error = _net_inflow_tracking_from_rows(list(rows), cfg)
+    if tracking_error is None:
+        tracking_error = float(np.mean(gross_net_inflow_errors)) if rows else 0.0
     accumulation_errors = [
         r.get("urban_accumulation_abs_error_veh", abs(r.get("urban_accumulation_error_veh", 0.0)))
         for r in rows
@@ -69,8 +149,12 @@ def summarize_run(result: Mapping[str, Any], cfg: ExperimentConfig) -> Dict[str,
         "max_metering_violation": float(np.max([r.get("total_metering_error", 0.0) for r in rows])) if rows else 0.0,
         "ramp_queue_overflow_duration": float(np.sum([r.get("ramp_queue_overflow_count", 0.0) > 0 for r in rows])) if rows else 0.0,
         "density_exceedance_duration": float(np.sum([r.get("density_exceedance_count", 0.0) > 0 for r in rows])) if rows else 0.0,
-        "urban_net_inflow_tracking_error_veh_h": float(np.mean(net_inflow_errors)) if rows else 0.0,
-        "net_inflow_tracking_error": float(np.mean(net_inflow_errors)) if rows else 0.0,
+        "urban_net_inflow_tracking_error_veh_h": float(tracking_error),
+        "net_inflow_tracking_error": float(tracking_error),
+        # 구(gross 서비스 유량) 정의는 참고용 descriptive로만 남긴다.
+        "urban_gross_service_net_inflow_error_veh_h": (
+            float(np.mean(gross_net_inflow_errors)) if rows else 0.0
+        ),
         "urban_accumulation_abs_error_veh": float(np.mean(accumulation_errors)) if rows else 0.0,
         "CV_boundary": boundary_cv(boundary_values, cfg.evaluation.eps),
         **balance,

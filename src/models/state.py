@@ -405,6 +405,9 @@ class EvaluationConfig:
     eps_balance: float = 0.03
     boundary_degenerate_saturation_fraction: float = 0.95
     boundary_degenerate_ratio: float = 0.5
+    # run 전체에서 제어가능(비-degenerate) interval 비율이 이 값 미만일 때만
+    # boundary balance를 degenerate로 판정한다(부하 구간 시간 집계 기준).
+    boundary_controllable_min_fraction: float = 0.25
 
 
 @dataclass

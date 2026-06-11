@@ -354,7 +354,14 @@ def freeway_substep(
     avg_metering = float(sum(ramp_release.values()))
     avg_no_meter = ramp_diag["total_no_meter_flow"]
     diagnostics["total_metering_flow"] = avg_metering
-    diagnostics["total_metering_error"] = abs(avg_metering - target_flow)
+    # N_UF_star는 "여기까지 허용"하는 상한(ceiling)이다. 수요·receiving이 목표보다 작아
+    # 덜 방출한 것은 추적 실패가 아니므로, 달성가능 목표 기준으로 잔차를 계산한다.
+    # 달성가능 = min(목표, no-meter 방출량, 실제방출+잔여 w_r 환산유량): step 끝에 w_r이
+    # 비었으면 수요 소진(잔차 0), 차가 남아 있는데 덜 방출했으면 진짜 추적 실패다.
+    # 원목표 초과분은 metering_target_infeasible로 따로 표시.
+    held_back_flow = sum(max(0.0, q) for q in state.ramp_queue.values()) / max(dt_h, 1.0e-9)
+    effective_target_flow = min(target_flow, avg_no_meter, avg_metering + held_back_flow)
+    diagnostics["total_metering_error"] = abs(avg_metering - effective_target_flow)
     diagnostics["metering_target_infeasible"] = float(target_flow > avg_no_meter + cfg.freeway_follower.eps_F)
     diagnostics["ramp_queue_overflow_count"] = float(sum(
         1 for q in state.ramp_queue.values() if q > net.ramp_queue_max_veh

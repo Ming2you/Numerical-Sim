@@ -99,6 +99,40 @@ def movement_density_values(
     return out
 
 
+def boundary_group_key(spec: Mapping[str, object]) -> str:
+    """movement가 속한 물리적 경계 요소 key — 게이트 in링크 / off-ramp / ramp.
+
+    balance 지표는 경계 요소 간 공평성이 목적이다. 그리드 라우팅으로 한 게이트가
+    β분할 movement 3~4개로 쪼개진 뒤에는 movement 단위 B가 "구조적 공큐 조각"에
+    지배되므로(B_in 바닥 ≈0.1), round-9 당시의 차원(경계 요소당 1값)으로 집계한다."""
+    kind = str(spec.get("kind", ""))
+    if kind == "boundary_in":
+        return f"gate:{spec.get('origin', '')}"
+    if kind == "off_ramp":
+        return f"off:{spec.get('off_ramp', spec.get('origin', ''))}"
+    if kind == "on_ramp":
+        return f"ramp:{spec.get('ramp', '')}"
+    return f"movement:{spec.get('origin', '')}->{spec.get('destination', '')}"
+
+
+def grouped_boundary_densities(
+    state: TrafficState,
+    cfg: ExperimentConfig,
+    accepted_kinds: set[str],
+) -> list[float]:
+    """경계 요소(게이트/off-ramp/ramp)별 집계 밀도 Σqueue/Σcapacity 목록."""
+    specs = movement_specs(cfg)
+    queues: Dict[str, float] = {}
+    caps: Dict[str, float] = {}
+    for movement, spec in specs.items():
+        if str(spec.get("kind", "")) not in accepted_kinds:
+            continue
+        key = boundary_group_key(spec)
+        queues[key] = queues.get(key, 0.0) + max(0.0, state.urban_movement_queue.get(movement, 0.0))
+        caps[key] = caps.get(key, 0.0) + max(movement_storage_capacity(cfg, movement, spec), 1.0e-9)
+    return [queues[key] / caps[key] for key in sorted(queues)]
+
+
 def movement_balance_summary(
     state: TrafficState,
     cfg: ExperimentConfig,
@@ -110,9 +144,31 @@ def movement_balance_summary(
 
     B 자체는 §3.2의 균등성 지표이므로, 모든 큐가 비었거나 대부분 포화된 경우에는
     값이 작아도 제어 가능한 균형으로 해석하지 않도록 별도 flag를 함께 낸다.
+
+    B_out은 통제 가능한 유출(on_ramp)만 대상으로 한다 — boundary_out은 자유 유출
+    sink라 항상 최대 서비스가 정답이고 균등화가 정의되지 않는다(round-9
+    "outflow 균등화 ill-posed" 결론, 그리드 라우팅 후 출구 교살로 실증).
+
+    밀도는 경계 요소(게이트 7 / ramp 4) 단위로 집계한다 — round-9의 지표 차원을
+    보존하고, β분할 movement 조각의 구조적 공큐 인공물을 제거한다.
+
+    B_in은 외부 진입 게이트(boundary_in)만 대상으로 한다 — off-ramp 방출 큐는
+    freeway 보호를 위해 의도적으로 우선 서비스되는 transfer 큐라 상시 ≈0이고
+    (균형화가 아니라 우선 방출이 설계 목표), 게이트와 한 지표에 섞으면 구조적
+    0들이 B_in을 지배해 게이트 간 공평성 측정이 무의미해진다.
     """
-    inflow = movement_density_values(state, cfg, {"boundary_in", "off_ramp"})
-    outflow = movement_density_values(state, cfg, {"boundary_out", "on_ramp"})
+    inflow = grouped_boundary_densities(state, cfg, {"boundary_in"})
+    outflow = grouped_boundary_densities(state, cfg, {"on_ramp"})
+    inflow_load = float(sum(
+        max(0.0, state.urban_movement_queue.get(movement, 0.0))
+        for movement, spec in movement_specs(cfg).items()
+        if str(spec.get("kind", "")) == "boundary_in"
+    ))
+    outflow_load = float(sum(
+        max(0.0, state.urban_movement_queue.get(movement, 0.0))
+        for movement, spec in movement_specs(cfg).items()
+        if str(spec.get("kind", "")) == "on_ramp"
+    ))
 
     def ratio(values: list[float], predicate: Callable[[float], bool]) -> float:
         if not values:
@@ -125,10 +181,17 @@ def movement_balance_summary(
     out_saturated = ratio(outflow, lambda value: value >= saturation_fraction)
     empty_ratio = max(in_empty, out_empty)
     saturation_ratio = max(in_saturated, out_saturated)
-    degenerate = empty_ratio >= degenerate_ratio or saturation_ratio >= degenerate_ratio
+    # degenerate 판정은 공큐 지배만 사용한다. saturation 기준은 큐가 cap에 클립되던
+    # 시절의 가드였고, 클립 제거(점큐 무한 성장) 후에는 "큐가 크다=구조적 적체"일 뿐
+    # 균형 제어가 불능인 상태가 아니다(saturation 비율은 descriptive로 유지).
+    degenerate = empty_ratio >= degenerate_ratio
     return {
         "B_in": safe_balance_index(inflow),
         "B_out": safe_balance_index(outflow),
+        # run-level 집계에서 부하 가중에 쓰는 load(B는 스케일 불변이라 노이즈 수준
+        # 잔여 큐의 B와 실제 대기 큐의 B를 같은 무게로 평균하면 안 된다).
+        "boundary_in_load_veh": inflow_load,
+        "boundary_out_load_veh": outflow_load,
         "boundary_empty_ratio": float(empty_ratio),
         "boundary_saturation_ratio": float(saturation_ratio),
         "boundary_in_empty_ratio": float(in_empty),

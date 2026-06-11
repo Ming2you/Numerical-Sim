@@ -8,6 +8,7 @@ import numpy as np
 from src.controllers.leader import LeaderAction
 from src.models.state import ExperimentConfig, TrafficState
 from src.models.urban_queue_model import (
+    boundary_group_key,
     movement_storage_capacity,
     movement_specs,
     safe_balance_index,
@@ -17,6 +18,11 @@ from src.models.urban_queue_model import (
 
 INFLOW_KINDS = {"boundary_in", "off_ramp"}
 OUTFLOW_KINDS = {"boundary_out", "on_ramp"}
+# 균형화(B) 대상은 외부 게이트(in)와 통제 가능한 on_ramp(out)만 — boundary_out은
+# 자유 유출 sink, off_ramp는 우선 방출 transfer 큐(상시 ≈0)라 균등화가 정의되지
+# 않는다(net-flow 회계에는 INFLOW/OUTFLOW_KINDS 전체를 그대로 쓴다).
+BALANCE_INFLOW_KINDS = {"boundary_in"}
+BALANCE_OUTFLOW_KINDS = {"on_ramp"}
 
 
 @dataclass
@@ -66,8 +72,8 @@ class InflowOutflowAllocationModule:
             movement: self._flow_to_green_sec(flows[movement])
             for movement in movements
         }
-        in_values = self._densities_after_service(state, movements, kinds, best, INFLOW_KINDS)
-        out_values = self._densities_after_service(state, movements, kinds, best, OUTFLOW_KINDS)
+        in_values = self._densities_after_service(state, movements, kinds, best, BALANCE_INFLOW_KINDS)
+        out_values = self._densities_after_service(state, movements, kinds, best, BALANCE_OUTFLOW_KINDS)
         net = self._net_flow(best, kinds)
         residual = abs(net - target)
         diagnostics = {
@@ -191,8 +197,8 @@ class InflowOutflowAllocationModule:
         flows: np.ndarray,
         target: float,
     ) -> float:
-        inflow_density = self._densities_after_service(state, movements, kinds, flows, INFLOW_KINDS)
-        outflow_density = self._densities_after_service(state, movements, kinds, flows, OUTFLOW_KINDS)
+        inflow_density = self._densities_after_service(state, movements, kinds, flows, BALANCE_INFLOW_KINDS)
+        outflow_density = self._densities_after_service(state, movements, kinds, flows, BALANCE_OUTFLOW_KINDS)
         balance = safe_balance_index(inflow_density) ** 2 + safe_balance_index(outflow_density) ** 2
         residual = self._net_flow(flows, kinds) - target
         return float(balance + 10.0 * (residual / max(self.cfg.network.movement_capacity_veh_h, 1.0)) ** 2)
@@ -205,15 +211,23 @@ class InflowOutflowAllocationModule:
         flows: np.ndarray,
         accepted_kinds: set[str],
     ) -> list[float]:
-        out: list[float] = []
+        """서비스 후 잔여 큐를 경계 요소(게이트/off-ramp/ramp) 단위로 집계한 밀도.
+
+        balance 지표(movement_balance_summary)와 같은 집계라야 PSO가 게이트가
+        측정하는 양을 최적화한다(β분할 movement 조각 단위 균형화는 ill-posed)."""
+        specs = movement_specs(self.cfg)
         dt_h = self.cfg.simulation.T_c_h
+        queues: Dict[str, float] = {}
+        caps: Dict[str, float] = {}
         for idx, movement in enumerate(movements):
             if kinds[idx] not in accepted_kinds:
                 continue
+            key = boundary_group_key(specs.get(movement, {}))
             queue = max(0.0, state.urban_movement_queue.get(movement, 0.0))
             remaining = max(0.0, queue - max(0.0, flows[idx]) * dt_h)
-            out.append(remaining / max(self._movement_storage_capacity(movement), 1.0e-9))
-        return out
+            queues[key] = queues.get(key, 0.0) + remaining
+            caps[key] = caps.get(key, 0.0) + max(self._movement_storage_capacity(movement), 1.0e-9)
+        return [queues[key] / caps[key] for key in sorted(queues)]
 
     def _movement_storage_capacity(self, movement: str) -> float:
         return movement_storage_capacity(self.cfg, movement)

@@ -239,7 +239,13 @@ class ConstraintTests(unittest.TestCase):
         demand = DemandProfile(cfg, ScenarioConfig("test")).at(0.0)
         result = FreewayFollower(cfg).solve(state, LeaderAction(0.0, 10000.0), demand)
         error = abs(sum(result.ramp_metering.values()) - 10000.0)
-        self.assertTrue(error <= cfg.freeway_follower.eps_F or result.infeasibility["metering_residual"] > 0.0)
+        # N_UF는 ceiling 목표: 원목표(10000)를 못 채우면 추적잔차 대신
+        # metering_target_infeasible로 명시 로깅된다(acceptance 기준 문서 참조).
+        self.assertTrue(
+            error <= cfg.freeway_follower.eps_F
+            or result.infeasibility["metering_residual"] > 0.0
+            or result.infeasibility["metering_target_infeasible"] > 0.0
+        )
 
     def test_ramp_metering_respects_downstream_receiving_capacity(self):
         cfg = short_config()

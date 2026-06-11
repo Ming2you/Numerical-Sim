@@ -262,6 +262,7 @@ class DistributedCoordinator:
                 urban_solves,
             )
             candidate.offsets = self._clamp_offsets_to_reference(candidate.offsets, reference_control)
+            candidate.vsl = self._clamp_vsl_to_reference(candidate.vsl, reference_control)
             new_coupling = self._extract_coupling(state, candidate, first_demand)
             residual = self._coupling_residual(coupling, new_coupling)
             obj = sum(s.objective for s in freeway_solves) + sum(s.objective for s in urban_solves)
@@ -331,7 +332,9 @@ class DistributedCoordinator:
         lane_loss = max(0.0, net.freeway_lanes - (lane_profile.get(agent.link, [net.freeway_lanes])[-1]))
         desired = self._agent_vsl(density_ratio, lane_loss, current.vsl.get(agent.link, max(self.cfg.freeway_follower.vsl_set)))
         density_excess = sum(max(0.0, rho - net.rho_crit) for rho in rhos)
-        metering_error = abs(sum(ramp_metering.values()) - target)
+        # 잔차는 달성가능 목표(min(target, Σ물리상한)) 기준 — 수요 부족으로 덜 방출한 것을
+        # "추적 실패"로 만들어 urban 쪽에 가짜 freeway 압력을 보내지 않게 한다.
+        metering_error = abs(sum(ramp_metering.values()) - min(target, sum(upper.values())))
         objective = (
             sum(max(0.0, rho) * net.freeway_segment_length_km * net.freeway_lanes for rho in rhos)
             + self.cfg.freeway_follower.density_penalty * density_excess
@@ -512,6 +515,26 @@ class DistributedCoordinator:
             delta = (value - prev + 0.5 * cycle) % cycle - 0.5 * cycle
             delta = float(np.clip(delta, -max_step, max_step))
             out[signal] = float((prev + delta) % cycle)
+        return out
+
+    def _clamp_vsl_to_reference(
+        self,
+        vsl: Mapping[str, float],
+        reference: ControlAction,
+    ) -> Dict[str, float]:
+        """내부 iteration의 VSL 누적 드리프트가 interval 간 max_vsl_step 제약을
+        위반하지 않게, 직전 적용 control 기준 ±step 범위의 discrete 값으로 스냅한다."""
+        fc = self.cfg.freeway_follower
+        vsl_set = sorted(float(v) for v in fc.vsl_set)
+        out: Dict[str, float] = {}
+        for link in self.cfg.network.freeway_links:
+            prev = float(reference.vsl.get(link, max(vsl_set)))
+            value = float(vsl.get(link, prev))
+            feasible = [
+                v for v in vsl_set
+                if prev - fc.max_vsl_step - 1.0e-9 <= v <= prev + fc.max_vsl_step + 1.0e-9
+            ] or vsl_set
+            out[link] = float(min(feasible, key=lambda v: (abs(v - value), v)))
         return out
 
     def _legacy_boundary_allocations(self, allocation: Mapping[str, float]) -> Dict[str, float]:

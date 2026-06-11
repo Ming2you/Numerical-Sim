@@ -193,7 +193,7 @@ leader:
   N_P_candidate_upper_factor: 1.05
   N_P_star_unit: veh
   N_UF_star_unit: veh_per_hour
-  N_P_feedback_horizon_h: 0.5
+  N_P_feedback_horizon_h: 1.0
   N_P_feedback_flow_limit_veh_h: 800.0
   N_UF_feasible_margin: 0.95
   non_convergence_penalty: 500.0
@@ -230,8 +230,8 @@ urban_follower:
   offset_smoothness_weight: 0.1
   green_smoothness_weight: 0.1
   receiving_space_rule: proportional
-  allocation_pso_particles: 18
-  allocation_pso_iterations: 24
+  allocation_pso_particles: 36
+  allocation_pso_iterations: 48
   allocation_green_band_sec: 5.0
 evaluation:
   main_metric: total_ttt
@@ -241,6 +241,7 @@ evaluation:
   eps_balance: 0.03
   boundary_degenerate_saturation_fraction: 0.95
   boundary_degenerate_ratio: 0.5
+  boundary_controllable_min_fraction: 0.25
 auto_tuning:
   enabled: true
   max_iterations: 5
