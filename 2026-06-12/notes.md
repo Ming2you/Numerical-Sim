@@ -122,3 +122,24 @@ main PASS)까지 완료. 남은 FAIL이 vsl/ramp_metering/boundary_balance 게�
 
 - `outputs/sweep_{low,medium,oversat,incident}_full7200`, 리포트 사본 `2026-06-12/results/sweep_*_report.md`.
 - 코드 변경 없음(측정 라운드).
+
+---
+
+# 추가 작업 — 액추에이터 동작 진단 (데이터·그래프)
+
+`scripts/plot_actuator_diagnostics.py` 신규(의존성 없는 SVG 차트). 5개 풀런에서
+VSL/metering/offset/green 시계열 30장 생성(`2026-06-12/results/actuator_plots/`),
+분석은 `2026-06-12/results/actuator_diagnostics.md`.
+
+핵심 결론.
+- **VSL ✓**: 활성 빈도 0/4/14/14/28 (low→oversat 단조), 활성 구간 밀도비 > 비활성,
+  명령 깊이(100→80→60)가 혼잡 깊이에 비례. incident에서 capacity drop에 실제 개입.
+- **metering ✓**: 자유류에서는 명령<용량이어도 w_r≈9대(즉시 배수)라 비구속(수요 제한);
+  oversat에서만 명령 3,172로 실제 제한하며 적체를 x_on으로 후퇴 — 본선 10배 방어.
+  명령은 N_UF_star를 정확히 추적.
+- **offset ★ 문제 확정**: (a) plant가 cycle 위상을 모델링하지 않아 offset이 동역학에
+  0 영향(검증 원리적으로 불가, corridor_delay_change는 urban TTT proxy). (b) 휴리스틱도
+  round-4 이슈 ③ 그대로 — Δoffset(A→B)≈49s = 1km@freeway 속도. 모델 정합 이상값은
+  1.32km@50km/h=95s. 권고: 현 단계 offset 제외 또는 spillback 라운드에서 위상 모델 추가
+  후 재작성(연구자 결정).
+- **green ✓**: p1 비율이 큐 압력/allocation에 따라 실제로 가동(신호 제어의 실효 채널).
