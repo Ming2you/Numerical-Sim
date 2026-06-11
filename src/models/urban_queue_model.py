@@ -34,6 +34,35 @@ def movement_specs(cfg: ExperimentConfig) -> Dict[str, Dict[str, object]]:
     return {key: dict(value) for key, value in cfg.network.urban_movements.items()}
 
 
+def approach_routing(cfg: ExperimentConfig) -> Dict[str, list[tuple[str, float]]]:
+    """approach source(링크/게이트/off-ramp storage) → [(movement, β)] 매핑.
+
+    spec §3.3.5: 링크 끝(큐 꼬리)에 도착한 차량은 단일 next_movement가 아니라
+    β[o,s,·]로 그 교차로의 (o,s,d) movement 큐들에 분할 주입된다."""
+    net = cfg.network
+    routing: Dict[str, list[tuple[str, float]]] = {}
+    for movement, spec in cfg.network.urban_movements.items():
+        kind = str(spec.get("kind", ""))
+        if kind == "off_ramp":
+            source = net.off_ramp_storage_link.get(str(spec.get("origin", "")), "")
+        else:
+            # boundary_in은 게이트 in링크, 그 외는 내부 incoming link가 origin이다.
+            source = str(spec.get("origin", ""))
+        if source:
+            routing.setdefault(source, []).append((movement, float(spec.get("beta", 0.0))))
+    return routing
+
+
+def sink_storage_links(cfg: ExperimentConfig) -> set[str]:
+    """boundary_out 게이트로 나가는 storage 링크 — 링크 끝 도착 = system sink 이탈."""
+    out_links = set(cfg.network.boundary_out_links)
+    return {
+        str(spec.get("receiving_link", ""))
+        for spec in cfg.network.urban_movements.values()
+        if str(spec.get("destination", "")) in out_links
+    }
+
+
 def movement_storage_capacity(
     cfg: ExperimentConfig,
     movement: str,
@@ -113,17 +142,14 @@ def movement_balance_summary(
 
 def ensure_urban_state(state: TrafficState, cfg: ExperimentConfig) -> None:
     net = cfg.network
-    if not state.urban_movement_queue:
-        state.urban_movement_queue = {
-            movement: (0.0 if spec.get("kind") == "on_ramp" else 20.0)
-            for movement, spec in movement_specs(cfg).items()
-        }
     for movement, spec in movement_specs(cfg).items():
         state.urban_movement_queue.setdefault(
             movement,
-            0.0 if spec.get("kind") == "on_ramp" else 20.0,
+            20.0 * float(spec.get("beta", 1.0)) if spec.get("kind") == "boundary_in" else 0.0,
         )
-        state.urban_arrival_buffer.setdefault(movement, {})
+    # arrival buffer는 movement가 아니라 approach source(링크) 단위로 쌓는다 — β분할은 도착 시점.
+    for source in approach_routing(cfg):
+        state.urban_arrival_buffer.setdefault(source, {})
     for link, capacity in net.urban_link_storage_veh.items():
         state.urban_link_storage.setdefault(link, capacity)
         state.urban_storage_release_buffer.setdefault(link, {})
@@ -133,33 +159,23 @@ def ensure_urban_state(state: TrafficState, cfg: ExperimentConfig) -> None:
 def sync_onramp_queues_from_freeway(state: TrafficState, cfg: ExperimentConfig) -> None:
     """2저수지 구조에서는 freeway ramp queue를 urban 접근부 queue로 복사하지 않는다."""
     ensure_urban_state(state, cfg)
-    for ramp, movement in cfg.network.on_ramp_to_movement.items():
+    for ramp, movements in cfg.network.on_ramp_to_movement.items():
         state.ramp_queue[ramp] = float(np.clip(
             state.ramp_queue.get(ramp, 0.0),
             0.0,
             cfg.network.ramp_queue_max_veh,
         ))
-        state.urban_movement_queue[movement] = max(
-            0.0,
-            state.urban_movement_queue.get(movement, 0.0),
-        )
+        for movement in movements:
+            state.urban_movement_queue[movement] = max(
+                0.0,
+                state.urban_movement_queue.get(movement, 0.0),
+            )
     _sync_legacy_queues(state, cfg)
 
 
 def sync_onramp_queues_to_freeway(state: TrafficState, cfg: ExperimentConfig) -> None:
     """2저수지 구조에서는 urban 접근부 queue와 freeway ramp queue를 독립으로 유지한다."""
-    ensure_urban_state(state, cfg)
-    for ramp, movement in cfg.network.on_ramp_to_movement.items():
-        state.ramp_queue[ramp] = float(np.clip(
-            state.ramp_queue.get(ramp, 0.0),
-            0.0,
-            cfg.network.ramp_queue_max_veh,
-        ))
-        state.urban_movement_queue[movement] = max(
-            0.0,
-            state.urban_movement_queue.get(movement, 0.0),
-        )
-    _sync_legacy_queues(state, cfg)
+    sync_onramp_queues_from_freeway(state, cfg)
 
 
 def schedule_offramp_arrivals(
@@ -171,14 +187,14 @@ def schedule_offramp_arrivals(
 ) -> tuple[float, float]:
     """Insert freeway-to-off-ramp vehicles into directed urban storage.
 
-    Returns `(accepted, rejected)` in vehicles.
+    off-ramp 차량은 storage 링크를 지나 교차로에 도착하면 β로 분산 합류한다(종료 아님).
+    arrival buffer key = storage 링크(approach source). Returns `(accepted, rejected)`.
     """
     ensure_urban_state(state, cfg)
     if vehicles <= 0.0:
         return 0.0, 0.0
     net = cfg.network
     storage_link = net.off_ramp_storage_link[off_ramp]
-    movement = net.off_ramp_to_movement[off_ramp]
     available = max(0.0, state.urban_link_storage.get(storage_link, 0.0))
     accepted = min(float(vehicles), available)
     rejected = max(0.0, float(vehicles) - accepted)
@@ -187,7 +203,7 @@ def schedule_offramp_arrivals(
     state.urban_link_storage[storage_link] = max(0.0, available - accepted)
     delay_steps = _link_delay_steps(state, cfg, storage_link)
     arrival_step = urban_step_index + delay_steps
-    _schedule(state.urban_arrival_buffer, movement, arrival_step, accepted)
+    _schedule(state.urban_arrival_buffer, storage_link, arrival_step, accepted)
     _schedule(state.urban_storage_release_buffer, storage_link, arrival_step, accepted)
     return accepted, rejected
 
@@ -304,7 +320,11 @@ def _sync_legacy_queues(state: TrafficState, cfg: ExperimentConfig) -> None:
 
 
 def _storage_occupancy(state: TrafficState, cfg: ExperimentConfig) -> float:
-    return state.protected_accumulation_veh(cfg.network)
+    """링크 in-transit 점유(cap−available) 합계. movement 큐는 포함하지 않는다."""
+    total = 0.0
+    for link, capacity in cfg.network.urban_link_storage_veh.items():
+        total += max(0.0, capacity - state.urban_link_storage.get(link, capacity))
+    return float(total)
 
 
 def urban_accumulation_feedback_flow(
@@ -339,20 +359,20 @@ def estimate_onramp_green_release_flows(
     specs = movement_specs(cfg)
     horizon_h = cfg.simulation.T_f_h if interval_h is None else interval_h
     release: Dict[str, float] = {}
-    for ramp, movement in net.on_ramp_to_movement.items():
-        spec = specs.get(movement)
-        if spec is None:
-            release[ramp] = 0.0
-            continue
-        current_x_on = max(0.0, state.urban_movement_queue.get(movement, 0.0))
+    for ramp, movements in net.on_ramp_to_movement.items():
+        requested_total = 0.0
         arrival = max(0.0, demand.ramp_arrival.get(ramp, 0.0)) * horizon_h
-        available = current_x_on + arrival
-        cap_flow = _movement_capacity_flow(control, cfg, movement, spec)
-        green_fraction = _phase_green_fraction(control, cfg, spec)
-        green_capacity = horizon_h * green_fraction * cap_flow
+        arrival_share = arrival / max(len(movements), 1)
+        for movement in movements:
+            spec = specs.get(movement)
+            if spec is None:
+                continue
+            available = max(0.0, state.urban_movement_queue.get(movement, 0.0)) + arrival_share
+            cap_flow = _movement_capacity_flow(control, cfg, movement, spec)
+            green_fraction = _phase_green_fraction(control, cfg, spec)
+            requested_total += min(available, horizon_h * green_fraction * cap_flow)
         ramp_space = max(0.0, net.ramp_queue_max_veh - state.ramp_queue.get(ramp, 0.0))
-        actual_veh = min(available, green_capacity, ramp_space)
-        release[ramp] = actual_veh / max(horizon_h, 1.0e-9)
+        release[ramp] = min(requested_total, ramp_space) / max(horizon_h, 1.0e-9)
     return release
 
 
@@ -395,34 +415,47 @@ def urban_substep(
     ramp_metering_shortfall_by_ramp: Dict[str, float] = {ramp: 0.0 for ramp in net.ramps}
     off_ramp_departures: Dict[str, float] = {r: 0.0 for r in net.off_ramps}
     step_idx = _urban_step_index(state, cfg) if urban_step_index is None else urban_step_index
+    routing = approach_routing(cfg)
+    sink_links = sink_storage_links(cfg)
+    boundary_out_sink_veh = 0.0
+    urban_gate_inflow_veh = 0.0
+    urban_demand_arrivals_veh = 0.0
 
     for link in net.urban_link_storage_veh:
         released = _pop_buffer(state.urban_storage_release_buffer, link, step_idx)
         if released > 0.0:
             cap = net.urban_link_storage_veh[link]
             state.urban_link_storage[link] = min(cap, state.urban_link_storage.get(link, cap) + released)
+            # boundary_out 링크 끝 도착 = system sink 이탈(보존 회계의 유일한 urban-side 출구).
+            if link in sink_links:
+                boundary_out_sink_veh += released
 
-    for movement in specs:
-        arrived = _pop_buffer(state.urban_arrival_buffer, movement, step_idx)
-        if arrived > 0.0:
-            state.urban_movement_queue[movement] += arrived
+    # arrival = "다음 노드 도착 → β분할" (spec §3.3.5). 1:1 next_movement 체인이 아님.
+    for source, targets in routing.items():
+        arrived = _pop_buffer(state.urban_arrival_buffer, source, step_idx)
+        if arrived <= 0.0:
+            continue
+        for movement, beta in targets:
+            state.urban_movement_queue[movement] += beta * arrived
 
-    by_origin: Dict[str, list[str]] = {}
-    for movement, spec in specs.items():
-        if spec.get("kind") == "boundary_in":
-            by_origin.setdefault(str(spec.get("origin")), []).append(movement)
-    for origin, movements in by_origin.items():
+    # 게이트 수요는 그 교차로에 "해당 방향에서 도착"으로 주입 후 동일 β분할.
+    for origin in net.boundary_in_links:
         arrival = demand.urban_boundary.get(origin, 0.0) * sim.T_u_h
+        targets = routing.get(origin, [])
+        if arrival <= 0.0 or not targets:
+            continue
+        urban_demand_arrivals_veh += arrival
+        for movement, beta in targets:
+            state.urban_movement_queue[movement] += beta * arrival
+
+    # 외생 on-ramp 수요는 먼저 urban 접근부 저수지 x_on(해당 ramp의 on_ramp movement들)에 쌓인다.
+    for ramp, movements in net.on_ramp_to_movement.items():
+        arrival = max(0.0, demand.ramp_arrival.get(ramp, 0.0)) * sim.T_u_h
         if arrival <= 0.0 or not movements:
             continue
         share = arrival / len(movements)
         for movement in movements:
-            state.urban_movement_queue[movement] += share
-
-    # 외생 on-ramp 수요는 먼저 urban 접근부 저수지 x_on에 쌓인다.
-    for ramp, movement in net.on_ramp_to_movement.items():
-        arrival = max(0.0, demand.ramp_arrival.get(ramp, 0.0)) * sim.T_u_h
-        state.urban_movement_queue[movement] = state.urban_movement_queue.get(movement, 0.0) + arrival
+            state.urban_movement_queue[movement] = state.urban_movement_queue.get(movement, 0.0) + share
         onramp_arrivals_veh += arrival
 
     # ramp metering은 freeway ramp 저수지 w_r에서 freeway로 빠져나가는 흐름이다.
@@ -440,33 +473,49 @@ def urban_substep(
             ramp_metering_actual_by_ramp[ramp] = ramp_metering_actual_by_ramp.get(ramp, 0.0) + actual
             ramp_metering_shortfall_by_ramp[ramp] = ramp_metering_shortfall_by_ramp.get(ramp, 0.0) + shortfall
 
-    # urban green은 접근부 저수지 x_on에서 freeway ramp 저수지 w_r로 보내는 흐름이다.
-    for ramp, movement in net.on_ramp_to_movement.items():
-        spec = specs.get(movement)
-        if spec is None:
+    # urban green은 접근부 저수지(x_on, ramp행 movement들)에서 freeway ramp 저수지 w_r로
+    # 보내는 흐름이다. ramp는 sink가 아니라 freeway로의 transfer(차량 보존).
+    ramp_requests: Dict[str, Dict[str, float]] = {}
+    for movement, spec in specs.items():
+        ramp = str(spec.get("ramp", ""))
+        if not ramp:
             continue
         available = max(0.0, state.urban_movement_queue.get(movement, 0.0))
         cap_flow = _movement_capacity_flow(control, cfg, movement, spec)
         green_fraction = _phase_green_fraction(control, cfg, spec)
-        requested = min(available, sim.T_u_h * green_fraction * cap_flow)
+        ramp_requests.setdefault(ramp, {})[movement] = min(
+            available,
+            sim.T_u_h * green_fraction * cap_flow,
+        )
+    for ramp, requests in ramp_requests.items():
+        requested_total = sum(requests.values())
         ramp_space = max(0.0, net.ramp_queue_max_veh - state.ramp_queue.get(ramp, 0.0))
-        actual = min(requested, ramp_space)
-        state.urban_movement_queue[movement] = max(0.0, available - actual)
+        scale = 1.0 if requested_total <= ramp_space else ramp_space / max(requested_total, 1.0e-9)
+        released_total = 0.0
+        for movement, requested in requests.items():
+            actual = requested * scale
+            before = max(0.0, state.urban_movement_queue.get(movement, 0.0))
+            actual = min(before, actual)
+            state.urban_movement_queue[movement] = max(0.0, before - actual)
+            released_total += actual
+            total_departures_veh += actual
+            outbound_service_veh += actual
+            if str(specs[movement].get("kind", "")) in {"boundary_in", "off_ramp"}:
+                # 게이트에서 곧장 ramp로 가는 movement는 perimeter 유입이기도 하다.
+                inbound_service_veh += actual
         state.ramp_queue[ramp] = min(
             net.ramp_queue_max_veh,
-            max(0.0, state.ramp_queue.get(ramp, 0.0) + actual),
+            max(0.0, state.ramp_queue.get(ramp, 0.0) + released_total),
         )
-        total_departures_veh += actual
-        outbound_service_veh += actual
-        onramp_green_release_request_veh += requested
-        onramp_green_releases_veh += actual
-        onramp_green_release_shortfall_veh += max(0.0, requested - actual)
+        onramp_green_release_request_veh += requested_total
+        onramp_green_releases_veh += released_total
+        onramp_green_release_shortfall_veh += max(0.0, requested_total - released_total)
 
     intended_by_storage: Dict[str, Dict[str, float]] = {}
     no_storage_intended: Dict[str, float] = {}
     for movement, spec in specs.items():
-        if spec.get("kind") == "on_ramp":
-            continue
+        if str(spec.get("ramp", "")):
+            continue  # ramp행 movement는 위 transfer 루프에서 처리됨.
         available = max(0.0, state.urban_movement_queue.get(movement, 0.0))
         cap_flow = _movement_capacity_flow(control, cfg, movement, spec)
         green_fraction = _phase_green_fraction(control, cfg, spec)
@@ -502,9 +551,9 @@ def urban_substep(
             )
             delay_steps = _link_delay_steps(state, cfg, receiving_link)
             arrival_step = step_idx + delay_steps
-            next_movement = str(spec.get("next_movement", ""))
-            if next_movement:
-                _schedule(state.urban_arrival_buffer, next_movement, arrival_step, actual)
+            # 내부 링크면 다음 교차로 approach buffer로(도착 시 β분할), sink 링크면 release만.
+            if receiving_link in routing:
+                _schedule(state.urban_arrival_buffer, receiving_link, arrival_step, actual)
             _schedule(state.urban_storage_release_buffer, receiving_link, arrival_step, actual)
         if spec.get("kind") == "off_ramp":
             off_ramp = str(spec.get("off_ramp", ""))
@@ -512,15 +561,20 @@ def urban_substep(
             inbound_service_veh += actual
         elif spec.get("kind") == "boundary_in":
             inbound_service_veh += actual
+            urban_gate_inflow_veh += actual
         elif spec.get("kind") == "boundary_out":
             outbound_service_veh += actual
 
+    projection_protected_veh = 0.0
+    protected_queue_kinds = {"internal", "boundary_out", "off_ramp"}
     for movement, spec in specs.items():
         qmax = _queue_max(cfg, movement, spec)
         q = state.urban_movement_queue.get(movement, 0.0)
         if q > qmax:
             overflow_count += 1.0
             projection_count += q - qmax
+            if str(spec.get("kind", "")) in protected_queue_kinds:
+                projection_protected_veh += q - qmax
             state.urban_movement_queue[movement] = qmax
 
     urban_ttt = (
@@ -558,7 +612,17 @@ def urban_substep(
     diagnostics.update(boundary_indices(state.boundary_queue.values(), net.boundary_queue_max_veh))
     diagnostics["queue_overflow_count"] = float(overflow_count)
     diagnostics["movement_queue_projection_veh"] = float(projection_count)
+    diagnostics["movement_queue_projection_protected_veh"] = float(projection_protected_veh)
     diagnostics["urban_storage_occupancy"] = _storage_occupancy(state, cfg)
+    diagnostics["urban_link_occupancy_veh"] = _storage_occupancy(state, cfg)
+    # 보존 회계(proposal §8): 유입(게이트 service + off_ramp 복귀 + 외생 ramp 수요)
+    # = 이탈(boundary_out sink + on_ramp 전이) + Δ누적. off_ramp 복귀는 coupling에서 집계.
+    diagnostics["urban_gate_inflow_veh"] = float(urban_gate_inflow_veh)
+    diagnostics["urban_demand_arrivals_veh"] = float(urban_demand_arrivals_veh)
+    diagnostics["boundary_out_sink_veh"] = float(boundary_out_sink_veh)
+    diagnostics["urban_total_vehicles_veh"] = float(
+        sum(state.urban_movement_queue.values()) + _storage_occupancy(state, cfg)
+    )
     diagnostics["onramp_arrivals_veh"] = float(onramp_arrivals_veh)
     diagnostics["onramp_green_release_request_veh"] = float(onramp_green_release_request_veh)
     diagnostics["onramp_green_releases_veh"] = float(onramp_green_releases_veh)
@@ -578,7 +642,8 @@ def urban_substep(
         )
     diagnostics["onramp_approach_queue_veh"] = float(sum(
         state.urban_movement_queue.get(movement, 0.0)
-        for movement in net.on_ramp_to_movement.values()
+        for movements in net.on_ramp_to_movement.values()
+        for movement in movements
     ))
     diagnostics["ramp_queue_veh"] = float(sum(state.ramp_queue.values()))
     diagnostics["offramp_departures_veh"] = float(sum(off_ramp_departures.values()))
@@ -618,6 +683,10 @@ def aggregate_urban_diagnostics(
         "urban_total_departures_veh",
         "queue_overflow_count",
         "movement_queue_projection_veh",
+        "movement_queue_projection_protected_veh",
+        "urban_gate_inflow_veh",
+        "urban_demand_arrivals_veh",
+        "boundary_out_sink_veh",
         "onramp_arrivals_veh",
         "onramp_green_release_request_veh",
         "onramp_green_releases_veh",

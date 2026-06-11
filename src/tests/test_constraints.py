@@ -42,8 +42,8 @@ class ConstraintTests(unittest.TestCase):
         self.assertEqual({agent.id for agent in urban_agents}, {"U_A", "U_B", "U_C", "U_D", "U_F"})
         self.assertEqual({agent.id for agent in freeway_agents}, {"F_W0", "F_W1", "F_W2", "F_E0", "F_E1", "F_E2"})
         d_agent = next(agent for agent in urban_agents if agent.id == "U_D")
-        self.assertIn("D_on_FW_W", d_agent.movements)
-        self.assertIn("OR_D_W_to_D_grid", d_agent.movements)
+        self.assertIn("D_N_to_onW", d_agent.movements)
+        self.assertIn("D_offW_to_N", d_agent.movements)
         fw_merge_agent = next(agent for agent in freeway_agents if agent.id == "F_W1")
         self.assertIn("R_D_W", fw_merge_agent.ramps)
         self.assertIn("R_F_W", fw_merge_agent.ramps)
@@ -166,7 +166,8 @@ class ConstraintTests(unittest.TestCase):
         congested = state.copy()
         for movement in congested.urban_movement_queue:
             congested.urban_movement_queue[movement] = 0.0
-        congested.urban_movement_queue["A_top_in_to_grid"] = 220.0
+        # internal movement 큐는 보호영역 누적 N_P에 포함된다(그리드 라우팅 이후 정의).
+        congested.urban_movement_queue["A_S_to_E"] = 220.0
         congested_actions = Leader(cfg).candidates(congested, previous, demand)
         self.assertTrue(all(action.N_P_star <= 172.0 + 1.0e-9 for action in congested_actions))
 
@@ -187,10 +188,10 @@ class ConstraintTests(unittest.TestCase):
         state = TrafficState.initial(cfg)
         for movement in state.urban_movement_queue:
             state.urban_movement_queue[movement] = 0.0
-        state.urban_movement_queue["A_top_in_to_grid"] = 120.0
+        state.urban_movement_queue["A_N_to_S"] = 120.0
         # 보호영역 누적(내부 link storage 점유)을 perimeter penalty 경로가 동작하도록 설정한다.
-        entry_cap = cfg.network.urban_link_storage_veh["A_entry_top"]
-        state.urban_link_storage["A_entry_top"] = entry_cap - 150.0
+        grid_cap = cfg.network.urban_link_storage_veh["A_to_D"]
+        state.urban_link_storage["A_to_D"] = grid_cap - 150.0
         for link in cfg.network.freeway_links:
             state.freeway_density[link] = [cfg.network.rho_crit + 2.0 for _ in state.freeway_density[link]]
             state.freeway_speed[link] = [cfg.network.v_free for _ in state.freeway_speed[link]]
@@ -475,13 +476,13 @@ class ConstraintTests(unittest.TestCase):
         cfg = short_config()
         state = TrafficState.initial(cfg)
         state.ramp_queue["R_D_W"] = 30.0
-        state.urban_movement_queue["D_on_FW_W"] = 70.0
+        state.urban_movement_queue["D_N_to_onW"] = 70.0
         sync_onramp_queues_from_freeway(state, cfg)
         self.assertAlmostEqual(state.ramp_queue["R_D_W"], 30.0)
-        self.assertAlmostEqual(state.urban_movement_queue["D_on_FW_W"], 70.0)
+        self.assertAlmostEqual(state.urban_movement_queue["D_N_to_onW"], 70.0)
         sync_onramp_queues_to_freeway(state, cfg)
         self.assertAlmostEqual(state.ramp_queue["R_D_W"], 30.0)
-        self.assertAlmostEqual(state.urban_movement_queue["D_on_FW_W"], 70.0)
+        self.assertAlmostEqual(state.urban_movement_queue["D_N_to_onW"], 70.0)
 
     def test_onramp_demand_enters_urban_movement_queue_when_metering_closed(self):
         cfg = short_config()
@@ -509,15 +510,19 @@ class ConstraintTests(unittest.TestCase):
         for state in (low, high):
             for ramp in cfg.network.ramps:
                 state.ramp_queue[ramp] = 0.0
-            for movement in cfg.network.on_ramp_to_movement.values():
-                state.urban_movement_queue[movement] = 40.0
+            for movements in cfg.network.on_ramp_to_movement.values():
+                for movement in movements:
+                    state.urban_movement_queue[movement] = 40.0
 
         low_control = ControlAction.fixed(cfg)
         high_control = ControlAction.fixed(cfg)
-        low_control.green_times["D_p2"] = cfg.network.green_min
-        high_control.green_times["D_p2"] = cfg.network.green_max
-        low_control.inflow_outflow_allocation["D_on_FW_W"] = cfg.network.movement_capacity_veh_h
-        high_control.inflow_outflow_allocation["D_on_FW_W"] = cfg.network.movement_capacity_veh_h
+        # on_ramp 행 movement는 incoming approach 축으로 phase가 갈린다 — 양 phase 모두 조인다.
+        for phase in ("D_p1", "D_p2"):
+            low_control.green_times[phase] = cfg.network.green_min
+            high_control.green_times[phase] = cfg.network.green_max
+        for movement in cfg.network.on_ramp_to_movement["R_D_W"]:
+            low_control.inflow_outflow_allocation[movement] = cfg.network.movement_capacity_veh_h
+            high_control.inflow_outflow_allocation[movement] = cfg.network.movement_capacity_veh_h
         ramp_release = {ramp: 0.0 for ramp in cfg.network.ramps}
 
         _, low_diag = urban_substep(low, low_control, demand, cfg, urban_step_index=0, ramp_release_veh_h=ramp_release)
@@ -534,9 +539,13 @@ class ConstraintTests(unittest.TestCase):
         state = TrafficState.initial(cfg)
         for ramp in cfg.network.ramps:
             state.ramp_queue[ramp] = 0.0
-            state.urban_movement_queue[cfg.network.on_ramp_to_movement[ramp]] = 0.0
+        # 게이트→ramp 직결 movement(β 자연 분산)도 w_r를 채우므로 ramp행 큐를 전부 비운다.
+        for movement, spec in cfg.network.urban_movements.items():
+            if spec.get("ramp"):
+                state.urban_movement_queue[movement] = 0.0
         control = ControlAction.fixed(cfg)
-        demand = DemandProfile(cfg, ScenarioConfig("test", ramp_scale=0.0)).at(0.0)
+        # urban 게이트 수요가 같은 interval 안에서 ramp로 넘어가지 않게 urban_scale=0.
+        demand = DemandProfile(cfg, ScenarioConfig("test", urban_scale=0.0, ramp_scale=0.0)).at(0.0)
         requested_release = {ramp: 1000.0 for ramp in cfg.network.ramps}
         seen_release = []
 

@@ -191,7 +191,10 @@ class FreewayFollower:
 
         future_queue_pressure = np.asarray([
             state.ramp_queue.get(r, 0.0)
-            + state.urban_movement_queue.get(net.on_ramp_to_movement.get(r, ""), 0.0)
+            + sum(
+                state.urban_movement_queue.get(movement, 0.0)
+                for movement in net.on_ramp_to_movement.get(r, [])
+            )
             + sum(d.ramp_arrival.get(r, 0.0) * self.cfg.simulation.T_c_h for d in forecast)
             for r in net.ramps
         ], dtype=float)
@@ -260,9 +263,16 @@ class FreewayFollower:
             self.cfg,
             interval_h=dt_h,
         )
-        for ramp, movement in net.on_ramp_to_movement.items():
+        for ramp, movements in net.on_ramp_to_movement.items():
+            if not movements:
+                continue
             arrival_veh = max(0.0, demand.ramp_arrival.get(ramp, 0.0)) * dt_h
-            available_x_on = max(0.0, state.urban_movement_queue.get(movement, 0.0)) + arrival_veh
+            arrival_share = arrival_veh / len(movements)
+            x_on_by_movement = {
+                movement: max(0.0, state.urban_movement_queue.get(movement, 0.0)) + arrival_share
+                for movement in movements
+            }
+            available_x_on = sum(x_on_by_movement.values())
             ramp_before = max(0.0, state.ramp_queue.get(ramp, 0.0))
             ramp_space = max(0.0, net.ramp_queue_max_veh - ramp_before)
             green_veh = min(
@@ -270,7 +280,10 @@ class FreewayFollower:
                 available_x_on,
                 ramp_space,
             )
-            state.urban_movement_queue[movement] = max(0.0, available_x_on - green_veh)
+            # 경량 예측에서는 ramp 단위 green 방출을 movement별 잔량에 비례 배분한다.
+            scale = green_veh / available_x_on if available_x_on > 1.0e-9 else 0.0
+            for movement, x_on in x_on_by_movement.items():
+                state.urban_movement_queue[movement] = max(0.0, x_on * (1.0 - scale))
             state.ramp_queue[ramp] = min(net.ramp_queue_max_veh, ramp_before + green_veh)
         return green_flow
 

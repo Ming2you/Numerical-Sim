@@ -85,177 +85,11 @@ network:
   - out_F_right
   boundary_queue_max_veh: 240.0
   movement_capacity_veh_h: 1400.0
-  urban_movements:
-    A_top_in_to_grid:
-      origin: in_A_top
-      signal: A
-      destination: grid
-      receiving_link: A_entry_top
-      phase: A_p1
-      kind: boundary_in
-    A_left_in_to_grid:
-      origin: in_A_left
-      signal: A
-      destination: grid
-      receiving_link: A_entry_left
-      phase: A_p1
-      kind: boundary_in
-    B_top_in_to_grid:
-      origin: in_B_top
-      signal: B
-      destination: grid
-      receiving_link: B_entry_top
-      phase: B_p1
-      kind: boundary_in
-    C_top_in_to_grid:
-      origin: in_C_top
-      signal: C
-      destination: grid
-      receiving_link: C_entry_top
-      phase: C_p1
-      kind: boundary_in
-    C_right_in_to_grid:
-      origin: in_C_right
-      signal: C
-      destination: grid
-      receiving_link: C_entry_right
-      phase: C_p1
-      kind: boundary_in
-    D_left_in_to_grid:
-      origin: in_D_left
-      signal: D
-      destination: grid
-      receiving_link: D_entry_left
-      phase: D_p1
-      kind: boundary_in
-    F_right_in_to_grid:
-      origin: in_F_right
-      signal: F
-      destination: grid
-      receiving_link: F_entry_right
-      phase: F_p1
-      kind: boundary_in
-    A_grid_to_top_out:
-      origin: grid
-      signal: A
-      destination: out_A_top
-      receiving_link: A_top_out
-      phase: A_p2
-      kind: boundary_out
-    A_grid_to_left_out:
-      origin: grid
-      signal: A
-      destination: out_A_left
-      receiving_link: A_left_out
-      phase: A_p2
-      kind: boundary_out
-    B_grid_to_top_out:
-      origin: grid
-      signal: B
-      destination: out_B_top
-      receiving_link: B_top_out
-      phase: B_p2
-      kind: boundary_out
-    C_grid_to_top_out:
-      origin: grid
-      signal: C
-      destination: out_C_top
-      receiving_link: C_top_out
-      phase: C_p2
-      kind: boundary_out
-    C_grid_to_right_out:
-      origin: grid
-      signal: C
-      destination: out_C_right
-      receiving_link: C_right_out
-      phase: C_p2
-      kind: boundary_out
-    D_grid_to_left_out:
-      origin: grid
-      signal: D
-      destination: out_D_left
-      receiving_link: D_left_out
-      phase: D_p2
-      kind: boundary_out
-    F_grid_to_right_out:
-      origin: grid
-      signal: F
-      destination: out_F_right
-      receiving_link: F_right_out
-      phase: F_p2
-      kind: boundary_out
-    D_on_FW_W:
-      origin: D
-      signal: D
-      destination: FW_W
-      receiving_link: D_R_W
-      phase: D_p2
-      kind: on_ramp
-      ramp: R_D_W
-    F_on_FW_W:
-      origin: F
-      signal: F
-      destination: FW_W
-      receiving_link: F_R_W
-      phase: F_p2
-      kind: on_ramp
-      ramp: R_F_W
-    D_on_FW_E:
-      origin: D
-      signal: D
-      destination: FW_E
-      receiving_link: D_R_E
-      phase: D_p2
-      kind: on_ramp
-      ramp: R_D_E
-    F_on_FW_E:
-      origin: F
-      signal: F
-      destination: FW_E
-      receiving_link: F_R_E
-      phase: F_p2
-      kind: on_ramp
-      ramp: R_F_E
-    OR_D_W_to_D_grid:
-      origin: OR_D_W
-      signal: D
-      destination: grid
-      receiving_link: D_from_OR_D_W
-      phase: D_p1
-      kind: off_ramp
-      off_ramp: OR_D_W
-    OR_F_W_to_F_grid:
-      origin: OR_F_W
-      signal: F
-      destination: grid
-      receiving_link: F_from_OR_F_W
-      phase: F_p1
-      kind: off_ramp
-      off_ramp: OR_F_W
-    OR_D_E_to_D_grid:
-      origin: OR_D_E
-      signal: D
-      destination: grid
-      receiving_link: D_from_OR_D_E
-      phase: D_p1
-      kind: off_ramp
-      off_ramp: OR_D_E
-    OR_F_E_to_F_grid:
-      origin: OR_F_E
-      signal: F
-      destination: grid
-      receiving_link: F_from_OR_F_E
-      phase: F_p1
-      kind: off_ramp
-      off_ramp: OR_F_E
+  # urban_movements / turning_ratios / on·off_ramp_to_movement는 grid_node_legs
+  # 토폴로지에서 자동 유도된다(src/models/grid_topology.py, grid_routing_proposal §3).
+  # turning_ratios 기본값 = 직진우대(직진 0.5, 나머지 균등, U-turn 0). 필요 시 여기서 override.
+  grid_link_storage_veh: 220.0
   urban_link_storage_veh:
-    A_entry_top: 220.0
-    A_entry_left: 220.0
-    B_entry_top: 220.0
-    C_entry_top: 220.0
-    C_entry_right: 220.0
-    D_entry_left: 220.0
-    F_entry_right: 220.0
     A_top_out: 220.0
     A_left_out: 220.0
     B_top_out: 220.0
@@ -263,6 +97,20 @@ network:
     C_right_out: 220.0
     D_left_out: 220.0
     F_right_out: 220.0
+    A_to_B: 220.0
+    B_to_A: 220.0
+    B_to_C: 220.0
+    C_to_B: 220.0
+    A_to_D: 220.0
+    D_to_A: 220.0
+    B_to_E: 220.0
+    E_to_B: 220.0
+    C_to_F: 220.0
+    F_to_C: 220.0
+    D_to_E: 220.0
+    E_to_D: 220.0
+    E_to_F: 220.0
+    F_to_E: 220.0
     D_R_W: 180.0
     F_R_W: 180.0
     D_R_E: 180.0
@@ -271,15 +119,6 @@ network:
     OR_F_W_storage: 120.0
     OR_D_E_storage: 120.0
     OR_F_E_storage: 120.0
-    D_from_OR_D_W: 220.0
-    F_from_OR_F_W: 220.0
-    D_from_OR_D_E: 220.0
-    F_from_OR_F_E: 220.0
-  on_ramp_to_movement:
-    R_D_W: D_on_FW_W
-    R_F_W: F_on_FW_W
-    R_D_E: D_on_FW_E
-    R_F_E: F_on_FW_E
   off_ramps:
   - OR_D_W
   - OR_F_W
@@ -300,11 +139,6 @@ network:
     OR_F_W: OR_F_W_storage
     OR_D_E: OR_D_E_storage
     OR_F_E: OR_F_E_storage
-  off_ramp_to_movement:
-    OR_D_W: OR_D_W_to_D_grid
-    OR_F_W: OR_F_W_to_F_grid
-    OR_D_E: OR_D_E_to_D_grid
-    OR_F_E: OR_F_E_to_F_grid
   off_ramp_split_ratio:
     OR_D_W: 0.06
     OR_F_W: 0.06
@@ -348,11 +182,13 @@ leader:
   w_L: 0.05
   N_P_star_range:
   - 0.0
-  - 500.0
+  - 600.0
   N_UF_star_range:
   - 0.0
   - 6000.0
-  N_P_crit_veh: 166.045
+  # 그리드 라우팅 도입 후 재calibration(outputs/calib_gridrouting, peak_demand,
+  # urban-scales 0.5~3.0, T=1800): MFD 정점 production 20045 veh/h @ N_P=476.801.
+  N_P_crit_veh: 476.801
   N_P_candidate_lower_factor: 0.9
   N_P_candidate_upper_factor: 1.05
   N_P_star_unit: veh

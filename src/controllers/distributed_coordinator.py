@@ -90,12 +90,12 @@ def build_agent_specs(cfg: ExperimentConfig) -> tuple[list[AgentSpec], list[Agen
             if movement_owner.get(movement) == signal
         )
         ramps = tuple(
-            ramp for ramp, movement in net.on_ramp_to_movement.items()
-            if movement in movements
+            ramp for ramp, ramp_movements in net.on_ramp_to_movement.items()
+            if any(movement in movements for movement in ramp_movements)
         )
         off_ramps = tuple(
-            off_ramp for off_ramp, movement in net.off_ramp_to_movement.items()
-            if movement in movements
+            off_ramp for off_ramp, ramp_movements in net.off_ramp_to_movement.items()
+            if any(movement in movements for movement in ramp_movements)
         )
         neighbors = sorted({
             _freeway_agent_id(
@@ -131,14 +131,14 @@ def build_agent_specs(cfg: ExperimentConfig) -> tuple[list[AgentSpec], list[Agen
         ))
 
     urban_by_ramp = {
-        ramp: _urban_agent_id(movement_owner[movement])
-        for ramp, movement in net.on_ramp_to_movement.items()
-        if movement in specs and movement_owner.get(movement)
+        ramp: _urban_agent_id(movement_owner[ramp_movements[0]])
+        for ramp, ramp_movements in net.on_ramp_to_movement.items()
+        if ramp_movements and ramp_movements[0] in specs and movement_owner.get(ramp_movements[0])
     }
     urban_by_offramp = {
-        off_ramp: _urban_agent_id(movement_owner[movement])
-        for off_ramp, movement in net.off_ramp_to_movement.items()
-        if movement in specs and movement_owner.get(movement)
+        off_ramp: _urban_agent_id(movement_owner[ramp_movements[0]])
+        for off_ramp, ramp_movements in net.off_ramp_to_movement.items()
+        if ramp_movements and ramp_movements[0] in specs and movement_owner.get(ramp_movements[0])
     }
     freeway_agents: list[AgentSpec] = []
     for link in net.freeway_links:
@@ -401,9 +401,12 @@ class DistributedCoordinator:
             spec = specs.get(movement, {})
             origin = str(spec.get("origin", ""))
             destination = str(spec.get("destination", ""))
-            if origin in self.cfg.network.boundary_in_links:
+            kind = str(spec.get("kind", ""))
+            # _legacy_boundary_allocations와 동일하게 kind까지 맞춰 합산한다
+            # (corner boundary_in→out movement가 out 링크 합에 중복 산입되지 않게).
+            if origin in self.cfg.network.boundary_in_links and kind == "boundary_in":
                 allocation[origin] = allocation.get(origin, 0.0) + allocation[movement]
-            if destination in self.cfg.network.boundary_out_links:
+            if destination in self.cfg.network.boundary_out_links and kind == "boundary_out":
                 allocation[destination] = allocation.get(destination, 0.0) + allocation[movement]
         local_queue = sum(state.urban_movement_queue.get(movement, 0.0) for movement in agent.movements)
         local_objective = float(local_queue + result.objective_value / max(len(self.urban_agents), 1))

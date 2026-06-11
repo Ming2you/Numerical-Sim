@@ -213,46 +213,19 @@ class NetworkConfig:
     ])
     boundary_queue_max_veh: float = 240.0
     movement_capacity_veh_h: float = 1400.0
-    urban_movements: Dict[str, Dict[str, Any]] = field(default_factory=lambda: {
-        "A_top_in_to_grid": {"origin": "in_A_top", "signal": "A", "destination": "grid", "receiving_link": "A_entry_top", "phase": "A_p1", "kind": "boundary_in"},
-        "A_left_in_to_grid": {"origin": "in_A_left", "signal": "A", "destination": "grid", "receiving_link": "A_entry_left", "phase": "A_p1", "kind": "boundary_in"},
-        "B_top_in_to_grid": {"origin": "in_B_top", "signal": "B", "destination": "grid", "receiving_link": "B_entry_top", "phase": "B_p1", "kind": "boundary_in"},
-        "C_top_in_to_grid": {"origin": "in_C_top", "signal": "C", "destination": "grid", "receiving_link": "C_entry_top", "phase": "C_p1", "kind": "boundary_in"},
-        "C_right_in_to_grid": {"origin": "in_C_right", "signal": "C", "destination": "grid", "receiving_link": "C_entry_right", "phase": "C_p1", "kind": "boundary_in"},
-        "D_left_in_to_grid": {"origin": "in_D_left", "signal": "D", "destination": "grid", "receiving_link": "D_entry_left", "phase": "D_p1", "kind": "boundary_in"},
-        "F_right_in_to_grid": {"origin": "in_F_right", "signal": "F", "destination": "grid", "receiving_link": "F_entry_right", "phase": "F_p1", "kind": "boundary_in"},
-        "A_grid_to_top_out": {"origin": "grid", "signal": "A", "destination": "out_A_top", "receiving_link": "A_top_out", "phase": "A_p2", "kind": "boundary_out"},
-        "A_grid_to_left_out": {"origin": "grid", "signal": "A", "destination": "out_A_left", "receiving_link": "A_left_out", "phase": "A_p2", "kind": "boundary_out"},
-        "B_grid_to_top_out": {"origin": "grid", "signal": "B", "destination": "out_B_top", "receiving_link": "B_top_out", "phase": "B_p2", "kind": "boundary_out"},
-        "C_grid_to_top_out": {"origin": "grid", "signal": "C", "destination": "out_C_top", "receiving_link": "C_top_out", "phase": "C_p2", "kind": "boundary_out"},
-        "C_grid_to_right_out": {"origin": "grid", "signal": "C", "destination": "out_C_right", "receiving_link": "C_right_out", "phase": "C_p2", "kind": "boundary_out"},
-        "D_grid_to_left_out": {"origin": "grid", "signal": "D", "destination": "out_D_left", "receiving_link": "D_left_out", "phase": "D_p2", "kind": "boundary_out"},
-        "F_grid_to_right_out": {"origin": "grid", "signal": "F", "destination": "out_F_right", "receiving_link": "F_right_out", "phase": "F_p2", "kind": "boundary_out"},
-        "D_on_FW_W": {"origin": "D", "signal": "D", "destination": "FW_W", "receiving_link": "D_R_W", "phase": "D_p2", "kind": "on_ramp", "ramp": "R_D_W"},
-        "F_on_FW_W": {"origin": "F", "signal": "F", "destination": "FW_W", "receiving_link": "F_R_W", "phase": "F_p2", "kind": "on_ramp", "ramp": "R_F_W"},
-        "D_on_FW_E": {"origin": "D", "signal": "D", "destination": "FW_E", "receiving_link": "D_R_E", "phase": "D_p2", "kind": "on_ramp", "ramp": "R_D_E"},
-        "F_on_FW_E": {"origin": "F", "signal": "F", "destination": "FW_E", "receiving_link": "F_R_E", "phase": "F_p2", "kind": "on_ramp", "ramp": "R_F_E"},
-        "OR_D_W_to_D_grid": {"origin": "OR_D_W", "signal": "D", "destination": "grid", "receiving_link": "D_from_OR_D_W", "phase": "D_p1", "kind": "off_ramp", "off_ramp": "OR_D_W"},
-        "OR_F_W_to_F_grid": {"origin": "OR_F_W", "signal": "F", "destination": "grid", "receiving_link": "F_from_OR_F_W", "phase": "F_p1", "kind": "off_ramp", "off_ramp": "OR_F_W"},
-        "OR_D_E_to_D_grid": {"origin": "OR_D_E", "signal": "D", "destination": "grid", "receiving_link": "D_from_OR_D_E", "phase": "D_p1", "kind": "off_ramp", "off_ramp": "OR_D_E"},
-        "OR_F_E_to_F_grid": {"origin": "OR_F_E", "signal": "F", "destination": "grid", "receiving_link": "F_from_OR_F_E", "phase": "F_p1", "kind": "off_ramp", "off_ramp": "OR_F_E"},
-    })
+    # urban_movements/turning_ratios/on·off_ramp_to_movement는 비워두면
+    # grid_node_legs 토폴로지에서 자동 유도된다(__post_init__, grid_routing_proposal §3).
+    grid_node_legs: Dict[str, Dict[str, Dict[str, Any]]] = field(default_factory=dict)
+    turning_ratios: Dict[str, Dict[str, Dict[str, float]]] = field(default_factory=dict)
+    urban_movements: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    grid_link_storage_veh: float = 220.0
     urban_link_storage_veh: Dict[str, float] = field(default_factory=lambda: {
-        "A_entry_top": 220.0, "A_entry_left": 220.0, "B_entry_top": 220.0,
-        "C_entry_top": 220.0, "C_entry_right": 220.0, "D_entry_left": 220.0, "F_entry_right": 220.0,
         "A_top_out": 220.0, "A_left_out": 220.0, "B_top_out": 220.0,
         "C_top_out": 220.0, "C_right_out": 220.0, "D_left_out": 220.0, "F_right_out": 220.0,
         "D_R_W": 180.0, "F_R_W": 180.0, "D_R_E": 180.0, "F_R_E": 180.0,
         "OR_D_W_storage": 120.0, "OR_F_W_storage": 120.0, "OR_D_E_storage": 120.0, "OR_F_E_storage": 120.0,
-        "D_from_OR_D_W": 220.0, "F_from_OR_F_W": 220.0,
-        "D_from_OR_D_E": 220.0, "F_from_OR_F_E": 220.0,
     })
-    on_ramp_to_movement: Dict[str, str] = field(default_factory=lambda: {
-        "R_D_W": "D_on_FW_W",
-        "R_F_W": "F_on_FW_W",
-        "R_D_E": "D_on_FW_E",
-        "R_F_E": "F_on_FW_E",
-    })
+    on_ramp_to_movement: Dict[str, List[str]] = field(default_factory=dict)
     off_ramps: List[str] = field(default_factory=lambda: ["OR_D_W", "OR_F_W", "OR_D_E", "OR_F_E"])
     off_ramp_from_freeway: Dict[str, str] = field(default_factory=lambda: {
         "OR_D_W": "FW_W",
@@ -269,12 +242,7 @@ class NetworkConfig:
         "OR_D_E": "OR_D_E_storage",
         "OR_F_E": "OR_F_E_storage",
     })
-    off_ramp_to_movement: Dict[str, str] = field(default_factory=lambda: {
-        "OR_D_W": "OR_D_W_to_D_grid",
-        "OR_F_W": "OR_F_W_to_F_grid",
-        "OR_D_E": "OR_D_E_to_D_grid",
-        "OR_F_E": "OR_F_E_to_F_grid",
-    })
+    off_ramp_to_movement: Dict[str, List[str]] = field(default_factory=dict)
     off_ramp_split_ratio: Dict[str, float] = field(default_factory=lambda: {
         "OR_D_W": 0.06,
         "OR_F_W": 0.06,
@@ -294,6 +262,47 @@ class NetworkConfig:
     urban_avg_speed_km_h: float = 50.0
     green_min_fraction: float = 0.2
     green_max_fraction: float = 0.8
+
+    def __post_init__(self) -> None:
+        # 토폴로지·movement·β를 leg 인접에서 자동 유도 — hand-list 금지(grid_routing_proposal §3).
+        from .grid_topology import (
+            build_urban_movements,
+            default_grid_node_legs,
+            derive_turning_ratios,
+            internal_links,
+        )
+
+        if not self.grid_node_legs:
+            self.grid_node_legs = default_grid_node_legs()
+        if not self.turning_ratios:
+            self.turning_ratios = derive_turning_ratios(self.grid_node_legs)
+        for node, by_approach in self.turning_ratios.items():
+            for token, beta in by_approach.items():
+                total = sum(float(v) for v in beta.values())
+                if abs(total - 1.0) > 1.0e-6:
+                    raise ValueError(f"turning_ratios[{node}][{token}] must sum to 1, got {total}.")
+        if not self.urban_movements:
+            self.urban_movements = build_urban_movements(
+                self.grid_node_legs,
+                self.turning_ratios,
+                self.signals,
+                self.ramp_to_freeway,
+            )
+        # 내부 그리드 directed link(14개) storage를 자동 추가 — 용량 220 통일.
+        for link in internal_links(self.grid_node_legs):
+            self.urban_link_storage_veh.setdefault(link, float(self.grid_link_storage_veh))
+        if not self.on_ramp_to_movement:
+            self.on_ramp_to_movement = {ramp: [] for ramp in self.ramps}
+            for movement, spec in self.urban_movements.items():
+                ramp = str(spec.get("ramp", ""))
+                if ramp and spec.get("kind") == "on_ramp":
+                    self.on_ramp_to_movement.setdefault(ramp, []).append(movement)
+        if not self.off_ramp_to_movement:
+            self.off_ramp_to_movement = {off_ramp: [] for off_ramp in self.off_ramps}
+            for movement, spec in self.urban_movements.items():
+                off_ramp = str(spec.get("off_ramp", ""))
+                if off_ramp:
+                    self.off_ramp_to_movement.setdefault(off_ramp, []).append(movement)
 
     @property
     def movement_links(self) -> List[str]:
@@ -526,12 +535,17 @@ class TrafficState:
             urban_queue={m: 20.0 for m in net.movement_links},
             boundary_queue={m: 20.0 for m in net.movement_links},
             freeway_effective_lanes=lanes,
+            # 게이트 대기열(boundary_in)만 초기 20대를 β로 나눠 갖고, 내부 큐는 0에서 시작한다.
             urban_movement_queue={
-                movement: (0.0 if spec.get("kind") == "on_ramp" else 20.0)
+                movement: (
+                    20.0 * float(spec.get("beta", 1.0))
+                    if spec.get("kind") == "boundary_in"
+                    else 0.0
+                )
                 for movement, spec in net.urban_movements.items()
             },
             urban_link_storage=dict(net.urban_link_storage_veh),
-            urban_arrival_buffer={movement: {} for movement in net.urban_movements},
+            urban_arrival_buffer={},
             urban_storage_release_buffer={link: {} for link in net.urban_link_storage_veh},
         )
 
@@ -591,13 +605,18 @@ class TrafficState:
         return float(sum(self.urban_queue.values()) + sum(self.boundary_queue.values()))
 
     def protected_accumulation_veh(self, net) -> float:
-        """보호영역(내부 urban 링크) 점유 차량 수 = perimeter 제어 대상 누적 N_P.
+        """보호영역 누적 N_P = 링크 in-transit 점유(cap−available) + 보호영역 내부 movement 대기열.
 
-        진입 대기열(boundary_in movement)·on-ramp 접근 대기열(x_on)은 경계 미터링 큐이므로
-        보호영역 누적에서 제외된다. 여기서는 내부 링크 storage 점유(cap−available)만 집계한다."""
+        진입 대기열(boundary_in 게이트 큐)·on-ramp 접근 대기열(x_on)은 경계 미터링 큐이므로
+        제외한다. 그리드 라우팅 도입으로 내부 교차로 대기열(internal/boundary_out/off_ramp
+        kind)이 생겼고, 이들은 물리적으로 보호영역 안에 있으므로 N_P에 포함한다."""
         total = 0.0
         for link, capacity in net.urban_link_storage_veh.items():
             total += max(0.0, capacity - self.urban_link_storage.get(link, capacity))
+        protected_kinds = {"internal", "boundary_out", "off_ramp"}
+        for movement, spec in net.urban_movements.items():
+            if str(spec.get("kind", "")) in protected_kinds:
+                total += max(0.0, self.urban_movement_queue.get(movement, 0.0))
         return float(total)
 
     def boundary_vector(self) -> List[float]:
@@ -624,11 +643,23 @@ class ControlAction:
         for signal in net.signals:
             green[f"{signal}_p1"] = phase_green
             green[f"{signal}_p2"] = phase_green
-        allocation = {m: net.movement_capacity_veh_h * 0.5 for m in net.movement_links}
-        allocation.update({
+        allocation = {
             movement: net.movement_capacity_veh_h * 0.5
             for movement in net.urban_movements
-        })
+        }
+        # legacy link-level allocation은 movement-level 합과 일치시킨다(분산 coordinator 합산과 정합).
+        for link in net.boundary_in_links:
+            allocation[link] = sum(
+                allocation[movement]
+                for movement, spec in net.urban_movements.items()
+                if spec.get("origin") == link and spec.get("kind") == "boundary_in"
+            )
+        for link in net.boundary_out_links:
+            allocation[link] = sum(
+                allocation[movement]
+                for movement, spec in net.urban_movements.items()
+                if spec.get("destination") == link and spec.get("kind") == "boundary_out"
+            )
         return cls(
             ramp_metering={r: net.ramp_capacity_veh_h[r] for r in net.ramps},
             vsl={link: max(cfg.freeway_follower.vsl_set) for link in net.freeway_links},
