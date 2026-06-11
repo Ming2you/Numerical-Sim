@@ -32,7 +32,10 @@ turning ratio β로 자연 분산하며 그리드를 통과**하도록 한다.
 | F | C(grid) | **램프(on/off)** | 경계(right) | E(grid) | 4 |
 
 - A·B·C·D·F = **4-leg**(램프·경계가 grid 외 leg를 채움). **E만 3-leg(T)**: N=B, W=D, E=F, 남쪽 없음.
-- 램프(D·S, F·S)는 양 freeway(FW_W·FW_E)에 연결.
+- ★ **D·F의 S(램프) leg는 사실 4갈래**: 나가는 on_ramp 2개(W→FW_W, E→FW_E) + 들어오는 off_ramp 2개(W,E).
+  - β에서 **"직진(S/ramp) 몫"은 on_ramp_W/on_ramp_E에 균등 분할**(각 절반). off_ramp_W/E는 **각각 별도 incoming 방향**.
+  - 즉 D outgoing 실제 집합 = {A(N), on_ramp_W, on_ramp_E, E(E), 경계(W)}, incoming = {A, off_ramp_W, off_ramp_E, E, 경계}.
+- A·C는 경계 leg 2개(예: A는 N=top·W=left 둘 다 경계) — incoming/outgoing 각 2 boundary 방향.
 
 ## 2. 그리드 링크 storage + transit (신규)
 
@@ -56,6 +59,8 @@ turning ratio β로 자연 분산하며 그리드를 통과**하도록 한다.
   - 회전·직진 무관하게 **incoming approach 축으로 phase 결정** → 2-phase로 깔끔히 떨어짐. green split은
     기존 `urban_follower._green_times`(p1/p2)가 그대로 처리 → **신호 제어부 구조 변경 없음**.
   - **E는 신호 없이 통과**(green=1 상당, β로 전달만). 4-phase 정밀화는 후속 옵션.
+  - ★ **램프 movement도 이 규칙으로 재배정**(기존 고정 on_ramp=D_p2 등 버림): off_ramp는 S에서 유입→NS(p1),
+    on_ramp-행 movement는 그 movement의 incoming o 축으로 결정. 즉 phase는 항상 **incoming approach 축**.
 - 경계/램프 movement는 이 체계의 **특수 케이스**: boundary_in = 외부→그리드 진입(o=외부), boundary_out =
   그리드→외부 **system sink**(d=외부, 모델 이탈), on_ramp = 그리드→freeway **transfer**(d=ramp, sink 아님 —
   freeway로 핸드오프해 계속 system 내), off_ramp = freeway→그리드 진입(o=ramp, freeway에서 transfer).
@@ -72,7 +77,7 @@ turning ratio β로 자연 분산하며 그리드를 통과**하도록 한다.
 - **목적지별 처리**:
   - d=boundary_out → **system sink**: 서비스 후 모델 이탈(외부세계).
   - d=on_ramp → **freeway로 transfer**: x_on→w_r→freeway(기존 coupling). 그리드는 떠나지만 system 내 계속.
-  - d=내부 링크 → 다음 교차로 movement로 `next_movement` 체인(β 분산 계속).
+  - d=내부 링크 → 다음 교차로에서 **β 분할**(§5; 1:1 next_movement 체인 아님).
 - **자연 분산 정합성**: 모든 노드에서 출구(boundary_out 또는 on_ramp 경유 freeway 본선)로 가는 경로가
   존재하면 차량은 결국 이탈. β가 내부 순환만 만들지 않게 출구 방향 β를 0으로 두지 말 것.
 - ★ on_ramp는 **sink가 아님** — freeway로 핸드오프된 차량은 freeway를 달리다 본선 유출(system sink)하거나
@@ -105,6 +110,8 @@ movement (o,s,d) 서비스(green) → receiving_link(=링크 s→s') 에 deposit
 - 그리드 라우팅 도입 후 내부 누적 동역학이 바뀜 → **n_crit 재calibration 필수**(현 166은 임시).
 - 누적이 entry 링크가 아니라 **실제 그리드 링크에 분포** → MFD가 더 현실적(자유류·혼잡 분지 모두 샘플링
   기대). calibration sweep(저수요 포함)이 곡선을 제대로 그리는지 확인.
+- **후속(이 작업 범위 밖)**: 그리드 라우팅 후 boundary_in 큐가 그리드로 흐르므로 큐 거동이 바뀜 →
+  boundary balance 지표(`docs/boundary_balance_acceptance_proposal.md`)·net_inflow 정의 재평가는 그 뒤에.
 
 ## 8. 검증
 
