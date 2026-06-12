@@ -199,3 +199,26 @@ vsl ✓(13 active), balance ✓(B_in 0.014, 추적 88.1), green·offset ✓. 테
 - offset 진행시간은 빈 링크 기준 95s 고정 — 혼잡 시 실제 통과시간이 길어지는 것(점유 따라
   최대 ~190s)을 반영하는 상태 적응형 t_link는 후속 옵션.
 - 다른 시나리오들의 게이트 잔여(무부하 balance 등 3범주)는 이전 라운드 결정 대기 그대로.
+
+---
+
+# 추가 작업 — 5개 시나리오 control·allocation 사후검증 (측정 전용, 수정 없음)
+
+`scripts/posthoc_control_verification.py` 신규(분석 전용). 현재 코드(99a914a) 그대로
+풀 7200s ×5 재실행 후 control별 효과와 inflow-outflow allocation before/after를 사후검증.
+종합 리포트: `2026-06-12/results/posthoc/posthoc_verification_report.md` (+ JSON/SVG 일습).
+
+핵심 결과.
+- **allocation before/after**: 게이트 7개 시간평균 밀도 편차가 전 시나리오에서
+  baseline 대비 ×4~×117 균등화(예: medium 0.0821→0.0007, peak 0.060~0.345→0.063~0.153).
+  계획 vs 실현(net-inflow) 추적은 비과포화 3종 ✓(48~88 veh/h), 심과포화 2종은 구조적
+  달성불가 잔차(300.5/123.7) — 컨트롤러 결함 아님(기존 결론 재확인).
+- **control별**: metering 5/5 PASS(21~56.5, oversat 포함 — cycle 정렬 채점 후 정상화),
+  VSL 활성 0/3/13/13/24 단조·활성 시 밀도비↑·peak 본선 초과 절반(13 vs 26),
+  green-큐 상관 0.58~0.996, offset D−A=95.3~96.4(설계 95.04) 전 시나리오 고정 수렴.
+- **위상 plant 파급(신규 관찰, 보고만)**: medium balance·oversat metering/vsl이 PASS로
+  전환된 반면, low improvement +24.6→**+5.81%(<8%)**, incident +16.8→+8.79%로 압축 —
+  위상 plant에서 baseline도 현실적 신호 지연을 가져 자유류 제어 이득이 줄어듦.
+  low의 8% 기준 적용 여부 등은 연구자 결정 대상.
+- 종합: peak PASS 유지(+18.08%), medium은 vsl 가드레일만, oversat·incident는 심과포화
+  추적만 잔존 — 모두 기존 결정 대기 3범주와 동일 뿌리.

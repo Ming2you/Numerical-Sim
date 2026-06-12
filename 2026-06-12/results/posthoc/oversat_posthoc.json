@@ -1,0 +1,77 @@
+{
+  "label": "oversat",
+  "passed": false,
+  "improvement_pct": 24.06,
+  "gates": {
+    "ramp_metering": true,
+    "vsl": true,
+    "green_time": true,
+    "offset": true,
+    "boundary_balance": false
+  },
+  "ttt": {
+    "baseline": 17136.1,
+    "proposed": 13013.4,
+    "freeway_b": 3632.2,
+    "freeway_p": 340.9,
+    "urban_b": 13504.0,
+    "urban_p": 12672.6
+  },
+  "allocation": {
+    "B_in_baseline": 0.0274,
+    "B_in_proposed": 0.0054,
+    "B_out_baseline": 0.0017,
+    "B_out_proposed": 0.0011,
+    "net_inflow_tracking_veh_h": 300.5,
+    "np_abs_error_veh": 147.5,
+    "gate_density_mean_baseline": {
+      "gate:in_A_left": 0.271,
+      "gate:in_A_top": 0.1936,
+      "gate:in_B_top": 0.3317,
+      "gate:in_C_right": 0.4791,
+      "gate:in_C_top": 0.4008,
+      "gate:in_D_left": 0.6584,
+      "gate:in_F_right": 0.7537
+    },
+    "gate_density_mean_proposed": {
+      "gate:in_A_left": 0.3876,
+      "gate:in_A_top": 0.2374,
+      "gate:in_B_top": 0.387,
+      "gate:in_C_right": 0.458,
+      "gate:in_C_top": 0.346,
+      "gate:in_D_left": 0.3652,
+      "gate:in_F_right": 0.4285
+    },
+    "gate_density_spread_baseline": 0.0262,
+    "gate_density_spread_proposed": 0.0044
+  },
+  "metering": {
+    "mean_error": 56.5,
+    "wr_mean": 19.6,
+    "wr_max": 57.3
+  },
+  "vsl": {
+    "active_intervals": 24,
+    "density_ratio_active": 0.848,
+    "density_ratio_inactive": 0.705,
+    "exceedance_p": 23.0,
+    "exceedance_b": 39.0
+  },
+  "green_queue_corr": {
+    "A": 0.615,
+    "B": 0.996,
+    "C": 0.928,
+    "D": 0.583,
+    "F": 0.798
+  },
+  "offset": {
+    "std": {
+      "A": 0.0,
+      "B": 39.2,
+      "C": 18.5,
+      "D": 1.6,
+      "F": 10.8
+    },
+    "mean_D_minus_A": 95.3
+  }
+}

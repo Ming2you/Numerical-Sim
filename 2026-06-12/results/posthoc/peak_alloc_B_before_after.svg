@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="360" font-family="Arial">
+<rect width="1000" height="360" fill="white"/>
+<text x="70" y="24" font-size="15" font-weight="bold">[peak] gate balance B_in — allocation 작동(proposed) vs 없음(baseline)</text>
+<text x="14" y="180" font-size="11" transform="rotate(-90 14 180)">B_in</text>
+<text x="986" y="180" font-size="11" transform="rotate(90 986 180)">gate load [veh]</text>
+<line x1="70" y1="46.0" x2="930" y2="46.0" stroke="#e5e7eb"/>
+<text x="64" y="50.0" font-size="10" text-anchor="end">0</text>
+<text x="936" y="50.0" font-size="10">1,421.7</text>
+<line x1="70" y1="113.0" x2="930" y2="113.0" stroke="#e5e7eb"/>
+<text x="64" y="117.0" font-size="10" text-anchor="end">0</text>
+<text x="936" y="117.0" font-size="10">1,055.6</text>
+<line x1="70" y1="180.0" x2="930" y2="180.0" stroke="#e5e7eb"/>
+<text x="64" y="184.0" font-size="10" text-anchor="end">0</text>
+<text x="936" y="184.0" font-size="10">689.5</text>
+<line x1="70" y1="247.0" x2="930" y2="247.0" stroke="#e5e7eb"/>
+<text x="64" y="251.0" font-size="10" text-anchor="end">0</text>
+<text x="936" y="251.0" font-size="10">323.4</text>
+<line x1="70" y1="314.0" x2="930" y2="314.0" stroke="#e5e7eb"/>
+<text x="64" y="318.0" font-size="10" text-anchor="end">-0</text>
+<text x="936" y="318.0" font-size="10">-42.7</text>
+<text x="70.0" y="330" font-size="10" text-anchor="middle">180s</text>
+<text x="242.0" y="330" font-size="10" text-anchor="middle">1,584s</text>
+<text x="414.0" y="330" font-size="10" text-anchor="middle">2,988s</text>
+<text x="586.0" y="330" font-size="10" text-anchor="middle">4,392s</text>
+<text x="758.0" y="330" font-size="10" text-anchor="middle">5,796s</text>
+<text x="930.0" y="330" font-size="10" text-anchor="middle">7,200s</text>
+<line x1="70" y1="250.2" x2="930" y2="250.2" stroke="#9ca3af" stroke-dasharray="6 4"/>
+<text x="926" y="246.2" font-size="10" text-anchor="end" fill="#6b7280">eps_balance 0.03</text>
+<polyline fill="none" stroke="#2563eb" stroke-width="1.8" points="70.0,64.5 92.1,160.4 114.1,186.0 136.2,236.9 158.2,102.1 180.3,67.7 202.3,72.9 224.4,165.4 246.4,200.2 268.5,281.4 290.5,261.3 312.6,269.8 334.6,295.5 356.7,282.4 378.7,275.8 400.8,290.3 422.8,279.4 444.9,293.1 466.9,285.6 489.0,284.4 511.0,282.8 533.1,294.3 555.1,270.2 577.2,280.1 599.2,278.9 621.3,287.1 643.3,261.7 665.4,280.0 687.4,276.1 709.5,287.3 731.5,288.5 753.6,290.1 775.6,289.9 797.7,292.3 819.7,285.8 841.8,289.7 863.8,285.3 885.9,288.3 907.9,285.0 930.0,287.6"/>
+<rect x="70" y="346" width="14" height="4" fill="#2563eb"/>
+<text x="88" y="352" font-size="11">B_in proposed</text>
+<polyline fill="none" stroke="#9ca3af" stroke-width="1.8" points="70.0,217.5 92.1,292.7 114.1,226.0 136.2,278.4 158.2,227.5 180.3,268.5 202.3,230.5 224.4,263.2 246.4,234.2 268.5,260.8 290.5,238.1 312.6,260.0 334.6,241.7 356.7,260.0 378.7,244.9 400.8,260.5 422.8,247.6 444.9,261.0 466.9,249.9 489.0,261.6 511.0,251.8 533.1,262.0 555.1,253.2 577.2,262.3 599.2,254.3 621.3,262.3 643.3,255.0 665.4,262.2 687.4,255.3 709.5,261.1 731.5,253.8 753.6,258.4 775.6,251.3 797.7,255.5 819.7,248.6 841.8,252.5 863.8,245.7 885.9,249.3 907.9,242.5 930.0,245.9"/>
+<rect x="195" y="346" width="14" height="4" fill="#9ca3af"/>
+<text x="213" y="352" font-size="11">B_in baseline</text>
+<polyline fill="none" stroke="#d97706" stroke-width="1.8" stroke-dasharray="4 3" points="70.0,285.9 92.1,293.0 114.1,283.7 136.2,294.6 158.2,291.0 180.3,295.5 202.3,291.0 224.4,293.4 246.4,281.2 268.5,272.1 290.5,254.9 312.6,257.3 334.6,244.0 356.7,240.6 378.7,235.8 400.8,224.7 422.8,217.8 444.9,209.3 466.9,203.1 489.0,193.4 511.0,185.2 533.1,175.1 555.1,168.7 577.2,166.5 599.2,163.4 621.3,152.2 643.3,148.1 665.4,134.9 687.4,135.0 709.5,122.9 731.5,114.0 753.6,101.4 775.6,94.3 797.7,89.6 819.7,83.1 841.8,81.4 863.8,89.6 885.9,77.9 907.9,68.5 930.0,64.5"/>
+<rect x="320" y="346" width="14" height="4" fill="#d97706"/>
+<text x="338" y="352" font-size="11">gate load proposed [veh]</text>
+</svg>
