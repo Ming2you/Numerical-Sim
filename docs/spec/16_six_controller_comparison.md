@@ -1,30 +1,31 @@
-# Six-Controller Comparison Specification
+# Controller Comparison Specification
+
+> 2026-06-13 개정(연구자 결정). 주 비교군을 여섯에서 넷으로 축소하고
+> `PROPOSED-FOLLOWERS-ONLY`를 allocation module 없는 형태로 재정의했다.
+> `WU-MATCHED-STACKELBERG`와 `WU-CC-F`는 보조 참고군으로 강등한다(구현·과거 결과 유지).
 
 ## 16.1 문서 목적
 
 이 문서는 Wu et al. (2022) 기반 control authority와 본 연구의 full control authority를
 분리하여 비교하기 위한 controller 사양이다.
 
-비교 대상은 다음 여섯 controller다.
+주 비교군은 다음 네 controller다.
 
 ```text
-WU authority group
-  1. WU-CD-F
-  2. WU-MATCHED-STACKELBERG
-  3. WU-CC-F
-
-Proposed authority group
-  4. PROPOSED-FOLLOWERS-ONLY
-  5. PROPOSED-STACKELBERG
-  6. PROPOSED-CENTRALIZED
+1. WU-CD-F                  (Wu et al. distributed control)
+2. PROPOSED-FOLLOWERS-ONLY  (follower 패키지: green 자유탐색 + offset + metering + VSL)
+3. PROPOSED-STACKELBERG     (본 연구 full controller: Leader + allocation 포함)
+4. PROPOSED-CENTRALIZED     (full-information centralized reference)
 ```
 
 이 구조는 다음 효과를 구분한다.
 
-- Wu control authority에서 Leader를 추가한 효과
-- Proposed full authority에서 Leader를 추가한 효과
+- follower 패키지에 Leader와 allocation coordination layer를 추가한 결합 효과
 - Distributed/Stackelberg 구조와 centralized 구조의 성능 및 계산량 차이
-- Wu authority에 proposed control package를 추가한 전체 효과
+- Wu authority 대비 follower 패키지(offset/metering 추가)의 차이
+
+보조 참고군(주 매트릭스에서 제외, 필요 시 별도 분석): `WU-MATCHED-STACKELBERG`,
+`WU-CC-F`(16.5, 16.6).
 
 참고 문헌:
 
@@ -35,7 +36,7 @@ Proposed authority group
 
 ## 16.2 공통 Physical Plant
 
-여섯 controller 모두 다음 physical plant를 공유한다.
+모든 controller가 다음 physical plant를 공유한다.
 
 - urban movement queue와 storage dynamics
 - METANET freeway dynamics
@@ -135,7 +136,7 @@ freeway -> freeway:
 7. 첫 control sample 적용
 ```
 
-## 16.5 Controller 2: `WU-MATCHED-STACKELBERG`
+## 16.5 (보조) `WU-MATCHED-STACKELBERG` — 주 비교군 제외
 
 Wu의 agent partition, green/VSL authority, local dynamics, base local objective와 coupling
 iteration을 유지하면서 upper-level Leader-conditioning interface만 추가한다.
@@ -193,7 +194,7 @@ apply first green/VSL sample
 
 Leader는 green/VSL을 직접 결정하지 않고 Wu follower response를 target으로 조정한다.
 
-## 16.6 Controller 3: `WU-CC-F`
+## 16.6 (보조) `WU-CC-F` — 주 비교군 제외
 
 Wu의 centralized reference다.
 
@@ -218,31 +219,41 @@ J_WU_global =
 
 Agent partition, coupling iteration과 Leader는 사용하지 않는다.
 
-## 16.7 Controller 4: `PROPOSED-FOLLOWERS-ONLY`
+## 16.7 Controller 2: `PROPOSED-FOLLOWERS-ONLY`
 
-본 연구의 full control package와 distributed player 구조를 사용하지만 upper-level Leader는
-사용하지 않는다.
+> 2026-06-13 재정의. allocation module은 Leader의 net-inflow target을 입력으로 갖는
+> coordination 기구이므로, Leader가 없는 mode에서는 module 자체를 제거한다.
+> (구 정의 — module을 유지하고 objective를 균형+drain으로 퇴화 — 는 폐기.
+> 구 정의 결과는 git 이력 6807ef4의 매트릭스에 보존.)
+
+Distributed player 구조는 유지하되 upper-level Leader와 inflow-outflow allocation module을
+모두 사용하지 않는다.
 
 ### Active controls
 
-- inflow-outflow allocation과 resulting phase green
+- phase green: allocation 기준점 없이 `[green_min, green_max]` 범위 자유 탐색
 - signal offset
 - ramp metering
 - VSL
+
+`inflow_outflow_allocation`은 결정하지 않는다. movement service는 plant 기본
+saturation flow(green window 내)를 따른다 — Wu group과 동일한 비제어 fallback.
 
 ### Leaderless decision
 
 - Leader candidate를 생성하지 않음
 - `N_P_star`, `N_UF_star`를 전달하지 않음
-- allocation module은 observed queue, storage, boundary imbalance와 coupling state로 service
-  target을 결정
-- urban/freeway agents는 local objective와 exchanged coupling information으로 action 결정
-- remaining agent coordination loop는 proposed Stackelberg follower와 동일
+- allocation module을 호출하지 않음 — green setpoint anchor 없음
+- urban agents는 local objective(관측 큐·coupling 정보)로 phase green을
+  `[green_min, green_max]`에서 직접 탐색하고 offset을 결정
+- freeway agents는 local objective로 ramp metering 수준과 VSL을 결정
+- remaining agent coordination loop(coupling 교환·iteration)는 proposed Stackelberg
+  follower와 동일
 
 이 mode는 fixed global state target을 가진 static coordinator가 아니라 genuinely leaderless
 distributed controller로 정의한다.
 
-## 16.8 Controller 5: `PROPOSED-STACKELBERG`
+## 16.8 Controller 3: `PROPOSED-STACKELBERG`
 
 현재 제안한 full controller다.
 
@@ -285,7 +296,7 @@ J_L =
 Leader target 자체를 critical threshold로 사용하지 않는다. 각 target 후보에 대한 coupled
 follower response를 위 system objective로 평가한다.
 
-## 16.9 Controller 6: `PROPOSED-CENTRALIZED`
+## 16.9 Controller 4: `PROPOSED-CENTRALIZED`
 
 Proposed full authority를 하나의 centralized MPC에서 직접 최적화한다.
 
@@ -322,15 +333,7 @@ centralized numerical reference로 표현한다.
 
 ## 16.10 핵심 Pairwise Comparison
 
-Lower-is-better cost `J`에 대해:
-
-```text
-WuLeaderValue =
-  J(WU-CD-F)
-  - J(WU-MATCHED-STACKELBERG)
-```
-
-Wu control authority에서 hierarchy/Leader-conditioning의 추가 효과다.
+Lower-is-better cost `J`에 대해 주 비교군 4개에서 다음 쌍을 본다.
 
 ```text
 ProposedLeaderValue =
@@ -338,13 +341,9 @@ ProposedLeaderValue =
   - J(PROPOSED-STACKELBERG)
 ```
 
-Proposed full authority에서 Leader의 추가 효과다.
-
-```text
-WuCentralizationGap =
-  J(WU-CD-F)
-  - J(WU-CC-F)
-```
+Leader와 allocation coordination layer의 **결합** 추가 효과다. allocation module은
+Leader target 없이는 정의되지 않으므로 이 쌍에서 둘은 분리되지 않는다 — 이 값을
+"Leader 단독 효과"로 표현하지 않는다.
 
 ```text
 ProposedCentralizationGap =
@@ -358,16 +357,20 @@ FollowerPackageDifference =
   - J(PROPOSED-FOLLOWERS-ONLY)
 ```
 
-이 차이에는 control authority, follower objective와 implementation 차이가 함께 포함된다.
-따라서 proposed control variable만의 순수 효과라고 부르지 않는다.
+두 controller 모두 allocation이 없으므로 이 차이는 offset/ramp metering authority 추가와
+agent 구현 차이를 함께 담는다. proposed control variable만의 순수 효과라고 부르지 않는다.
 
 ```text
-LeaderPackageDifference =
-  J(WU-MATCHED-STACKELBERG)
+FullPackageValue =
+  J(WU-CD-F)
   - J(PROPOSED-STACKELBERG)
 ```
 
-Leader가 있는 상태에서 proposed full control package의 전체 차이다.
+Wu distributed 대비 본 연구 full controller(Leader + allocation + offset + metering)의
+전체 차이 — 주 headline 비교다.
+
+보조 참고군을 실행한 경우의 쌍(`WuLeaderValue`, `WuCentralizationGap`,
+`LeaderPackageDifference`)은 주 매트릭스에 포함하지 않고 별도 부록으로만 보고한다.
 
 ## 16.11 공정 비교 규칙
 
@@ -384,7 +387,7 @@ network throughput and completed vehicles
 terminal total vehicles and subsystem queues
 ```
 
-Delay reference는 scenario와 seed별로 한 번만 계산하고 여섯 controller에 공통으로 사용한다.
+Delay reference는 scenario와 seed별로 한 번만 계산하고 모든 controller에 공통으로 사용한다.
 이는 no-control 또는 fixed-control simulation 결과가 아니라, 동일 demand, route, turning ratio와
 free-flow travel time을 사용한 controller-independent reference다.
 
@@ -435,13 +438,16 @@ average_delay_per_completed_vehicle =
 
 Wu group 내부에서는 green/VSL bounds와 action set을 동일하게 사용한다.
 
-Proposed group 내부에서는 allocation/green, offset, metering, VSL bounds와 action set을 동일하게
-사용한다.
+Proposed group 내부에서는 공유하는 control(green, offset, metering, VSL)의 bounds와
+action set을 동일하게 사용한다. `PROPOSED-FOLLOWERS-ONLY`는 정의상 allocation을
+사용하지 않으며, `PROPOSED-STACKELBERG`/`PROPOSED-CENTRALIZED`는 동일한 allocation
+bounds를 사용한다.
 
 ### Leader comparison
 
-- `WU-CD-F`와 `WU-MATCHED-STACKELBERG`의 차이는 Leader-conditioning interface에 한정
-- `PROPOSED-FOLLOWERS-ONLY`와 `PROPOSED-STACKELBERG`의 차이는 Leader 유무에 한정
+- `PROPOSED-FOLLOWERS-ONLY`와 `PROPOSED-STACKELBERG`의 차이는 Leader와
+  allocation coordination layer 유무에 한정 — 그 외 plant·offset·metering·VSL 경로와
+  agent coordination loop는 동일
 - Leader가 없는 mode에서 숨은 fixed global target을 사용하지 않음
 - evaluation 결과를 본 뒤 controller별 weight를 재튜닝하지 않음
 
@@ -515,18 +521,16 @@ vsl
 ## 16.13 Required Tests
 
 ```text
-test_comparison_runner_exposes_exactly_six_controllers
+test_comparison_runner_exposes_primary_four_controllers
 test_all_controllers_use_same_physical_plant
 
 test_wu_group_uses_green_and_vsl_only
 test_wu_cd_has_no_leader
-test_wu_stackelberg_uses_wu_partition_and_authority
-test_wu_stackelberg_leader_affects_follower_response
-test_wu_cc_has_no_agent_iteration
 
-test_proposed_group_uses_same_full_authority
+test_proposed_followers_only_has_no_allocation_control
 test_proposed_followers_only_has_no_hidden_global_target
-test_proposed_pair_differs_only_by_leader
+test_proposed_followers_only_green_searched_within_bounds
+test_proposed_pair_differs_by_leader_and_allocation_only
 test_proposed_centralized_has_no_leader_or_agents
 
 test_physical_on_offramp_coupling_remains_identical
@@ -538,13 +542,17 @@ test_low_reference_delay_uses_absolute_difference
 test_terminal_queue_is_reported
 ```
 
+보조 참고군(`WU-MATCHED-STACKELBERG`, `WU-CC-F`) 관련 기존 테스트는 구현이 유지되는
+동안 함께 유지한다.
+
 ## 16.14 Definition of Done
 
-- 여섯 controller가 독립 mode로 실행됨
+- 주 비교군 네 controller가 독립 mode로 실행됨
+- `PROPOSED-FOLLOWERS-ONLY`가 allocation 없이 green 자유탐색 + offset + metering + VSL로
+  동작함이 자동검사로 확인됨
 - Wu group과 proposed group의 control authority가 명확히 분리됨
-- 두 authority group 모두 distributed, Leader, centralized 비교가 가능함
-- Leader가 follower action에 실제 영향을 주는 경로가 검증됨
 - centralized mode가 동일 authority와 plant를 사용함
-- 모든 pairwise comparison의 해석 한계가 report에 기록됨
+- 모든 pairwise comparison의 해석 한계(특히 ProposedLeaderValue = Leader+allocation
+  결합 효과)가 report에 기록됨
 - TTT/TTS, delay, throughput과 terminal state가 하나의 성능 묶음으로 보고됨
 - computation time과 convergence가 성능 지표와 함께 보고됨
