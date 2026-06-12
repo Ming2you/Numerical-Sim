@@ -224,18 +224,20 @@ class DistributedCoordinator:
     def solve(
         self,
         state: TrafficState,
-        leader: LeaderAction,
+        leader: Optional[LeaderAction],
         demand: DemandStep | Iterable[DemandStep],
         previous_control: Optional[ControlAction] = None,
     ) -> NashResult:
+        """leader=None이면 PROPOSED-FOLLOWERS-ONLY(spec 16.7) — 숨은 전역 목표 없이
+        allocation은 균형/관측 큐로, freeway agent는 local objective로 결정한다."""
         forecast = [demand] if isinstance(demand, DemandStep) else list(demand)
         if not forecast:
             raise ValueError("DistributedCoordinator requires at least one demand step.")
         first_demand = forecast[0]
         reference_control = previous_control or ControlAction.fixed(self.cfg)
         current = reference_control
-        current.N_P_star = leader.N_P_star
-        current.N_UF_star = leader.N_UF_star
+        current.N_P_star = leader.N_P_star if leader is not None else 0.0
+        current.N_UF_star = leader.N_UF_star if leader is not None else 0.0
         allocation_plan = self.urban_follower.allocation_module.solve(state, leader)
         coupling = self._extract_coupling(state, current, first_demand)
         best_control = current
@@ -297,7 +299,7 @@ class DistributedCoordinator:
         self,
         agent: AgentSpec,
         state: TrafficState,
-        leader: LeaderAction,
+        leader: Optional[LeaderAction],
         demand: DemandStep,
         current: ControlAction,
         coupling: Mapping[str, float],
@@ -306,7 +308,6 @@ class DistributedCoordinator:
         dt_h = self.cfg.simulation.T_f_h
         link_capacity = sum(net.ramp_capacity_veh_h[ramp] for ramp in agent.ramps)
         total_capacity = max(sum(net.ramp_capacity_veh_h.values()), 1.0e-9)
-        target = max(0.0, leader.N_UF_star) * link_capacity / total_capacity
         upper: Dict[str, float] = {}
         weights: Dict[str, float] = {}
         min_receiving = 1.0
@@ -323,6 +324,12 @@ class DistributedCoordinator:
             available = state.ramp_queue.get(ramp, 0.0) / max(dt_h, 1.0e-9) + urban_release
             upper[ramp] = min(net.ramp_capacity_veh_h[ramp], available, net.freeway_capacity_veh_h * receiving)
             weights[ramp] = state.ramp_queue.get(ramp, 0.0) + urban_release * self.cfg.simulation.T_c_h + 1.0
+        if leader is not None:
+            target = max(0.0, leader.N_UF_star) * link_capacity / total_capacity
+        else:
+            # leaderless(spec 16.7): 전역 N_UF 목표 없이 agent가 local objective로 방출
+            # 수준을 고른다 — 후보 분율을 1-구획 merge 밀도 예측으로 평가해 최소 비용 선택.
+            target = self._leaderless_metering_target(agent, state, upper)
         ramp_metering = _project_to_target(target, upper, weights)
         lane_profile, lane_diag = effective_lane_profile(state, self.cfg)
         all_rhos = state.freeway_density.get(agent.link, [])
@@ -361,6 +368,40 @@ class DistributedCoordinator:
             diagnostics=diagnostics,
         )
 
+    def _leaderless_metering_target(
+        self,
+        agent: AgentSpec,
+        state: TrafficState,
+        upper: Mapping[str, float],
+    ) -> float:
+        """leaderless freeway agent의 국소 metering 수준 선택.
+
+        후보 = Σupper의 분율 {1.0, 0.85, 0.7, 0.5}. 1-구획 근사로 한 control interval 뒤
+        merge 밀도를 예측해 비용 = density_penalty×pos(ρ_pred−ρ_crit) + 잡아둔 차량의
+        대기비용(veh·h)으로 평가한다 — 전역 목표 없이 자기 목적만 사용(spec 16.7)."""
+        net = self.cfg.network
+        dt_h = self.cfg.simulation.T_c_h
+        total_upper = sum(max(0.0, v) for v in upper.values())
+        if total_upper <= 1.0e-9 or not agent.ramps:
+            return total_upper
+        merge_idx = agent.segment_index if agent.segment_index >= 0 else len(state.freeway_density[agent.link]) // 2
+        rho_merge = state.freeway_density[agent.link][merge_idx]
+        speed = max(state.freeway_speed[agent.link][merge_idx], net.v_min)
+        seg_cap_veh = net.freeway_segment_length_km * net.freeway_lanes
+        q_out = rho_merge * speed * net.freeway_lanes
+        best_target, best_cost = total_upper, float("inf")
+        for fraction in (1.0, 0.85, 0.7, 0.5):
+            release = fraction * total_upper
+            rho_pred = max(0.0, rho_merge + (release - q_out) * dt_h / max(seg_cap_veh, 1.0e-9))
+            held = (total_upper - release) * dt_h  # 잡아둔 차량수[veh] — 대기비용으로 환산.
+            cost = (
+                self.cfg.freeway_follower.density_penalty * max(0.0, rho_pred - net.rho_crit)
+                + held
+            )
+            if cost < best_cost:
+                best_cost, best_target = cost, release
+        return float(best_target)
+
     def _agent_vsl(self, density_ratio: float, lane_loss: float, previous_vsl: float) -> float:
         vsl_set = sorted(float(v) for v in self.cfg.freeway_follower.vsl_set)
         max_vsl = max(vsl_set)
@@ -382,7 +423,7 @@ class DistributedCoordinator:
         self,
         agent: AgentSpec,
         state: TrafficState,
-        leader: LeaderAction,
+        leader: Optional[LeaderAction],
         demand: DemandStep,
         freeway_response: FreewayFollowerResult,
         current: ControlAction,
@@ -463,7 +504,7 @@ class DistributedCoordinator:
 
     def _merge_agent_controls(
         self,
-        leader: LeaderAction,
+        leader: Optional[LeaderAction],
         current: ControlAction,
         freeway_solves: list[AgentSolve],
         urban_solves: list[AgentSolve],
@@ -489,8 +530,8 @@ class DistributedCoordinator:
             diagnostics.update(solve.diagnostics)
         allocation.update(self._legacy_boundary_allocations(allocation))
         return ControlAction(
-            N_P_star=leader.N_P_star,
-            N_UF_star=leader.N_UF_star,
+            N_P_star=leader.N_P_star if leader is not None else 0.0,
+            N_UF_star=leader.N_UF_star if leader is not None else 0.0,
             ramp_metering=_relax_map(current.ramp_metering, ramp_metering, alpha),
             vsl=vsl,
             green_times=_relax_map(current.green_times, green_times, alpha),

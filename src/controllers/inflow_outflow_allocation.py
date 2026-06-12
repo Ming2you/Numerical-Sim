@@ -47,7 +47,7 @@ class InflowOutflowAllocationModule:
         self.cfg = cfg
         self.solve_count = 0
 
-    def solve(self, state: TrafficState, leader: LeaderAction) -> AllocationResult:
+    def solve(self, state: TrafficState, leader: LeaderAction | None) -> AllocationResult:
         self.solve_count += 1
         specs = movement_specs(self.cfg)
         movements = [
@@ -58,15 +58,22 @@ class InflowOutflowAllocationModule:
         if not movements:
             return AllocationResult({}, {}, 0.0, 0.0, 0.0, {"allocation_module_active": 1.0})
 
-        target = urban_accumulation_feedback_flow(state, self.cfg, leader.N_P_star)
+        # leaderless 모드(PROPOSED-FOLLOWERS-ONLY, spec 16.7): 숨은 고정 누적 목표 없이
+        # 관측 큐·storage 균형만으로 결정한다 — net-inflow target 항 자체를 0 가중 처리.
+        leaderless = leader is None
+        target = 0.0 if leaderless else urban_accumulation_feedback_flow(state, self.cfg, leader.N_P_star)
         lower, upper = self._bounds(movements, specs, leader)
         kinds = [str(specs[m].get("kind", "")) for m in movements]
-        target = self._clip_target(target, lower, upper, kinds)
+        if not leaderless:
+            target = self._clip_target(target, lower, upper, kinds)
         # 같은 state/leader에서는 호출 순서와 무관하게 같은 allocation plan을 재현한다.
         time_index = int(round(state.time_sec / max(self.cfg.simulation.control_interval, 1.0e-9)))
         seed = int(self.cfg.simulation.random_seed + time_index)
-        best = self._run_pso(state, movements, kinds, lower, upper, target, seed)
-        best = self._project_net_flow(best, lower, upper, kinds, target)
+        best = self._run_pso(state, movements, kinds, lower, upper, target if not leaderless else None, seed)
+        if not leaderless:
+            # net-target 추적은 leader가 있을 때만 — leaderless에서 target=0 투영은
+            # 그 자체가 숨은 전역 목표가 되므로 금지(spec 16.7 자동검사 대상).
+            best = self._project_net_flow(best, lower, upper, kinds, target)
         flows = {movement: float(best[idx]) for idx, movement in enumerate(movements)}
         green = {
             movement: self._flow_to_green_sec(flows[movement])
@@ -75,7 +82,7 @@ class InflowOutflowAllocationModule:
         in_values = self._densities_after_service(state, movements, kinds, best, BALANCE_INFLOW_KINDS)
         out_values = self._densities_after_service(state, movements, kinds, best, BALANCE_OUTFLOW_KINDS)
         net = self._net_flow(best, kinds)
-        residual = abs(net - target)
+        residual = 0.0 if leaderless else abs(net - target)
         diagnostics = {
             "allocation_module_active": 1.0,
             "allocation_pso_calls": float(self.solve_count),
@@ -109,7 +116,8 @@ class InflowOutflowAllocationModule:
             if ramp and str(specs[movement].get("kind", "")) == "on_ramp":
                 ramp_counts[ramp] = ramp_counts.get(ramp, 0) + 1
         total_ramp_cap = max(float(net.total_ramp_capacity), 1.0e-9)
-        nuf_total = max(0.0, float(leader.N_UF_star))
+        # leaderless면 물리 용량만 상한(coupling 목표 없음 — w_r 용량이 backpressure 담당).
+        nuf_total = total_ramp_cap if leader is None else max(0.0, float(leader.N_UF_star))
         lower = []
         upper = []
         for movement in movements:
@@ -195,11 +203,16 @@ class InflowOutflowAllocationModule:
         movements: list[str],
         kinds: list[str],
         flows: np.ndarray,
-        target: float,
+        target: float | None,
     ) -> float:
         inflow_density = self._densities_after_service(state, movements, kinds, flows, BALANCE_INFLOW_KINDS)
         outflow_density = self._densities_after_service(state, movements, kinds, flows, BALANCE_OUTFLOW_KINDS)
         balance = safe_balance_index(inflow_density) ** 2 + safe_balance_index(outflow_density) ** 2
+        if target is None:
+            # leaderless(spec 16.7): 전역 net 목표 없이 "균형 + 자기 잔여 큐 최소화"만 —
+            # 잔여 밀도 평균은 local TTS 성격의 drain 항이지 숨은 누적 목표가 아니다.
+            drain = float(np.mean(inflow_density + outflow_density)) if (inflow_density or outflow_density) else 0.0
+            return float(balance + drain)
         residual = self._net_flow(flows, kinds) - target
         return float(balance + 10.0 * (residual / max(self.cfg.network.movement_capacity_veh_h, 1.0)) ** 2)
 

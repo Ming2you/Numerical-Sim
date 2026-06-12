@@ -1,0 +1,7 @@
+baseline_controller,comparison,computation_time_ratio,delay_improvement_abs,delay_improvement_pct,negative_delay_flag,other_controller,terminal_total_difference,throughput_difference,ttt_difference
+WU-CD-F,WuLeaderValue,13370000000.0,0.0,0.0,False,WU-MATCHED-STACKELBERG,0.0,0.0,0.0
+PROPOSED-FOLLOWERS-ONLY,ProposedLeaderValue,20.8,184.725,34.48,False,PROPOSED-STACKELBERG,-1193.3,2386.4,184.725
+WU-CD-F,WuCentralizationGap,113210000000.0,176.952,33.63,False,WU-CC-F,-679.1,1358.1,176.952
+PROPOSED-STACKELBERG,ProposedCentralizationGap,1.04,54.371,15.49,False,PROPOSED-CENTRALIZED,-281.8,563.6,54.371
+WU-CD-F,FollowerPackageDifference,5330000000.0,-9.545,-1.81,False,PROPOSED-FOLLOWERS-ONLY,47.4,-94.8,-9.545
+WU-MATCHED-STACKELBERG,LeaderPackageDifference,8.29,175.18,33.29,False,PROPOSED-STACKELBERG,-1145.9,2291.6,175.18

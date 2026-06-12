@@ -222,3 +222,52 @@ vsl ✓(13 active), balance ✓(B_in 0.014, 추적 88.1), green·offset ✓. 테
   low의 8% 기준 적용 여부 등은 연구자 결정 대상.
 - 종합: peak PASS 유지(+18.08%), medium은 vsl 가드레일만, oversat·incident는 심과포화
   추적만 잔존 — 모두 기존 결정 대기 3범주와 동일 뿌리.
+
+---
+
+# 추가 작업 — Stage 1: 6-controller 비교 구현 (spec 16, 사후분석 1단계)
+
+기준: HEAD 1ab003b(spec 16 + plan + 11/12 갱신본 pull). gap audit은 `2026-06-12/stage1_gap_audit.md`.
+
+## 구현물
+
+- `src/analysis/free_flow_reference.py`: controller-독립 자유류 reference — β 흡수 마르코프
+  체인으로 진입원별 기대 여정시간(게이트 3.3~4.3분), 수요 적분으로 TTT_ref(시나리오·seed당
+  1회, 6개 공통). peak: total 1080.8 / urban 890.6 / freeway 190.3 veh·h.
+- `src/analysis/authority.py`: control trace 기반 authority 자동검사(Wu group: offset 고정·
+  metering=용량·allocation 무사용 / 숨은 leader target 탐지).
+- `src/controllers/wu_distributed.py`: WU-CD-F(이웃 결합 고정 + green/VSL 후보탐색의 경량
+  국소 모델, Wu §IV-D 합의 루프)와 WU-MATCHED-STACKELBERG((N_P*,N_F*)[veh] conditioning +
+  후보별 coupled 예측 평가).
+- `src/controllers/centralized_mpc.py`: budgeted seeded random search 중앙화 엔진 —
+  WU-CC-F(green+VSL, J_WU_global)와 PROPOSED-CENTRALIZED(full authority, 게이트 service
+  매개변수화) 공용. budget·수렴 보고.
+- leaderless 경로: `DistributedCoordinator.solve(leader=None)` + allocation의 net-target
+  항/투영 제거(숨은 전역 목표 금지) + freeway agent 국소 metering 후보선택
+  → PROPOSED-FOLLOWERS-ONLY.
+- plant 로깅 1건: `mainline_exit_flow_total`(완료차량 회계) — 동역학·보존 무변경.
+- runner `src/experiments/six_controller_comparison.py`: reference→6개 실행→summary/
+  paired/fidelity/optimization CSV·MD (plan §15 구조).
+- 테스트: spec 16.13 요구 17개 전부(+1 구조 테스트) `test_six_controller_comparison.py`.
+  전체 스위트 94/94.
+
+## Smoke run (peak, 1800s, `post_analysis/stage1_smoke`)
+
+| controller | TTT | delay | thr[veh/h] | terminal | comp[s] | evals |
+|---|---|---|---|---|---|---|
+| WU-CD-F | 792.4 | 526.2 | 8,885 | 3,070 | 0.0 | 410 |
+| WU-MATCHED-STACKELBERG | 792.4 | 526.2 | 8,885 | 3,070 | 13.4 | 3,960 |
+| WU-CC-F | 615.4 | 349.3 | 10,243 | 2,391 | 113.2 | 800 |
+| PROPOSED-FOLLOWERS-ONLY | 801.9 | 535.8 | 8,790 | 3,117 | 5.3 | 550 |
+| PROPOSED-STACKELBERG | 617.2 | 351.0 | 11,176 | 1,924 | 110.9 | 10,688 |
+| PROPOSED-CENTRALIZED | 562.8 | 296.7 | 11,740 | 1,642 | 115.2 | 800 |
+
+paired: ProposedLeaderValue **+184.7(+34.5%)** (throughput↑·terminal↓ 동반 — 16.11 규칙 충족),
+ProposedCentralizationGap +54.4(+15.5%), WuCentralizationGap +177.0, LeaderPackageDifference
++175.2. **WuLeaderValue 0.0** — 1800s warmup에서 conditioning 미binding(단위테스트로는 영향
+경로 검증됨; 풀런·고부하에서 재평가 필요). authority 자동검사 6/6 통과.
+
+## 한계(스모크)
+
+- 1800s 단축 horizon, peak 단일 시나리오, seed 42 단일 — 본 비교는 풀런 매트릭스에서.
+- Wu 분산 local 모델은 경량 근사(원문 MILP/SQP 아님) — fidelity_matrix.md에 기록.

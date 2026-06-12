@@ -253,7 +253,7 @@ class UrbanFollower:
     def _allocation(
         self,
         state: TrafficState,
-        leader: LeaderAction,
+        leader: Optional[LeaderAction],
         freeway_response: object | None = None,
         green_times: Optional[Dict[str, float]] = None,
         allocation_plan: Optional[AllocationResult] = None,
@@ -303,7 +303,7 @@ class UrbanFollower:
     def solve(
         self,
         state: TrafficState,
-        leader: LeaderAction,
+        leader: Optional[LeaderAction],
         demand: DemandStep,
         freeway_response: object | None = None,
         previous_control: Optional[ControlAction] = None,
@@ -340,8 +340,11 @@ class UrbanFollower:
             "freeway_receiving_pressure": pressure["receiving_pressure"],
             "freeway_total_pressure": pressure["total_pressure"],
             "urban_accumulation_veh": float(state.protected_accumulation_veh(self.cfg.network)),
-            "urban_accumulation_target_veh": float(leader.N_P_star),
-            "urban_accumulation_error_veh": float(state.protected_accumulation_veh(self.cfg.network) - leader.N_P_star),
+            "urban_accumulation_target_veh": float(leader.N_P_star) if leader is not None else 0.0,
+            "urban_accumulation_error_veh": (
+                float(state.protected_accumulation_veh(self.cfg.network) - leader.N_P_star)
+                if leader is not None else 0.0
+            ),
             "urban_net_inflow_target_veh_h": float(target_net_inflow),
         }
         metrics.update(allocation_metrics)

@@ -45,6 +45,7 @@ def _aggregate_freeway_diagnostics(
         "mean_segment_flow",
         "offramp_flow_total",
         "offramp_blocked_flow_total",
+        "mainline_exit_flow_total",
     }
     out: Dict[str, float] = {}
     keys = set().union(*(row.keys() for row in rows))

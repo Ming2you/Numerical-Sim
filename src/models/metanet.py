@@ -228,6 +228,8 @@ def freeway_substep(
     flow_count = 0
     offramp_flow_acc: Dict[str, float] = {link: 0.0 for link in net.freeway_links}
     offramp_blocked_acc: Dict[str, float] = {link: 0.0 for link in net.freeway_links}
+    # 본선 마지막 세그먼트에서 off-ramp로 빠지지 않고 시스템을 이탈하는 유량(완료차량 회계용).
+    mainline_exit_acc: Dict[str, float] = {link: 0.0 for link in net.freeway_links}
     cap_factor = getattr(demand, "incident_capacity_factor", 1.0)
     q_cap = net.freeway_capacity_veh_h * cap_factor
     target_flow = _nuf_target_flow_veh_h(control, cfg)
@@ -304,6 +306,7 @@ def freeway_substep(
                 q_out = (1.0 - off_ratio) * normal_out + effective_off
                 offramp_flow_acc[link] += effective_off
                 offramp_blocked_acc[link] += max(0.0, normal_off - effective_off)
+                mainline_exit_acc[link] += (1.0 - off_ratio) * normal_out
                 if normal_off > effective_off + 1.0e-9:
                     boundary_speed_cap = q_out / max(rho * lanes_now[i], 1.0e-9)
             vehicle_raw = vehicles[i] + dt_h * (q_in - q_out)
@@ -391,6 +394,8 @@ def freeway_substep(
     diagnostics["offramp_storage_binding"] = float(any(v > 1.0e-9 for v in offramp_blocked_acc.values()))
     diagnostics["offramp_flow_total"] = float(sum(offramp_flow_acc.values()))
     diagnostics["offramp_blocked_flow_total"] = float(sum(offramp_blocked_acc.values()))
+    # 완료차량 회계: 본선 이탈 유량[veh/h] — × T_f_h 적분 시 이탈 차량수.
+    diagnostics["mainline_exit_flow_total"] = float(sum(mainline_exit_acc.values()))
     for link in net.freeway_links:
         diagnostics[f"offramp_flow_{link}"] = float(offramp_flow_acc.get(link, 0.0))
         diagnostics[f"offramp_blocked_flow_{link}"] = float(offramp_blocked_acc.get(link, 0.0))
