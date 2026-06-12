@@ -46,6 +46,7 @@ Proposed authority group
 - 동일 topology, demand, turning ratio와 initial state
 - 동일 `T_u`, `T_f`, `T_c` nested simulation order
 - 동일 TTT/TTS queue 귀속과 terminal-cost 규칙
+- 동일 controller-independent free-flow delay reference
 
 Controller를 제거하거나 information edge를 제한하더라도 physical on/off-ramp 연결과 차량
 보존식은 변경하지 않는다.
@@ -370,12 +371,64 @@ Leader가 있는 상태에서 proposed full control package의 전체 차이다.
 
 ## 16.11 공정 비교 규칙
 
+### Stage 1 성과지표와 delay accounting
+
+Stage 1은 TTT/TTS만으로 controller 성능을 판정하지 않는다. 모든 controller에 대해 다음
+성과지표 묶음을 함께 보고한다.
+
+```text
+TTT/TTS
+total, urban and freeway delay
+average delay per completed vehicle
+network throughput and completed vehicles
+terminal total vehicles and subsystem queues
+```
+
+Delay reference는 scenario와 seed별로 한 번만 계산하고 여섯 controller에 공통으로 사용한다.
+이는 no-control 또는 fixed-control simulation 결과가 아니라, 동일 demand, route, turning ratio와
+free-flow travel time을 사용한 controller-independent reference다.
+
+```text
+total_delay(c) =
+  total_ttt(c) - total_free_flow_reference_ttt
+
+urban_delay(c) =
+  urban_ttt(c) - urban_free_flow_reference_ttt
+
+freeway_delay(c) =
+  freeway_ttt(c) - freeway_free_flow_reference_ttt
+```
+
+Paired baseline `b`와 controller `c` 사이의 delay 개선은 다음과 같이 계산한다.
+
+```text
+delay_improvement_abs(b, c) =
+  total_delay(b) - total_delay(c)
+
+delay_improvement_pct(b, c) =
+  100 * delay_improvement_abs(b, c) / total_delay(b)
+```
+
+`total_delay(b)`가 configured epsilon 이하인 low-delay case에서는 percentage를 `NA`로 두고
+절대 delay 차이 `[veh*h]`를 주 지표로 사용한다. Aggregate accounting에서 음의 delay가 나오면
+0으로 clamp하지 않고 free-flow reference 또는 queue accounting 오류로 판정한다.
+
+```text
+average_delay_per_completed_vehicle =
+  total_delay / max(completed_vehicles, 1)
+```
+
+완료차량당 평균 delay는 throughput과 terminal queue를 반드시 함께 보고한다. Throughput을
+낮추거나 terminal queue를 늘려 horizon 밖으로 지연을 미룬 결과는 delay 개선으로 인정하지
+않는다.
+
 ### 모든 controller 공통
 
 - plant, demand, initial state, seed와 simulation horizon
 - control/prediction horizon
 - available state information
 - TTT/TTS와 terminal queue accounting
+- free-flow reference와 delay accounting
 - warm-up/evaluation interval
 
 ### Authority group 내부
@@ -410,7 +463,19 @@ centralized
 total_ttt
 urban_ttt
 freeway_ttt
+free_flow_reference_total_ttt
+free_flow_reference_urban_ttt
+free_flow_reference_freeway_ttt
+total_delay
+urban_delay
+freeway_delay
+completed_vehicles
+network_throughput
+average_delay_per_completed_vehicle
 terminal_total_vehicles
+terminal_urban_vehicles
+terminal_onramp_vehicles
+terminal_freeway_vehicles
 computation_time_sec
 solver_evaluations
 solver_converged
@@ -466,6 +531,10 @@ test_proposed_centralized_has_no_leader_or_agents
 
 test_physical_on_offramp_coupling_remains_identical
 test_first_mpc_action_only_is_applied
+test_all_controllers_use_same_free_flow_delay_reference
+test_delay_is_reported_for_total_urban_and_freeway
+test_delay_improvement_is_paired_with_throughput_and_terminal_state
+test_low_reference_delay_uses_absolute_difference
 test_terminal_queue_is_reported
 ```
 
@@ -477,4 +546,5 @@ test_terminal_queue_is_reported
 - Leader가 follower action에 실제 영향을 주는 경로가 검증됨
 - centralized mode가 동일 authority와 plant를 사용함
 - 모든 pairwise comparison의 해석 한계가 report에 기록됨
-- computation time, convergence와 terminal queue가 성능과 함께 보고됨
+- TTT/TTS, delay, throughput과 terminal state가 하나의 성능 묶음으로 보고됨
+- computation time과 convergence가 성능 지표와 함께 보고됨

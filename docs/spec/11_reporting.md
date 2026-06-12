@@ -73,14 +73,34 @@ PROPOSED-CENTRALIZED
 For every controller report:
 
 - total, urban and freeway TTT/TTS
+- common free-flow reference TTT
+- total, urban and freeway delay
+- absolute and percentage delay improvement for paired comparisons
+- completed vehicles, network throughput and average delay per completed vehicle
 - terminal queues and total vehicles
 - accepted/blocked off-ramp flow and on-ramp transfer
 - capacity-drop and density-exceedance metrics
 - computation time, solver evaluations and convergence
 - authority group, Leader presence and centralized/distributed flag
 
-Report the predefined paired comparisons separately. Do not label cross-authority differences as the
-pure value of one control variable.
+The Stage 1 main result must treat the following as one outcome block:
+
+```text
+TTT/TTS
+delay
+throughput/completed vehicles
+terminal state
+```
+
+Use one controller-independent free-flow reference for every controller in the same scenario/seed pair.
+If baseline delay is at or below the configured epsilon, report percentage delay improvement as `NA` and
+use the absolute `[veh*h]` difference. A negative calculated delay is an accounting/reference failure,
+not a value to clamp to zero.
+
+Report the predefined paired comparisons separately. Every paired comparison must include TTT difference,
+delay difference, throughput difference and terminal-state difference. Do not label cross-authority
+differences as the pure value of one control variable. Do not claim improvement when lower delay is
+obtained by reducing throughput or increasing terminal queues beyond the configured tolerance.
 
 #### Stage 2: Control mechanism validation
 

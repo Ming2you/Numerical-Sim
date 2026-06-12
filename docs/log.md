@@ -436,3 +436,37 @@ This file records human-readable update notes for each direct push.
 
 - 대상 Markdown 파일의 UTF-8 decoding, code-fence balance와 trailing whitespace를 검사했습니다.
 - 기존 four-controller 및 fixed-reference 비교 명칭이 남아 있지 않음을 확인했습니다.
+
+## 2026-06-12 Stage 1 delay 지표 확장
+
+### Scope
+
+- Six-controller Stage 1 결과를 TTT/TTS 단일 관점이 아니라 다음 outcome block으로
+  평가하도록 문서 사양을 확장했습니다.
+  - TTT/TTS
+  - total/urban/freeway delay
+  - throughput과 completed vehicles
+  - terminal total vehicles와 subsystem queue
+- Scenario/seed별 controller-independent free-flow reference를 한 번 계산하여 여섯
+  controller에 공통 적용하도록 정의했습니다.
+- Paired absolute/percentage delay improvement와 average delay per completed vehicle 정의를
+  추가했습니다.
+- Baseline delay가 epsilon 이하인 경우 percentage를 `NA`로 두고 절대 차이를 사용하도록
+  했습니다.
+- Throughput 감소 또는 terminal queue 증가로 horizon 밖에 지연을 미룬 결과는 개선으로
+  인정하지 않도록 Stage 1 PASS 및 reporting 규칙을 강화했습니다.
+- 음의 delay는 0으로 보정하지 않고 free-flow reference 또는 queue-accounting 오류로
+  처리하도록 명시했습니다.
+
+### Files
+
+- `docs/spec/16_six_controller_comparison.md`
+- `docs/literature_grounded_post_analysis_plan.md`
+- `docs/spec/11_reporting.md`
+- `docs/log.md`
+
+### Validation
+
+- 대상 Markdown 파일의 UTF-8 decoding, code-fence balance와 trailing whitespace를 검사합니다.
+- Stage 1 required diagnostics, report fields와 PASS 기준이 동일한 delay/throughput/terminal
+  규칙을 사용하는지 확인합니다.

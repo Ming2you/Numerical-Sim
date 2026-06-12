@@ -140,6 +140,7 @@ LeaderPackageDifference =
 - simulation/control/prediction horizon
 - detector와 available state information
 - TTT/TTS queue 귀속과 terminal cost
+- controller-independent free-flow reference와 delay accounting
 - warm-up과 evaluation interval
 
 Authority group 내부에서는 control bounds, action set과 solver evaluation budget을 가능한 한
@@ -171,17 +172,56 @@ Authority group 내부에서는 control bounds, action set과 solver evaluation 
 
 ### 2.6 Primary Metrics
 
-- total, urban과 freeway TTT/TTS
+Stage 1의 primary outcome은 다음 네 항목을 하나의 묶음으로 해석한다.
+
+1. TTT/TTS
+2. delay
+3. throughput
+4. terminal state
+
+필수 지표:
+
+- total, urban과 freeway TTT/TTS `[veh*h]`
+- total, urban과 freeway delay `[veh*h]`
+- paired delay improvement `[veh*h, %]`
+- average delay per completed vehicle `[h/veh]`
+- network throughput과 completed vehicles
 - terminal total vehicles
 - terminal urban, on-ramp와 freeway queue
 - accepted/blocked off-ramp flow
 - actual on-ramp transfer
 - urban receiving-link minimum headroom
 - capacity-drop duration과 density-exceedance AUC
-- network throughput
 - computation time, solver evaluations와 convergence rate
 
-Total TTT만 낮추고 terminal queue를 horizon 밖으로 미루면 개선으로 인정하지 않는다.
+Scenario와 seed별 free-flow reference는 여섯 controller를 실행하기 전에 한 번 계산해 고정한다.
+No-control 또는 fixed-control run을 free-flow reference로 재사용하지 않는다.
+
+```text
+D_total(c) = TTT_total(c) - TTT_total_free_flow_reference
+D_urban(c) = TTT_urban(c) - TTT_urban_free_flow_reference
+D_freeway(c) = TTT_freeway(c) - TTT_freeway_free_flow_reference
+```
+
+Paired comparison:
+
+```text
+Delta_D_abs(b, c) = D_total(b) - D_total(c)
+Delta_D_pct(b, c) = 100 * Delta_D_abs(b, c) / D_total(b)
+```
+
+Baseline delay가 configured epsilon 이하이면 `Delta_D_pct`는 `NA`로 보고하고
+`Delta_D_abs`를 사용한다. 음의 delay는 개선으로 해석하지 않고 reference/accounting 오류로
+분류한다.
+
+```text
+average_delay_per_completed_vehicle =
+  D_total / max(completed_vehicles, 1)
+```
+
+Total TTT 또는 delay만 낮추고 throughput을 감소시키거나 terminal queue를 horizon 밖으로
+미루면 개선으로 인정하지 않는다. Delay 결과표에는 항상 throughput, completed vehicles와
+terminal subsystem queues를 같은 행 또는 인접 표에 표시한다.
 
 ### 2.7 Statistical Analysis
 
@@ -189,6 +229,7 @@ Total TTT만 낮추고 terminal queue를 horizon 밖으로 미루면 개선으�
 
 - mean, median, standard deviation
 - paired absolute difference와 improvement percentage
+- paired TTT difference와 delay difference
 - bootstrap confidence interval
 - scenario별 및 pooled result
 - seed별 winner count
@@ -634,6 +675,9 @@ Subsystem cost뿐 아니라 total cost와 terminal state를 함께 사용한다.
 
 - controller ID와 authority group
 - objective components
+- common free-flow reference와 subsystem별 reference TTT
+- total, urban과 freeway TTT/TTS 및 delay
+- completed vehicles, throughput과 average delay per completed vehicle
 - all control timeseries
 - terminal state
 - solver/convergence diagnostics
@@ -662,6 +706,7 @@ post_analysis/
   stage1/
     six_controller_summary.csv
     paired_comparisons.csv
+    free_flow_reference.csv
     fidelity_matrix.md
     optimization_diagnostics.csv
 
@@ -702,7 +747,9 @@ post_analysis/
 
 - authority group 내부 fair comparison 성립
 - Leader pair에서 follower action이 실제로 달라짐
-- terminal queue를 포함해 개선이 반복됨
+- 동일 free-flow reference로 delay가 계산됨
+- TTT와 delay 개선이 throughput 감소 없이 반복됨
+- terminal total vehicles와 subsystem queue가 악화되지 않음
 - centralized/distributed computation 차이가 함께 보고됨
 
 ### Stage 2 PASS
@@ -725,6 +772,7 @@ post_analysis/
 
 - Wu authority와 proposed authority 각각에서 Leader의 추가 가치
 - distributed/Stackelberg와 centralized control의 성능-계산량 trade-off
+- TTT, delay, throughput과 terminal state를 함께 고려한 paired 성능 차이
 - proposed control이 특정 traffic trigger에서 만드는 물리효과
 - coupling information direction 및 coupling player의 한계기여
 - 양방향 information exchange의 interaction/synergy
@@ -732,6 +780,8 @@ post_analysis/
 주장 불가:
 
 - authority가 다른 controller 차이를 특정 control 하나의 순수 효과로 해석
+- throughput과 terminal state를 제외하고 delay 감소만으로 성능 개선을 주장
+- controller별로 다른 free-flow reference를 사용해 delay를 비교
 - control value 변화만으로 mechanism을 검증했다고 주장
 - physical network를 삭제한 ablation을 player contribution으로 해석
 - evaluation result에 맞춘 사후 tuning을 fair comparison으로 주장
