@@ -1,0 +1,2 @@
+computation_time_sec,controller_id,solver_converged_rate,solver_evaluations
+0.06,PROPOSED-FOLLOWERS-ONLY,1.0,110.0

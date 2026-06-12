@@ -183,6 +183,71 @@ class UrbanFollower:
             p1_new = total - p2_new
         return float(p1_new), float(p2_new)
 
+    def _search_green_times(
+        self,
+        state: TrafficState,
+        previous: Optional[ControlAction],
+        pressure: Mapping[str, float],
+    ) -> tuple[Dict[str, float], float]:
+        """P-FO(spec 16.7, 2026-06-13 재정의) green 자유 탐색 — allocation 기준점 없음.
+
+        신호별 후보 p1 ∈ linspace(green_min, green_max, 7)를 경량 큐 모델
+        (서비스율 = green/cycle × Σ포화유율 — plant의 cycle 평균과 동일 회계)로
+        horizon 동안 굴려 잔여 큐 + green 변화 패널티가 최소인 split을 고른다.
+        coupling 정보는 freeway 압력으로만 들어온다(off-ramp 방출 phase 큐 가중)."""
+        net = self.cfg.network
+        specs = movement_specs(self.cfg)
+        horizon = max(1, self.cfg.mpc.horizon_steps)
+        dt_h = self.cfg.simulation.T_c_h
+        total = net.effective_green_total
+        smooth_w = self.cfg.urban_follower.green_smoothness_weight
+        green: Dict[str, float] = {}
+        objective = 0.0
+        for signal in net.signals:
+            phase_movements = {
+                pid: [m for m, spec in specs.items() if spec.get("phase") == f"{signal}_{pid}"]
+                for pid in ("p1", "p2")
+            }
+            q0 = {
+                pid: sum(
+                    max(0.0, state.urban_movement_queue.get(m, 0.0))
+                    for m in phase_movements[pid]
+                )
+                for pid in ("p1", "p2")
+            }
+            for pid in ("p1", "p2"):
+                # freeway 압력이 높으면 off-ramp storage를 비우는 phase를 우선한다
+                # (full follower의 _green_times와 같은 coupling 경로).
+                if any(specs[m].get("kind") == "off_ramp" for m in phase_movements[pid]):
+                    q0[pid] += float(pressure.get("total_pressure", 0.0)) * net.ramp_queue_max_veh
+            sat = {
+                pid: max(len(phase_movements[pid]) * net.movement_capacity_veh_h, 1.0e-9)
+                for pid in ("p1", "p2")
+            }
+            prev_p1 = (
+                float(previous.green_times.get(f"{signal}_p1", total / 2.0))
+                if previous else total / 2.0
+            )
+            best_p1, best_cost = prev_p1, float("inf")
+            for p1 in np.linspace(net.green_min, net.green_max, 7):
+                p2 = total - p1
+                if p2 < net.green_min - 1.0e-9 or p2 > net.green_max + 1.0e-9:
+                    continue
+                q = dict(q0)
+                cost = 0.0
+                for _ in range(horizon):
+                    for pid, g in (("p1", p1), ("p2", p2)):
+                        service = (g / max(net.cycle_length, 1.0e-9)) * sat[pid] * dt_h
+                        q[pid] = max(0.0, q[pid] - service)
+                    cost += (q["p1"] + q["p2"]) * dt_h
+                cost += smooth_w * abs(p1 - prev_p1)
+                if cost < best_cost:
+                    best_cost, best_p1 = cost, float(p1)
+            green[f"{signal}_p1"] = float(best_p1)
+            green[f"{signal}_p2"] = float(total - best_p1)
+            objective += best_cost
+        return green, float(objective)
+
     def _offsets(
         self,
         state: TrafficState,
@@ -311,6 +376,11 @@ class UrbanFollower:
     ) -> UrbanFollowerResult:
         ensure_urban_state(state, self.cfg)
         pressure = self._freeway_pressure(freeway_response)
+        if leader is None:
+            # P-FO(spec 16.7, 2026-06-13 재정의): allocation module을 호출하지 않는다 —
+            # green 자유탐색 + offset만 결정하고 movement service는 plant 포화유율
+            # fallback(빈 allocation)에 맡긴다. 숨은 전역 target 없음.
+            return self._solve_leaderless(state, pressure, previous_control)
         plan = allocation_plan or self.allocation_module.solve(state, leader)
         green = self._green_times(state, previous_control, freeway_response, plan)
         offsets = self._offsets(state, previous_control, green)
@@ -365,5 +435,43 @@ class UrbanFollower:
             inflow_outflow_allocation=allocation,
             objective_value=float(objective),
             infeasibility={"net_inflow_residual": max(0.0, residual - self.cfg.urban_follower.eps_U)},
+            metrics=metrics,
+        )
+
+    def _solve_leaderless(
+        self,
+        state: TrafficState,
+        pressure: Mapping[str, float],
+        previous_control: Optional[ControlAction],
+    ) -> UrbanFollowerResult:
+        """PROPOSED-FOLLOWERS-ONLY — green 자유탐색 + offset, allocation 비제어."""
+        green, search_cost = self._search_green_times(state, previous_control, pressure)
+        offsets = self._offsets(state, previous_control, green)
+        balance = movement_balance_summary(
+            state,
+            self.cfg,
+            saturation_fraction=self.cfg.evaluation.boundary_degenerate_saturation_fraction,
+            degenerate_ratio=self.cfg.evaluation.boundary_degenerate_ratio,
+            eps=self.cfg.evaluation.eps,
+        )
+        metrics = {
+            "B_in": balance["B_in"],
+            "B_out": balance["B_out"],
+            "allocation_module_active": 0.0,
+            "freeway_response_used": pressure["used"],
+            "freeway_total_pressure": pressure["total_pressure"],
+            "urban_accumulation_veh": float(state.protected_accumulation_veh(self.cfg.network)),
+            "urban_accumulation_target_veh": 0.0,
+            "urban_accumulation_error_veh": 0.0,
+            "urban_net_inflow_target_veh_h": 0.0,
+        }
+        metrics.update(balance)
+        metrics.update(boundary_indices(state.boundary_queue.values(), self.cfg.network.boundary_queue_max_veh))
+        return UrbanFollowerResult(
+            green_times=green,
+            offsets=offsets,
+            inflow_outflow_allocation={},
+            objective_value=float(search_cost),
+            infeasibility={"net_inflow_residual": 0.0},
             metrics=metrics,
         )

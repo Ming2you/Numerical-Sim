@@ -8,7 +8,11 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from src.analysis.authority import CONTROLLER_IDS, LEADER_ENABLED, check_control_authority
+from src.analysis.authority import (
+    LEADER_ENABLED,
+    PRIMARY_CONTROLLERS,
+    check_control_authority,
+)
 from src.analysis.free_flow_reference import FreeFlowReference, compute_free_flow_reference
 from src.controllers.centralized_mpc import CentralizedMPC
 from src.controllers.distributed_coordinator import DistributedCoordinator
@@ -211,20 +215,30 @@ def summarize_controller(
     }
 
 
+# 주 비교쌍(spec 16.10, 2026-06-13 개정). ProposedLeaderValue는 Leader+allocation
+# coordination layer의 "결합" 효과다 — Leader 단독 효과로 해석하지 않는다.
 PAIRED_COMPARISONS = [
-    ("WuLeaderValue", "WU-CD-F", "WU-MATCHED-STACKELBERG"),
     ("ProposedLeaderValue", "PROPOSED-FOLLOWERS-ONLY", "PROPOSED-STACKELBERG"),
-    ("WuCentralizationGap", "WU-CD-F", "WU-CC-F"),
     ("ProposedCentralizationGap", "PROPOSED-STACKELBERG", "PROPOSED-CENTRALIZED"),
     ("FollowerPackageDifference", "WU-CD-F", "PROPOSED-FOLLOWERS-ONLY"),
+    ("FullPackageValue", "WU-CD-F", "PROPOSED-STACKELBERG"),
+]
+# 보조 참고군 쌍 — 해당 controller를 명시 실행한 경우에만 부록으로 계산된다.
+APPENDIX_COMPARISONS = [
+    ("WuLeaderValue", "WU-CD-F", "WU-MATCHED-STACKELBERG"),
+    ("WuCentralizationGap", "WU-CD-F", "WU-CC-F"),
     ("LeaderPackageDifference", "WU-MATCHED-STACKELBERG", "PROPOSED-STACKELBERG"),
 ]
 
 
 def paired_rows(summaries: Dict[str, Dict[str, Any]], delay_eps: float) -> List[Dict[str, Any]]:
-    """spec 16.10 6쌍 — TTT/delay/throughput/terminal 차이를 한 행으로(16.11 규칙 적용)."""
+    """spec 16.10 쌍 — TTT/delay/throughput/terminal 차이를 한 행으로(16.11 규칙 적용).
+
+    주 비교쌍 + (실행된 경우) 부록 쌍. 양쪽 controller가 모두 실행된 쌍만 계산한다."""
     rows = []
-    for name, base_id, other_id in PAIRED_COMPARISONS:
+    for name, base_id, other_id in PAIRED_COMPARISONS + APPENDIX_COMPARISONS:
+        if base_id not in summaries or other_id not in summaries:
+            continue
         b, c = summaries[base_id], summaries[other_id]
         delay_abs = b["total_delay"] - c["total_delay"]
         if b["total_delay"] <= delay_eps:
@@ -259,7 +273,7 @@ FIDELITY_MATRIX_MD = """# Stage 1 fidelity matrix (plan §2.4)
 | WU-CD-F | 공유 plant(METANET+movement queue, storage-cap spillback) | green p1+VSL (offset 0, metering=용량, allocation 無) | agent local TTS+Δu | 공통 T_c×horizon | 원문 MILP/SQP 대신 결정적 후보탐색(경량 국소 큐/밀도 모델) | y 고정→교환, S_max | local 모델이 거칠어 분산해의 질이 원문 대비 보수적일 수 있음 |
 | WU-MATCHED-STACKELBERG | 동일 | 동일 | local + w·pos(n_pred−ω·target) conditioning | 동일 | follower=위와 동일, leader=후보 열거+coupled 예측 | 동일 | leader 후보 9개 고정 그리드 — conditioning이 binding하지 않으면 WU-CD-F와 동일해질 수 있음 |
 | WU-CC-F | 동일 | 동일(green+VSL) | J_WU_global(TTS+Δu) | 동일 | seeded random search(budget 보고) | 없음 | 보장된 전역최적 아님 — 동일 budget 수치 참조 |
-| PROPOSED-FOLLOWERS-ONLY | 동일 | allocation/green+offset+metering+VSL | follower local + 균형(전역 target 無) | 동일 | 기존 distributed follower 휴리스틱 | coupling iteration | leaderless metering은 국소 1-구획 예측 후보선택 |
+| PROPOSED-FOLLOWERS-ONLY | 동일 | green 자유탐색([green_min,green_max] 후보)+offset+metering+VSL (allocation 無) | agent local 잔여 큐+Δgreen (전역 target 無) | 동일 | 신호별 green 후보탐색 + leaderless metering 국소 후보선택 | coupling iteration | allocation 비제어 — movement service는 plant 포화유율 fallback(Wu와 동일) |
 | PROPOSED-STACKELBERG | 동일 | 동일 full | leader J_L(16.8)+follower 휴리스틱 | 동일 | leader 후보×distributed Nash | coupling iteration | 기존 검증된 controller |
 | PROPOSED-CENTRALIZED | 동일 | 동일 full | J_PROPOSED_SYSTEM(TTS+초과+Δu) | 동일 | seeded random search | 없음 | allocation을 게이트 service level로 매개변수화(차원 축소 근사) |
 
@@ -275,7 +289,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     parser.add_argument("--scenario", default="peak_demand")
     parser.add_argument("--T-total", type=float, default=None)
     parser.add_argument("--output", default="post_analysis/stage1")
-    parser.add_argument("--controllers", default=",".join(CONTROLLER_IDS))
+    parser.add_argument("--controllers", default=",".join(PRIMARY_CONTROLLERS))
     parser.add_argument("--delay-eps", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=None)
     args = parser.parse_args(argv)
@@ -319,8 +333,9 @@ def main(argv: Optional[List[str]] = None) -> None:
         }
         for cid, s in summaries.items()
     ])
-    if all(cid in summaries for cid in CONTROLLER_IDS):
-        _write_csv(out / "paired_comparisons.csv", paired_rows(summaries, args.delay_eps))
+    pair_rows = paired_rows(summaries, args.delay_eps)
+    if pair_rows:
+        _write_csv(out / "paired_comparisons.csv", pair_rows)
     (out / "summary.json").write_text(
         json.dumps({"scenario": args.scenario, "summaries": summaries}, indent=2, ensure_ascii=False),
         encoding="utf-8",

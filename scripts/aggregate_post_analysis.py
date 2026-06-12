@@ -9,13 +9,13 @@ from typing import Any, Dict, List
 
 import numpy as np
 
+# 주 비교쌍(spec 16.10, 2026-06-13 개정 — 4-controller 주 비교군).
+# ProposedLeaderValue = Leader+allocation coordination layer의 결합 효과.
 PAIRS = [
-    ("WuLeaderValue", "WU-CD-F", "WU-MATCHED-STACKELBERG"),
     ("ProposedLeaderValue", "PROPOSED-FOLLOWERS-ONLY", "PROPOSED-STACKELBERG"),
-    ("WuCentralizationGap", "WU-CD-F", "WU-CC-F"),
     ("ProposedCentralizationGap", "PROPOSED-STACKELBERG", "PROPOSED-CENTRALIZED"),
     ("FollowerPackageDifference", "WU-CD-F", "PROPOSED-FOLLOWERS-ONLY"),
-    ("LeaderPackageDifference", "WU-MATCHED-STACKELBERG", "PROPOSED-STACKELBERG"),
+    ("FullPackageValue", "WU-CD-F", "PROPOSED-STACKELBERG"),
 ]
 
 

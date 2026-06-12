@@ -274,17 +274,27 @@ class DistributedCoordinator:
         demand: DemandStep | Iterable[DemandStep],
         previous_control: Optional[ControlAction] = None,
     ) -> NashResult:
-        """leader=None이면 PROPOSED-FOLLOWERS-ONLY(spec 16.7) — 숨은 전역 목표 없이
-        allocation은 균형/관측 큐로, freeway agent는 local objective로 결정한다."""
+        """leader=None이면 PROPOSED-FOLLOWERS-ONLY(spec 16.7, 2026-06-13 재정의) —
+        allocation module 미사용, urban agent는 green 자유탐색 + offset, freeway agent는
+        local objective로 metering/VSL을 결정한다. 숨은 전역 목표 없음."""
         forecast = [demand] if isinstance(demand, DemandStep) else list(demand)
         if not forecast:
             raise ValueError("DistributedCoordinator requires at least one demand step.")
         first_demand = forecast[0]
-        reference_control = previous_control or ControlAction.fixed(self.cfg)
+        if previous_control is not None:
+            reference_control = previous_control
+        else:
+            # leaderless 초기 기준은 물리적 no-control(allocation 비움) — fixed()의
+            # 0.5cap allocation이 숨은 게이팅으로 남지 않게 한다.
+            reference_control = (
+                ControlAction.uncontrolled(self.cfg) if leader is None else ControlAction.fixed(self.cfg)
+            )
         current = reference_control
         current.N_P_star = leader.N_P_star if leader is not None else 0.0
         current.N_UF_star = leader.N_UF_star if leader is not None else 0.0
-        allocation_plan = self.urban_follower.allocation_module.solve(state, leader)
+        allocation_plan = (
+            None if leader is None else self.urban_follower.allocation_module.solve(state, leader)
+        )
         coupling = self._extract_coupling(state, current, first_demand)
         best_control = current
         best_obj = np.inf
@@ -488,7 +498,7 @@ class DistributedCoordinator:
         demand: DemandStep,
         freeway_response: FreewayFollowerResult,
         current: ControlAction,
-        allocation_plan: AllocationResult,
+        allocation_plan: Optional[AllocationResult],
     ) -> AgentSolve:
         # NO_F_TO_U/LOCAL_ONLY ablation: freeway 예측 압력 정보 차단 — urban은 측정된
         # 현재 off-ramp 도착(plant 경유)만 disturbance로 받는다.
@@ -504,12 +514,15 @@ class DistributedCoordinator:
         offsets = {agent.signal: result.offsets.get(agent.signal, current.offsets.get(agent.signal, 0.0))}
         # follower allocation에 없는 movement(internal 등)는 0이 아니라 "비제어"다 —
         # 0으로 머지하면 내부 그리드 이동이 동결돼 출구 보급이 끊긴다(그리드 라우팅 후 치명적).
+        # leaderless(P-FO)는 allocation 자체가 비어 있으므로 아래 합산도 자연히 건너뛴다.
         allocation = {
             movement: result.inflow_outflow_allocation[movement]
             for movement in agent.movements
             if movement in result.inflow_outflow_allocation
         }
         for movement in agent.movements:
+            if movement not in allocation:
+                continue
             spec = specs.get(movement, {})
             origin = str(spec.get("origin", ""))
             destination = str(spec.get("destination", ""))
@@ -608,7 +621,11 @@ class DistributedCoordinator:
             allocation.update(solve.allocation)
             infeasibility.update(solve.infeasibility)
             diagnostics.update(solve.diagnostics)
-        allocation.update(self._legacy_boundary_allocations(allocation))
+        if leader is None:
+            # P-FO(spec 16.7 재정의): allocation 비제어 — plant 포화유율 fallback.
+            allocation = {}
+        else:
+            allocation.update(self._legacy_boundary_allocations(allocation))
         return ControlAction(
             N_P_star=leader.N_P_star if leader is not None else 0.0,
             N_UF_star=leader.N_UF_star if leader is not None else 0.0,
@@ -616,7 +633,10 @@ class DistributedCoordinator:
             vsl=vsl,
             green_times=_relax_map(current.green_times, green_times, alpha),
             offsets=_relax_map(current.offsets, offsets, alpha),
-            inflow_outflow_allocation=_relax_map(current.inflow_outflow_allocation, allocation, alpha),
+            inflow_outflow_allocation=(
+                {} if leader is None
+                else _relax_map(current.inflow_outflow_allocation, allocation, alpha)
+            ),
             infeasibility=infeasibility,
             diagnostics=diagnostics,
         )

@@ -1,0 +1,32 @@
+{
+  "scenario": "peak_demand",
+  "summaries": {
+    "PROPOSED-FOLLOWERS-ONLY": {
+      "controller_id": "PROPOSED-FOLLOWERS-ONLY",
+      "authority_group": "proposed",
+      "leader_enabled": false,
+      "centralized": false,
+      "authority_ok": true,
+      "authority_violations": "",
+      "total_ttt": 594.761,
+      "urban_ttt": 302.817,
+      "freeway_ttt": 291.944,
+      "free_flow_reference_total_ttt": 266.157,
+      "free_flow_reference_urban_ttt": 218.631,
+      "free_flow_reference_freeway_ttt": 47.526,
+      "total_delay": 328.604,
+      "urban_delay": 84.186,
+      "freeway_delay": 244.418,
+      "completed_vehicles": 5731.3,
+      "network_throughput_veh_h": 11462.5,
+      "average_delay_per_completed_vehicle_h": 0.057336,
+      "terminal_total_vehicles": 1781.0,
+      "terminal_urban_vehicles": 935.9,
+      "terminal_onramp_vehicles": 1141.2,
+      "terminal_freeway_vehicles": 125.0,
+      "computation_time_sec": 0.06,
+      "solver_evaluations": 110.0,
+      "solver_converged_rate": 1.0
+    }
+  }
+}

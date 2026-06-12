@@ -3,12 +3,14 @@ import unittest
 from pathlib import Path
 import tempfile
 
-from src.analysis.authority import CONTROLLER_IDS, check_control_authority
+from src.analysis.authority import CONTROLLER_IDS, PRIMARY_CONTROLLERS, check_control_authority
 from src.analysis.free_flow_reference import compute_free_flow_reference
 from src.controllers.centralized_mpc import CentralizedMPC
 from src.controllers.distributed_coordinator import DistributedCoordinator
+from src.controllers.urban_follower import UrbanFollower
 from src.controllers.wu_distributed import WuDistributedController, WuLeaderAction, _wu_fixed_control
 from src.experiments.six_controller_comparison import (
+    APPENDIX_COMPARISONS,
     PAIRED_COMPARISONS,
     _ControllerAdapter,
     paired_rows,
@@ -59,8 +61,14 @@ class SixControllerTests(unittest.TestCase):
             cls.results[cid] = result
             cls.summaries[cid] = summary
 
-    def test_comparison_runner_exposes_exactly_six_controllers(self):
-        self.assertEqual(len(CONTROLLER_IDS), 6)
+    def test_comparison_runner_exposes_primary_four_controllers(self):
+        # 주 비교군 4종(spec 16.1 개정) — 보조 참고군 포함 전체는 6종 구현 유지.
+        self.assertEqual(len(PRIMARY_CONTROLLERS), 4)
+        self.assertEqual(
+            PRIMARY_CONTROLLERS,
+            ["WU-CD-F", "PROPOSED-FOLLOWERS-ONLY", "PROPOSED-STACKELBERG", "PROPOSED-CENTRALIZED"],
+        )
+        self.assertTrue(set(PRIMARY_CONTROLLERS) <= set(CONTROLLER_IDS))
         self.assertEqual(set(self.summaries), set(CONTROLLER_IDS))
 
     def test_all_controllers_use_same_physical_plant(self):
@@ -202,19 +210,48 @@ class SixControllerTests(unittest.TestCase):
         decisions = self.results["WU-CC-F"]["decision_rows"]
         self.assertTrue(all("coordination_iterations" not in d for d in decisions))
 
-    def test_proposed_group_uses_same_full_authority(self):
+    def test_proposed_group_authority_checks_pass(self):
+        # P-STACK/P-CENT는 allocation 포함 full authority, P-FO는 allocation 제외(16.7 재정의).
         for cid in ("PROPOSED-FOLLOWERS-ONLY", "PROPOSED-STACKELBERG", "PROPOSED-CENTRALIZED"):
+            auth = check_control_authority(cid, self.results[cid]["control_rows"], self.cfg)
+            self.assertTrue(auth["ok"], msg=f"{cid}: {auth['violations']}")
+        for cid in ("PROPOSED-STACKELBERG", "PROPOSED-CENTRALIZED"):
             rows = self.results[cid]["control_rows"]
-            # full authority 흔적: metering이 용량 고정이 아니고 offset이 움직일 수 있다.
-            metering_free = any(
-                abs(float(r.get(f"ramp_metering_{ramp}", 0.0)) - self.cfg.network.ramp_capacity_veh_h[ramp]) > 1e-6
-                for r in rows for ramp in self.cfg.network.ramps
-            )
             allocation_used = any(
                 abs(float(r.get(f"allocation_{m}", 0.0))) > 1e-6
-                for r in rows for m in list(self.cfg.network.urban_movements)[:20]
+                for r in rows for m in self.cfg.network.urban_movements
             )
-            self.assertTrue(metering_free or allocation_used, msg=cid)
+            self.assertTrue(allocation_used, msg=f"{cid}: allocation 흔적 없음")
+
+    def test_proposed_followers_only_has_no_allocation_control(self):
+        rows = self.results["PROPOSED-FOLLOWERS-ONLY"]["control_rows"]
+        for row in rows:
+            for movement in self.cfg.network.urban_movements:
+                self.assertLessEqual(
+                    abs(float(row.get(f"allocation_{movement}", 0.0))), 1e-6,
+                    msg=f"P-FO가 allocation_{movement}을 사용함",
+                )
+
+    def test_proposed_followers_only_green_searched_within_bounds(self):
+        cfg = fast_config()
+        net = cfg.network
+        rows = self.results["PROPOSED-FOLLOWERS-ONLY"]["control_rows"]
+        for row in rows:
+            for signal in net.signals:
+                p1 = float(row.get(f"green_{signal}_p1", net.effective_green_total / 2.0))
+                p2 = float(row.get(f"green_{signal}_p2", net.effective_green_total / 2.0))
+                self.assertGreaterEqual(p1, net.green_min - 1e-6)
+                self.assertLessEqual(p1, net.green_max + 1e-6)
+                self.assertAlmostEqual(p1 + p2, net.effective_green_total, places=3)
+        # 탐색이 큐에 반응하는지: p1 큐만 무거우면 p1 green이 균등(56)보다 커진다.
+        state = TrafficState.initial(cfg)
+        for movement, spec in cfg.network.urban_movements.items():
+            if spec.get("phase") == "A_p1":
+                state.urban_movement_queue[movement] = 200.0
+        demand = DemandProfile(cfg, ScenarioConfig("test")).at(0.0)
+        result = UrbanFollower(cfg).solve(state, None, demand)
+        self.assertGreater(result.green_times["A_p1"], net.effective_green_total / 2.0)
+        self.assertEqual(result.inflow_outflow_allocation, {})
 
     def test_proposed_followers_only_has_no_hidden_global_target(self):
         rows = self.results["PROPOSED-FOLLOWERS-ONLY"]["control_rows"]
@@ -225,13 +262,26 @@ class SixControllerTests(unittest.TestCase):
         decisions = self.results["PROPOSED-FOLLOWERS-ONLY"]["decision_rows"]
         self.assertTrue(all(float(d.get("leader_candidate_count", 0.0)) == 0.0 for d in decisions))
 
-    def test_proposed_pair_differs_only_by_leader(self):
-        # 두 모드 모두 같은 follower 기계(DistributedCoordinator)를 사용해야 한다.
+    def test_proposed_pair_differs_by_leader_and_allocation_only(self):
+        # 두 모드 모두 같은 follower 기계(DistributedCoordinator)를 사용하고,
+        # 차이는 Leader와 allocation coordination layer 유무뿐이다(16.7/16.11 개정).
         cfg = fast_config()
         followers_only = _ControllerAdapter(cfg, "PROPOSED-FOLLOWERS-ONLY")
         stackelberg = _ControllerAdapter(cfg, "PROPOSED-STACKELBERG")
         self.assertIsInstance(followers_only._impl, DistributedCoordinator)
         self.assertIsInstance(stackelberg._impl.nash_solver, DistributedCoordinator)
+        fo_rows = self.results["PROPOSED-FOLLOWERS-ONLY"]["control_rows"]
+        st_rows = self.results["PROPOSED-STACKELBERG"]["control_rows"]
+        fo_alloc = any(
+            abs(float(r.get(f"allocation_{m}", 0.0))) > 1e-6
+            for r in fo_rows for m in self.cfg.network.urban_movements
+        )
+        st_alloc = any(
+            abs(float(r.get(f"allocation_{m}", 0.0))) > 1e-6
+            for r in st_rows for m in self.cfg.network.urban_movements
+        )
+        self.assertFalse(fo_alloc)
+        self.assertTrue(st_alloc)
 
     def test_proposed_centralized_has_no_leader_or_agents(self):
         cfg = fast_config()
@@ -269,18 +319,22 @@ class SixControllerTests(unittest.TestCase):
                 self.assertIn(key, s)
 
     def test_delay_improvement_is_paired_with_throughput_and_terminal_state(self):
+        # setUpClass가 6종 전부 실행하므로 주 4쌍 + 부록 3쌍이 모두 계산된다.
         rows = paired_rows(self.summaries, delay_eps=1.0)
-        self.assertEqual(len(rows), len(PAIRED_COMPARISONS))
+        self.assertEqual(len(rows), len(PAIRED_COMPARISONS) + len(APPENDIX_COMPARISONS))
         for row in rows:
             for key in ("delay_improvement_abs", "throughput_difference", "terminal_total_difference"):
                 self.assertIn(key, row)
+        # 주 비교군 4종만 실행한 경우엔 주 4쌍만 계산된다.
+        primary_only = {cid: self.summaries[cid] for cid in PRIMARY_CONTROLLERS}
+        self.assertEqual(len(paired_rows(primary_only, delay_eps=1.0)), len(PAIRED_COMPARISONS))
 
     def test_low_reference_delay_uses_absolute_difference(self):
         fake = {k: dict(v) for k, v in self.summaries.items()}
         fake["WU-CD-F"]["total_delay"] = 0.5  # epsilon(1.0) 이하 → pct NA.
         rows = paired_rows(fake, delay_eps=1.0)
-        wu_leader = next(r for r in rows if r["comparison"] == "WuLeaderValue")
-        self.assertEqual(wu_leader["delay_improvement_pct"], "NA")
+        full_package = next(r for r in rows if r["comparison"] == "FullPackageValue")
+        self.assertEqual(full_package["delay_improvement_pct"], "NA")
 
     def test_terminal_queue_is_reported(self):
         for s in self.summaries.values():
