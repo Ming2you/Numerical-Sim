@@ -1,0 +1,69 @@
+{
+  "scenario": "peak_demand",
+  "summaries": [
+    {
+      "ablation": "LOCAL_ONLY_COUPLING_PLAYERS",
+      "total_ttt": 6687.251,
+      "urban_ttt": 6325.377,
+      "freeway_ttt": 361.874,
+      "terminal_total_vehicles": 5981.5,
+      "offramp_accepted_veh": 1832.2,
+      "onramp_transfer_veh": 6055.6,
+      "x_on_peak_veh": 4166.4,
+      "w_r_peak_veh": 101.6,
+      "computation_time_sec": 512.2,
+      "nash_iterations_total": 222,
+      "physical_coupling_active": true,
+      "remaining_players_reoptimized": true,
+      "leader_reoptimized": true
+    },
+    {
+      "ablation": "FIXED_URBAN_COUPLING_PLAYERS",
+      "total_ttt": 7183.261,
+      "urban_ttt": 6724.05,
+      "freeway_ttt": 459.211,
+      "terminal_total_vehicles": 6591.9,
+      "offramp_accepted_veh": 1853.7,
+      "onramp_transfer_veh": 6321.2,
+      "x_on_peak_veh": 3693.1,
+      "w_r_peak_veh": 220.8,
+      "computation_time_sec": 489.78,
+      "nash_iterations_total": 40,
+      "physical_coupling_active": true,
+      "remaining_players_reoptimized": true,
+      "leader_reoptimized": true
+    },
+    {
+      "ablation": "FIXED_FREEWAY_COUPLING_PLAYERS",
+      "total_ttt": 6819.385,
+      "urban_ttt": 6525.087,
+      "freeway_ttt": 294.297,
+      "terminal_total_vehicles": 6116.2,
+      "offramp_accepted_veh": 1836.7,
+      "onramp_transfer_veh": 6079.9,
+      "x_on_peak_veh": 4107.3,
+      "w_r_peak_veh": 17.8,
+      "computation_time_sec": 516.19,
+      "nash_iterations_total": 215,
+      "physical_coupling_active": true,
+      "remaining_players_reoptimized": true,
+      "leader_reoptimized": true
+    },
+    {
+      "ablation": "FIXED_ALL_COUPLING_PLAYERS",
+      "total_ttt": 7970.147,
+      "urban_ttt": 6978.01,
+      "freeway_ttt": 992.137,
+      "terminal_total_vehicles": 8317.6,
+      "offramp_accepted_veh": 1652.8,
+      "onramp_transfer_veh": 5496.6,
+      "x_on_peak_veh": 4304.8,
+      "w_r_peak_veh": 363.1,
+      "computation_time_sec": 466.91,
+      "nash_iterations_total": 40,
+      "physical_coupling_active": true,
+      "remaining_players_reoptimized": true,
+      "leader_reoptimized": true
+    }
+  ]
+}

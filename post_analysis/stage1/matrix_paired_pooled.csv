@@ -1,0 +1,7 @@
+comparison,max,mean_ttt_difference,min,n,positive_count
+WuLeaderValue,3.944,2.11,0.0,7,5
+ProposedLeaderValue,4675.77,3354.762,-197.283,7,6
+WuCentralizationGap,3326.399,2205.86,5.454,7,7
+ProposedCentralizationGap,2361.097,1112.289,96.752,7,7
+FollowerPackageDifference,148.238,-74.66,-494.831,7,4
+LeaderPackageDifference,4771.4,3277.992,-327.956,7,6

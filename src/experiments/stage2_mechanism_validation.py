@@ -37,11 +37,14 @@ def main(argv: Optional[List[str]] = None) -> None:
     parser.add_argument("--T-total", type=float, default=None)
     parser.add_argument("--output", default="post_analysis/stage2")
     parser.add_argument("--max-events", type=int, default=4)
+    parser.add_argument("--seed", type=int, default=None)
     args = parser.parse_args(argv)
 
     overrides: Dict[str, Any] = {}
     if args.T_total is not None:
         overrides["simulation"] = {"T_total": args.T_total}
+    if args.seed is not None:
+        overrides.setdefault("simulation", {})["random_seed"] = args.seed
     cfg = ExperimentConfig.from_file(args.config, overrides)
     scenario = load_scenarios(args.scenarios_config)[args.scenario]
     out = Path(args.output)

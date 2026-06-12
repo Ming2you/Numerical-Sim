@@ -121,6 +121,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     parser.add_argument("--T-total", type=float, default=None)
     parser.add_argument("--output", default="post_analysis/stage3")
     parser.add_argument("--cases", default=",".join(ABLATION_MODES))
+    parser.add_argument("--seed", type=int, default=None)
     args = parser.parse_args(argv)
 
     out = Path(args.output)
@@ -133,6 +134,8 @@ def main(argv: Optional[List[str]] = None) -> None:
         overrides: Dict[str, Any] = {}
         if args.T_total is not None:
             overrides["simulation"] = {"T_total": args.T_total}
+        if args.seed is not None:
+            overrides.setdefault("simulation", {})["random_seed"] = args.seed
         cfg = ExperimentConfig.from_file(args.config, overrides)  # case마다 새 cfg(상태 격리).
         summary = run_ablation_case(cfg, scenario, ablation, out / "runs" / args.scenario / ablation)
         summaries.append(summary)

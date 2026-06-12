@@ -303,3 +303,43 @@ ProposedCentralizationGap +54.4(+15.5%), WuCentralizationGap +177.0, LeaderPacka
   **전체 스위트 99/99 통과.**
 - 최종 리포트: `post_analysis/final_post_analysis_report.md` (spec 11.2 구조, smoke 기준선
   + 주장 한계 명시). 풀 매트릭스(시나리오×seed×7200s)는 후속 실행 명령으로 문서화.
+
+---
+
+# 추가 작업 — 사후분석 풀 매트릭스 실행·집계 (7200s)
+
+조건: Stage 1 = 5 시나리오×s42 + peak×s{123,7}(7콤보, 42 paired), Stage 2·3 = peak·oversat.
+--seed 옵션 3개 runner에 추가, 집계는 `scripts/aggregate_post_analysis.py`(interval-paired
+bootstrap CI 2000회·winner count·pooled). 모든 런 authority 자동검사 통과.
+
+## Stage 1 핵심 (풀런)
+
+- winner: P-CENTRALIZED 5/7, WU-CC-F 2/7(low·medium). peak 3 seed 순위 동일.
+- **ProposedLeaderValue +3,354.8 (6/7 양수, CI 7/7)** vs **WuLeaderValue +2.1(≈0)** —
+  leader의 가치는 full authority와 결합될 때만 발현(LeaderPackageDifference +3,278).
+- regime 의존: 경부하(low/medium)는 WU-CC 최강(P-STACK은 low에서 최하위 — perimeter 마찰),
+  혼잡 3종은 PROPOSED 압도(P-CENT가 WU-CD 대비 TTT −53~−58%).
+- 중앙화 이득 7/7 양수(WU +2,206 / PROPOSED +1,112), FollowerPackageDifference ≈ −75(동급).
+
+## Stage 2 핵심 (peak·oversat 풀런)
+
+- allocation/green: peak 재현 1.0(+14.2), oversat 음수(−12.3, 심혼잡 창에선 배분 무력 —
+  고통 보존). offset: 양 시나리오 방향 1.0·양의 이득(+2.4/+1.3).
+- vsl/metering: frozen 6-interval 창에서 중립~음수 — 측정 창 비대칭(단기 비용만 포착,
+  가치는 capacity-drop 예방으로 장기 발현). closed-loop 증거(Stage1 oversat freeway 341 vs
+  3,600+, Stage3 FIXED_ALL 붕괴)와 함께 읽도록 리포트 명시.
+
+## Stage 3 핵심 (peak·oversat 8케이스)
+
+- **u→f가 주 채널**(peak +383.9, Phi +292.9/+61.9), f→u는 Phi 음수(−86.7/−120.2) —
+  "가짜 압력" 계열 f→u 신호의 설계 개선 후보 확인.
+- 심혼잡 단방향 차단값 음수(−109/−292): 예측 정보가 receiving 붕괴 조건에서 오조정.
+  synergy는 peak −182.1 / oversat +342.8 — regime별 부호 반전.
+- **player 초가산성**: 개별 고정은 완만(또는 소폭 이득), 모두 고정 시 파국
+  (peak +1,489 / oversat +4,073, 본선 3,632 붕괴) — 최소 한 그룹의 전략적 운용이 필요조건.
+- LOCAL_ONLY = NO_CROSS 정확 일치(양 시나리오).
+
+## 산출물
+
+- `post_analysis/stage1/`(7콤보 + matrix_* 집계 5종), `stage2/`(2 시나리오),
+  `stage3/`(2 시나리오 × 8케이스 + 가치 CSV), `final_post_analysis_report.md` 풀런 전면 갱신.

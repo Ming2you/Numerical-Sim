@@ -1,0 +1,8 @@
+scenario,seed,winner,winner_ttt
+incident_or_capacity_drop,42,PROPOSED-CENTRALIZED,4992.519
+low_demand,42,WU-CC-F,873.38
+medium_demand,42,WU-CC-F,1844.692
+oversaturated_demand,42,PROPOSED-CENTRALIZED,10652.348
+peak_demand,123,PROPOSED-CENTRALIZED,5317.19
+peak_demand,42,PROPOSED-CENTRALIZED,5349.275
+peak_demand,7,PROPOSED-CENTRALIZED,5316.296

@@ -1,0 +1,7 @@
+authority_group,authority_ok,authority_violations,average_delay_per_completed_vehicle_h,centralized,completed_vehicles,computation_time_sec,controller_id,free_flow_reference_freeway_ttt,free_flow_reference_total_ttt,free_flow_reference_urban_ttt,freeway_delay,freeway_ttt,leader_enabled,network_throughput_veh_h,solver_converged_rate,solver_evaluations,terminal_freeway_vehicles,terminal_onramp_vehicles,terminal_total_vehicles,terminal_urban_vehicles,total_delay,total_ttt,urban_delay,urban_ttt
+wu,True,,0.013123,False,17259.3,0.01,WU-CD-F,115.583,652.349,536.765,76.193,191.776,False,8629.6,1.0,1640.0,69.0,25.9,396.2,323.8,226.485,878.834,150.292,687.058
+wu,True,,0.013123,False,17259.3,61.53,WU-MATCHED-STACKELBERG,115.583,652.349,536.765,76.193,191.776,True,8629.6,1.0,15840.0,69.0,25.9,396.2,323.8,226.485,878.834,150.292,687.058
+wu,True,,0.012802,True,17265.8,556.0,WU-CC-F,115.583,652.349,536.765,75.201,190.784,False,8632.9,0.975,3200.0,68.8,26.1,389.7,317.0,221.031,873.38,145.831,682.596
+proposed,True,,0.020799,False,17171.7,23.44,PROPOSED-FOLLOWERS-ONLY,115.583,652.349,536.765,75.797,191.38,False,8585.8,1.0,2409.0,73.8,75.2,483.8,399.8,357.158,1009.507,281.361,818.127
+proposed,True,,0.032457,False,17082.2,499.29,PROPOSED-STACKELBERG,115.583,652.349,536.765,74.172,189.755,True,8541.1,1.0,40464.0,71.6,178.4,573.3,494.3,554.441,1206.79,480.269,1017.034
+proposed,True,,0.019168,True,17197.8,526.79,PROPOSED-CENTRALIZED,115.583,652.349,536.765,73.52,189.104,False,8598.9,0.925,3200.0,75.9,83.6,457.7,373.7,329.642,981.991,256.122,792.887

@@ -1,0 +1,4 @@
+ablation,computation_time_sec,freeway_ttt,leader_reoptimized,nash_iterations_total,offramp_accepted_veh,onramp_transfer_veh,physical_coupling_active,remaining_players_reoptimized,terminal_total_vehicles,total_ttt,urban_ttt,w_r_peak_veh,x_on_peak_veh
+FIXED_URBAN_COUPLING_PLAYERS,489.78,459.211,True,40,1853.7,6321.2,True,True,6591.9,7183.261,6724.05,220.8,3693.1
+FIXED_FREEWAY_COUPLING_PLAYERS,516.19,294.297,True,215,1836.7,6079.9,True,True,6116.2,6819.385,6525.087,17.8,4107.3
+FIXED_ALL_COUPLING_PLAYERS,466.91,992.137,True,40,1652.8,5496.6,True,True,8317.6,7970.147,6978.01,363.1,4304.8

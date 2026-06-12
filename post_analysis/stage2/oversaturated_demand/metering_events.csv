@@ -1,0 +1,5 @@
+control,directional_accuracy,event_id,mediator_change,outcome_actual_ttt,outcome_counterfactual_ttt,outcome_gain,response_delay_intervals,shifted_subsystem_delta,status,t0_step,threshold,trigger_value
+metering,True,metering_2,"{""delta_receiving"": 0.00030468443187703365, ""delta_ramp_queue"": -13.01541209626971}",545.6349164172375,545.2521629562825,-0.382753460954973,0,-0.4041119259266637,ACTIVATED_BUT_INEFFECTIVE,2,0.15,0.2652794658460079
+metering,True,metering_6,"{""delta_receiving"": 0.0, ""delta_ramp_queue"": -1.8742753570615633}",865.1656597741726,864.641896099288,-0.5237636748845489,0,-0.5622510957037576,ACTIVATED_BUT_INEFFECTIVE,6,0.15,0.2338934482275089
+metering,True,metering_9,"{""delta_receiving"": 0.0, ""delta_ramp_queue"": 7.240541794922775}",1137.6943736053272,1136.3968321395841,-1.297541465743052,0,-1.3657175451140375,ACTIVATED_BUT_INEFFECTIVE,9,0.15,0.21996707801595206
+metering,False,metering_13,"{""delta_receiving"": -0.0011856844774029707, ""delta_ramp_queue"": -1.815474487948169}",1528.452110599475,1526.7921973448692,-1.6599132546057263,0,-1.7576122898536468,WRONG_DIRECTION,13,0.15,0.24514424291206094

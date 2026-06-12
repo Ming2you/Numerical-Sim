@@ -1,0 +1,5 @@
+control,directional_accuracy,event_id,mediator_change,outcome_actual_ttt,outcome_counterfactual_ttt,outcome_gain,response_delay_intervals,shifted_subsystem_delta,status,t0_step,threshold,trigger_value
+vsl,False,vsl_1,"{""delta_density_exceedance"": 3.0}",466.9070297816825,466.7007915533689,-0.20623822831362304,1,-0.21142816855613233,WRONG_DIRECTION,1,0.85,1.0
+vsl,True,vsl_6,"{""delta_density_exceedance"": 0.0}",865.1656597741726,864.8110212466848,-0.3546385274877366,0,-0.3723057849376161,ACTIVATED_BUT_INEFFECTIVE,6,0.85,1.0
+vsl,False,vsl_12,"{""delta_density_exceedance"": 6.5}",1430.5567098064193,1430.4707888087273,-0.08592099769202832,1,-0.08875546910403642,WRONG_DIRECTION,12,0.85,1.0
+vsl,False,vsl_17,"{""delta_density_exceedance"": 31.25}",1924.5375007859557,1922.6909681616535,-1.846532624302199,1,-2.0104236697551485,WRONG_DIRECTION,17,0.85,1.0

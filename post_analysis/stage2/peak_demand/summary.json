@@ -1,0 +1,53 @@
+{
+  "scenario": "peak_demand",
+  "summary": [
+    {
+      "control": "allocation_green",
+      "challenged_event_count": 1,
+      "correctly_inactive_event_count": 0,
+      "directional_accuracy": 1.0,
+      "response_delay_mean_intervals": 0.0,
+      "mechanism_success_rate": 1.0,
+      "outcome_success_rate": 1.0,
+      "unnecessary_activation_rate": 0.0,
+      "congestion_shift_event_count": 0,
+      "mean_outcome_gain_veh_h": 14.213180892558
+    },
+    {
+      "control": "offset",
+      "challenged_event_count": 4,
+      "correctly_inactive_event_count": 0,
+      "directional_accuracy": 1.0,
+      "response_delay_mean_intervals": 0.0,
+      "mechanism_success_rate": 0.5,
+      "outcome_success_rate": 0.5,
+      "unnecessary_activation_rate": 0.5,
+      "congestion_shift_event_count": 0,
+      "mean_outcome_gain_veh_h": 2.352695371875427
+    },
+    {
+      "control": "vsl",
+      "challenged_event_count": 4,
+      "correctly_inactive_event_count": 0,
+      "directional_accuracy": 0.0,
+      "response_delay_mean_intervals": 0.5,
+      "mechanism_success_rate": 0.0,
+      "outcome_success_rate": 0.0,
+      "unnecessary_activation_rate": 0.0,
+      "congestion_shift_event_count": 0,
+      "mean_outcome_gain_veh_h": -0.44597970548267085
+    },
+    {
+      "control": "metering",
+      "challenged_event_count": 4,
+      "correctly_inactive_event_count": 0,
+      "directional_accuracy": 0.25,
+      "response_delay_mean_intervals": 0.0,
+      "mechanism_success_rate": 0.0,
+      "outcome_success_rate": 0.0,
+      "unnecessary_activation_rate": 0.25,
+      "congestion_shift_event_count": 0,
+      "mean_outcome_gain_veh_h": -0.5421774675152022
+    }
+  ]
+}

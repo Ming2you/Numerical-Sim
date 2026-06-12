@@ -1,0 +1,69 @@
+{
+  "scenario": "oversaturated_demand",
+  "summaries": [
+    {
+      "ablation": "FULL_COUPLING",
+      "total_ttt": 13013.445,
+      "urban_ttt": 12672.59,
+      "freeway_ttt": 340.855,
+      "terminal_total_vehicles": 12513.0,
+      "offramp_accepted_veh": 1856.7,
+      "onramp_transfer_veh": 4353.8,
+      "x_on_peak_veh": 8029.5,
+      "w_r_peak_veh": 57.3,
+      "computation_time_sec": 515.87,
+      "nash_iterations_total": 224,
+      "physical_coupling_active": true,
+      "remaining_players_reoptimized": true,
+      "leader_reoptimized": true
+    },
+    {
+      "ablation": "NO_U_TO_F_INFO",
+      "total_ttt": 12903.957,
+      "urban_ttt": 12507.341,
+      "freeway_ttt": 396.616,
+      "terminal_total_vehicles": 12366.8,
+      "offramp_accepted_veh": 1860.1,
+      "onramp_transfer_veh": 4417.9,
+      "x_on_peak_veh": 7993.8,
+      "w_r_peak_veh": 115.3,
+      "computation_time_sec": 506.44,
+      "nash_iterations_total": 243,
+      "physical_coupling_active": true,
+      "remaining_players_reoptimized": true,
+      "leader_reoptimized": true
+    },
+    {
+      "ablation": "NO_F_TO_U_INFO",
+      "total_ttt": 12721.85,
+      "urban_ttt": 12394.855,
+      "freeway_ttt": 326.995,
+      "terminal_total_vehicles": 12206.0,
+      "offramp_accepted_veh": 1873.9,
+      "onramp_transfer_veh": 4497.2,
+      "x_on_peak_veh": 7925.5,
+      "w_r_peak_veh": 45.1,
+      "computation_time_sec": 506.05,
+      "nash_iterations_total": 229,
+      "physical_coupling_active": true,
+      "remaining_players_reoptimized": true,
+      "leader_reoptimized": true
+    },
+    {
+      "ablation": "NO_CROSS_NETWORK_INFO",
+      "total_ttt": 12955.125,
+      "urban_ttt": 12564.565,
+      "freeway_ttt": 390.559,
+      "terminal_total_vehicles": 12359.1,
+      "offramp_accepted_veh": 1850.8,
+      "onramp_transfer_veh": 4311.3,
+      "x_on_peak_veh": 8096.9,
+      "w_r_peak_veh": 115.3,
+      "computation_time_sec": 482.98,
+      "nash_iterations_total": 240,
+      "physical_coupling_active": true,
+      "remaining_players_reoptimized": true,
+      "leader_reoptimized": true
+    }
+  ]
+}

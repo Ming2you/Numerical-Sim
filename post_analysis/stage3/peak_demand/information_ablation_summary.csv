@@ -1,0 +1,2 @@
+ablation,computation_time_sec,freeway_ttt,leader_reoptimized,nash_iterations_total,offramp_accepted_veh,onramp_transfer_veh,physical_coupling_active,remaining_players_reoptimized,terminal_total_vehicles,total_ttt,urban_ttt,w_r_peak_veh,x_on_peak_veh
+LOCAL_ONLY_COUPLING_PLAYERS,512.2,361.874,True,222,1832.2,6055.6,True,True,5981.5,6687.251,6325.377,101.6,4166.4

@@ -1,0 +1,2 @@
+control,directional_accuracy,event_id,mediator_change,outcome_actual_ttt,outcome_counterfactual_ttt,outcome_gain,response_delay_intervals,shifted_subsystem_delta,status,t0_step,threshold,trigger_value
+allocation_green,True,allocation_green_0,"{""delta_B_in"": -0.04478273795547755, ""delta_departures"": 444.4588593634717}",248.45871485383952,262.6718957463975,14.213180892558,0,-0.7520719376808955,MECHANISM_REPRODUCED,0,0.03,0.12936762602515506
