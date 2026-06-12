@@ -401,3 +401,38 @@ This file records human-readable update notes for each direct push.
 
 - `python -B -m unittest discover -s src\\tests`
 - Result: 54 tests passed.
+
+## 2026-06-12 14:01:52 +09:00
+
+### Scope
+
+- GitHub `origin/main`을 fast-forward하여 최신 커밋 `a8fe1c1`을 반영했습니다.
+- 사후분석을 다음 3단계로 재구성했습니다.
+  - Stage 1: 여섯 controller의 성능 및 계산량 비교
+  - Stage 2: allocation/green, offset, VSL, ramp metering의 Trigger-Action-Mediator-Outcome 검증
+  - Stage 3: coupling player 및 정보교환 방향 ablation과 정량적 한계기여 분석
+- Stage 1 비교 controller를 다음 여섯 개로 확정했습니다.
+  - `WU-CD-F`
+  - `WU-MATCHED-STACKELBERG`
+  - `WU-CC-F`
+  - `PROPOSED-FOLLOWERS-ONLY`
+  - `PROPOSED-STACKELBERG`
+  - `PROPOSED-CENTRALIZED`
+- `docs/spec/16_six_controller_comparison.md`에 각 controller의 authority, Leader, follower,
+  centralized 구조와 공정 비교 규칙을 정의했습니다.
+- `docs/literature_grounded_post_analysis_plan.md`에 control mechanism event 분석과
+  coupling-information/player ablation을 정의했습니다.
+- Stage 3에는 `urban -> freeway`, `freeway -> urban` 정보의 directional marginal value,
+  bidirectional synergy와 Shapley-style contribution 계산식을 포함했습니다.
+- `docs/spec/11_reporting.md`와 `docs/spec/README_index.md`를 새 분석 구조에 맞게 갱신했습니다.
+
+### Notes
+
+- 이번 변경은 사후분석 및 controller 비교를 위한 문서 사양입니다.
+- 여섯 controller runner, control event analyzer와 player/information ablation 실행 코드는
+  아직 구현하지 않았습니다.
+
+### Validation
+
+- 대상 Markdown 파일의 UTF-8 decoding, code-fence balance와 trailing whitespace를 검사했습니다.
+- 기존 four-controller 및 fixed-reference 비교 명칭이 남아 있지 않음을 확인했습니다.

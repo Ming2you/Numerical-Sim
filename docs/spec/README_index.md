@@ -22,6 +22,7 @@ This folder splits the implementation specification by top-level section so an L
 - `13_implementation_order.md`
 - `14_definition_of_done.md`
 - `15_caveats.md`
+- `16_six_controller_comparison.md`
 
 ## Recommended use
 
@@ -29,5 +30,7 @@ This folder splits the implementation specification by top-level section so an L
 2. For traffic-model implementation, give `03_traffic_models.md` plus the relevant controller file only.
 3. For tests, give `10_tests.md` plus the module-specific section being tested.
 4. Keep `15_caveats.md` attached to every coding task.
+5. For benchmark implementation and post-analysis, also provide
+   `16_six_controller_comparison.md` and `../literature_grounded_post_analysis_plan.md`.
 
 Do not give the entire full spec to the coding agent unless the task requires cross-section integration.
