@@ -1,0 +1,39 @@
+{
+  "scenario": "peak_demand",
+  "horizon_sec": 720.0,
+  "control_intervals": 4,
+  "baseline_total_ttt": 154.51583125638473,
+  "baseline_urban_ttt": 96.32278016648581,
+  "baseline_freeway_ttt": 58.1930510898989,
+  "stackelberg_total_ttt": 158.36998375714938,
+  "stackelberg_urban_ttt": 126.28813987724561,
+  "stackelberg_freeway_ttt": 32.08184387990376,
+  "improvement_pct": -2.494341498489915,
+  "authority_ok": true,
+  "authority_violations": [],
+  "nash_converged_intervals": 4,
+  "mean_nash_iterations": 5.75,
+  "leader_candidate_counts": [
+    16.0,
+    16.0,
+    16.0,
+    16.0
+  ],
+  "selected_N_P_star": [
+    521.281,
+    495.21695,
+    521.281,
+    547.34505
+  ],
+  "selected_N_UF_star": [
+    4000.0,
+    6000.0,
+    4000.0,
+    6000.0
+  ],
+  "metering_active_intervals": 4,
+  "vsl_active_intervals": 2,
+  "green_active_intervals": 4,
+  "offset_active_intervals": 4,
+  "allocation_active_intervals": 4
+}

@@ -54,13 +54,54 @@ class Leader:
             )))
         nuf_values = sorted(nuf_values)
         np_values = sorted(np_values)
-        out = [LeaderAction(float(np_), float(nuf)) for np_ in np_values for nuf in nuf_values]
+        grid = [LeaderAction(float(np_), float(nuf)) for np_ in np_values for nuf in nuf_values]
+        required = [
+            LeaderAction(np_values[0], nuf_values[0]),
+            LeaderAction(np_values[0], nuf_values[-1]),
+            LeaderAction(np_values[-1], nuf_values[0]),
+            LeaderAction(np_values[-1], nuf_values[-1]),
+            LeaderAction(
+                float(np.clip(leader.N_P_crit_veh, np_lower, np_upper)),
+                float(min(nuf_values, key=lambda value: abs(value - heuristic_nuf))),
+            ),
+        ]
         if previous is not None:
-            out.append(LeaderAction(
+            required.append(LeaderAction(
                 float(np.clip(previous.N_P_star, np_lower, np_upper)),
-                previous.N_UF_star,
+                float(np.clip(previous.N_UF_star, nuf_values[0], nuf_values[-1])),
             ))
-        return out[:count + 1]
+        # 단순 Cartesian 앞부분 절단은 낮은 N_P 후보만 남긴다. 필수 corner/직전
+        # action을 먼저 보존하고, 남은 budget은 정규화된 (N_P,N_UF) 공간의
+        # farthest-point 순서로 채워 전체 후보 영역을 균형 있게 덮는다.
+        budget = min(len(grid), count + 1)
+        selected: List[LeaderAction] = []
+
+        def add_unique(action: LeaderAction) -> None:
+            if action not in selected and len(selected) < budget:
+                selected.append(action)
+
+        for action in required:
+            add_unique(action)
+
+        np_span = max(np_values[-1] - np_values[0], 1.0e-9)
+        nuf_span = max(nuf_values[-1] - nuf_values[0], 1.0e-9)
+        while len(selected) < budget:
+            remaining = [action for action in grid if action not in selected]
+            if not remaining:
+                break
+
+            def coverage_distance(action: LeaderAction) -> tuple[float, float, float]:
+                if not selected:
+                    return (float("inf"), action.N_P_star, action.N_UF_star)
+                min_distance = min(
+                    ((action.N_P_star - other.N_P_star) / np_span) ** 2
+                    + ((action.N_UF_star - other.N_UF_star) / nuf_span) ** 2
+                    for other in selected
+                )
+                return (float(min_distance), action.N_P_star, action.N_UF_star)
+
+            add_unique(max(remaining, key=coverage_distance))
+        return selected
 
     def _np_candidate_bounds(self, state: TrafficState) -> tuple[float, float]:
         """Calibration된 n_P_crit 주변으로 leader의 도시 누적 목표 후보를 제한한다."""

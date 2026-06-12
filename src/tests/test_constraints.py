@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-from src.controllers.distributed_coordinator import DistributedCoordinator, build_agent_specs
+from src.controllers.distributed_coordinator import AgentSolve, DistributedCoordinator, build_agent_specs
 from src.controllers.freeway_follower import FreewayFollower, FreewayFollowerResult
 from src.controllers.leader import Leader, LeaderAction
 from src.controllers.stackelberg_mpc import StackelbergMPCController
@@ -90,6 +90,48 @@ class ConstraintTests(unittest.TestCase):
             result.control.inflow_outflow_allocation["out_A_left"],
             boundary_out_total,
         )
+
+    def test_distributed_link_vsl_consensus_is_order_independent(self):
+        cfg = short_config()
+        coordinator = DistributedCoordinator(cfg)
+        solves = [
+            AgentSolve(agent_id="F_W0", objective=0.0, vsl={"FW_W": 100.0}),
+            AgentSolve(agent_id="F_W1", objective=0.0, vsl={"FW_W": 80.0}),
+            AgentSolve(agent_id="F_W2", objective=0.0, vsl={"FW_W": 60.0}),
+        ]
+        self.assertEqual(coordinator._aggregate_link_vsl(solves)["FW_W"], 60.0)
+        self.assertEqual(coordinator._aggregate_link_vsl(list(reversed(solves)))["FW_W"], 60.0)
+
+    def test_leaderless_metering_prediction_includes_upstream_mainline_flow(self):
+        cfg = short_config()
+        coordinator = DistributedCoordinator(cfg)
+        state = TrafficState.initial(cfg)
+        demand = DemandProfile(cfg, ScenarioConfig("test")).at(0.0)
+        agent = next(item for item in coordinator.freeway_agents if item.id == "F_W1")
+        upper = {ramp: cfg.network.ramp_capacity_veh_h[ramp] for ramp in agent.ramps}
+
+        state.freeway_flow["FW_W"][0] = 0.0
+        low_inflow_target = coordinator._leaderless_metering_target(agent, state, upper, demand)
+        state.freeway_flow["FW_W"][0] = 8000.0
+        high_inflow_target = coordinator._leaderless_metering_target(agent, state, upper, demand)
+
+        self.assertLess(high_inflow_target, low_inflow_target)
+
+    def test_leader_candidate_budget_covers_extremes_and_previous_action(self):
+        cfg = short_config()
+        state = TrafficState.initial(cfg)
+        demand = DemandProfile(cfg, ScenarioConfig("test")).at(0.0)
+        previous = ControlAction.fixed(cfg)
+        previous.N_P_star = 500.0
+        previous.N_UF_star = 3333.0
+        candidates = Leader(cfg).candidates(state, previous, demand)
+
+        pairs = {(round(c.N_P_star, 6), round(c.N_UF_star, 6)) for c in candidates}
+        np_values = [c.N_P_star for c in candidates]
+        nuf_values = [c.N_UF_star for c in candidates]
+        self.assertIn((round(min(np_values), 6), round(min(nuf_values), 6)), pairs)
+        self.assertIn((round(max(np_values), 6), round(max(nuf_values), 6)), pairs)
+        self.assertIn((500.0, 3333.0), pairs)
 
     def test_stackelberg_can_use_distributed_follower_solver(self):
         cfg = ExperimentConfig.from_file(

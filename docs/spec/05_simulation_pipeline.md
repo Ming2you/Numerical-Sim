@@ -15,8 +15,8 @@ baseline_modes:
 
 Definitions:
 
-- `no_control`: no active ramp metering, no VSL, fixed green time and offset
-- `fixed_signal_fixed_speed`: fixed signal plans and fixed speed limit; ramp flow follows demand/capacity only
+- `no_control`: no active ramp metering, no VSL, fixed green time and offset. Do not apply an additional inflow-outflow allocation cap; movement service is `saturation flow × actual green fraction`.
+- `fixed_signal_fixed_speed`: fixed signal plans and fixed speed limit; ramp flow follows demand/capacity only. Its neutral movement service semantics must match `no_control`.
 - `local_control_only`: freeway and urban controls operate independently without leader coordination
 
 The primary improvement rate should compare the proposed controller to `fixed_signal_fixed_speed` unless configured otherwise.

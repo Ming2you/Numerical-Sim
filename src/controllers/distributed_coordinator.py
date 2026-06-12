@@ -381,7 +381,7 @@ class DistributedCoordinator:
         else:
             # leaderless(spec 16.7): 전역 N_UF 목표 없이 agent가 local objective로 방출
             # 수준을 고른다 — 후보 분율을 1-구획 merge 밀도 예측으로 평가해 최소 비용 선택.
-            target = self._leaderless_metering_target(agent, state, upper)
+            target = self._leaderless_metering_target(agent, state, upper, demand)
         ramp_metering = _project_to_target(target, upper, weights)
         lane_profile, lane_diag = effective_lane_profile(state, self.cfg)
         all_rhos = state.freeway_density.get(agent.link, [])
@@ -425,6 +425,7 @@ class DistributedCoordinator:
         agent: AgentSpec,
         state: TrafficState,
         upper: Mapping[str, float],
+        demand: DemandStep,
     ) -> float:
         """leaderless freeway agent의 국소 metering 수준 선택.
 
@@ -441,10 +442,18 @@ class DistributedCoordinator:
         speed = max(state.freeway_speed[agent.link][merge_idx], net.v_min)
         seg_cap_veh = net.freeway_segment_length_km * net.freeway_lanes
         q_out = rho_merge * speed * net.freeway_lanes
+        if merge_idx > 0:
+            q_upstream = max(0.0, state.freeway_flow[agent.link][merge_idx - 1])
+        else:
+            q_upstream = max(0.0, demand.freeway_mainline.get(agent.link, 0.0))
         best_target, best_cost = total_upper, float("inf")
         for fraction in (1.0, 0.85, 0.7, 0.5):
             release = fraction * total_upper
-            rho_pred = max(0.0, rho_merge + (release - q_out) * dt_h / max(seg_cap_veh, 1.0e-9))
+            # Spec 3.1.2 conservation: merge 유입은 본선 상류 유량과 ramp release의 합이다.
+            rho_pred = max(
+                0.0,
+                rho_merge + (q_upstream + release - q_out) * dt_h / max(seg_cap_veh, 1.0e-9),
+            )
             held = (total_upper - release) * dt_h  # 잡아둔 차량수[veh] — 대기비용으로 환산.
             cost = (
                 self.cfg.freeway_follower.density_penalty * max(0.0, rho_pred - net.rho_crit)
@@ -530,7 +539,7 @@ class DistributedCoordinator:
 
     def _freeway_response(self, solves: list[AgentSolve]) -> FreewayFollowerResult:
         ramp_metering: Dict[str, float] = {}
-        vsl: Dict[str, float] = {}
+        vsl = self._aggregate_link_vsl(solves)
         objective = 0.0
         density_excess = 0.0
         metering_residual = 0.0
@@ -538,7 +547,6 @@ class DistributedCoordinator:
         min_receiving = 1.0
         for solve in solves:
             ramp_metering.update(solve.ramp_metering)
-            vsl.update(solve.vsl)
             objective += solve.objective
             density_excess += solve.infeasibility.get("density_excess", 0.0)
             metering_residual += solve.infeasibility.get("metering_tracking_residual", 0.0)
@@ -558,6 +566,22 @@ class DistributedCoordinator:
             },
         )
 
+    def _aggregate_link_vsl(self, solves: list[AgentSolve]) -> Dict[str, float]:
+        """segment agent의 제안을 하나의 link-level VSL actuator로 합의한다.
+
+        동일 link를 여러 agent가 소유한 것처럼 순서대로 덮어쓰지 않고, local
+        congestion constraint 중 가장 제한적인 제안을 consensus projection으로 쓴다.
+        """
+        by_link: Dict[str, list[float]] = {link: [] for link in self.cfg.network.freeway_links}
+        for solve in solves:
+            for link, value in solve.vsl.items():
+                by_link.setdefault(link, []).append(float(value))
+        maximum = max(self.cfg.freeway_follower.vsl_set)
+        return {
+            link: float(min(values)) if values else float(maximum)
+            for link, values in by_link.items()
+        }
+
     def _merge_agent_controls(
         self,
         leader: Optional[LeaderAction],
@@ -575,9 +599,9 @@ class DistributedCoordinator:
         diagnostics: Dict[str, float] = {}
         for solve in freeway_solves:
             ramp_metering.update(solve.ramp_metering)
-            vsl.update(solve.vsl)
             infeasibility.update(solve.infeasibility)
             diagnostics.update(solve.diagnostics)
+        vsl.update(self._aggregate_link_vsl(freeway_solves))
         for solve in urban_solves:
             green_times.update(solve.green_times)
             offsets.update(solve.offsets)

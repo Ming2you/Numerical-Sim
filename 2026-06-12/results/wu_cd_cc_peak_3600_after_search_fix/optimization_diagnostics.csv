@@ -1,0 +1,3 @@
+computation_time_sec,controller_id,solver_converged_rate,solver_evaluations
+3.01,WU-CD-F,1.0,820.0
+265.71,WU-CC-F,0.9,1600.0

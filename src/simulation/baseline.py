@@ -14,11 +14,9 @@ def baseline_control(
     demand: DemandStep,
     previous: ControlAction | None = None,
 ) -> ControlAction:
+    if mode in {"no_control", "fixed_signal_fixed_speed"}:
+        return ControlAction.uncontrolled(cfg)
     control = ControlAction.fixed(cfg)
-    if mode == "no_control":
-        return control
-    if mode == "fixed_signal_fixed_speed":
-        return control
     if mode == "local_control_only":
         nuf = min(cfg.network.total_ramp_capacity, sum(demand.ramp_arrival.values()))
         leader = LeaderAction(N_P_star=0.0, N_UF_star=nuf)

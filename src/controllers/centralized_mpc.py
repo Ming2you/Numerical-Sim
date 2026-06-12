@@ -168,25 +168,59 @@ class CentralizedMPC:
 
     # ---------- objective ----------
 
-    def _objective(self, states: List[TrafficState], control: ControlAction, previous: ControlAction) -> float:
+    def _objective(
+        self,
+        states: List[TrafficState],
+        control: ControlAction,
+        previous: ControlAction,
+        trajectory_ttt: float | None = None,
+    ) -> float:
         """J_WU_global(16.6)/J_PROPOSED_SYSTEM(16.9) 공통 형태 — TTS + 초과 패널티 + Δu."""
         net = self.cfg.network
         lc = self.cfg.leader
-        total = 0.0
-        for s in states:
-            total += s.total_urban_vehicles(net) + s.total_freeway_vehicles(net)
-            total += lc.w_P * max(0.0, s.protected_accumulation_veh(net) - lc.N_P_crit_veh)
-            total += lc.w_F * sum(
-                net.freeway_segment_length_km * net.freeway_lanes * max(0.0, rho - net.rho_crit)
-                for values in s.freeway_density.values()
-                for rho in values
-            )
+        if self.mode == "wu":
+            # Spec 16.6: Wu centralized objective는 coupled plant의 urban/freeway TTS와
+            # green/VSL variation이다. Proposed leader threshold penalty를 섞지 않는다.
+            if trajectory_ttt is None:
+                total = self.cfg.simulation.T_c_h * sum(
+                    s.total_urban_vehicles(net) + s.total_freeway_vehicles(net)
+                    for s in states
+                )
+            else:
+                total = float(trajectory_ttt)
+        else:
+            total = 0.0
+            for s in states:
+                total += s.total_urban_vehicles(net) + s.total_freeway_vehicles(net)
+                total += lc.w_P * max(0.0, s.protected_accumulation_veh(net) - lc.N_P_crit_veh)
+                total += lc.w_F * sum(
+                    net.freeway_segment_length_km * net.freeway_lanes * max(0.0, rho - net.rho_crit)
+                    for values in s.freeway_density.values()
+                    for rho in values
+                )
         # 제어 변화 패널티(green/VSL — Wu 식24의 Δu항과 동형; proposed는 offset/metering 포함).
-        smooth = 0.0
+        green_variation = 0.0
         for signal in net.signals:
-            smooth += abs(control.green_times.get(f"{signal}_p1", 0.0) - previous.green_times.get(f"{signal}_p1", 0.0))
+            green_variation += abs(
+                control.green_times.get(f"{signal}_p1", 0.0)
+                - previous.green_times.get(f"{signal}_p1", 0.0)
+            )
+        vsl_variation = 0.0
         for link in net.freeway_links:
-            smooth += abs(control.vsl.get(link, 0.0) - previous.vsl.get(link, 0.0))
+            vsl_variation += abs(control.vsl.get(link, 0.0) - previous.vsl.get(link, 0.0))
+        if self.mode == "wu":
+            # seconds와 km/h를 직접 더하지 않고 각 action range로 정규화한다.
+            smooth = (
+                self.cfg.urban_follower.green_smoothness_weight
+                * green_variation
+                / max(net.effective_green_total, 1.0e-9)
+                + self.cfg.freeway_follower.vsl_smoothness_weight
+                * vsl_variation
+                / max(self.cfg.freeway_follower.max_vsl_step, 1.0e-9)
+            )
+            return float(total + smooth)
+
+        smooth = green_variation + vsl_variation
         if self.mode == "proposed":
             for signal in net.signals:
                 delta = abs(control.offsets.get(signal, 0.0) - previous.offsets.get(signal, 0.0))
@@ -196,15 +230,25 @@ class CentralizedMPC:
         return float(total + 0.1 * smooth)
 
     def _predict(self, state: TrafficState, control: ControlAction, forecast: List[DemandStep]) -> List[TrafficState]:
+        return self._predict_with_ttt(state, control, forecast)[0]
+
+    def _predict_with_ttt(
+        self,
+        state: TrafficState,
+        control: ControlAction,
+        forecast: List[DemandStep],
+    ) -> tuple[List[TrafficState], float]:
         from src.simulation.coupling import run_coupled_interval
 
         s = state.copy()
         states: List[TrafficState] = []
+        total_ttt = 0.0
         for demand in forecast[: self.cfg.mpc.horizon_steps]:
-            run_coupled_interval(s, control, demand, self.cfg)
+            result = run_coupled_interval(s, control, demand, self.cfg)
+            total_ttt += result.urban_ttt + result.freeway_ttt
             s.time_sec += self.cfg.simulation.control_interval
             states.append(s.copy())
-        return states
+        return states, float(total_ttt)
 
     # ---------- decide ----------
 
@@ -225,13 +269,30 @@ class CentralizedMPC:
 
         def evaluate(vec: np.ndarray) -> tuple[float, ControlAction]:
             control = self._control_from_vector(np.clip(vec, lower, upper), names)
-            states = self._predict(state, control, forecast)
-            return self._objective(states, control, previous), control
+            states, trajectory_ttt = self._predict_with_ttt(state, control, forecast)
+            return self._objective(states, control, previous, trajectory_ttt), control
 
         # warm start = 직전 적용 제어, 비교 기준 = 고정 baseline.
         best_vec = np.clip(self._vector_from_control(previous, names), lower, upper)
         best_obj, best_control = evaluate(best_vec)
         evals = 1
+
+        # Sparse control improvement를 놓치지 않도록 각 차원의 bound를 먼저 평가한다.
+        # 모든 변수를 동시에 흔드는 random search만 사용하면 불필요한 variation penalty가
+        # 유효한 단일 green/VSL 변경을 가릴 수 있다.
+        coordinate_origin = best_vec.copy()
+        for index in range(len(best_vec)):
+            for value in (lower[index], upper[index]):
+                if evals >= budget or abs(value - coordinate_origin[index]) <= 1.0e-9:
+                    continue
+                cand = coordinate_origin.copy()
+                cand[index] = value
+                obj, control = evaluate(cand)
+                evals += 1
+                if obj < best_obj - 1.0e-9:
+                    best_obj, best_control = obj, control
+                    best_vec = np.clip(self._vector_from_control(control, names), lower, upper)
+
         stall = 0
         sigma = 0.35
         while evals < budget:
@@ -239,7 +300,8 @@ class CentralizedMPC:
             obj, control = evaluate(cand)
             evals += 1
             if obj < best_obj - 1e-9:
-                best_obj, best_control, best_vec = obj, control, np.clip(cand, lower, upper)
+                best_obj, best_control = obj, control
+                best_vec = np.clip(self._vector_from_control(control, names), lower, upper)
                 stall = 0
             else:
                 stall += 1

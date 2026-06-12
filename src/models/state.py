@@ -648,6 +648,27 @@ class ControlAction:
     diagnostics: Dict[str, Any] = field(default_factory=dict)
 
     @classmethod
+    def uncontrolled(cls, cfg: ExperimentConfig) -> "ControlAction":
+        """고정 신호와 자유 방출을 사용하는 물리적 no-control action을 만든다.
+
+        allocation을 비워 두면 urban plant가 movement saturation flow를 사용한다.
+        따라서 equal green fraction이 service capacity에 정확히 한 번만 적용된다.
+        """
+        net = cfg.network
+        phase_green = net.effective_green_total / 2.0
+        return cls(
+            ramp_metering={r: net.ramp_capacity_veh_h[r] for r in net.ramps},
+            vsl={link: max(cfg.freeway_follower.vsl_set) for link in net.freeway_links},
+            green_times={
+                f"{signal}_{phase}": phase_green
+                for signal in net.signals
+                for phase in ("p1", "p2")
+            },
+            offsets={signal: 0.0 for signal in net.signals},
+            inflow_outflow_allocation={},
+        )
+
+    @classmethod
     def fixed(cls, cfg: ExperimentConfig) -> "ControlAction":
         net = cfg.network
         green = {}

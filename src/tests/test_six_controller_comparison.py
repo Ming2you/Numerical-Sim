@@ -7,7 +7,7 @@ from src.analysis.authority import CONTROLLER_IDS, check_control_authority
 from src.analysis.free_flow_reference import compute_free_flow_reference
 from src.controllers.centralized_mpc import CentralizedMPC
 from src.controllers.distributed_coordinator import DistributedCoordinator
-from src.controllers.wu_distributed import WuDistributedController, WuLeaderAction
+from src.controllers.wu_distributed import WuDistributedController, WuLeaderAction, _wu_fixed_control
 from src.experiments.six_controller_comparison import (
     PAIRED_COMPARISONS,
     _ControllerAdapter,
@@ -17,6 +17,7 @@ from src.experiments.six_controller_comparison import (
 )
 from src.models.demand import DemandProfile, ScenarioConfig
 from src.models.state import ControlAction, ExperimentConfig, TrafficState
+from src.simulation.baseline import baseline_control
 
 
 def fast_config():
@@ -84,6 +85,77 @@ class SixControllerTests(unittest.TestCase):
         for cid in ("WU-CD-F", "WU-MATCHED-STACKELBERG", "WU-CC-F"):
             auth = check_control_authority(cid, self.results[cid]["control_rows"], self.cfg)
             self.assertTrue(auth["ok"], msg=f"{cid}: {auth['violations']}")
+
+    def test_no_control_matches_wu_neutral_physical_action(self):
+        cfg = fast_config()
+        state = TrafficState.initial(cfg)
+        demand = DemandProfile(cfg, ScenarioConfig("test")).at(0.0)
+        no_control = baseline_control("no_control", cfg, state, demand)
+        fixed_signal = baseline_control("fixed_signal_fixed_speed", cfg, state, demand)
+        wu_neutral = _wu_fixed_control(cfg)
+
+        self.assertEqual(no_control.inflow_outflow_allocation, {})
+        self.assertEqual(no_control, fixed_signal)
+        self.assertEqual(no_control.ramp_metering, wu_neutral.ramp_metering)
+        self.assertEqual(no_control.vsl, wu_neutral.vsl)
+        self.assertEqual(no_control.green_times, wu_neutral.green_times)
+        self.assertEqual(no_control.offsets, wu_neutral.offsets)
+
+    def test_wu_coupling_uses_forecast_demand_and_actual_green(self):
+        cfg = fast_config()
+        state = TrafficState.initial(cfg)
+        controller = WuDistributedController(cfg)
+        demand = DemandProfile(cfg, ScenarioConfig("test", freeway_scale=1.2)).at(0.0)
+        control = _wu_fixed_control(cfg)
+        movements = cfg.network.on_ramp_to_movement["R_D_W"]
+        state.urban_movement_queue[movements[0]] = 100.0
+        state.urban_movement_queue[movements[1]] = 0.0
+
+        equal = controller._coupling(state, control, demand)
+        control.green_times["D_p1"] = cfg.network.green_max
+        control.green_times["D_p2"] = cfg.network.effective_green_total - cfg.network.green_max
+        favored = controller._coupling(state, control, demand)
+
+        self.assertEqual(equal["mainline_FW_W"], demand.freeway_mainline["FW_W"])
+        self.assertGreater(favored["u_on_R_D_W"], equal["u_on_R_D_W"])
+
+    def test_wu_cd_and_cc_return_feasible_green_and_discrete_vsl(self):
+        cfg = fast_config()
+        state = TrafficState.initial(cfg)
+        profile = DemandProfile(cfg, ScenarioConfig("test"))
+        forecast = [
+            profile.at(step * cfg.simulation.control_interval)
+            for step in range(cfg.mpc.horizon_steps)
+        ]
+
+        cd = WuDistributedController(cfg).decide_with_info(state.copy(), forecast)
+        cc = CentralizedMPC(cfg, mode="wu").decide_with_info(state.copy(), forecast)
+        vsl_set = {float(v) for v in cfg.freeway_follower.vsl_set}
+        for control in (cd.control, cc.control):
+            self.assertTrue(all(float(v) in vsl_set for v in control.vsl.values()))
+            for signal in cfg.network.signals:
+                p1 = control.green_times[f"{signal}_p1"]
+                p2 = control.green_times[f"{signal}_p2"]
+                self.assertAlmostEqual(p1 + p2, cfg.network.effective_green_total)
+                self.assertGreaterEqual(p1, cfg.network.green_min)
+                self.assertGreaterEqual(p2, cfg.network.green_min)
+
+    def test_wu_cc_objective_uses_coupled_ttt_without_proposed_penalties(self):
+        cfg = fast_config()
+        state = TrafficState.initial(cfg)
+        for movement in cfg.network.urban_movements:
+            state.urban_movement_queue[movement] = 100.0
+        control = _wu_fixed_control(cfg)
+        controller = CentralizedMPC(cfg, mode="wu")
+
+        objective = controller._objective(
+            [state],
+            control,
+            control,
+            trajectory_ttt=12.5,
+        )
+
+        self.assertAlmostEqual(objective, 12.5)
 
     def test_wu_cd_has_no_leader(self):
         decisions = self.results["WU-CD-F"]["decision_rows"]

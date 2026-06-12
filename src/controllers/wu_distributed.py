@@ -8,9 +8,13 @@ from typing import Dict, Iterable, List, Mapping, Optional
 import numpy as np
 
 from src.models.demand import DemandStep
-from src.models.metanet import effective_desired_speed_kmh, segment_flow_veh_h
+from src.models.metanet import compute_ramp_release_flows, freeway_substep
 from src.models.state import ControlAction, ExperimentConfig, TrafficState
-from src.models.urban_queue_model import movement_specs
+from src.models.urban_queue_model import (
+    estimate_onramp_green_release_flows,
+    movement_specs,
+    off_ramp_capacity_by_freeway_link,
+)
 
 
 @dataclass(frozen=True)
@@ -37,19 +41,7 @@ class WuDecisionInfo:
 def _wu_fixed_control(cfg: ExperimentConfig) -> ControlAction:
     """Wu authority의 고정 요소 — offset 고정 0, metering=용량(no-metering 물리 유출),
     allocation 미사용(빈 dict → plant가 movement 포화유율 1400으로 fallback)."""
-    net = cfg.network
-    green = {}
-    phase_green = net.effective_green_total / 2.0
-    for signal in net.signals:
-        green[f"{signal}_p1"] = phase_green
-        green[f"{signal}_p2"] = phase_green
-    return ControlAction(
-        ramp_metering={r: net.ramp_capacity_veh_h[r] for r in net.ramps},
-        vsl={link: max(cfg.freeway_follower.vsl_set) for link in net.freeway_links},
-        green_times=green,
-        offsets={signal: 0.0 for signal in net.signals},
-        inflow_outflow_allocation={},
-    )
+    return ControlAction.uncontrolled(cfg)
 
 
 class WuDistributedController:
@@ -129,16 +121,22 @@ class WuDistributedController:
             y[f"arr_{signal}_p1"] = float(arr["p1"])
             y[f"arr_{signal}_p2"] = float(arr["p2"])
         # urban→freeway: ramp별 접근(x_on) no-metering 방출 추정 = min(대기+수요, green×포화).
-        for ramp, movements in net.on_ramp_to_movement.items():
-            queue = sum(max(0.0, state.urban_movement_queue.get(m, 0.0)) for m in movements)
-            arrival = max(0.0, demand.ramp_arrival.get(ramp, 0.0))
-            green_frac = 0.5
-            sat = len(movements) * net.movement_capacity_veh_h
-            y[f"u_on_{ramp}"] = float(min(queue / max(self.cfg.simulation.T_c_h, 1e-9) + arrival, green_frac * sat))
+        # Spec 3.3.1: movement별 queue/arrival와 실제 green 용량을 먼저 제한한 뒤 ramp별로 합친다.
+        # queue와 phase 용량을 각각 합산한 뒤 min을 취하면 phase split 효과가 소거된다.
+        onramp_release = estimate_onramp_green_release_flows(
+            state,
+            control,
+            demand,
+            self.cfg,
+            interval_h=self.cfg.simulation.T_c_h,
+        )
+        for ramp in net.ramps:
+            y[f"u_on_{ramp}"] = float(onramp_release.get(ramp, 0.0))
         # freeway boundary 상태(진단·잔차용).
         for link in net.freeway_links:
             rhos = state.freeway_density.get(link, [])
             y[f"rho_{link}"] = float(np.mean(rhos)) if rhos else 0.0
+            y[f"mainline_{link}"] = float(max(0.0, demand.freeway_mainline.get(link, 0.0)))
         return y
 
     # ---------- urban agent local solve ----------
@@ -213,6 +211,7 @@ class WuDistributedController:
         link: str,
         state: TrafficState,
         coupling: Mapping[str, float],
+        demand: DemandStep,
         previous: ControlAction,
         leader: Optional[WuLeaderAction],
     ) -> tuple[float, float, int]:
@@ -224,17 +223,9 @@ class WuDistributedController:
         net = self.cfg.network
         sim = self.cfg.simulation
         horizon = max(1, self.cfg.mpc.horizon_steps)
-        dt_h = sim.T_c_h
-        n_seg = net.freeway_segments_per_link
-        length = net.freeway_segment_length_km * n_seg
-        lanes = float(net.freeway_lanes)
-        rho0 = float(np.mean(state.freeway_density.get(link, [0.0])))
-        ramp_in = sum(
-            float(coupling.get(f"u_on_{ramp}", 0.0))
-            for ramp in net.ramps
-            if net.ramp_to_freeway.get(ramp) == link
-        )
-        mainline_in = 1650.0  # 결합변수에 본선 수요가 없으므로 공칭값(진단용 경량 모델).
+        dt_h = sim.T_f_h
+        # 단일 평균-density 근사는 낮은 VSL이 outflow만 줄여 최고 VSL을 구조적으로
+        # 선택하므로, 동일 multi-segment METANET 식으로 후보를 평가한다.
         prev_vsl = float(previous.vsl.get(link, max(self.cfg.freeway_follower.vsl_set)))
         smooth_w = self.cfg.freeway_follower.vsl_smoothness_weight
         vsl_set = sorted(float(v) for v in self.cfg.freeway_follower.vsl_set)
@@ -244,20 +235,71 @@ class WuDistributedController:
         best_vsl, best_obj = prev_vsl, float("inf")
         evals = 0
         for vsl in candidates:
-            rho = rho0
+            probe = state.copy()
+            candidate_control = ControlAction(
+                ramp_metering=dict(previous.ramp_metering),
+                vsl=dict(previous.vsl),
+                green_times=dict(previous.green_times),
+                offsets=dict(previous.offsets),
+                inflow_outflow_allocation={},
+            )
+            candidate_control.vsl[link] = float(vsl)
             cost = 0.0
             for _ in range(horizon):
-                vsl_active = vsl < max(vsl_set) - 0.5
-                v_eff = effective_desired_speed_kmh(
-                    rho, net.v_free, net.rho_crit, vsl, net.alpha_vsl, vsl_active, net.metanet_a_m,
-                )
-                q_out = segment_flow_veh_h(rho, min(v_eff, vsl if vsl_active else net.v_free), lanes)
-                rho = max(0.0, rho + (mainline_in + ramp_in - q_out) * dt_h / max(length * lanes, 1e-9))
-                cost += length * lanes * rho * dt_h
-                cost += self.cfg.freeway_follower.density_penalty * max(0.0, rho - net.rho_crit) * dt_h
+                for _ in range(sim.K_cf):
+                    # urban->freeway coupling [veh/h]을 ramp reservoir에 넣은 뒤,
+                    # no-metering receiving constraint로 실제 freeway 진입량을 계산한다.
+                    for ramp in net.ramps:
+                        approach_flow = max(0.0, float(coupling.get(f"u_on_{ramp}", 0.0)))
+                        probe.ramp_queue[ramp] = min(
+                            net.ramp_queue_max_veh,
+                            max(0.0, probe.ramp_queue.get(ramp, 0.0)) + approach_flow * dt_h,
+                        )
+                    ramp_release, ramp_diag = compute_ramp_release_flows(
+                        probe,
+                        candidate_control,
+                        demand,
+                        self.cfg,
+                        include_current_arrivals=False,
+                    )
+                    for ramp, release in ramp_release.items():
+                        probe.ramp_queue[ramp] = max(
+                            0.0,
+                            probe.ramp_queue.get(ramp, 0.0) - max(0.0, release) * dt_h,
+                        )
+                    offramp_capacity = off_ramp_capacity_by_freeway_link(
+                        probe.copy(),
+                        self.cfg,
+                        interval_h=dt_h,
+                    )
+                    freeway_substep(
+                        probe,
+                        candidate_control,
+                        demand,
+                        self.cfg,
+                        offramp_capacity_veh_h=offramp_capacity,
+                        ramp_release_veh_h=ramp_release,
+                        ramp_release_diagnostics=ramp_diag,
+                        update_ramp_queues=False,
+                        include_ramp_queue_ttt=False,
+                    )
+
+                    # Wu local TTS: 해당 freeway agent의 segment 차량과 연결 ramp queue.
+                    link_vehicles = sum(probe.freeway_vehicle_count_by_link(net).get(link, []))
+                    link_ramp_queue = sum(
+                        max(0.0, probe.ramp_queue.get(ramp, 0.0))
+                        for ramp in net.ramps
+                        if net.ramp_to_freeway.get(ramp) == link
+                    )
+                    density_excess = sum(
+                        max(0.0, rho - net.rho_crit)
+                        for rho in probe.freeway_density.get(link, [])
+                    )
+                    cost += (link_vehicles + link_ramp_queue) * dt_h
+                    cost += self.cfg.freeway_follower.density_penalty * density_excess * dt_h
             cost += smooth_w * abs(vsl - prev_vsl)
             if leader is not None:
-                n_pred = rho * length * lanes
+                n_pred = sum(probe.freeway_vehicle_count_by_link(net).get(link, []))
                 cost += self.cfg.leader.w_F * max(0.0, n_pred - self._omega_f[link] * leader.n_f_star)
             evals += 1
             if cost < best_obj:
@@ -291,7 +333,14 @@ class WuDistributedController:
                 control.green_times[f"{signal}_p2"] = net.effective_green_total - p1
                 evals += e
             for link in net.freeway_links:
-                vsl, _, e = self._solve_freeway_agent(link, state, coupling, control, leader)
+                vsl, _, e = self._solve_freeway_agent(
+                    link,
+                    state,
+                    coupling,
+                    demand,
+                    control,
+                    leader,
+                )
                 control.vsl[link] = vsl
                 evals += e
             new_coupling = self._coupling(state, control, demand)
