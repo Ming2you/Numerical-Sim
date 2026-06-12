@@ -1,0 +1,3 @@
+control,directional_accuracy,event_id,mediator_change,outcome_actual_ttt,outcome_counterfactual_ttt,outcome_gain,response_delay_intervals,shifted_subsystem_delta,status,t0_step,threshold,trigger_value
+allocation_green,True,allocation_green_0,"{""delta_B_in"": -0.06102084407754524, ""delta_departures"": 457.93818147202524}",278.7451362303625,289.5618508969387,10.816714666576217,0,1.3092176648019205,MECHANISM_REPRODUCED,0,0.03,0.12936762602515506
+allocation_green,True,allocation_green_4,"{""delta_B_in"": -0.04880304033298897, ""delta_departures"": -16.96740502126636}",465.18079276048326,486.05886666228855,20.878073901805294,0,3.6734226399338468,MECHANISM_REPRODUCED,4,0.03,0.10619680287942276

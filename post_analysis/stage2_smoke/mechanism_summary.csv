@@ -1,0 +1,5 @@
+challenged_event_count,congestion_shift_event_count,control,correctly_inactive_event_count,directional_accuracy,mean_outcome_gain_veh_h,mechanism_success_rate,outcome_success_rate,response_delay_mean_intervals,unnecessary_activation_rate
+2,0,allocation_green,0,1.0,15.847394284190756,1.0,1.0,0.0,0.0
+1,0,offset,0,1.0,0.2687131357883459,1.0,1.0,0.0,0.0
+2,0,vsl,0,0.0,-0.8791226341647587,0.0,0.0,0.0,0.0
+2,0,metering,0,0.0,-0.37408956619293576,0.0,0.0,0.0,0.0

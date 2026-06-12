@@ -271,3 +271,35 @@ ProposedCentralizationGap +54.4(+15.5%), WuCentralizationGap +177.0, LeaderPacka
 
 - 1800s 단축 horizon, peak 단일 시나리오, seed 42 단일 — 본 비교는 풀런 매트릭스에서.
 - Wu 분산 local 모델은 경량 근사(원문 MILP/SQP 아님) — fidelity_matrix.md에 기록.
+
+---
+
+# 추가 작업 — Stage 2·3 구현 + 3단계 사후분석 smoke 완료
+
+## Stage 2 (메커니즘 검증, `src/analysis/stage2_mechanism.py` + runner)
+
+- traced closed loop(interval 시작 상태 보존) → trigger 검출(allocation 불균형/회랑 방향성/
+  밀도비/receiving 붕괴) → Trigger→Action→Mediator→Outcome event 분류(6상태) →
+  **frozen-control replay counterfactual**(대상 control만 neutral, 나머지 적용값 유지).
+- smoke(peak 1800s): allocation/green 메커니즘 재현율 1.0·이득 +15.85 veh·h, offset 재현
+  +0.27, vsl/metering은 warmup 조기 활성으로 중립~소폭 음수(풀런 재평가 대상, 리포트에
+  한계 명시).
+
+## Stage 3 (coupling ablation, coordinator 확장 + runner)
+
+- `DistributedCoordinator(ablation=...)` 8모드: 정보 차단(u→f/f→u/양방향/LOCAL_ONLY)은
+  결합변수·freeway_response 소비만 차단(물리 결합·차량 이동 유지 — 테스트로 검증),
+  FIXED_*는 coupling player(U_D/U_F, merge·off-ramp agent)를 고정 정책으로 대체.
+  잔여 player·leader는 구조적으로 재최적화.
+- smoke: **Value_U_to_F +83.7 ≫ Value_F_to_U +0.3, Synergy ≈ 0(가산적)**,
+  LOCAL_ONLY=NO_CROSS(정보 소비자는 coupling player뿐), player 가치 Urban +26.5/
+  Freeway +58.9/All +19.7(부분 대체성 시사 — 풀런 확인 필요).
+- 일관성: FULL_COUPLING(617.2) = Stage 1 PROPOSED-STACKELBERG(617.2) 정확 일치.
+
+## 마무리
+
+- 신규 테스트 5종(`test_post_analysis.py`): ablation 8모드 존재/오류, §12 수식 산술 검증
+  (Shapley 분해 합 포함), 물리 결합 불변, FIXED player 고정, Stage 2 event smoke.
+  **전체 스위트 99/99 통과.**
+- 최종 리포트: `post_analysis/final_post_analysis_report.md` (spec 11.2 구조, smoke 기준선
+  + 주장 한계 명시). 풀 매트릭스(시나리오×seed×7200s)는 후속 실행 명령으로 문서화.

@@ -1,0 +1,6 @@
+ablation,computation_time_sec,freeway_ttt,leader_reoptimized,nash_iterations_total,offramp_accepted_veh,onramp_transfer_veh,physical_coupling_active,remaining_players_reoptimized,terminal_total_vehicles,total_ttt,urban_ttt,w_r_peak_veh,x_on_peak_veh
+FULL_COUPLING,117.31,76.572,True,58,457.3,1548.2,True,True,1923.9,617.195,540.623,20.3,992.7
+NO_U_TO_F_INFO,118.58,88.652,True,54,442.5,1441.5,True,True,2144.6,700.906,612.255,101.6,1062.7
+NO_F_TO_U_INFO,117.88,75.964,True,58,456.2,1537.3,True,True,1928.7,617.488,541.524,20.3,993.3
+NO_CROSS_NETWORK_INFO,118.19,86.464,True,57,435.8,1409.6,True,True,2174.2,701.383,614.919,101.6,1073.6
+LOCAL_ONLY_COUPLING_PLAYERS,117.9,86.464,True,57,435.8,1409.6,True,True,2174.2,701.383,614.919,101.6,1073.6

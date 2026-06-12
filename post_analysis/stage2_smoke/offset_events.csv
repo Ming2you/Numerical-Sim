@@ -1,0 +1,2 @@
+control,directional_accuracy,event_id,mediator_change,outcome_actual_ttt,outcome_counterfactual_ttt,outcome_gain,response_delay_intervals,shifted_subsystem_delta,status,t0_step,threshold,trigger_value
+offset,True,offset_2,"{""delta_urban_ttt_rate"": 0.0}",378.10599550090956,378.3747086366979,0.2687131357883459,0,-0.08528646390988115,MECHANISM_REPRODUCED,2,0.25,0.2918980186663363

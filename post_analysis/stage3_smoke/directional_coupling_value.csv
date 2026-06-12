@@ -1,0 +1,8 @@
+metric,value
+Value_U_to_F_given_F_to_U,83.711
+Value_F_to_U_given_U_to_F,0.293
+Phi_U_to_F,83.803
+Phi_F_to_U,0.385
+UrbanCouplingPlayerValue,26.464
+FreewayCouplingPlayerValue,58.907
+AllCouplingPlayersValue,19.699

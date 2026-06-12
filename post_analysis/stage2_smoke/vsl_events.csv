@@ -1,0 +1,3 @@
+control,directional_accuracy,event_id,mediator_change,outcome_actual_ttt,outcome_counterfactual_ttt,outcome_gain,response_delay_intervals,shifted_subsystem_delta,status,t0_step,threshold,trigger_value
+vsl,False,vsl_3,"{""delta_density_exceedance"": 9.25}",422.3923029625418,421.5271941031329,-0.865108859408906,0,-0.9204057913517047,WRONG_DIRECTION,3,0.85,1.0
+vsl,False,vsl_6,"{""delta_density_exceedance"": 1.0}",338.44997929859977,337.55684288967916,-0.8931364089206113,0,-0.9686192390961423,WRONG_DIRECTION,6,0.85,1.0

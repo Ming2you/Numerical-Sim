@@ -209,17 +209,63 @@ def _project_to_target(target: float, upper: Mapping[str, float], weights: Mappi
     return {key: float(min(max(value, 0.0), upper[key])) for key, value in release.items()}
 
 
+ABLATION_MODES = (
+    "FULL_COUPLING",
+    "NO_U_TO_F_INFO",
+    "NO_F_TO_U_INFO",
+    "NO_CROSS_NETWORK_INFO",
+    "LOCAL_ONLY_COUPLING_PLAYERS",
+    "FIXED_URBAN_COUPLING_PLAYERS",
+    "FIXED_FREEWAY_COUPLING_PLAYERS",
+    "FIXED_ALL_COUPLING_PLAYERS",
+)
+
+
 class DistributedCoordinator:
     """Wu §IV-D 형태의 agent별 follower coordinator.
 
     이 1차 구현은 기존 follower 휴리스틱을 재사용하되, 적용 변수는 agent 소유 변수로
     제한하고 coupling variable 변화량으로 반복 종료를 판단한다.
-    """
 
-    def __init__(self, cfg: ExperimentConfig):
+    Stage 3 ablation(plan §10~§11): physical 결합·차량 이동은 plant에 그대로 두고,
+    여기서 strategic 정보 교환(u→f 예측 방출, f→u 압력)만 차단하거나 coupling player
+    (U_D/U_F, merge·off-ramp freeway agent)의 결정을 고정 정책으로 대체한다.
+    잔여 player와 leader는 변경된 game 기준으로 매 호출 재최적화된다."""
+
+    def __init__(self, cfg: ExperimentConfig, ablation: str = "FULL_COUPLING"):
+        if ablation not in ABLATION_MODES:
+            raise ValueError(f"Unknown ablation mode: {ablation}")
         self.cfg = cfg
+        self.ablation = ablation
         self.urban_agents, self.freeway_agents = build_agent_specs(cfg)
         self.urban_follower = UrbanFollower(cfg)
+        # coupling player 식별(plan §9.2): ramp/off-ramp 결합을 가진 agent — topology에서 자동.
+        self.coupling_urban_ids = {a.id for a in self.urban_agents if a.ramps or a.off_ramps}
+        self.coupling_freeway_ids = {a.id for a in self.freeway_agents if a.ramps or a.off_ramps}
+
+    def _block_u_to_f(self, agent: AgentSpec) -> bool:
+        """이 freeway agent가 urban 예측 정보(u_on 등)를 보면 안 되는가."""
+        if self.ablation in {"NO_U_TO_F_INFO", "NO_CROSS_NETWORK_INFO"}:
+            return True
+        return self.ablation == "LOCAL_ONLY_COUPLING_PLAYERS" and agent.id in self.coupling_freeway_ids
+
+    def _block_f_to_u(self, agent: AgentSpec) -> bool:
+        """이 urban agent가 freeway 예측 압력/예측 off-ramp 정보를 보면 안 되는가."""
+        if self.ablation in {"NO_F_TO_U_INFO", "NO_CROSS_NETWORK_INFO"}:
+            return True
+        return self.ablation == "LOCAL_ONLY_COUPLING_PLAYERS" and agent.id in self.coupling_urban_ids
+
+    def _urban_player_fixed(self, agent: AgentSpec) -> bool:
+        return (
+            self.ablation in {"FIXED_URBAN_COUPLING_PLAYERS", "FIXED_ALL_COUPLING_PLAYERS"}
+            and agent.id in self.coupling_urban_ids
+        )
+
+    def _freeway_player_fixed(self, agent: AgentSpec) -> bool:
+        return (
+            self.ablation in {"FIXED_FREEWAY_COUPLING_PLAYERS", "FIXED_ALL_COUPLING_PLAYERS"}
+            and agent.id in self.coupling_freeway_ids
+        )
 
     def solve(
         self,
@@ -248,13 +294,17 @@ class DistributedCoordinator:
         iteration = 0
 
         for iteration in range(1, self.cfg.mpc.max_nash_iter + 1):
+            # FIXED_* ablation: coupling player의 strategic 결정을 고정 정책으로 대체.
+            # physical subsystem은 그대로 — strategic controller role만 제거(plan §11).
             freeway_solves = [
-                self._solve_freeway_agent(agent, state, leader, first_demand, current, coupling)
+                self._fixed_freeway_solve(agent) if self._freeway_player_fixed(agent)
+                else self._solve_freeway_agent(agent, state, leader, first_demand, current, coupling)
                 for agent in self.freeway_agents
             ]
             freeway_response = self._freeway_response(freeway_solves)
             urban_solves = [
-                self._solve_urban_agent(agent, state, leader, first_demand, freeway_response, current, allocation_plan)
+                self._fixed_urban_solve(agent) if self._urban_player_fixed(agent)
+                else self._solve_urban_agent(agent, state, leader, first_demand, freeway_response, current, allocation_plan)
                 for agent in self.urban_agents
             ]
             candidate = self._merge_agent_controls(
@@ -320,7 +370,9 @@ class DistributedCoordinator:
                 1.0,
             ))
             min_receiving = min(min_receiving, receiving)
-            urban_release = max(0.0, coupling.get(f"u_on_{ramp}", 0.0))
+            # NO_U_TO_F/LOCAL_ONLY ablation: urban 예측 방출 정보 차단 — 측정된 현재
+            # w_r만 사용(zero-order hold). 물리 차량 이동은 plant에서 그대로 일어난다.
+            urban_release = 0.0 if self._block_u_to_f(agent) else max(0.0, coupling.get(f"u_on_{ramp}", 0.0))
             available = state.ramp_queue.get(ramp, 0.0) / max(dt_h, 1.0e-9) + urban_release
             upper[ramp] = min(net.ramp_capacity_veh_h[ramp], available, net.freeway_capacity_veh_h * receiving)
             weights[ramp] = state.ramp_queue.get(ramp, 0.0) + urban_release * self.cfg.simulation.T_c_h + 1.0
@@ -429,6 +481,10 @@ class DistributedCoordinator:
         current: ControlAction,
         allocation_plan: AllocationResult,
     ) -> AgentSolve:
+        # NO_F_TO_U/LOCAL_ONLY ablation: freeway 예측 압력 정보 차단 — urban은 측정된
+        # 현재 off-ramp 도착(plant 경유)만 disturbance로 받는다.
+        if self._block_f_to_u(agent):
+            freeway_response = None
         result = self.urban_follower.solve(state.copy(), leader, demand, freeway_response, current, allocation_plan)
         specs = movement_specs(self.cfg)
         green = {
@@ -557,6 +613,40 @@ class DistributedCoordinator:
             delta = float(np.clip(delta, -max_step, max_step))
             out[signal] = float((prev + delta) % cycle)
         return out
+
+    def _fixed_urban_solve(self, agent: AgentSpec) -> AgentSolve:
+        """FIXED_URBAN_COUPLING_PLAYERS: green 50:50·offset 0·allocation 0.5cap 고정 정책."""
+        net = self.cfg.network
+        fixed = ControlAction.fixed(self.cfg)
+        return AgentSolve(
+            agent_id=agent.id,
+            objective=0.0,
+            green_times={
+                f"{agent.signal}_p1": fixed.green_times[f"{agent.signal}_p1"],
+                f"{agent.signal}_p2": fixed.green_times[f"{agent.signal}_p2"],
+            },
+            offsets={agent.signal: 0.0},
+            allocation={m: fixed.inflow_outflow_allocation.get(m, 0.5 * net.movement_capacity_veh_h)
+                        for m in agent.movements},
+            diagnostics={f"agent_{agent.id}_fixed_policy": 1.0},
+        )
+
+    def _fixed_freeway_solve(self, agent: AgentSpec) -> AgentSolve:
+        """FIXED_FREEWAY_COUPLING_PLAYERS: VSL=max·metering=용량(neutral) 고정 정책."""
+        net = self.cfg.network
+        return AgentSolve(
+            agent_id=agent.id,
+            objective=0.0,
+            ramp_metering={r: net.ramp_capacity_veh_h[r] for r in agent.ramps},
+            vsl={agent.link: max(self.cfg.freeway_follower.vsl_set)},
+            infeasibility={
+                "metering_tracking_residual": 0.0,
+                "density_excess": 0.0,
+                "min_ramp_receiving_factor": 1.0,
+                "ramp_projection_first_step_capacity": sum(net.ramp_capacity_veh_h[r] for r in agent.ramps),
+            },
+            diagnostics={f"agent_{agent.id}_fixed_policy": 1.0},
+        )
 
     def _clamp_vsl_to_reference(
         self,
