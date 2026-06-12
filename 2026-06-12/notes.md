@@ -143,3 +143,59 @@ VSL/metering/offset/green 시계열 30장 생성(`2026-06-12/results/actuator_pl
   1.32km@50km/h=95s. 권고: 현 단계 offset 제외 또는 spillback 라운드에서 위상 모델 추가
   후 재작성(연구자 결정).
 - **green ✓**: p1 비율이 큐 압력/allocation에 따라 실제로 가동(신호 제어의 실효 채널).
+
+---
+
+# 추가 작업 — plant cycle 위상(offset) 모델 + corridor offset 휴리스틱 (옵션 (ii) 채택)
+
+사용자 결정: offset을 제거하지 않고 plant에 cycle 위상(플래툰 도착–green 정렬)을 모델링한 뒤
+urban 속도·실제 인접 기반으로 휴리스틱 재작성, 실제 동작 검증까지.
+
+## 구현
+
+1. **plant** (`urban_queue_model._phase_green_fraction`): substep 시간 기반 green window
+   (이진+경계분수). cycle 구조 [p1][lost/2][p2][lost/2], offset만큼 평행이동 — offset이
+   동역학에 들어가는 유일한 지점. cycle 평균 서비스량은 기존(분수 green)과 동일해 회계 정합.
+   plant 호출부(551/587)만 시간 기반, 예측 헬퍼(estimate)는 평균 유지.
+2. **offset 휴리스틱** (`urban_follower._offsets` 전면 재작성): t_link = 220×6m/50km/h
+   = 95.04s(모델 정합). 회랑 = leg 인접 기반 상단 A–B–C(EW, p2 시작 정렬), 수직 A–D(NS,
+   p1 정렬), 하단 D–(E)–F(2링크). 진행 방향 = 회랑별 양방향 부하(링크 점유+하류 대기열)
+   비교로 매 interval 선택. green split 차이는 p2_start 보정항으로 반영. 앵커 A,
+   max_offset_step(15s) 모듈러 클램프. (freeway 속도·enumerate 선형 가정 제거 — round-4 ③ 해소.)
+
+## 검증 (3층)
+
+- **단위 6종** (`test_signal_phase_model.py`): green window 패턴(p1 [0,56)+경계 0.2,
+  cycle 평균 보존 Σ=56s, offset 평행이동), **정렬(95s) vs 비정렬(35s) 플래툰 실험 —
+  정렬이 TTT 우위**(offset이 실제 물리 효과), 휴리스틱 수렴(B−A=C−B=95, F−D=190),
+  부하 방향 전환, step 제약.
+- **ablation 정량 (peak 7200s, 동일 config)**: with-offset 6,481.1 vs without 6,827.8 →
+  **offset 기여 346.7 veh·h (TTT −5.1%)**.
+- **시계열**: D는 95(A→D 남행)에 고정 수렴, B/C/F는 회랑 부하·split에 따라 시간별 이동
+  (`2026-06-12/results/actuator_plots/peak_phase_*.svg`).
+
+## 파급 정합 (plant가 바뀌었으므로)
+
+- **n_crit 재calibration**: 476.801 → **521.281** (`outputs/calib_phasemodel`, 내부 정점,
+  production 20,591 veh/h). config·test_metanet 갱신.
+- **펄스 인공물 2건 수정** (지표가 펄스 동역학을 오독):
+  1. metering 잔차: no_meter의 available=w_r/dt가 재고 10대를 10초 창 유량 3,600veh/h로
+     환산하는 stock/flow 범주 오류(이전 라운드 정의의 잔여 결함이 펄스에서 표면화).
+     재정의 = 상한 초과 + "목표 미달이면서 w_r이 실제 누적된 양"(cycle 정렬 시점 비교,
+     interval 수준 채점, 큐 상한 고착 시 전액). 363 → **28.3**.
+  2. net_inflow 추적: interval(180s)=1.5 cycle이라 endpoint N_P 표본이 앨리어싱 —
+     interval 평균 N_P로 측정. `N_P_feedback_horizon_h` 1.0→1.5(진동 평활) — 추적
+     136→**88.1**, TTT도 +15.5→+18.1% 동반 개선.
+- acceptance 문서에 cycle 정렬 채점 의미론 명문화.
+
+## 최종 결과 (peak 7200s distributed, v4)
+
+**종합 verdict PASS (dominant failure: none)** — Total TTT **+18.08%**, metering 28.3,
+vsl ✓(13 active), balance ✓(B_in 0.014, 추적 88.1), green·offset ✓. 테스트 76/76.
+리포트 사본 `2026-06-12/results/phase_peak_full7200_v4_PASS_report.md`.
+
+## 남은 것
+
+- offset 진행시간은 빈 링크 기준 95s 고정 — 혼잡 시 실제 통과시간이 길어지는 것(점유 따라
+  최대 ~190s)을 반영하는 상태 적응형 t_link는 후속 옵션.
+- 다른 시나리오들의 게이트 잔여(무부하 balance 등 3범주)는 이전 라운드 결정 대기 그대로.

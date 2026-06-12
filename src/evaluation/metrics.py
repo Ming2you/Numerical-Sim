@@ -74,7 +74,9 @@ def _net_inflow_tracking_from_rows(rows: list, cfg: ExperimentConfig) -> float |
     기존 row 지표(realized = gross 서비스 유량)는 처리량 자체를 벌점화하는 stale
     정의다. feedback 법칙 (N_P_star−N_P)/horizon 은 누적 변화율 목표이므로, 같은
     horizon 창에서 (N_P(t)−N_P(t−H))/H 와 창 평균 목표를 비교한다."""
-    accs = [r.get("urban_accumulation_veh") for r in rows]
+    # cycle 위상 plant에서 endpoint N_P는 신호 cycle(120s)과 interval(180s)의
+    # 비정합으로 앨리어싱된다 — interval 평균 N_P가 있으면 그것을 쓴다.
+    accs = [r.get("urban_accumulation_mean_veh", r.get("urban_accumulation_veh")) for r in rows]
     targets = [r.get("net_inflow_target") for r in rows]
     if len(rows) < 2 or any(v is None for v in accs) or any(v is None for v in targets):
         return None

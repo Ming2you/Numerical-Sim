@@ -35,11 +35,15 @@ ImprovementRate(%) = 100 * (Metric_proposed - Metric_baseline) / max(abs(Metric_
 Pass conditions:
 
 - Mean total metering error is within `eps_F`, or infeasibility is explicitly logged.
-  - `N_UF_star` is a ceiling-type target: the tracking error is computed against the
-    achievable target `min(N_UF_star, no-meter feasible release)`. Releasing less than
-    `N_UF_star` because demand or receiving space is insufficient is correct behavior,
-    not a tracking failure; the raw-target gap is reported separately via
-    `metering_target_infeasible`.
+  - `N_UF_star` is a ceiling-type target scored asymmetrically at the control-interval
+    level: (a) releasing more than the target is an over-release violation; (b) releasing
+    less counts only to the extent that the ramp reservoir actually accumulated
+    (cycle-aligned `w_r` growth, or the reservoir pegged at capacity). Releasing less
+    than `N_UF_star` because demand is insufficient is correct behavior, not a tracking
+    failure; the raw-target gap is reported separately via `metering_target_infeasible`.
+    Queue growth is measured between cycle-aligned samples because the signal-phase
+    plant makes `w_r` oscillate within each cycle (per-`T_f` rectified differences
+    would misread pulse buffering as withheld vehicles).
 - Ramp queue overflow duration is within tolerance.
 - Metering rates are nonnegative and do not exceed ramp capacities.
 

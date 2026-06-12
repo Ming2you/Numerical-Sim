@@ -183,17 +183,71 @@ class UrbanFollower:
             p1_new = total - p2_new
         return float(p1_new), float(p2_new)
 
-    def _offsets(self, state: TrafficState, previous: Optional[ControlAction]) -> Dict[str, float]:
+    def _offsets(
+        self,
+        state: TrafficState,
+        previous: Optional[ControlAction],
+        green_times: Optional[Dict[str, float]] = None,
+    ) -> Dict[str, float]:
+        """corridor 진행(green wave) offset — urban 속도·실제 leg 인접 기반.
+
+        plant가 cycle 위상을 모델링하므로(`_phase_green_fraction`), 인접 신호의
+        해당 축 phase 시작이 링크 통과시간(t_link = storage×차길이/urban 속도 ≈95s)
+        만큼 어긋나게 offset을 정한다. 진행 방향은 회랑별 양방향 부하(링크 점유 +
+        하류 접근 대기열)로 매 interval 선택 — 상태에 따라 신호별·시간별로 움직인다.
+        회랑: 상단 A–B–C(EW, p2 정렬), 수직 A–D(NS, p1 정렬), 하단 D–(E)–F(EW,
+        p2 정렬, E는 비통제라 2링크 통과시간). 앵커는 A(이전 offset 유지)."""
         net = self.cfg.network
         uc = self.cfg.urban_follower
+        cycle = max(net.cycle_length, 1.0e-9)
+        prev = previous.offsets if previous else {}
+        green = green_times or {}
+        default_green = net.effective_green_total / 2.0
+        link_len_km = float(net.grid_link_storage_veh) * net.urban_avg_vehicle_length_m / 1000.0
+        t_link = link_len_km / max(net.urban_avg_speed_km_h, 1.0e-9) * 3600.0
+
+        def p2_start(signal: str) -> float:
+            return float(green.get(f"{signal}_p1", default_green)) + net.lost_time / 2.0
+
+        def occ(link: str) -> float:
+            cap = net.urban_link_storage_veh.get(link, 0.0)
+            return max(0.0, cap - state.urban_link_storage.get(link, cap))
+
+        def queue_mass(signal: str, approach: str) -> float:
+            return sum(
+                max(0.0, state.urban_movement_queue.get(movement, 0.0))
+                for movement, spec in net.urban_movements.items()
+                if spec.get("intersection") == signal and spec.get("approach") == approach
+            )
+
+        # 방향 선택: 회랑별 양방향 부하 비교(링크 in-transit 점유 + 하류 접근 대기열).
+        east_top = occ("A_to_B") + occ("B_to_C") + queue_mass("B", "W") + queue_mass("C", "W")
+        west_top = occ("B_to_A") + occ("C_to_B") + queue_mass("B", "E") + queue_mass("A", "E")
+        south_ad = occ("A_to_D") + queue_mass("D", "N")
+        north_ad = occ("D_to_A") + queue_mass("A", "S")
+        east_bot = occ("D_to_E") + occ("E_to_F") + queue_mass("F", "W")
+        west_bot = occ("F_to_E") + occ("E_to_D") + queue_mass("D", "E")
+
+        desired: Dict[str, float] = {"A": float(prev.get("A", 0.0))}
+        # 상단 EW: 같은 축 phase(p2) 시작이 진행 방향으로 t_link씩 늦게 오게.
+        top_sign = 1.0 if east_top >= west_top else -1.0
+        desired["B"] = desired["A"] + top_sign * t_link + p2_start("A") - p2_start("B")
+        desired["C"] = desired["B"] + top_sign * t_link + p2_start("B") - p2_start("C")
+        # 수직 A–D: NS축 phase(p1)는 cycle 시작이라 보정항 없음.
+        ad_sign = 1.0 if south_ad >= north_ad else -1.0
+        desired["D"] = desired["A"] + ad_sign * t_link
+        # 하단 D–F: E 비통제 통과라 2링크 통과시간.
+        bot_sign = 1.0 if east_bot >= west_bot else -1.0
+        desired["F"] = desired["D"] + bot_sign * 2.0 * t_link + p2_start("D") - p2_start("F")
+
         offsets: Dict[str, float] = {}
-        avg_speed = np.mean([v for values in state.freeway_speed.values() for v in values])
-        travel_time = 1000.0 / max(avg_speed / 3.6, 1.0)
-        for idx, signal in enumerate(net.signals):
-            desired = (idx * travel_time) % net.cycle_length
-            prev = previous.offsets.get(signal, 0.0) if previous else 0.0
-            bounded = float(np.clip(desired, prev - uc.max_offset_step, prev + uc.max_offset_step))
-            offsets[signal] = bounded % net.cycle_length
+        for signal in net.signals:
+            target = float(desired.get(signal, prev.get(signal, 0.0))) % cycle
+            anchor = float(prev.get(signal, 0.0))
+            # cycle 래핑을 고려한 최단 이동을 max_offset_step으로 제한한다.
+            delta = (target - anchor + 0.5 * cycle) % cycle - 0.5 * cycle
+            delta = float(np.clip(delta, -uc.max_offset_step, uc.max_offset_step))
+            offsets[signal] = float((anchor + delta) % cycle)
         return offsets
 
     def _allocation(
@@ -259,7 +313,7 @@ class UrbanFollower:
         pressure = self._freeway_pressure(freeway_response)
         plan = allocation_plan or self.allocation_module.solve(state, leader)
         green = self._green_times(state, previous_control, freeway_response, plan)
-        offsets = self._offsets(state, previous_control)
+        offsets = self._offsets(state, previous_control, green)
         allocation, residual, target_net_inflow, allocation_metrics = self._allocation(
             state,
             leader,

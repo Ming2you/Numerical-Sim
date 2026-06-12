@@ -326,13 +326,46 @@ def _queue_max(cfg: ExperimentConfig, movement: str, spec: Mapping[str, object])
     return 1.0e9
 
 
-def _phase_green_fraction(control: ControlAction, cfg: ExperimentConfig, spec: Mapping[str, object]) -> float:
+def _phase_green_fraction(
+    control: ControlAction,
+    cfg: ExperimentConfig,
+    spec: Mapping[str, object],
+    urban_step_index: int | None = None,
+) -> float:
+    """phase의 green 비율.
+
+    urban_step_index가 주어지면 cycle 위상(offset 반영) 기반으로 해당 substep
+    [t, t+T_u)와 green window의 겹침 비율(이진 + 경계 분수)을 돌려준다 — offset이
+    plant 동역학(플래툰 도착–green 정렬)에 들어가는 유일한 지점. 없으면 기존처럼
+    cycle 평균 비율(예측/추정 헬퍼용). 신호 cycle 구조는
+    [p1 green][lost/2][p2 green][lost/2], 시작점이 offset만큼 뒤로 이동한다.
+    cycle 평균 서비스량은 두 방식이 동일(g_sec×saturation)해 기존 회계와 정합."""
     phase = str(spec.get("phase", ""))
     if not phase:
         return 1.0
-    default_green = cfg.network.effective_green_total / 2.0
-    green_sec = control.green_times.get(phase, default_green)
-    return float(np.clip(green_sec / max(cfg.network.cycle_length, 1.0e-9), 0.0, 1.0))
+    net = cfg.network
+    default_green = net.effective_green_total / 2.0
+    green_sec = float(control.green_times.get(phase, default_green))
+    cycle = max(net.cycle_length, 1.0e-9)
+    if urban_step_index is None:
+        return float(np.clip(green_sec / cycle, 0.0, 1.0))
+    signal, _, phase_id = phase.rpartition("_")
+    g1 = float(control.green_times.get(f"{signal}_p1", default_green))
+    half_lost = max(0.0, net.lost_time) / 2.0
+    start = 0.0 if phase_id == "p1" else g1 + half_lost
+    end = min(start + green_sec, cycle)
+    offset = float(control.offsets.get(signal, 0.0))
+    t_u = cfg.simulation.T_u_sec
+    t0 = (urban_step_index * t_u - offset) % cycle
+
+    def seg_overlap(a0: float, a1: float, b0: float, b1: float) -> float:
+        return max(0.0, min(a1, b1) - max(a0, b0))
+
+    overlap = seg_overlap(t0, min(t0 + t_u, cycle), start, end)
+    if t0 + t_u > cycle:
+        # substep이 cycle 경계를 넘어가면 다음 cycle 머리쪽 green과의 겹침을 더한다.
+        overlap += seg_overlap(0.0, t0 + t_u - cycle, start, end)
+    return float(np.clip(overlap / max(t_u, 1.0e-9), 0.0, 1.0))
 
 
 def _movement_capacity_flow(
@@ -548,7 +581,7 @@ def urban_substep(
             continue
         available = max(0.0, state.urban_movement_queue.get(movement, 0.0))
         cap_flow = _movement_capacity_flow(control, cfg, movement, spec)
-        green_fraction = _phase_green_fraction(control, cfg, spec)
+        green_fraction = _phase_green_fraction(control, cfg, spec, urban_step_index=step_idx)
         ramp_requests.setdefault(ramp, {})[movement] = min(
             available,
             sim.T_u_h * green_fraction * cap_flow,
@@ -584,7 +617,7 @@ def urban_substep(
             continue  # ramp행 movement는 위 transfer 루프에서 처리됨.
         available = max(0.0, state.urban_movement_queue.get(movement, 0.0))
         cap_flow = _movement_capacity_flow(control, cfg, movement, spec)
-        green_fraction = _phase_green_fraction(control, cfg, spec)
+        green_fraction = _phase_green_fraction(control, cfg, spec, urban_step_index=step_idx)
         intended = min(available, sim.T_u_h * green_fraction * cap_flow)
         receiving_link = str(spec.get("receiving_link", ""))
         if receiving_link and receiving_link in state.urban_link_storage:
@@ -776,6 +809,12 @@ def aggregate_urban_diagnostics(
             "onramp_two_reservoir_active",
         }:
             out[key] = float(max(row.get(key, 0.0) for row in diagnostics_rows))
+
+    # cycle 위상 plant에서 N_P는 cycle 주기로 진동하고 interval(180s)=1.5 cycle이라
+    # endpoint 표본은 앨리어싱된다 — 추적 지표용으로 interval 평균 N_P를 함께 낸다.
+    out["urban_accumulation_mean_veh"] = float(np.mean([
+        row.get("urban_accumulation_veh", 0.0) for row in diagnostics_rows
+    ]))
 
     horizon_h = cfg.simulation.T_c_h if interval_h is None else interval_h
     inbound = out.get("inbound_service_veh", 0.0) / max(horizon_h, 1.0e-9)

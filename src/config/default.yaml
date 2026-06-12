@@ -186,14 +186,16 @@ leader:
   N_UF_star_range:
   - 0.0
   - 6000.0
-  # 그리드 라우팅 도입 후 재calibration(outputs/calib_gridrouting, peak_demand,
-  # urban-scales 0.5~3.0, T=1800): MFD 정점 production 20045 veh/h @ N_P=476.801.
-  N_P_crit_veh: 476.801
+  # cycle 위상(offset) plant 도입 후 재calibration(outputs/calib_phasemodel, peak_demand,
+  # urban-scales 0.5~3.0, T=1800): MFD 정점 production 20591 veh/h @ N_P=521.281.
+  # (그리드 라우팅 직후 값은 476.801 — outputs/calib_gridrouting.)
+  N_P_crit_veh: 521.281
   N_P_candidate_lower_factor: 0.9
   N_P_candidate_upper_factor: 1.05
   N_P_star_unit: veh
   N_UF_star_unit: veh_per_hour
-  N_P_feedback_horizon_h: 1.0
+  # cycle 위상 plant에서 N_P가 cycle 주기로 진동해 feedback/추적 창을 더 길게 둔다.
+  N_P_feedback_horizon_h: 1.5
   N_P_feedback_flow_limit_veh_h: 800.0
   N_UF_feasible_margin: 0.95
   non_convergence_penalty: 500.0

@@ -176,7 +176,7 @@ def main() -> None:
     signals = ["A", "B", "C", "D", "F"]
     svg_chart(
         out / f"{args.label}_offsets.svg",
-        f"[{args.label}] signal offsets (proposed) — plant에 미반영(장식 변수)",
+        f"[{args.label}] signal offsets (proposed) — cycle 위상 plant에 반영(green wave)",
         t,
         [
             {"label": f"offset {s} [s]", "values": [_f(c, f"offset_{s}") for c in ctl], "step": True}

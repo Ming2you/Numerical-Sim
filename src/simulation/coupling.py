@@ -23,13 +23,24 @@ class CoupledStepResult:
     diagnostics: Dict[str, Any] = field(default_factory=dict)
 
 
-def _aggregate_freeway_diagnostics(rows: list[Dict[str, float]]) -> Dict[str, float]:
+def _aggregate_freeway_diagnostics(
+    rows: list[Dict[str, float]],
+    interval_h: float | None = None,
+    rows_per_cycle: int | None = None,
+    queue_cap_veh: float | None = None,
+) -> Dict[str, float]:
     """`freeway_substep` diagnostics를 control interval 기준으로 묶는다."""
     if not rows:
         return {}
     avg_keys = {
         "total_metering_flow",
         "total_metering_error",
+        "total_no_meter_flow",
+        "nuf_target_flow",
+        "metering_over_release_flow",
+        "metering_shortfall_flow",
+        "total_ramp_queue_start_veh",
+        "total_ramp_queue_end_veh",
         "mean_ramp_receiving_factor",
         "mean_segment_flow",
         "offramp_flow_total",
@@ -52,6 +63,35 @@ def _aggregate_freeway_diagnostics(rows: list[Dict[str, float]]) -> Dict[str, fl
             out[key] = float(max(values))
         else:
             out[key] = float(sum(values))
+    # metering 추적 잔차는 interval 수준에서 재채점한다 — cycle 위상 plant에서 T_f(10s)
+    # 창의 w_r 증감은 green 펄스로 진동하고, max(0,·)로 정류된 per-T_f 잔차 평균은
+    # 펄스 버퍼링을 '잡아둠'으로 오인한다. interval(=신호 cycle 이상) 시야에서
+    # 순증가만 잡으면 진짜 restrictive metering만 남는다.
+    if interval_h is not None and "nuf_target_flow" in rows[0]:
+        target = float(rows[0].get("nuf_target_flow", 0.0))
+        mean_actual = float(out.get("total_metering_flow", 0.0))
+        start_veh = float(rows[0].get("total_ramp_queue_start_veh", 0.0))
+        end_veh = float(rows[-1].get("total_ramp_queue_end_veh", 0.0))
+        # 성장은 cycle 정렬 시점끼리 비교한다 — interval(1.5 cycle) 경계는 cycle 위상의
+        # 반대편을 표본해 펄스 진동이 성장으로 앨리어싱된다. 같은 위상(정확히 1 cycle
+        # 간격)의 w_r 차이만 진짜 누적이다.
+        if rows_per_cycle and len(rows) > rows_per_cycle:
+            ref_veh = float(rows[-1 - rows_per_cycle].get("total_ramp_queue_end_veh", start_veh))
+            # T_f_h = interval_h/len(rows) → 1 cycle = rows_per_cycle × T_f_h.
+            cycle_h = interval_h * rows_per_cycle / max(len(rows), 1)
+            growth_flow = max(0.0, end_veh - ref_veh) / max(cycle_h, 1.0e-9)
+        else:
+            growth_flow = max(0.0, end_veh - start_veh) / max(interval_h, 1.0e-9)
+        # 큐가 상한에 고착되면 성장이 0이어도 명백한 holding이다 — 전액 채점.
+        if queue_cap_veh is not None and end_veh >= 0.9 * queue_cap_veh:
+            growth_flow = float("inf")
+        over_release = max(0.0, mean_actual - target)
+        shortfall = min(max(0.0, target - mean_actual), growth_flow)
+        out["total_metering_error"] = over_release + shortfall
+        out["metering_over_release_flow"] = float(over_release)
+        out["metering_shortfall_flow"] = float(shortfall)
+        out["total_ramp_queue_start_veh"] = start_veh
+        out["total_ramp_queue_end_veh"] = end_veh
     return out
 
 
@@ -180,7 +220,12 @@ def run_coupled_interval(
         "coupling_offramp_arrivals_accepted_veh": float(accepted_offramp),
         "coupling_offramp_arrivals_rejected_veh": float(rejected_offramp),
     }
-    fw_diag = _aggregate_freeway_diagnostics(freeway_rows)
+    fw_diag = _aggregate_freeway_diagnostics(
+        freeway_rows,
+        interval_h=sim.T_c_h,
+        rows_per_cycle=max(1, int(round(cfg.network.cycle_length / sim.T_f_sec))),
+        queue_cap_veh=cfg.network.ramp_queue_max_veh * max(len(cfg.network.ramps), 1),
+    )
     ur_diag = aggregate_urban_diagnostics(urban_rows, cfg, control, interval_h=sim.T_c_h)
     diagnostics.update(fw_diag)
     diagnostics.update(ur_diag)

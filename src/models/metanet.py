@@ -191,6 +191,12 @@ def compute_ramp_release_flows(
     diagnostics = {
         "total_metering_flow": float(sum(ramp_release.values())),
         "total_no_meter_flow": float(no_meter_total),
+        # 방출 결정 시점(T_f 시작)의 w_r 환산유량 — metering binding 판정 기준.
+        # (cycle 위상 plant에서는 green 펄스가 T_f 중간에 w_r을 채우는데, 그 분량은
+        # 이번 방출 결정이 볼 수 없었던 차량이라 '잡아둠'으로 채점하면 안 된다.)
+        "total_ramp_queue_start_flow": float(
+            sum(max(0.0, state.ramp_queue.get(r, 0.0)) for r in net.ramps) / max(dt_h, 1.0e-9)
+        ),
         "mean_ramp_receiving_factor": (
             receiving_factor_acc / max(len(net.ramps), 1)
         ),
@@ -354,14 +360,27 @@ def freeway_substep(
     avg_metering = float(sum(ramp_release.values()))
     avg_no_meter = ramp_diag["total_no_meter_flow"]
     diagnostics["total_metering_flow"] = avg_metering
-    # N_UF_star는 "여기까지 허용"하는 상한(ceiling)이다. 수요·receiving이 목표보다 작아
-    # 덜 방출한 것은 추적 실패가 아니므로, 달성가능 목표 기준으로 잔차를 계산한다.
-    # 달성가능 = min(목표, no-meter 방출량, 실제방출+잔여 w_r 환산유량): step 끝에 w_r이
-    # 비었으면 수요 소진(잔차 0), 차가 남아 있는데 덜 방출했으면 진짜 추적 실패다.
-    # 원목표 초과분은 metering_target_infeasible로 따로 표시.
-    held_back_flow = sum(max(0.0, q) for q in state.ramp_queue.values()) / max(dt_h, 1.0e-9)
-    effective_target_flow = min(target_flow, avg_no_meter, avg_metering + held_back_flow)
-    diagnostics["total_metering_error"] = abs(avg_metering - effective_target_flow)
+    # N_UF_star는 "여기까지 허용"하는 상한(ceiling)이다. 잔차는 비대칭으로 채점한다.
+    # ① 상한 초과(actual > target): 초과분이 위반.
+    # ② 잡아둠(shortfall): 목표 미달이면서 그만큼 w_r이 실제로 누적된 양만 위반.
+    #    no_meter의 available(w_r/dt)은 재고 10대를 10초 창 유량 3600veh/h로 환산하는
+    #    stock/flow 범주 오류라 판정 기준으로 쓰지 않는다 — 방출이 목표 아래여도
+    #    큐가 자라지 않으면(도착을 소화하면) 잡아둔 것이 아니다.
+    # 원목표 미달은 metering_target_infeasible로 따로 표시.
+    queue_start_veh = float(ramp_diag.get("total_ramp_queue_start_flow", 0.0)) * dt_h
+    queue_end_veh = sum(max(0.0, q) for q in state.ramp_queue.values())
+    queue_growth_flow = max(0.0, queue_end_veh - queue_start_veh) / max(dt_h, 1.0e-9)
+    over_release = max(0.0, avg_metering - target_flow)
+    shortfall = min(max(0.0, target_flow - avg_metering), queue_growth_flow)
+    diagnostics["total_metering_error"] = over_release + shortfall
+    diagnostics["total_no_meter_flow"] = float(avg_no_meter)
+    diagnostics["metering_over_release_flow"] = float(over_release)
+    diagnostics["metering_shortfall_flow"] = float(shortfall)
+    # interval 단위 재채점용 원자료(coupling 집계에서 사용): cycle 위상 plant에서는
+    # T_f(10s) 창의 큐 증감이 green 펄스로 진동하므로 interval 수준에서 채점해야 한다.
+    diagnostics["nuf_target_flow"] = float(target_flow)
+    diagnostics["total_ramp_queue_start_veh"] = float(queue_start_veh)
+    diagnostics["total_ramp_queue_end_veh"] = float(queue_end_veh)
     diagnostics["metering_target_infeasible"] = float(target_flow > avg_no_meter + cfg.freeway_follower.eps_F)
     diagnostics["ramp_queue_overflow_count"] = float(sum(
         1 for q in state.ramp_queue.values() if q > net.ramp_queue_max_veh
