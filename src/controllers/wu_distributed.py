@@ -149,20 +149,30 @@ class WuDistributedController:
     def _coupling(self, state: TrafficState, control: ControlAction, demand: DemandStep) -> Dict[str, float]:
         """agent 간 교환하는 결합변수 — local solve 동안 고정된다.
 
-        urban→urban: 신호별 접근 도착유량 추정(상류 링크 점유/통과시간).
-        urban→freeway: ramp별 no-metering 접근 방출 추정.
-        freeway→urban: off-ramp 유입 유량(현재 본선 유량 × 분기율)."""
+        urban→urban: 상류 신호의 후보 green leaving rate(주) + 링크 점유 방출(보조<1).
+        urban→freeway: ramp별 reservoir inflow(w_r 캡 없는 green 후보 방출).
+        freeway→urban: freeway agent가 고른 후보 VSL의 off-ramp 유출(_last_offramp_flow)."""
         net = self.cfg.network
         y: Dict[str, float] = {}
         t_link_h = (
             float(net.grid_link_storage_veh) * net.urban_avg_vehicle_length_m / 1000.0
             / max(net.urban_avg_speed_km_h, 1.0e-9)
         )
-        # 신호·phase별 도착유량 추정: 게이트 수요(β분할) + off-ramp 유입 + 상류 링크
-        # in-transit 점유의 방출률 — local solve 동안 고정되는 결합변수다.
+        # link당 off-ramp split 합(link 합산 유출을 off_ramp별로 분배).
+        link_split = {
+            link: sum(
+                ratio for o, ratio in net.off_ramp_split_ratio.items()
+                if net.off_ramp_from_freeway.get(o) == link
+            )
+            for link in net.freeway_links
+        }
+        occupancy_weight = 0.5  # 점유 방출 보조항 가중(<1) — 상류 후보 green이 주채널.
+        # 신호·phase별 도착유량 추정: 게이트 수요(β분할) + off-ramp 후보 유입 + 상류
+        # 신호의 후보 green leaving rate(+점유 방출 보조) — local solve 동안 고정.
         for signal in net.signals:
             arr = {"p1": 0.0, "p2": 0.0}
             for phase_id in ("p1", "p2"):
+                key = f"{signal}_{phase_id}"
                 for movement in self._phase_movements[signal][phase_id]:
                     spec = self._specs[movement]
                     kind = str(spec.get("kind", ""))
@@ -171,17 +181,27 @@ class WuDistributedController:
                     if kind == "boundary_in":
                         arr[phase_id] += beta * max(0.0, demand.urban_boundary.get(origin, 0.0))
                     elif kind == "off_ramp":
-                        # freeway→urban 결합: 해당 off-ramp의 현재 유입 추정.
+                        # freeway→urban 결합: freeway agent 후보 VSL의 off-ramp 유출 재사용.
                         off_ramp = str(spec.get("off_ramp", ""))
                         link = net.off_ramp_from_freeway.get(off_ramp, "")
-                        flow = state.freeway_flow.get(link, [0.0])[-1] if state.freeway_flow.get(link) else 0.0
-                        ratio = net.off_ramp_split_ratio.get(off_ramp, 0.0)
-                        arr[phase_id] += beta * max(0.0, flow * ratio)
+                        link_flow = float(self._last_offramp_flow.get(link, 0.0))
+                        this_split = float(net.off_ramp_split_ratio.get(off_ramp, 0.0))
+                        if link_flow > 0.0 and link_split.get(link, 0.0) > 0.0:
+                            off_inflow = link_flow * this_split / link_split[link]
+                        else:
+                            # 초기(아직 freeway solve 전): 현재 본선 유량 폴백.
+                            base = state.freeway_flow.get(link, [0.0])[-1] if state.freeway_flow.get(link) else 0.0
+                            off_inflow = max(0.0, base * this_split)
+                        arr[phase_id] += beta * max(0.0, off_inflow)
                     else:
-                        # 내부 movement: 상류 링크 점유가 통과시간에 걸쳐 도착.
+                        # urban→urban: 상류 신호의 후보 green leaving rate(주채널) +
+                        # 링크 점유 방출(보조, 가중<1).
                         cap = net.urban_link_storage_veh.get(origin, 0.0)
                         occupied = max(0.0, cap - state.urban_link_storage.get(origin, cap))
-                        arr[phase_id] += beta * occupied / max(t_link_h, 1.0e-9) * 0.5
+                        arr[phase_id] += occupancy_weight * beta * occupied / max(t_link_h, 1.0e-9) * 0.5
+                # 상류 후보 green leaving rate를 β로 분배해 더한다(후보 반응형 주채널).
+                for up_signal, up_movement, up_beta in self._upstream_leaving_map.get(key, []):
+                    arr[phase_id] += up_beta * self._signal_leaving_rate(up_signal, up_movement, control)
             y[f"arr_{signal}_p1"] = float(arr["p1"])
             y[f"arr_{signal}_p2"] = float(arr["p2"])
         # urban→freeway: ramp별 접근(x_on) no-metering 방출 추정 = min(대기+수요, green×포화).
@@ -299,6 +319,7 @@ class WuDistributedController:
         candidates = [v for v in vsl_set if abs(v - prev_vsl) <= step + 1e-9] or vsl_set
 
         best_vsl, best_obj = prev_vsl, float("inf")
+        best_offramp_flow = 0.0
         evals = 0
         for vsl in candidates:
             probe = state.copy()
@@ -311,6 +332,8 @@ class WuDistributedController:
             )
             candidate_control.vsl[link] = float(vsl)
             cost = 0.0
+            first_offramp_flow = 0.0
+            first_substep = True
             for _ in range(horizon):
                 for _ in range(sim.K_cf):
                     # urban->freeway coupling [veh/h]을 ramp reservoir에 넣은 뒤,
@@ -353,6 +376,10 @@ class WuDistributedController:
                     # 유출시켜 점유를 갱신한다. 다음 substep의 effective_lane_profile이
                     # capacity-drop을 반영해 VSL↓→다운스트림 유입↓→λ_eff 회복 이득을 내생화.
                     self._update_probe_offramp_storage(probe, fw_diag, candidate_control, dt_h)
+                    if first_substep:
+                        # coupling freeway→urban이 재사용할 후보 VSL의 off-ramp 유출[veh/h].
+                        first_offramp_flow = max(0.0, float(fw_diag.get(f"offramp_flow_{link}", 0.0)))
+                        first_substep = False
 
                     # Wu local TTS: 해당 freeway agent의 segment 차량과 연결 ramp queue.
                     link_vehicles = sum(probe.freeway_vehicle_count_by_link(net).get(link, []))
@@ -372,6 +399,10 @@ class WuDistributedController:
             evals += 1
             if cost < best_obj:
                 best_obj, best_vsl = cost, float(vsl)
+                best_offramp_flow = first_offramp_flow
+        # 선택된 후보 VSL의 off-ramp 유출을 캐시 — coupling freeway→urban이 재시뮬
+        # 없이 후보 반응형 off-ramp inflow로 재사용한다.
+        self._last_offramp_flow[link] = float(best_offramp_flow if best_obj < float("inf") else 0.0)
         return best_vsl, best_obj, evals
 
     def _update_probe_offramp_storage(
@@ -434,17 +465,30 @@ class WuDistributedController:
         control.green_times = dict(previous.green_times)
         control.vsl = dict(previous.vsl)
         coupling = self._coupling(state, control, demand)
-        s_max = max(1, self.cfg.mpc.max_nash_iter)
+        # Wu 원논문: Jacobi 병렬 + S_max=5 절단. WU-CD-F 경로는 5로 클램프해
+        # green→arr 과결합 발산을 막는다(위험요소: under-relaxation+점유 보조항과 함께).
+        s_max = max(1, min(self.cfg.mpc.max_nash_iter, 5))
+        alpha = 0.5  # under-relaxation: y_new = (1-α)y_old + α·y_pred.
         evals = 0
         residual = float("inf")
         converged = False
         iteration = 0
         for iteration in range(1, s_max + 1):
-            # step3~4: 결합변수 고정 후 agent별 local solve(green/VSL만 — Wu authority).
+            # Jacobi: iteration 시작 control을 스냅샷으로 고정 → 그 iteration 내 모든 agent가
+            # 동일 고정 y와 동일 previous(스냅샷)를 입력으로 푼다(green을 통한 간접 결합 차단).
+            snapshot = ControlAction(
+                ramp_metering=dict(control.ramp_metering),
+                vsl=dict(control.vsl),
+                green_times=dict(control.green_times),
+                offsets=dict(control.offsets),
+                inflow_outflow_allocation={},
+            )
+            new_green: Dict[str, float] = {}
+            new_vsl: Dict[str, float] = {}
             for signal in net.signals:
-                p1, _, e = self._solve_urban_agent(signal, state, coupling, control, leader)
-                control.green_times[f"{signal}_p1"] = p1
-                control.green_times[f"{signal}_p2"] = net.effective_green_total - p1
+                p1, _, e = self._solve_urban_agent(signal, state, coupling, snapshot, leader)
+                new_green[f"{signal}_p1"] = p1
+                new_green[f"{signal}_p2"] = net.effective_green_total - p1
                 evals += e
             for link in net.freeway_links:
                 vsl, _, e = self._solve_freeway_agent(
@@ -452,20 +496,27 @@ class WuDistributedController:
                     state,
                     coupling,
                     demand,
-                    control,
+                    snapshot,
                     leader,
                 )
-                control.vsl[link] = vsl
+                new_vsl[link] = vsl
                 evals += e
-            new_coupling = self._coupling(state, control, demand)
+            control.green_times.update(new_green)
+            control.vsl.update(new_vsl)
+            # outgoing y를 후보 제어로 갱신한 뒤 under-relaxation으로 합성.
+            predicted = self._coupling(state, control, demand)
+            relaxed = {
+                k: (1.0 - alpha) * coupling.get(k, 0.0) + alpha * predicted[k]
+                for k in predicted
+            }
             residual = max(
                 (
-                    abs(new_coupling[k] - coupling.get(k, 0.0)) / max(1.0, abs(coupling.get(k, 0.0)))
-                    for k in new_coupling
+                    abs(relaxed[k] - coupling.get(k, 0.0)) / max(1.0, abs(coupling.get(k, 0.0)))
+                    for k in relaxed
                 ),
                 default=0.0,
             )
-            coupling = new_coupling
+            coupling = relaxed
             if residual < self.cfg.mpc.distributed_coupling_tol:
                 converged = True
                 break
