@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Mapping
+from typing import Dict, Mapping, Optional
 
 from .state import ExperimentConfig, load_jsonish
 
@@ -24,6 +24,9 @@ class ScenarioConfig:
     ramp_scale: float = 1.0
     incident_capacity_factor: float = 1.0
     required: bool = False
+    # off-ramp split ratio를 이 시나리오에서만 덮어쓴다(None이면 NetworkConfig 0.06 유지).
+    # capacity-drop 유발 무대를 만들기 위한 시나리오 한정 주입 — plant 보존식은 불변.
+    off_ramp_split_ratio_override: Optional[Dict[str, float]] = None
     metadata: Dict[str, float] = field(default_factory=dict)
 
     @classmethod
@@ -35,6 +38,11 @@ class ScenarioConfig:
             "incident_capacity_factor": float(raw.get("incident_capacity_factor", 1.0)),
             "required": bool(raw.get("required", False)),
         }
+        raw_override = raw.get("off_ramp_split_ratio_override")
+        if isinstance(raw_override, Mapping):
+            known["off_ramp_split_ratio_override"] = {
+                str(k): float(v) for k, v in raw_override.items()
+            }
         return cls(name=name, **known)
 
 
@@ -45,6 +53,22 @@ def load_scenarios(path: str | Path) -> Dict[str, ScenarioConfig]:
         name: ScenarioConfig.from_mapping(name, value)
         for name, value in scenarios.items()
     }
+
+
+def apply_scenario_network_overrides(
+    cfg: ExperimentConfig, scenario: ScenarioConfig
+) -> ExperimentConfig:
+    """시나리오의 network 단위 override(off-ramp split)를 cfg에 반영한 새 cfg를 반환한다.
+
+    off_ramp_split_ratio는 plant·모든 controller가 단일하게 cfg.network에서 읽으므로,
+    여기서 한 번만 덮어쓰면 모든 사용처에 일관 적용된다. override가 None이면 cfg를 그대로
+    반환(기존 0.06 동작 유지). 차량보존식·β합류 로직은 건드리지 않고 split 값만 주입한다."""
+    override = scenario.off_ramp_split_ratio_override
+    if not override:
+        return cfg
+    merged = dict(cfg.network.off_ramp_split_ratio)
+    merged.update({str(k): float(v) for k, v in override.items()})
+    return cfg.with_updates({"network": {"off_ramp_split_ratio": merged}})
 
 
 class DemandProfile:

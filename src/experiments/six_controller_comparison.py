@@ -18,7 +18,12 @@ from src.controllers.centralized_mpc import CentralizedMPC
 from src.controllers.distributed_coordinator import DistributedCoordinator
 from src.controllers.stackelberg_mpc import StackelbergMPCController
 from src.controllers.wu_distributed import WuDistributedController
-from src.models.demand import DemandProfile, ScenarioConfig, load_scenarios
+from src.models.demand import (
+    DemandProfile,
+    ScenarioConfig,
+    apply_scenario_network_overrides,
+    load_scenarios,
+)
 from src.models.state import ControlAction, ExperimentConfig
 from src.simulation.simulator import MixedTrafficSimulator, control_row, state_row
 
@@ -301,6 +306,8 @@ def main(argv: Optional[List[str]] = None) -> None:
         overrides.setdefault("simulation", {})["random_seed"] = args.seed
     cfg = ExperimentConfig.from_file(args.config, overrides)
     scenario = load_scenarios(args.scenarios_config)[args.scenario]
+    # 시나리오 한정 off-ramp split override를 cfg.network에 단일 주입(plant+모든 controller 공유).
+    cfg = apply_scenario_network_overrides(cfg, scenario)
     out = Path(args.output)
     out.mkdir(parents=True, exist_ok=True)
     requested = [c.strip() for c in args.controllers.split(",") if c.strip()]

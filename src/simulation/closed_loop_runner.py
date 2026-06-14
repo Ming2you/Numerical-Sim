@@ -7,7 +7,11 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
 from src.controllers.stackelberg_mpc import StackelbergMPCController
-from src.models.demand import DemandProfile, ScenarioConfig
+from src.models.demand import (
+    DemandProfile,
+    ScenarioConfig,
+    apply_scenario_network_overrides,
+)
 from src.models.state import ControlAction, ExperimentConfig, TrafficState
 from src.simulation.baseline import baseline_control
 from src.simulation.simulator import MixedTrafficSimulator, control_row, state_row
@@ -46,6 +50,8 @@ def run_closed_loop(
     baseline_mode: str = "fixed_signal_fixed_speed",
     ablation_modes: Optional[Iterable[str]] = None,
 ) -> Dict[str, Any]:
+    # 시나리오 한정 off-ramp split override를 cfg.network에 단일 주입(plant+controller 공유).
+    cfg = apply_scenario_network_overrides(cfg, scenario)
     demand = DemandProfile(cfg, scenario)
     sim = MixedTrafficSimulator(cfg)
     controller = StackelbergMPCController(cfg) if mode == "stackelberg_mpc" else None
