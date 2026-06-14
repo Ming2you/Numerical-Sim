@@ -9,7 +9,7 @@ import numpy as np
 
 from src.models.demand import DemandStep
 from src.models.metanet import compute_ramp_release_flows, freeway_substep
-from src.models.state import ControlAction, ExperimentConfig, TrafficState
+from src.models.state import ControlAction, ExperimentConfig, TrafficState, segment_vsl
 from src.models.urban_queue_model import (
     _movement_capacity_flow,
     _phase_green_fraction,
@@ -223,6 +223,23 @@ class WuDistributedController:
             rhos = state.freeway_density.get(link, [])
             y[f"rho_{link}"] = float(np.mean(rhos)) if rhos else 0.0
             y[f"mainline_{link}"] = float(max(0.0, demand.freeway_mainline.get(link, 0.0)))
+        # 메커니즘 B: 병목 segment(off-ramp seg) 다운스트림 압력 p_down.
+        # = w_rho·max(0, ρ_seg2−ρ_crit) + w_v·max(0, v_free−v_seg2). >0이면 병목이
+        # 임계 초과/감속 → 상류 metering(seg1→seg2 유입↓) 보상 신호. free-flow면 0.
+        ff = self.cfg.freeway_follower
+        for link in net.freeway_links:
+            rhos = state.freeway_density.get(link, [])
+            speeds = state.freeway_speed.get(link, [])
+            if rhos:
+                rho_b = float(rhos[-1])
+                v_b = float(speeds[-1]) if speeds else net.v_free
+                p_down = (
+                    ff.downstream_coupling_rho_weight * max(0.0, rho_b - net.rho_crit)
+                    + ff.downstream_coupling_v_weight * max(0.0, net.v_free - v_b)
+                )
+            else:
+                p_down = 0.0
+            y[f"p_down_{link}"] = float(p_down)
         return y
 
     # ---------- urban agent local solve ----------
@@ -292,6 +309,53 @@ class WuDistributedController:
 
     # ---------- freeway agent local solve ----------
 
+    def _freeway_segment_candidates(
+        self,
+        link: str,
+        n_seg: int,
+        previous: ControlAction,
+    ) -> list[list[float]]:
+        """Option C segment 벡터 VSL 후보 집합 — 폭발 방지 가지치기.
+
+        - 병목 segment(off-ramp seg, 보통 마지막): {max, 직전값} 2값으로 제한.
+          (병목 자신은 max 유지해야 q_out 회복이 상쇄되지 않는다.)
+        - 상류 segment(seg0/seg1): max_vsl_step(±20) 내 vsl_set 후보.
+        총 수십 개 수준(상류 2개 × 후보^2 × 병목 2값).
+        """
+        net = self.cfg.network
+        ff = self.cfg.freeway_follower
+        vsl_max = max(ff.vsl_set)
+        vsl_set = sorted(float(v) for v in ff.vsl_set)
+        step = ff.max_vsl_step
+        # off-ramp(병목) segment 인덱스 집합 — 이 링크에서 빠지는 off-ramp의 segment.
+        bottleneck_idx = {
+            int(net.off_ramp_segment_index.get(o, n_seg - 1))
+            for o in net.off_ramps
+            if net.off_ramp_from_freeway.get(o) == link
+        }
+        if not bottleneck_idx:
+            bottleneck_idx = {n_seg - 1}
+
+        per_seg_options: list[list[float]] = []
+        for i in range(n_seg):
+            prev_i = segment_vsl(previous, link, i, self.cfg)
+            if i in bottleneck_idx:
+                # 병목: max 유지 우선 + 직전값(스무딩). 중복 제거.
+                opts = {vsl_max, prev_i}
+            else:
+                # 상류: max_vsl_step 내 vsl_set 후보로 metering 가지치기.
+                opts = {v for v in vsl_set if abs(v - prev_i) <= step + 1e-9}
+                opts.add(vsl_max)
+                if not opts:
+                    opts = set(vsl_set)
+            per_seg_options.append(sorted(opts))
+
+        # 데카르트 곱 — 후보 벡터.
+        vectors: list[list[float]] = [[]]
+        for opts in per_seg_options:
+            vectors = [vec + [v] for vec in vectors for v in opts]
+        return vectors
+
     def _solve_freeway_agent(
         self,
         link: str,
@@ -300,28 +364,40 @@ class WuDistributedController:
         demand: DemandStep,
         previous: ControlAction,
         leader: Optional[WuLeaderAction],
-    ) -> tuple[float, float, int]:
-        """VSL 후보 탐색 — 반환 (vsl*, local objective, evaluations).
+    ) -> tuple[Dict[str, float], float, int]:
+        """segment 벡터 VSL 후보 탐색 — 반환 (vsl_dict, local objective, evaluations).
 
-        local 모델: 링크 평균 밀도 1-구획 근사 — ρ' = ρ + (q_in − q_out(ρ, vsl))dt/(LλN).
-        q_in = 본선수요 + 이 링크 ramp들의 no-metering 유입(결합변수 고정).
-        J = T_c Σ L λ ρ + R(Δvsl)² (+ leader conditioning)."""
+        Option C: 후보는 segment별 VSL 조합(_freeway_segment_candidates). 각 후보를
+        storage-aware probe로 K_cf substep 적분해, 상류 metering→seg1→seg2 유입↓→
+        off-ramp storage 유입↓→λ_eff 회복(capacity-drop 회피)이 link 차량합(메커니즘 A)에
+        반영되게 한다. 메커니즘 B: p_down>0(병목 임계 초과)일 때만 후보의 첫-substep
+        seg1→seg2 유입에 결합 페널티를 부과해 상류 metering을 보상.
+        반환 dict 키는 segment 키 `{link}__seg{i}`(plant가 segment_vsl로 읽음)."""
         net = self.cfg.network
         sim = self.cfg.simulation
         horizon = max(1, self.cfg.mpc.horizon_steps)
         dt_h = sim.T_f_h
-        # 단일 평균-density 근사는 낮은 VSL이 outflow만 줄여 최고 VSL을 구조적으로
-        # 선택하므로, 동일 multi-segment METANET 식으로 후보를 평가한다.
-        prev_vsl = float(previous.vsl.get(link, max(self.cfg.freeway_follower.vsl_set)))
-        smooth_w = self.cfg.freeway_follower.vsl_smoothness_weight
-        vsl_set = sorted(float(v) for v in self.cfg.freeway_follower.vsl_set)
-        step = self.cfg.freeway_follower.max_vsl_step
-        candidates = [v for v in vsl_set if abs(v - prev_vsl) <= step + 1e-9] or vsl_set
+        ff = self.cfg.freeway_follower
+        vsl_max = max(ff.vsl_set)
+        smooth_w = ff.vsl_smoothness_weight
+        n_seg = len(state.freeway_density.get(link, [])) or net.freeway_segments_per_link
+        prev_vec = [segment_vsl(previous, link, i, self.cfg) for i in range(n_seg)]
+        # 메커니즘 B 결합: p_down>0이면 상류 metering(merge seg→병목 유입)을 보상.
+        p_down = max(0.0, float(coupling.get(f"p_down_{link}", 0.0)))
+        w_couple = ff.downstream_coupling_weight
+        # 병목 직전 segment(merge seg=병목-1) 인덱스 — 첫-substep 유입 평가용.
+        bottleneck_idx = sorted({
+            int(net.off_ramp_segment_index.get(o, n_seg - 1))
+            for o in net.off_ramps
+            if net.off_ramp_from_freeway.get(o) == link
+        }) or [n_seg - 1]
+        upstream_of_bottleneck = max(0, bottleneck_idx[0] - 1)
 
-        best_vsl, best_obj = prev_vsl, float("inf")
+        candidates = self._freeway_segment_candidates(link, n_seg, previous)
+        best_vec, best_obj = list(prev_vec), float("inf")
         best_offramp_flow = 0.0
         evals = 0
-        for vsl in candidates:
+        for vec in candidates:
             probe = state.copy()
             candidate_control = ControlAction(
                 ramp_metering=dict(previous.ramp_metering),
@@ -330,9 +406,12 @@ class WuDistributedController:
                 offsets=dict(previous.offsets),
                 inflow_outflow_allocation={},
             )
-            candidate_control.vsl[link] = float(vsl)
+            # 후보 segment 벡터를 segment 키로 주입(plant가 segment_vsl로 읽음).
+            for i, v in enumerate(vec):
+                candidate_control.vsl[f"{link}__seg{i}"] = float(v)
             cost = 0.0
             first_offramp_flow = 0.0
+            inflow_to_bottleneck_acc = 0.0
             first_substep = True
             for _ in range(horizon):
                 for _ in range(sim.K_cf):
@@ -361,6 +440,19 @@ class WuDistributedController:
                         self.cfg,
                         interval_h=dt_h,
                     )
+                    # 메커니즘 B: merge seg(병목 직전)의 유출유량 = 병목 유입 = ρ·v·λ.
+                    # 후보 상류 VSL↓는 substep이 진행될수록 v_u를 낮춰 이 유입을 줄인다.
+                    # 전 substep에 걸쳐 누적해야 VSL 효과가 후보 간 차이를 만든다(첫 substep만
+                    # 보면 VSL이 아직 작동 전이라 후보 무차별 — 직전 0이득의 한 원인).
+                    vc = probe.freeway_vehicle_count_by_link(net).get(link, [])
+                    speeds = probe.freeway_speed.get(link, [])
+                    lanes = probe.freeway_effective_lanes.get(link, [])
+                    if upstream_of_bottleneck < len(vc):
+                        seg_len = net.freeway_segment_length_km
+                        lane_u = lanes[upstream_of_bottleneck] if upstream_of_bottleneck < len(lanes) else net.freeway_lanes
+                        rho_u = vc[upstream_of_bottleneck] / max(seg_len * max(lane_u, 1.0e-9), 1.0e-9)
+                        v_u = speeds[upstream_of_bottleneck] if upstream_of_bottleneck < len(speeds) else net.v_free
+                        inflow_to_bottleneck_acc += max(0.0, rho_u * v_u * max(lane_u, 0.0)) * dt_h
                     _, fw_diag = freeway_substep(
                         probe,
                         candidate_control,
@@ -392,18 +484,25 @@ class WuDistributedController:
                     # density_penalty 항은 제거 — storage-aware probe가 capacity-drop을
                     # TTS에 내생화하므로 별도 패널티 없이 VSL이 혼잡 시 작동한다.
                     cost += (link_vehicles + link_ramp_queue) * dt_h
-            cost += smooth_w * abs(vsl - prev_vsl)
+            # 메커니즘 B: 병목 임계 초과(p_down>0) 시에만 누적 병목 유입에 결합 페널티.
+            # free-flow면 p_down=0이라 이 항이 사라져 불필요 지연을 만들지 않는다.
+            cost += w_couple * p_down * inflow_to_bottleneck_acc
+            # smoothness: segment별 직전값 대비 변화량 합.
+            cost += smooth_w * sum(abs(v - prev_vec[i]) for i, v in enumerate(vec))
             if leader is not None:
                 n_pred = sum(probe.freeway_vehicle_count_by_link(net).get(link, []))
                 cost += self.cfg.leader.w_F * max(0.0, n_pred - self._omega_f[link] * leader.n_f_star)
             evals += 1
             if cost < best_obj:
-                best_obj, best_vsl = cost, float(vsl)
+                best_obj, best_vec = cost, list(vec)
                 best_offramp_flow = first_offramp_flow
         # 선택된 후보 VSL의 off-ramp 유출을 캐시 — coupling freeway→urban이 재시뮬
         # 없이 후보 반응형 off-ramp inflow로 재사용한다.
         self._last_offramp_flow[link] = float(best_offramp_flow if best_obj < float("inf") else 0.0)
-        return best_vsl, best_obj, evals
+        # segment 키 dict 반환(+ link 키는 min-over-segment로 하위호환 fallback 보존).
+        vsl_dict: Dict[str, float] = {f"{link}__seg{i}": float(v) for i, v in enumerate(best_vec)}
+        vsl_dict[link] = float(min(best_vec)) if best_vec else vsl_max
+        return vsl_dict, best_obj, evals
 
     def _update_probe_offramp_storage(
         self,
@@ -491,7 +590,7 @@ class WuDistributedController:
                 new_green[f"{signal}_p2"] = net.effective_green_total - p1
                 evals += e
             for link in net.freeway_links:
-                vsl, _, e = self._solve_freeway_agent(
+                vsl_dict, _, e = self._solve_freeway_agent(
                     link,
                     state,
                     coupling,
@@ -499,7 +598,7 @@ class WuDistributedController:
                     snapshot,
                     leader,
                 )
-                new_vsl[link] = vsl
+                new_vsl.update(vsl_dict)
                 evals += e
             control.green_times.update(new_green)
             control.vsl.update(new_vsl)

@@ -373,6 +373,12 @@ class FreewayFollowerConfig:
     density_penalty: float = 10.0
     metering_smoothness_weight: float = 0.1
     vsl_smoothness_weight: float = 0.1
+    # Option C 메커니즘 B(다운스트림 결합): 병목 segment가 임계 초과(p_down>0)일 때만
+    # 상류 metering(seg1→seg2 유입↓)을 보상하는 결합 페널티 가중. free-flow 시 p_down=0이라
+    # 불필요 지연을 만들지 않는다. w_couple_rho/w_couple_v는 p_down 구성요소 가중.
+    downstream_coupling_weight: float = 0.05
+    downstream_coupling_rho_weight: float = 1.0
+    downstream_coupling_v_weight: float = 1.0
     horizon_beam_width: int = 2
     horizon_ramp_candidate_limit: int = 3
     horizon_vsl_candidate_limit_per_link: int = 3
