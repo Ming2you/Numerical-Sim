@@ -187,7 +187,9 @@ class WuDistributedController:
         # urban→freeway: ramp별 접근(x_on) no-metering 방출 추정 = min(대기+수요, green×포화).
         # Spec 3.3.1: movement별 queue/arrival와 실제 green 용량을 먼저 제한한 뒤 ramp별로 합친다.
         # queue와 phase 용량을 각각 합산한 뒤 min을 취하면 phase split 효과가 소거된다.
-        onramp_release = estimate_onramp_green_release_flows(
+        # WU-CD-F Jacobi: w_r 포화에 막히지 않는 reservoir inflow를 결합변수로 사용해
+        # green 후보 차이를 freeway agent에 전파한다(green↑→u_on↑ 단조성 보존).
+        onramp_release = estimate_onramp_reservoir_inflow(
             state,
             control,
             demand,
