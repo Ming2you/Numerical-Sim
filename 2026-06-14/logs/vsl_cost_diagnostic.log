@@ -1,0 +1,16 @@
+most congested step=1 off-ramp occ=21.8%
+vsl_smoothness_weight=0.1
+
+[FW_W] candidate cost breakdown (prev_vsl=100):
+  vsl   TTS_term   smooth   total      dTTS_vs100   dSmooth_vs100
+     80    21.7870   2.0000    23.7870     +0.12856     +2.00000
+     90    21.6584   1.0000    22.6584     +0.00000     +1.00000
+    100    21.6584   0.0000    21.6584     +0.00000     +0.00000
+  -> VSL 80 vs 100: TTS_gain=-0.12856 veh*h, smooth_penalty=+2.00000, penalty/gain=-15.56
+
+[FW_E] candidate cost breakdown (prev_vsl=100):
+  vsl   TTS_term   smooth   total      dTTS_vs100   dSmooth_vs100
+     80    33.7161   2.0000    35.7161     +0.01073     +2.00000
+     90    33.7053   1.0000    34.7053     +0.00000     +1.00000
+    100    33.7053   0.0000    33.7053     +0.00000     +0.00000
+  -> VSL 80 vs 100: TTS_gain=-0.01073 veh*h, smooth_penalty=+2.00000, penalty/gain=-186.31

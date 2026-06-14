@@ -1,0 +1,53 @@
+{
+  "scenarios": {
+    "low_demand": {
+      "urban_scale": 0.75,
+      "freeway_scale": 0.75,
+      "ramp_scale": 0.70,
+      "incident_capacity_factor": 1.0,
+      "required": false
+    },
+    "medium_demand": {
+      "urban_scale": 1.0,
+      "freeway_scale": 1.0,
+      "ramp_scale": 1.0,
+      "incident_capacity_factor": 1.0,
+      "required": false
+    },
+    "peak_demand": {
+      "urban_scale": 1.25,
+      "freeway_scale": 1.20,
+      "ramp_scale": 1.25,
+      "incident_capacity_factor": 1.0,
+      "required": true
+    },
+    "oversaturated_demand": {
+      "urban_scale": 1.55,
+      "freeway_scale": 1.45,
+      "ramp_scale": 1.60,
+      "incident_capacity_factor": 0.92,
+      "required": false
+    },
+    "incident_or_capacity_drop": {
+      "urban_scale": 1.20,
+      "freeway_scale": 1.15,
+      "ramp_scale": 1.25,
+      "incident_capacity_factor": 0.72,
+      "required": false
+    },
+    "capacity_drop": {
+      "urban_scale": 2.5,
+      "freeway_scale": 1.45,
+      "ramp_scale": 1.25,
+      "incident_capacity_factor": 1.0,
+      "required": false,
+      "off_ramp_split_ratio_override": {
+        "OR_D_W": 0.45,
+        "OR_F_W": 0.45,
+        "OR_D_E": 0.45,
+        "OR_F_E": 0.45
+      }
+    }
+  }
+}
+

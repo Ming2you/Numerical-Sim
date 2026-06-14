@@ -53,3 +53,78 @@ WU-CD-F(Wu et al. 2022 분산제어 벤치마크)의 치명 결함 2건 수정.
 ## 커밋
 a241d84 신규 헬퍼 / 19089f1 캐시 / 6c85cc5 u_on 교체 / 0acb4fc storage probe /
 0d3f85a density_penalty 제거+drain 캡 / e077e77 coupling+Jacobi / 7413b2b 문서 / a79b3af 테스트
+
+---
+
+# 2026-06-14 (2) 작업 노트 — capacity-drop 유발 시나리오 추가 + VSL 반응 측정
+
+## 목표
+WU-CD-F의 freeway VSL이 작동하는 capacity-drop 무대를 시나리오로 추가하고, 실제로 VSL이
+반응하는지 실측. (현 peak/oversat/incident에서는 off-ramp 점유 최대 ~3.4%로 미발동.)
+
+## 변경 파일·함수·라인
+- `src/models/demand.py`:
+  - `ScenarioConfig`에 `off_ramp_split_ratio_override: Optional[Dict[str,float]]=None` 추가(L26 부근).
+  - `ScenarioConfig.from_mapping`이 yaml의 `off_ramp_split_ratio_override`를 파싱.
+  - 신규 `apply_scenario_network_overrides(cfg, scenario)`: override를
+    `cfg.network.off_ramp_split_ratio`에 병합한 새 cfg 반환. None이면 cfg 그대로(no-op).
+- **단일 주입 지점**: `off_ramp_split_ratio`는 plant(metanet.py:299) + 모든 controller
+  (wu_distributed/freeway_follower/distributed_coordinator/coupling/centralized_mpc) +
+  free_flow_reference가 전부 `cfg.network.off_ramp_split_ratio`만 읽는다. 따라서 cfg.network에
+  한 번 병합하면 모든 사용처에 일관 적용. β합류·차량보존식은 불변(split 값만 주입).
+- 배선 지점: `six_controller_comparison.main`(scenario 로드 직후) +
+  `closed_loop_runner.run_closed_loop`(함수 진입부). 둘 다 `apply_scenario_network_overrides` 호출.
+- `src/config/scenarios.yaml`: `capacity_drop` 추가
+  (urban_scale=2.5, freeway_scale=1.45, ramp_scale=1.25, off_ramp_split_ratio_override 전 0.45).
+  현실성 근거: 고off-ramp 수요(도심 진입 집중) + 포화 arterial(urban_scale 2.5)로 off-ramp
+  하류 신호 배출이 막혀 spillback 누적되는 첨두 상황.
+- `src/tests/test_six_controller_comparison.py`: `test_c` 정직화(아래).
+
+## 측정 (capacity_drop, T=1800, WU-CD-F)
+명령: `... -m src.experiments.six_controller_comparison --scenario capacity_drop
+--T-total 1800 --controllers WU-CD-F --output 2026-06-14/results/wu_capdrop_probe`
+- (1) off-ramp 점유 최대 = **21.8%** (목표 50% **미달**).
+- (2) λ_eff_last min=1.9796(lanes=2.0), capacity_drop_active=10/10 step. 단 lane loss는
+  ~0.02 (미미). gamma는 하드임계 아니라 지수감쇠 분모(metanet.offramp_spillback_lambda_eff):
+  점유 0이면 무감소, 점유↑면 연속 감소. 21.8%서 감소량 ~0.02 lane.
+- (3) **VSL이 max-0.5 미만으로 내려간 interval = 0/20** (vsl_FW_W/FW_E 항상 100).
+
+## 점유율 50% 미달의 구조적 원인 (실측 스윕)
+- off_ratio = Σ(같은 링크 off-ramp split)는 metanet.py:302에서 [0,1] 클립. 링크당 off-ramp 2개라
+  split≥0.5면 off_ratio→1.0 포화. split 0.55/0.65/0.75 전부 동일 점유(24.6%).
+- 점유는 **demand·storage·time 무관하게 ~22-25%에서 평형**(us 2.5→6.0, T 1800→3600, storage
+  120→40 전부 24.6% 이하). 원인: off-ramp inflow는 항상 drain(하류 신호 off_ramp movement
+  service over 180s)에 의해 소화됨. offramp_blocked=0(inflow throttle 미발동). 즉 120-veh
+  storage가 180s 신호 service 대비 작아 capacity-drop 임계까지 차오를 수 없음.
+- 결론: **현 plant drain 동역학에서 split-only(또는 storage 축소) 시나리오 조정으로는 50%
+  점유 도달 불가.** 이는 plant 구조 특성이지 튜닝 실패가 아님.
+
+## VSL 미반응 진단 — 이득/페널티 정량 (핵심, directive 4·5)
+스크립트: `2026-06-14/vsl_cost_diagnostic.py` (_solve_freeway_agent 후보 루프 복제, TTS항/
+smoothness항 분리). vsl_smoothness_weight=0.1.
+- **capacity_drop 최혼잡 interval(점유 21.8%, λ_eff 1.98)**: prev=100→80 시
+  TTS_gain = **음수**(FW_W +0.129, FW_E +0.011 veh·h 오히려 증가), smooth_penalty=+2.0.
+  → VSL↓가 TTS를 줄이지 못함. penalty/gain 음수.
+- **강한 capacity-drop(98% 점유, λ_eff 1.701)**: prev=100→80/90 시
+  TTS_gain = **정확히 0.00000** (FW_W·FW_E 둘 다), smooth_penalty=+2.0.
+  → "이득이 smoothness에 묻힌다"보다 더 강함: **묻힐 이득 자체가 0**.
+- 근본 원인: 단일링크 probe TTS 모델에서 VSL↓는 마지막 segment의 off-ramp capacity-drop
+  병목 앞 segment 차량수를 horizon(=1)×K_cf substep 내에 줄이지 못함. desired speed만
+  낮출 뿐 이미 존재하는 차량은 그대로 → link_vehicles 합 불변 → TTS 불변. smoothness만 순손실.
+
+## test_c 정직화 (directive 3)
+- 기존: prev_vsl=70(이미 <99.5)에서 출발 → "VSL<max-0.5"가 trivially 통과(거짓 안심).
+- 신규 `test_c_vsl_actively_steps_down_when_capacity_drop_active`: prev_vsl=max(=100)에서
+  출발, 98% 점유 state(λ_eff≈1.70)에서 (전제: capacity-drop active 먼저 단언) VSL이
+  max-0.5 미만으로 **능동 하강**하는지 검증.
+- **현재 FAIL** — capacity-drop이 강하게 active한데도 prev=100에서 VSL이 100 유지.
+  억지 통과 금지(directive 3·8). 이것이 정직한 신호. 전체 suite 112 pass / 1 fail(=test_c).
+
+## 보정 판단 (directive 5 — 연구자 결정 대기)
+VSL 미반응의 원인은 smoothness 페널티가 아니라 **probe TTS 모델이 VSL↓의 이득을 0으로
+계산**하는 것. 따라서 단순 smoothness_weight↓로는 해결 안 됨(0×무엇=0). gradient/probe
+모델 보정 방향(예: 후보 horizon 연장, off-ramp 병목 앞 segment 메타넷 속도 효과 반영,
+혹은 VSL→다운스트림 유입↓→λ_eff 회복 경로의 명시적 모델링)은 연구자 결정 필요.
+
+## 커밋 (이번 작업)
+0afa450 split override 배선 / bd2292e capacity_drop 시나리오 / 7f9dd80 test_c 정직화

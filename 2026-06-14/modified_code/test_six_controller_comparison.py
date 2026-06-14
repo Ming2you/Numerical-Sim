@@ -415,25 +415,44 @@ class WuDistributedFixesTests(unittest.TestCase):
         ]
         self.assertGreater(len(changed), 0, msg="coupling y가 후보 제어에 반응하지 않음")
 
-    def test_c_vsl_moves_below_max_in_congestion(self):
-        # (c) 혼잡 state에서 VSL이 max-0.5 미만으로 움직인다(자유류 max 유지는 정상).
+    def test_c_vsl_actively_steps_down_when_capacity_drop_active(self):
+        # (c) 정직화: prev_vsl=max(=100)에서 출발해, capacity-drop이 active한 state(off-ramp
+        # storage 98% 점유, λ_eff≈1.70로 강한 차로 감소)에서 _solve_freeway_agent가 VSL을
+        # max-0.5 미만으로 능동 하강시키는지 검증한다. prev=70→70 제자리 유지가 통과하던
+        # 거짓 안심을 제거한다. capacity-drop이 active한데도 VSL이 안 내려가면 실패해야 한다
+        # (그게 정직한 신호 — 단일링크 probe TTS 모델에서 VSL↓의 이득이 0이라는 사실을 노출).
         cfg = self._congested_config()
         ctl = WuDistributedController(cfg)
         state = self._congested_state(cfg)
         demand = DemandProfile(
             cfg, ScenarioConfig("test", freeway_scale=1.4, ramp_scale=1.4)
         ).at(0.0)
-        # 이전 VSL을 낮춰 step 제약 후보가 낮은 VSL을 포함하게 한다(점진 하강 가정).
         previous = _wu_fixed_control(cfg)
-        for link in cfg.network.freeway_links:
-            previous.vsl[link] = 70.0
-        coupling = ctl._coupling(state, previous, demand)
         vsl_max = max(cfg.freeway_follower.vsl_set)
+        # 정직한 출발점: 직전 VSL을 free-flow max로 둔다(no-control과 동일한 상태에서 시작).
+        for link in cfg.network.freeway_links:
+            previous.vsl[link] = vsl_max
+        # 전제: 이 state에서 capacity-drop이 실제로 active(λ_eff < freeway_lanes)인지 먼저 확인.
+        from src.models.metanet import effective_lane_profile
+
+        profile, _ = effective_lane_profile(state, cfg)
+        self.assertTrue(
+            any(
+                profile[link][-1] < cfg.network.freeway_lanes - 1.0e-9
+                for link in cfg.network.freeway_links
+                if profile[link]
+            ),
+            msg="전제 실패: 이 state에서 capacity-drop이 active하지 않음",
+        )
+        coupling = ctl._coupling(state, previous, demand)
         moved = []
         for link in cfg.network.freeway_links:
             vsl, _, _ = ctl._solve_freeway_agent(link, state, coupling, demand, previous, None)
             moved.append(vsl < vsl_max - 0.5)
-        self.assertTrue(any(moved), msg="혼잡에서 VSL이 max-0.5 미만으로 움직이지 않음")
+        self.assertTrue(
+            any(moved),
+            msg="capacity-drop active(λ_eff≈1.70)인데도 prev=100에서 VSL이 능동 하강하지 않음",
+        )
 
     def test_d_probe_enters_capacity_drop_with_filled_offramp_storage(self):
         # (d) off-ramp storage 채운 state로 freeway solve 시 probe에 λ_eff<freeway_lanes 진입.
