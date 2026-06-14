@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
 from src.models.demand import DemandStep
-from src.models.state import ControlAction, ExperimentConfig, TrafficState
+from src.models.state import ControlAction, ExperimentConfig, TrafficState, segment_vsl
 from src.simulation.coupling import run_coupled_interval
 
 
@@ -88,8 +88,16 @@ def control_row(control: ControlAction, cfg: ExperimentConfig, step: int, time_s
     }
     for ramp in cfg.network.ramps:
         row[f"ramp_metering_{ramp}"] = control.ramp_metering.get(ramp, 0.0)
+    vsl_max = max(cfg.freeway_follower.vsl_set)
     for link in cfg.network.freeway_links:
-        row[f"vsl_{link}"] = control.vsl.get(link, max(cfg.freeway_follower.vsl_set))
+        # Option C: segment별 VSL 열 + 기존 link 열은 min-over-segment(병목 metering 가시화).
+        seg_vsls = []
+        for i in range(cfg.network.freeway_segments_per_link):
+            value = segment_vsl(control, link, i, cfg)
+            row[f"vsl_{link}_seg{i}"] = value
+            seg_vsls.append(value)
+        # 기존 분석/metrics가 읽는 link 열은 segment 최소값으로 유지(하위호환 + 작동 가시화).
+        row[f"vsl_{link}"] = min(seg_vsls) if seg_vsls else control.vsl.get(link, vsl_max)
     for signal in cfg.network.signals:
         row[f"green_{signal}_p1"] = control.green_times.get(f"{signal}_p1", 0.0)
         row[f"green_{signal}_p2"] = control.green_times.get(f"{signal}_p2", 0.0)
