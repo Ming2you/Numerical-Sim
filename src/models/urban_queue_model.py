@@ -475,6 +475,41 @@ def estimate_onramp_green_release_flows(
     return release
 
 
+def estimate_onramp_reservoir_inflow(
+    state: TrafficState,
+    control: ControlAction,
+    demand: DemandStep,
+    cfg: ExperimentConfig,
+    interval_h: float | None = None,
+) -> Dict[str, float]:
+    """on-ramp 접근부 x_on에서 green이 방출하는 유량을 ramp space 캡 없이 예측한다.
+
+    `estimate_onramp_green_release_flows`와 동일한 requested_total(큐+도착, green 용량
+    제한) 계산을 재사용하되 w_r 상한(ramp_queue_max) 포화에 따른 `min(..., ramp_space)`
+    캡을 제거한다. WU-CD-F coupling의 urban→freeway 결합변수 소스로, w_r이 포화한
+    peak에서도 두 green 후보 간 방출 차이를 보존해 분산 협상이 후보 제어에 반응하게 한다.
+    """
+    ensure_urban_state(state, cfg)
+    net = cfg.network
+    specs = movement_specs(cfg)
+    horizon_h = cfg.simulation.T_f_h if interval_h is None else interval_h
+    release: Dict[str, float] = {}
+    for ramp, movements in net.on_ramp_to_movement.items():
+        requested_total = 0.0
+        arrival = max(0.0, demand.ramp_arrival.get(ramp, 0.0)) * horizon_h
+        arrival_share = arrival / max(len(movements), 1)
+        for movement in movements:
+            spec = specs.get(movement)
+            if spec is None:
+                continue
+            available = max(0.0, state.urban_movement_queue.get(movement, 0.0)) + arrival_share
+            cap_flow = _movement_capacity_flow(control, cfg, movement, spec)
+            green_fraction = _phase_green_fraction(control, cfg, spec)
+            requested_total += min(available, horizon_h * green_fraction * cap_flow)
+        release[ramp] = requested_total / max(horizon_h, 1.0e-9)
+    return release
+
+
 def urban_substep(
     state: TrafficState,
     control: ControlAction,
