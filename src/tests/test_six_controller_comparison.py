@@ -347,5 +347,123 @@ class SixControllerTests(unittest.TestCase):
                 self.assertIn(key, s)
 
 
+class WuDistributedFixesTests(unittest.TestCase):
+    """WU-CD-F 치명 2건 수정 검증 — 분산 협상 복원(a,b) + freeway VSL 작동(c,d)."""
+
+    def _congested_config(self):
+        return ExperimentConfig.from_file(
+            "src/config/default.yaml",
+            {"mpc": {"horizon_steps": 1, "max_nash_iter": 5}},
+        )
+
+    def _congested_state(self, cfg):
+        """본선 임계 근처 + off-ramp storage 채움 + 도시 링크 포화(drain 막힘)."""
+        net = cfg.network
+        state = TrafficState.initial(cfg)
+        for movement in net.urban_movements:
+            state.urban_movement_queue[movement] = 80.0
+        for link in net.freeway_links:
+            state.freeway_density[link] = [40.0 for _ in state.freeway_density[link]]
+            state.freeway_speed[link] = [50.0 for _ in state.freeway_speed[link]]
+        for off_ramp in net.off_ramps:
+            sl = net.off_ramp_storage_link[off_ramp]
+            cap = net.urban_link_storage_veh[sl]
+            state.urban_link_storage[sl] = 0.02 * cap  # 98% 점유.
+        for link, cap in net.urban_link_storage_veh.items():
+            state.urban_link_storage[link] = min(
+                state.urban_link_storage.get(link, cap), 0.05 * cap
+            )
+        return state
+
+    def test_a_peak_coupling_iterates_more_than_once(self):
+        # (a) peak 혼잡에서 coupling residual>tol 이고 iteration>1(단발 퇴화 해소).
+        # iteration>1은 정의상 첫 iteration residual>tol을 함의(아니면 1에서 종료)하지만,
+        # 단발 퇴화 산물이 아님을 명시하기 위해 첫 iteration residual도 직접 측정한다.
+        cfg = self._congested_config()
+        ctl = WuDistributedController(cfg)
+        state = self._congested_state(cfg)
+        demand = DemandProfile(
+            cfg, ScenarioConfig("test", freeway_scale=1.4, urban_scale=1.4, ramp_scale=1.4)
+        ).at(0.0)
+        previous = _wu_fixed_control(cfg)
+        _, iterations, _, _, _ = ctl._solve_followers(state, demand, previous, leader=None)
+        self.assertGreater(iterations, 1)
+        # 단발 퇴화 산물이 아님을 명시: 1 iteration만 돌렸을 때의 반환 residual이 tol을
+        # 초과(첫 단계에서 outgoing y가 후보 제어에 살아 있게 반응 — 즉시 종료가 아님).
+        one_iter_cfg = ExperimentConfig.from_file(
+            "src/config/default.yaml", {"mpc": {"horizon_steps": 1, "max_nash_iter": 1}}
+        )
+        ctl1 = WuDistributedController(one_iter_cfg)
+        _, _, _, first_residual, _ = ctl1._solve_followers(state, demand, previous, leader=None)
+        self.assertGreater(first_residual, cfg.mpc.distributed_coupling_tol)
+
+    def test_b_coupling_y_changes_between_iteration_zero_and_one(self):
+        # (b) iteration 0/1 사이 coupling y의 최소 한 key가 tol 초과로 변한다.
+        cfg = self._congested_config()
+        ctl = WuDistributedController(cfg)
+        state = self._congested_state(cfg)
+        demand = DemandProfile(
+            cfg, ScenarioConfig("test", freeway_scale=1.4, urban_scale=1.4, ramp_scale=1.4)
+        ).at(0.0)
+        previous = _wu_fixed_control(cfg)
+        y0 = ctl._coupling(state, previous, demand)
+        control, _, _, _, _ = ctl._solve_followers(state, demand, previous, leader=None)
+        y1 = ctl._coupling(state, control, demand)
+        changed = [
+            k for k in y0
+            if abs(y1[k] - y0[k]) > cfg.mpc.distributed_coupling_tol
+        ]
+        self.assertGreater(len(changed), 0, msg="coupling y가 후보 제어에 반응하지 않음")
+
+    def test_c_vsl_moves_below_max_in_congestion(self):
+        # (c) 혼잡 state에서 VSL이 max-0.5 미만으로 움직인다(자유류 max 유지는 정상).
+        cfg = self._congested_config()
+        ctl = WuDistributedController(cfg)
+        state = self._congested_state(cfg)
+        demand = DemandProfile(
+            cfg, ScenarioConfig("test", freeway_scale=1.4, ramp_scale=1.4)
+        ).at(0.0)
+        # 이전 VSL을 낮춰 step 제약 후보가 낮은 VSL을 포함하게 한다(점진 하강 가정).
+        previous = _wu_fixed_control(cfg)
+        for link in cfg.network.freeway_links:
+            previous.vsl[link] = 70.0
+        coupling = ctl._coupling(state, previous, demand)
+        vsl_max = max(cfg.freeway_follower.vsl_set)
+        moved = []
+        for link in cfg.network.freeway_links:
+            vsl, _, _ = ctl._solve_freeway_agent(link, state, coupling, demand, previous, None)
+            moved.append(vsl < vsl_max - 0.5)
+        self.assertTrue(any(moved), msg="혼잡에서 VSL이 max-0.5 미만으로 움직이지 않음")
+
+    def test_d_probe_enters_capacity_drop_with_filled_offramp_storage(self):
+        # (d) off-ramp storage 채운 state로 freeway solve 시 probe에 λ_eff<freeway_lanes 진입.
+        from src.models.metanet import effective_lane_profile
+
+        cfg = self._congested_config()
+        state = self._congested_state(cfg)
+        profile, _ = effective_lane_profile(state, cfg)
+        entered = any(
+            profile[link][-1] < cfg.network.freeway_lanes - 1.0e-9
+            for link in cfg.network.freeway_links
+            if profile[link]
+        )
+        self.assertTrue(entered, msg="off-ramp storage 점유가 capacity-drop을 유발하지 않음")
+
+    def test_last_offramp_flow_cached_after_freeway_solve(self):
+        # freeway→urban coupling 재사용 캐시가 freeway solve 후 채워진다.
+        cfg = self._congested_config()
+        ctl = WuDistributedController(cfg)
+        state = self._congested_state(cfg)
+        demand = DemandProfile(
+            cfg, ScenarioConfig("test", freeway_scale=1.4, ramp_scale=1.4)
+        ).at(0.0)
+        previous = _wu_fixed_control(cfg)
+        coupling = ctl._coupling(state, previous, demand)
+        for link in cfg.network.freeway_links:
+            ctl._solve_freeway_agent(link, state, coupling, demand, previous, None)
+            self.assertGreaterEqual(ctl._last_offramp_flow[link], 0.0)
+        self.assertTrue(any(v > 0.0 for v in ctl._last_offramp_flow.values()))
+
+
 if __name__ == "__main__":
     unittest.main()
