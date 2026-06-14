@@ -338,7 +338,7 @@ class WuDistributedController:
                         self.cfg,
                         interval_h=dt_h,
                     )
-                    freeway_substep(
+                    _, fw_diag = freeway_substep(
                         probe,
                         candidate_control,
                         demand,
@@ -349,6 +349,10 @@ class WuDistributedController:
                         update_ramp_queues=False,
                         include_ramp_queue_ttt=False,
                     )
+                    # storage-aware probe: off-ramp 유출을 storage로 유입, 하류 신호 drain으로
+                    # 유출시켜 점유를 갱신한다. 다음 substep의 effective_lane_profile이
+                    # capacity-drop을 반영해 VSL↓→다운스트림 유입↓→λ_eff 회복 이득을 내생화.
+                    self._update_probe_offramp_storage(probe, fw_diag, candidate_control, dt_h)
 
                     # Wu local TTS: 해당 freeway agent의 segment 차량과 연결 ramp queue.
                     link_vehicles = sum(probe.freeway_vehicle_count_by_link(net).get(link, []))
@@ -371,6 +375,44 @@ class WuDistributedController:
             if cost < best_obj:
                 best_obj, best_vsl = cost, float(vsl)
         return best_vsl, best_obj, evals
+
+    def _update_probe_offramp_storage(
+        self,
+        probe: TrafficState,
+        fw_diag: Mapping[str, float],
+        control: ControlAction,
+        dt_h: float,
+    ) -> None:
+        """probe의 off-ramp storage 점유를 한 substep 갱신한다.
+
+        유입 = freeway_substep이 보고한 off-ramp 유출(link 합산을 split ratio로 분배),
+        유출 = 하류 신호의 off_ramp movement drain(green×movement capacity 합).
+        storage 가용량(available)을 감소/증가시켜 effective_lane_profile이 다음 substep에
+        capacity-drop을 반영하게 한다(원논문 storage-aware 다운스트림 인식)."""
+        net = self.cfg.network
+        for off_ramp in net.off_ramps:
+            link = net.off_ramp_from_freeway.get(off_ramp, "")
+            storage_link = net.off_ramp_storage_link.get(off_ramp, "")
+            if not link or not storage_link:
+                continue
+            capacity = float(net.urban_link_storage_veh.get(storage_link, 0.0))
+            # link 합산 off-ramp 유출을 이 off_ramp split 몫으로 분배.
+            link_split = sum(
+                ratio
+                for o, ratio in net.off_ramp_split_ratio.items()
+                if net.off_ramp_from_freeway.get(o) == link
+            )
+            this_split = float(net.off_ramp_split_ratio.get(off_ramp, 0.0))
+            share = this_split / max(link_split, 1.0e-9)
+            inflow = max(0.0, float(fw_diag.get(f"offramp_flow_{link}", 0.0))) * share
+            drain = sum(
+                self._signal_leaving_rate(signal, movement, control)
+                for signal, movement in self._offramp_drain_flow.get(off_ramp, [])
+            )
+            available = float(probe.urban_link_storage.get(storage_link, capacity))
+            occupied = max(0.0, capacity - available)
+            occupied = min(capacity, max(0.0, occupied + (inflow - drain) * dt_h))
+            probe.urban_link_storage[storage_link] = capacity - occupied
 
     # ---------- 합의 루프 (Wu §IV-D) ----------
 
