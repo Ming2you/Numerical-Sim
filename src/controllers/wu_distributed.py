@@ -361,12 +361,10 @@ class WuDistributedController:
                         for ramp in net.ramps
                         if net.ramp_to_freeway.get(ramp) == link
                     )
-                    density_excess = sum(
-                        max(0.0, rho - net.rho_crit)
-                        for rho in probe.freeway_density.get(link, [])
-                    )
+                    # Wu 순수 TTS: Σ L·λ_eff·ρ(=segment 차량수) + ramp 큐. 비-Wu
+                    # density_penalty 항은 제거 — storage-aware probe가 capacity-drop을
+                    # TTS에 내생화하므로 별도 패널티 없이 VSL이 혼잡 시 작동한다.
                     cost += (link_vehicles + link_ramp_queue) * dt_h
-                    cost += self.cfg.freeway_follower.density_penalty * density_excess * dt_h
             cost += smooth_w * abs(vsl - prev_vsl)
             if leader is not None:
                 n_pred = sum(probe.freeway_vehicle_count_by_link(net).get(link, []))
@@ -405,10 +403,18 @@ class WuDistributedController:
             this_split = float(net.off_ramp_split_ratio.get(off_ramp, 0.0))
             share = this_split / max(link_split, 1.0e-9)
             inflow = max(0.0, float(fw_diag.get(f"offramp_flow_{link}", 0.0))) * share
-            drain = sum(
-                self._signal_leaving_rate(signal, movement, control)
-                for signal, movement in self._offramp_drain_flow.get(off_ramp, [])
-            )
+            # drain = 하류 신호 off_ramp movement green 처리량, 단 receiving 도시 링크
+            # 가용 공간으로 제약(도시 포화 시 spillback → drain 막힘 → storage 정체 →
+            # capacity-drop 지속). 이게 혼잡 interval에서 VSL이 작동하는 물리 경로다.
+            drain = 0.0
+            for signal, movement in self._offramp_drain_flow.get(off_ramp, []):
+                rate = self._signal_leaving_rate(signal, movement, control)
+                recv_link = str(self._specs[movement].get("receiving_link", ""))
+                recv_cap = float(net.urban_link_storage_veh.get(recv_link, 0.0))
+                if recv_cap > 0.0:
+                    recv_avail = float(probe.urban_link_storage.get(recv_link, recv_cap))
+                    rate = min(rate, max(0.0, recv_avail) / max(dt_h, 1.0e-9))
+                drain += rate
             available = float(probe.urban_link_storage.get(storage_link, capacity))
             occupied = max(0.0, capacity - available)
             occupied = min(capacity, max(0.0, occupied + (inflow - drain) * dt_h))
