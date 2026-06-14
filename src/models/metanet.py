@@ -4,7 +4,7 @@ import math
 from typing import Dict, List, Tuple
 
 from .demand import DemandStep
-from .state import ControlAction, ExperimentConfig, TrafficState
+from .state import ControlAction, ExperimentConfig, TrafficState, segment_vsl
 
 
 def segment_flow_veh_h(rho_veh_km_lane: float, speed_km_h: float, lanes: float) -> float:
@@ -272,8 +272,7 @@ def freeway_substep(
             n / max(net.freeway_segment_length_km * max(lane, 1.0e-9), 1.0e-9)
             for n, lane in zip(vehicles, lanes_now)
         ]
-        vsl = control.vsl.get(link, max(cfg.freeway_follower.vsl_set))
-        vsl_active = vsl < max(cfg.freeway_follower.vsl_set) - 0.5
+        vsl_max = max(cfg.freeway_follower.vsl_set)
         q_values = [
             segment_flow_veh_h(rho, speed, lane)
             for rho, speed, lane in zip(rho_for_flow, speeds, lanes_now)
@@ -317,13 +316,16 @@ def freeway_substep(
 
             upstream_speed = net.v_free if i == 0 else speeds[i - 1]
             downstream_rho = rho_for_flow[i + 1] if i + 1 < len(rhos) else rho_for_flow[i]
+            # Option C: VSL을 segment별로 읽는다(segment 키 없으면 link 키 fallback).
+            vsl_i = segment_vsl(control, link, i, cfg)
+            vsl_active_i = vsl_i < vsl_max - 0.5
             v_eff = effective_desired_speed_kmh(
                 rho,
                 net.v_free,
                 net.rho_crit,
-                vsl,
+                vsl_i,
                 net.alpha_vsl,
-                vsl_active,
+                vsl_active_i,
                 net.metanet_a_m,
             )
             v_new = metanet_speed_update_kmh(

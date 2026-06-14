@@ -635,6 +635,16 @@ class TrafficState:
         return [float(v) for v in self.boundary_queue.values()]
 
 
+def segment_vsl(control: "ControlAction", link: str, i: int, cfg: ExperimentConfig) -> float:
+    """freeway link의 segment i에 적용할 VSL 값을 읽는다(Option C per-segment).
+
+    조회 순서: segment 키 `{link}__seg{i}` → link 키 `{link}` → vsl_set 최대값(no-VSL).
+    segment 키가 없으면 link 키로 fallback해 기존 link-uniform 동작과 비트 동일하다.
+    """
+    fallback = control.vsl.get(link, max(cfg.freeway_follower.vsl_set))
+    return float(control.vsl.get(f"{link}__seg{i}", fallback))
+
+
 @dataclass
 class ControlAction:
     N_P_star: float = 0.0
