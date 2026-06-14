@@ -191,3 +191,16 @@ off-ramp OR_D_W·OR_F_W·OR_D_E·OR_F_E.
   차로수 감소)을 반영하게 한다. 이로써 VSL↓→다운스트림 유입↓→capacity-drop 회피→
   λ_eff 회복→본선 차량수↓가 TTS에 내생화되어, 별도 penalty 없이 혼잡 시 VSL이
   작동한다(직전 구현은 probe에서 storage 미갱신이라 VSL이 항상 max로 고정됐다).
+- **per-segment VSL + 다운스트림 결합 (Option C)**: storage-aware probe만으로는 부족했다.
+  link당 VSL 1값을 전 segment에 uniform 적용하면 병목 segment까지 같이 늦춰 mainstream
+  metering이 불가능했고, 측정 결과 강한 capacity-drop(98% storage, λ_eff≈1.70)에서도
+  VSL↓의 ΔTTS가 **정확히 0**이었다. 해결: (1) plant가 `segment_vsl(control, link, i)`로
+  segment별 VSL을 읽도록 입자도 세분화(segment 키 없으면 link 키 fallback → 타 컨트롤러
+  무변경), (2) `_solve_freeway_agent`가 segment 벡터를 탐색(병목 seg는 {max, prev}로
+  제한해 q_out 회복 보존, 상류는 max_vsl_step 내 후보), (3) coupling `p_down_{link}`로
+  병목 임계 초과 시에만 상류 metering(누적 seg1→seg2 유입)을 보상(메커니즘 B). 이 결과
+  상류 segment VSL↓의 ΔTTS가 음수가 됐다(seg0 100→80에서 −5.2, 100→50에서 −24.9; 직전
+  0.00000). 단, VSL은 free-flow 가지(ρ<ρ_crit)에서만 metering이 성립하므로(congested
+  가지는 q≈보존) 본선 전체가 과포화되면 이득은 다시 0으로 수렴한다 — 이는 정직한 물리
+  한계이며, capacity_drop 시나리오(점유 ~22%, λ_eff≈1.98)는 이 망이 심한 capacity-drop을
+  잘 만들지 않음을 보이는 정직 근거이고, VSL 작동 실증은 test_c의 강제 98% 상태로 한다.

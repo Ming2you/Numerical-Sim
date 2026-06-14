@@ -1,0 +1,32 @@
+{
+  "scenario": "capacity_drop",
+  "summaries": {
+    "WU-CD-F": {
+      "controller_id": "WU-CD-F",
+      "authority_group": "wu",
+      "leader_enabled": false,
+      "centralized": false,
+      "authority_ok": true,
+      "authority_violations": "",
+      "total_ttt": 1764.39,
+      "urban_ttt": 1073.409,
+      "freeway_ttt": 690.982,
+      "free_flow_reference_total_ttt": 655.522,
+      "free_flow_reference_urban_ttt": 600.773,
+      "free_flow_reference_freeway_ttt": 54.75,
+      "total_delay": 1108.868,
+      "urban_delay": 472.636,
+      "freeway_delay": 636.232,
+      "completed_vehicles": 4879.4,
+      "network_throughput_veh_h": 9758.8,
+      "average_delay_per_completed_vehicle_h": 0.227256,
+      "terminal_total_vehicles": 6353.1,
+      "terminal_urban_vehicles": 4156.6,
+      "terminal_onramp_vehicles": 2136.6,
+      "terminal_freeway_vehicles": 1476.5,
+      "computation_time_sec": 31.88,
+      "solver_evaluations": 2831.0,
+      "solver_converged_rate": 0.3
+    }
+  }
+}

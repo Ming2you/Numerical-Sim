@@ -1,0 +1,15 @@
+=== 전제 ===
+  FW_W: lambda_eff_last=1.7013 capacity_drop_active=1.0
+  FW_E: lambda_eff_last=1.7013 capacity_drop_active=1.0
+=== p_down ===
+  p_down_FW_W=58.5000
+  p_down_FW_E=58.5000
+=== FW_W 후보 수 = 9 ===
+선택된 segment 벡터 FW_W: [80.0, 100.0, 100.0]  obj=534.1637 evals=9
+=== 후보별 cost(seg0 sweep, 나머지 상류=max, seg2=max) ===
+  seg0=   50 seg1=100 seg2=100 -> obj=512.39985
+  seg0=   60 seg1=100 seg2=100 -> obj=519.16547
+  seg0=   70 seg1=100 seg2=100 -> obj=525.71794
+  seg0=   80 seg1=100 seg2=100 -> obj=532.16368
+  seg0=   90 seg1=100 seg2=100 -> obj=537.11702
+  seg0=  100 seg1=100 seg2=100 -> obj=537.32016

@@ -275,7 +275,7 @@ FIDELITY_MATRIX_MD = """# Stage 1 fidelity matrix (plan §2.4)
 
 | controller | plant | authority | objective | horizon | solver | coupling iteration | 차이의 영향 |
 |---|---|---|---|---|---|---|---|
-| WU-CD-F | 공유 plant(METANET+movement queue, storage-cap spillback) | green p1+VSL (offset 0, metering=용량, allocation 無) | agent local 순수 TTS(Σ L·λ_eff·ρ+ramp 큐)+Δu (비-Wu density_penalty 항 제거) | 공통 T_c×horizon | 원문 MILP/SQP 대신 결정적 후보탐색(경량 국소 큐/밀도 모델, freeway는 storage-aware probe로 capacity-drop 내생화) | Jacobi: y 고정→agent solve가 outgoing y를 후보 제어로 갱신→under-relaxation(α=0.5) 전파, S_max=5 | local 모델이 거칠어 분산해의 질이 원문 대비 보수적일 수 있음 |
+| WU-CD-F | 공유 plant(METANET+movement queue, storage-cap spillback, **per-segment VSL**) | green p1+**segment 벡터 VSL** (offset 0, metering=용량, allocation 無) | agent local 순수 TTS(Σ L·λ_eff·ρ+ramp 큐)+Δu + 다운스트림 결합 w_couple·p_down·유입(메커니즘 B, 비-Wu density_penalty 항 제거) | 공통 T_c×horizon | 원문 MILP/SQP 대신 결정적 후보탐색(경량 국소 큐/밀도 모델, freeway는 storage-aware probe로 capacity-drop 내생화 + segment 벡터 VSL 탐색: 병목 seg는 {max,prev}, 상류는 max_vsl_step 내) | Jacobi: y 고정→agent solve가 outgoing y를 후보 제어로 갱신→under-relaxation(α=0.5) 전파, S_max=5 | local 모델이 거칠어 분산해의 질이 원문 대비 보수적일 수 있음. VSL은 free-flow 가지에서만 metering 성립(과포화 시 이득→0, 정직 한계) |
 | WU-MATCHED-STACKELBERG | 동일 | 동일 | local + w·pos(n_pred−ω·target) conditioning | 동일 | follower=위와 동일, leader=후보 열거+coupled 예측 | 동일 | leader 후보 9개 고정 그리드 — conditioning이 binding하지 않으면 WU-CD-F와 동일해질 수 있음 |
 | WU-CC-F | 동일 | 동일(green+VSL) | J_WU_global(TTS+Δu) | 동일 | seeded random search(budget 보고) | 없음 | 보장된 전역최적 아님 — 동일 budget 수치 참조 |
 | PROPOSED-FOLLOWERS-ONLY | 동일 | green 자유탐색([green_min,green_max] 후보)+offset+metering+VSL (allocation 無) | agent local 잔여 큐+Δgreen (전역 target 無) | 동일 | 신호별 green 후보탐색 + leaderless metering 국소 후보선택 | coupling iteration | allocation 비제어 — movement service는 plant 포화유율 fallback(Wu와 동일) |
@@ -284,6 +284,12 @@ FIDELITY_MATRIX_MD = """# Stage 1 fidelity matrix (plan §2.4)
 
 공통: Wu off-ramp spillback(식22 차로수 감소)은 본 plant의 storage-cap 방식으로 대응(효과 등가,
 wu2022_reference §8). VSL 변화 제약은 양방향 max_vsl_step(Wu는 감소만 제한) — 기존 plant 정의 유지.
+
+per-segment VSL은 권한 확대가 아니라 같은 VSL 권한의 공간 입자도 세분화다(link 1값 uniform→
+segment 벡터). uniform VSL은 병목 segment까지 같이 늦춰 mainstream metering이 불가능했고 강한
+capacity-drop에서도 ΔTTS가 정확히 0이었다(Option C 이후 상류 segment VSL↓ ΔTTS 음수). capacity_drop
+시나리오(점유 ~22%, λ_eff≈1.98)는 실증 무대가 아니라 "이 망은 심한 capacity-drop을 잘 안 만든다"의
+정직 근거이며, VSL 작동 실증은 test_c의 강제 98% 상태(λ_eff≈1.70)로 한다(wu2022_reference §8).
 """
 
 

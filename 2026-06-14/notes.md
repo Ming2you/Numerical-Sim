@@ -128,3 +128,54 @@ VSL 미반응의 원인은 smoothness 페널티가 아니라 **probe TTS 모델�
 
 ## 커밋 (이번 작업)
 0afa450 split override 배선 / bd2292e capacity_drop 시나리오 / 7f9dd80 test_c 정직화
+
+---
+
+# 2026-06-14 (3) 작업 노트 — Option C: per-segment VSL + 다운스트림 결합
+
+## 목표
+WU-CD-F freeway VSL이 capacity-drop 시 작동하도록 per-segment VSL(plant 입자도 세분화)
++ 다운스트림 결합을 구현. 직전 실패: link당 VSL 1값 uniform → 병목 seg2까지 늦춰 mainstream
+metering 불가 + probe TTS 모델이 VSL↓ 이득을 0으로 계산(98% 점유서도 ΔTTS=0.00000).
+
+## 변경 (단계별 커밋)
+1. plant per-segment VSL: `state.segment_vsl(control, link, i, cfg)` 헬퍼(segment 키
+   `{link}__seg{i}`→link 키→max fallback). `metanet.freeway_substep`이 segment 루프 안에서
+   vsl_i/vsl_active_i 읽음. 차량보존식 불변. (235ac7d)
+2. 직렬화: `simulator.control_row`에 `vsl_{link}_seg{i}` 열 추가, 기존 `vsl_{link}`는
+   min-over-segment로 유지(하위호환). (b54dca3)
+3. controller: `_solve_freeway_agent` segment 벡터 탐색 재작성. 후보=병목 seg{max,prev}
+   ×상류 seg(max_vsl_step 내 vsl_set). 메커니즘 A(storage-aware probe→λ_eff 회복 TTS 내생화)
+   + 메커니즘 B(coupling p_down_{link}, objective에 w_couple·p_down·누적 seg1→seg2 유입).
+   반환 (vsl_dict,obj,evals), _solve_followers는 new_vsl.update(). w_couple=0.05(fallback). (97bca51)
+4. test_c: _congested_state를 현실적 프로파일([15,20,40], 상류 free-flow)로, demand fs=1.0/rs=0.8.
+   상류 VSL↓ + 병목 seg2 max 유지 단언. (320e299)
+5. 문서: spec 16.4 Option C 절, fidelity matrix WU-CD-F 행, wu2022_reference §8 갱신.
+
+## 핵심 측정 (강제 98% state, λ_eff=1.7013, p_down=58.5, smoothness=0)
+- **seg0 sweep ΔTTS(obj)**: 50→512.4, 60→519.2, 70→525.7, 80→532.2, 90→537.1, 100→537.3.
+  → 상류 VSL↓ ΔTTS **음수**(100→80: −5.16, 100→50: −24.9). **직전엔 0.00000**.
+- **seg1 sweep**: 50→530.0, ..., 100→537.3 (100→50: −7.28). 역시 음수.
+- 실제 solve 선택 벡터(prev=100, max_vsl_step=20): **[80, 100, 100]** — 상류 seg0=80(metering),
+  병목 seg2=100(유지). FW_E도 동일.
+
+## closed-loop (capacity_drop, T=1800, WU-CD-F)
+- VSL 움직인 interval = **9/10**(직전 0/20). FW_W seg0→70, seg1/seg2=100 유지. FW_E=100.
+- λ_eff_last min: FW_W 1.9804, FW_E 1.9796(lane loss ~0.02, 약함). 점유 ~22%(직전과 동일).
+- ttt=1764.4 delay=1108.9 authority_ok=True.
+
+## 근본 원인 규명 (정직)
+직전 "ΔTTS=0"의 진짜 원인은 smoothness가 아니라 **VSL이 물리적으로 inert**한 것:
+- METANET 평형속도: ρ=40 → 47.4 km/h, ρ=50 → 32.3. vsl_set 최저=50 > 47.4라 congested
+  가지에서 VSL이 binding 안 됨. 또한 congested 가지는 q=ρ·v 거의 보존 → 속도↓해도 유량 불변.
+- 따라서 VSL metering은 **free-flow 가지(ρ<ρ_crit=33.5)에서만 성립**. 상류가 free-flow를
+  유지(현실적 capacity-drop: 상류 흐름+병목만 막힘)할 때만 ΔTTS 음수. 본선 전체 과포화 시
+  이득 다시 0(정직 한계). 직전 fixture는 전 segment ρ=40으로 상류까지 congested로 밀어
+  VSL inert였음 → 현실적 프로파일로 교체.
+
+## 회귀
+- 전체 unittest 113 통과(직전 112+1fail→113 OK). 다른 3 controller는 link 키 fallback로
+  무변경(smoke improvement -0.91% 비트 동일). test_c 정상 통과(억지 아님 — 측정으로 입증).
+
+## 커밋
+235ac7d plant per-seg / b54dca3 직렬화 / 97bca51 controller / 320e299 test_c / (docs 다음 커밋)

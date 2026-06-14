@@ -155,6 +155,32 @@ freeway -> freeway:
 입력으로 푸는 Jacobi 정렬이며, outgoing y 갱신에 under-relaxation(α=0.5)을 적용하고
 S_max=5로 절단해 green→arr 과결합 발산을 막는다.
 
+### 구현 정합 (per-segment VSL + 다운스트림 결합, Option C)
+
+freeway VSL을 **link당 1값(전 segment uniform)에서 segment별 벡터로 입자도를 세분화**한다
+(권한 확대가 아니라 같은 VSL 권한의 공간 해상도를 높인 것). uniform VSL은 병목 segment
+까지 같이 늦춰 mainstream metering이 불가능했다. plant `freeway_substep`은 `segment_vsl`
+헬퍼로 segment 키 `{link}__seg{i}`를 읽고, 없으면 link 키로 fallback(다른 컨트롤러는
+무변경). `_solve_freeway_agent`는 segment 벡터 VSL을 탐색하되, 병목 segment(off-ramp seg)는
+{max, 직전값} 2값으로 제한해 q_out 회복을 상쇄하지 않고, 상류 segment(seg0/seg1)는
+`max_vsl_step` 내 vsl_set 후보로 가지치기한다(총 수십 개).
+
+작동 메커니즘 2종.
+
+- **메커니즘 A (storage-aware probe)**: 각 후보를 K_cf substep 적분하며 off-ramp storage
+  점유를 갱신(`_update_probe_offramp_storage`)해, 상류 metering→seg1→seg2 유입↓→off-ramp
+  storage 유입↓→λ_eff 회복(capacity-drop 회피)이 link 차량합(objective)에 내생화되게 한다.
+- **메커니즘 B (다운스트림 결합)**: coupling에 `p_down_{link}` = w_ρ·max(0, ρ_seg2−ρ_crit) +
+  w_v·max(0, v_free−v_seg2)를 추가하고, objective에 `w_couple·p_down·(전 substep 누적
+  seg1→seg2 유입)` 항을 더한다. 병목이 임계 초과(p_down>0)일 때만 상류 metering을 보상하고,
+  free-flow면 p_down=0이라 항이 사라져 불필요 지연을 만들지 않는다. 누적 유입은 첫 substep만
+  보면 VSL이 아직 작동 전이라 후보 무차별이 되는 것을 방지하기 위해 전 substep 합산한다.
+
+**물리적 전제**: VSL은 free-flow 가지(ρ<ρ_crit)에서만 속도↓→유량↓로 metering이 성립한다.
+congested 가지에서는 q=ρ·v가 거의 보존되어 VSL이 inert하다. 따라서 상류가 free-flow를
+유지할 때(현실적 capacity-drop: 상류는 흐르고 off-ramp 병목만 막힘) 상류 segment VSL↓의
+ΔTTS가 음수가 되고, 본선 전체가 과포화되면 이득이 0으로 수렴한다(정직한 한계).
+
 ## 16.5 (보조) `WU-MATCHED-STACKELBERG` — 주 비교군 제외
 
 Wu의 agent partition, green/VSL authority, local dynamics, base local objective와 coupling
