@@ -136,6 +136,25 @@ freeway -> freeway:
 7. 첫 control sample 적용
 ```
 
+### 구현 정합 (Jacobi 후보 반응형 coupling)
+
+원문 Jacobi 합의가 실제로 반복하도록, 교환되는 coupling variable을 **후보 제어에
+반응형**으로 구성한다(이전 구현은 현재 state/demand만 읽어 residual≈0, iteration=1로
+퇴화했다). 의미있는 교환 3종.
+
+- **urban→urban (`arr_*`)**: 상류 신호의 후보 green leaving rate(green_fraction×movement
+  capacity를 β분배)를 주채널로, 링크 점유 방출을 보조항(가중 0.5<1)으로 더한다.
+- **urban→freeway (`u_on_*`)**: ramp reservoir inflow(`estimate_onramp_reservoir_inflow`,
+  w_r 상한 캡 제거)로 w_r 포화 시에도 green 후보 차이를 보존한다.
+- **freeway→urban (off-ramp inflow)**: freeway agent가 고른 후보 VSL의 off-ramp 유출
+  (`_last_offramp_flow`)을 split ratio로 분배해 재사용한다(별도 재시뮬 없음).
+- **freeway→freeway**: 본 네트워크의 두 freeway link(FW_W·FW_E)는 비인접이라 f↔f
+  coupling은 토폴로지상 moot(각주) — 진단용 boundary density/speed만 유지한다.
+
+각 iteration은 시작 control을 스냅샷으로 고정해 모든 agent가 동일 y·동일 previous를
+입력으로 푸는 Jacobi 정렬이며, outgoing y 갱신에 under-relaxation(α=0.5)을 적용하고
+S_max=5로 절단해 green→arr 과결합 발산을 막는다.
+
 ## 16.5 (보조) `WU-MATCHED-STACKELBERG` — 주 비교군 제외
 
 Wu의 agent partition, green/VSL authority, local dynamics, base local objective와 coupling

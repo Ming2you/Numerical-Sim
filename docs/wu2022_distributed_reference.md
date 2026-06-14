@@ -181,3 +181,13 @@ off-ramp OR_D_W·OR_F_W·OR_D_E·OR_F_E.
   `max_vsl_step`. 의도적 차이면 리포트에 기록.
 - Wu의 local solver는 MILP/SQP(gradient). 현재 repo의 freeway 빔서치는 유지해도 되나,
   **이웃 결합변수를 고정**하고 **자기 서브망만** 평가하도록 바꾸는 게 비용 절감의 핵심.
+- **freeway local objective는 Wu 순수 TTS**(`Σ L·λ_eff·ρ`=segment 차량수 + ramp 큐)
+  + Δvsl 패널티로 정렬한다. 직전 구현에 있던 `density_penalty×pos(ρ−ρ_crit)` 항은
+  Wu objective에 없는 비-Wu 항이라 제거했다(`FreewayFollowerConfig.density_penalty`
+  config 키는 다른 proposed controller가 쓰므로 유지, WU-CD-F 코드에서만 미사용).
+- **storage-aware probe**: freeway agent의 probe horizon 각 substep에서 off-ramp
+  storage 점유를 off-ramp 유출(유입) + 하류 신호 drain(유출, 도시 receiving link
+  가용공간으로 제약)으로 갱신해 `effective_lane_profile`이 capacity-drop(식22 등가
+  차로수 감소)을 반영하게 한다. 이로써 VSL↓→다운스트림 유입↓→capacity-drop 회피→
+  λ_eff 회복→본선 차량수↓가 TTS에 내생화되어, 별도 penalty 없이 혼잡 시 VSL이
+  작동한다(직전 구현은 probe에서 storage 미갱신이라 VSL이 항상 max로 고정됐다).
