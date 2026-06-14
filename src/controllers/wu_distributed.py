@@ -11,7 +11,10 @@ from src.models.demand import DemandStep
 from src.models.metanet import compute_ramp_release_flows, freeway_substep
 from src.models.state import ControlAction, ExperimentConfig, TrafficState
 from src.models.urban_queue_model import (
+    _movement_capacity_flow,
+    _phase_green_fraction,
     estimate_onramp_green_release_flows,
+    estimate_onramp_reservoir_inflow,
     movement_specs,
     off_ramp_capacity_by_freeway_link,
 )
@@ -79,6 +82,67 @@ class WuDistributedController:
         total_cap = max(sum(cap_by_signal.values()), 1.0e-9)
         self._omega_p = {s: cap_by_signal[s] / total_cap for s in net.signals}
         self._omega_f = {link: 1.0 / max(len(net.freeway_links), 1) for link in net.freeway_links}
+        self._build_coupling_maps()
+
+    def _build_coupling_maps(self) -> None:
+        """Jacobi coupling용 토폴로지 캐시를 movement spec에서 자동 유도한다(hand-list 금지).
+
+        - `_upstream_leaving_map`: 하류 신호의 (phase, internal movement)마다 그 movement
+          origin 링크로 흘려보내는 상류 (signal, 상류 movement, β) 리스트. 상류 후보
+          green의 leaving rate를 하류 도착유량으로 전파하는 데 쓴다.
+        - `_offramp_drain_flow`: off_ramp별 하류 신호 drain 근사(off_ramp movement의
+          green×movement capacity 합). probe storage 유출에 쓴다.
+        - `_last_offramp_flow`: freeway agent가 고른 후보 VSL의 off-ramp 유출[veh/h]
+          캐시(link→flow). coupling freeway→urban이 재시뮬 없이 재사용한다.
+        """
+        net = self.cfg.network
+        specs = self._specs
+        # origin link(=internal incoming link)별로 그 링크를 destination으로 보내는
+        # 상류 movement를 모은다.
+        producers_by_link: Dict[str, list[tuple[str, str]]] = {}
+        for up_mv, up_spec in specs.items():
+            dest = str(up_spec.get("destination", ""))
+            up_signal = str(up_spec.get("signal", ""))
+            if dest and up_signal in set(net.signals):
+                producers_by_link.setdefault(dest, []).append((up_signal, up_mv))
+        self._upstream_leaving_map: Dict[str, list[tuple[str, str, float]]] = {}
+        for signal in net.signals:
+            for phase_id in ("p1", "p2"):
+                key = f"{signal}_{phase_id}"
+                entries: list[tuple[str, str, float]] = []
+                for movement in self._phase_movements[signal][phase_id]:
+                    spec = specs[movement]
+                    if str(spec.get("kind", "")) != "internal":
+                        continue
+                    origin = str(spec.get("origin", ""))
+                    beta = float(spec.get("beta", 0.0))
+                    for up_signal, up_mv in producers_by_link.get(origin, []):
+                        entries.append((up_signal, up_mv, beta))
+                self._upstream_leaving_map[key] = entries
+        # off_ramp drain: off_ramp movement(도시로 빠진 차량)의 green 용량 합.
+        self._offramp_drain_flow: Dict[str, list[tuple[str, str]]] = {}
+        for movement, spec in specs.items():
+            if str(spec.get("kind", "")) == "off_ramp":
+                off_ramp = str(spec.get("off_ramp", ""))
+                if off_ramp:
+                    self._offramp_drain_flow.setdefault(off_ramp, []).append(
+                        (str(spec.get("signal", "")), movement)
+                    )
+        self._last_offramp_flow: Dict[str, float] = {link: 0.0 for link in net.freeway_links}
+
+    def _signal_leaving_rate(
+        self,
+        up_signal: str,
+        up_movement: str,
+        control: ControlAction,
+    ) -> float:
+        """상류 movement의 후보 green leaving rate[veh/h] = green_fraction×movement capacity.
+
+        β는 호출처에서 곱한다(여기서는 movement 자체의 방출 용량만 반환)."""
+        spec = self._specs[up_movement]
+        green_fraction = _phase_green_fraction(control, self.cfg, spec)
+        cap_flow = _movement_capacity_flow(control, self.cfg, up_movement, spec)
+        return float(green_fraction * cap_flow)
 
     # ---------- 결합변수 y (Wu §IV-B) ----------
 
