@@ -122,7 +122,8 @@ class ConstraintTests(unittest.TestCase):
         state = TrafficState.initial(cfg)
         demand = DemandProfile(cfg, ScenarioConfig("test")).at(0.0)
         previous = ControlAction.fixed(cfg)
-        previous.N_P_star = 500.0
+        # previous N_P_star는 후보 범위(n_crit×[0.9,1.05]) 안이어야 clip 없이 보존된다.
+        previous.N_P_star = 750.0
         previous.N_UF_star = 3333.0
         candidates = Leader(cfg).candidates(state, previous, demand)
 
@@ -131,7 +132,7 @@ class ConstraintTests(unittest.TestCase):
         nuf_values = [c.N_UF_star for c in candidates]
         self.assertIn((round(min(np_values), 6), round(min(nuf_values), 6)), pairs)
         self.assertIn((round(max(np_values), 6), round(max(nuf_values), 6)), pairs)
-        self.assertIn((500.0, 3333.0), pairs)
+        self.assertIn((750.0, 3333.0), pairs)
 
     def test_stackelberg_can_use_distributed_follower_solver(self):
         cfg = ExperimentConfig.from_file(

@@ -36,16 +36,16 @@
       "required": false
     },
     "capacity_drop": {
-      "urban_scale": 2.5,
-      "freeway_scale": 1.45,
-      "ramp_scale": 1.25,
+      "urban_scale": 3.5,
+      "freeway_scale": 1.6,
+      "ramp_scale": 1.4,
       "incident_capacity_factor": 1.0,
       "required": false,
       "off_ramp_split_ratio_override": {
-        "OR_D_W": 0.45,
-        "OR_F_W": 0.45,
-        "OR_D_E": 0.45,
-        "OR_F_E": 0.45
+        "OR_D_W": 0.7,
+        "OR_F_W": 0.7,
+        "OR_D_E": 0.7,
+        "OR_F_E": 0.7
       }
     }
   }

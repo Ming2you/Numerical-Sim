@@ -54,3 +54,35 @@ storage→movement 이동은 점유 중립(보존 안전). schedule_offramp_arri
 복원: 하류 정체 해소 시 occ 98%→26%, λ_eff 1.702→1.955 (식22 복원 확인).
 - calibration n_crit: 280.447 → 277.754 (plant 변화 확인, step5에서 갱신).
 
+### Step 5 n_crit 재calibration — 완료 (커밋 2, 66d8c1a)
+- 전체 calibration(peak_demand, scales 0.5~3.0, T=1800): n_crit 521.281→778.703,
+  max production 35230 veh/h. config N_P_crit_veh 갱신, N_P_star_range 상한 600→850.
+
+### Step 6 spillback 시나리오 — 게이트 막힘(자연 형성 불가), 수치 보고
+**closed-loop에서 demand만으로는 off-ramp 점유 ≥50%가 형성되지 않는다.** 측정:
+- capacity_drop(urban 2.5/fw1.45/split0.45) fixed baseline: OR occ 최대 4.0%, λ_eff 2.0.
+- 공격적(urban 3.5/fw1.6/split0.7): OR occ 4.0%, grid rejoin 링크(D_to_A 등) 8~10%.
+- D/F off-ramp phase(p1) green 최소 강제: OR occ 6.2%.
+- grid_link_storage 30·movement_cap 400 축소: OR occ 3.6%(D_to_A는 220 유지 — 후술).
+
+**왜 안 쌓이나(근본 원인, 계측):**
+- off-ramp 유입이 작다. offramp_flow_FW_W ≈ 382~450 veh/h → 180s interval당 accepted ~40대.
+  storage cap 120 대비 미미하고, 드레인(green·movement_cap·T_u, 3 rejoin movement 분산)이
+  매 interval 36~60대로 유입을 따라잡는다. 점유가 0.5~4.4 사이 진동에 머문다.
+- 자연 정체가 안 생긴다. boundary_out이 자유 sink고 grid green 용량(1400 veh/h·0.8)이
+  수요 처리량을 크게 상회해, urban_scale 3.5에서도 모든 grid 링크 점유 ≤10.4%.
+  rejoin 링크(D_to_A/D_to_E/D_left_out)가 절대 안 차므로 receiving 게이트가 안 닫힌다.
+- 60대(50%)까지 쌓으려면 3개 rejoin movement의 하류가 동시에 다수 interval 동안 포화해야
+  하는데, 자유 sink 토폴로지에서 불가능. (wu2022 ref §8 line 206의 "이 망은 심한
+  capacity-drop을 잘 만들지 않음" 사전 진단과 일치.)
+- 부수 발견: `grid_link_storage_veh` override가 D_to_A 등 자동유도 내부 링크에 반영되지
+  않음(여전히 220). __post_init__에서 setdefault로 추가되는 시점/override 순서 이슈로
+  추정. 이번 작업 범위 밖이나 기록.
+
+**결론**: 메커니즘은 정상(G2 강제정체 100%·λ_eff 1.65, 복원 26%·1.955로 입증). 그러나
+이 망은 demand 시나리오만으로 자연 spillback을 못 만든다. 따라서 step7(VSL ablation,
+실제 spillback 필요)·step8(메커니즘 B 제거, VSL 실물리 작동 전제)·step9(test_c 자연
+spillback)는 **자연 spillback 부재로 진행 불가** — forced-state 검증(현 test_c 방식)만
+정직한 입증 수단이다. 지시의 단계 게이트("안 오르면 중단·보고")에 따라 중단하고 보고함.
+
+
