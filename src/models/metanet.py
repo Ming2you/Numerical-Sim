@@ -221,6 +221,8 @@ def freeway_substep(
     dt_h = sim.T_f_h
 
     state.ensure_freeway_lane_profile(net)
+    for link in net.freeway_links:
+        state.mainline_origin_queue.setdefault(link, 0.0)
     freeway_ttt = 0.0
     density_projection_count = 0
     speed_projection_count = 0
@@ -273,12 +275,50 @@ def freeway_substep(
             for n, lane in zip(vehicles, lanes_now)
         ]
         vsl_max = max(cfg.freeway_follower.vsl_set)
+        # sending[i] = METANET 유량(=demand). spec §3.1.2 demand-supply의 송출량.
         q_values = [
             segment_flow_veh_h(rho, speed, lane)
             for rho, speed, lane in zip(rho_for_flow, speeds, lanes_now)
         ]
         flow_acc += sum(q_values)
         flow_count += len(q_values)
+
+        # receiving[i] = 하류 segment i가 이번 step에 받을 수 있는 CTM supply [veh/h].
+        # (rho_max - rho_for_flow)·L·lambda_eff / dt 로, 채우면 정확히 rho_max가 되는 양.
+        receiving = [
+            max(
+                0.0,
+                (net.rho_max - rho_for_flow[i])
+                * net.freeway_segment_length_km
+                * max(lanes_now[i], 1.0e-9)
+                / max(dt_h, 1.0e-9),
+            )
+            for i in range(len(rho_for_flow))
+        ]
+        # merge segment의 supply 중 ramp 유입분을 먼저 예약하고, 본선 inter-segment 흐름은
+        # 남은 supply로만 제한한다(ramp release는 이미 receiving_factor로 게이트됨).
+        receiving_for_mainline = [
+            max(0.0, receiving[i] - max(0.0, ramp_in_by_link[link][i]))
+            for i in range(len(rho_for_flow))
+        ]
+        # q_inter[i] = segment i -> i+1 실제 흐름 = min(sending[i], 하류 supply).
+        q_inter = [
+            min(q_values[i], receiving_for_mainline[i + 1])
+            for i in range(len(rho_for_flow) - 1)
+        ]
+        # 진입 경계: 본선 수요 + origin 큐 환산을 receiving[0]·q_cap으로 제한, 못 들어간
+        # 본선 수요는 origin 큐에 누적(보존). ramp 유입은 별도 게이트라 여기서 제외.
+        if state.mainline_origin_queue.get(link) is None:
+            state.mainline_origin_queue[link] = 0.0
+        mainline_demand = max(0.0, demand.freeway_mainline.get(link, 0.0))
+        queued_flow = state.mainline_origin_queue[link] / max(dt_h, 1.0e-9)
+        entry_request = mainline_demand + queued_flow
+        entry_realized = min(entry_request, q_cap, receiving_for_mainline[0])
+        # 큐 갱신: 새 본선 수요 중 실제 진입 못한 분량을 origin 큐에 보관.
+        state.mainline_origin_queue[link] = max(
+            0.0,
+            state.mainline_origin_queue[link] + dt_h * (mainline_demand - entry_realized),
+        )
 
         next_rhos = []
         next_speeds = []
@@ -287,9 +327,9 @@ def freeway_substep(
         next_vehicle_count = []
         for i, rho in enumerate(rho_for_flow):
             # Spec 3.1.2 밀도 갱신: q_in/q_out은 veh/h, dt는 hour 단위로 계산한다.
-            q_in = min(q_cap, demand.freeway_mainline.get(link, 0.0)) if i == 0 else q_values[i - 1]
+            q_in = entry_realized if i == 0 else q_inter[i - 1]
             q_in += ramp_in_by_link[link][i]
-            q_out = q_values[i]
+            q_out = q_values[i] if i == len(rhos) - 1 else q_inter[i]
             boundary_speed_cap = None
             if i == len(rhos) - 1:
                 normal_out = q_values[i]
@@ -360,6 +400,8 @@ def freeway_substep(
 
     if include_ramp_queue_ttt:
         freeway_ttt += sum(state.ramp_queue.values()) * dt_h
+        # origin 큐 대기 차량도 freeway 지연을 겪으므로 ramp 큐와 동일하게 TTT에 적분한다.
+        freeway_ttt += sum(max(0.0, q) for q in state.mainline_origin_queue.values()) * dt_h
 
     diagnostics: Dict[str, float] = {}
     avg_metering = float(sum(ramp_release.values()))
@@ -403,6 +445,10 @@ def freeway_substep(
         diagnostics[f"offramp_blocked_flow_{link}"] = float(offramp_blocked_acc.get(link, 0.0))
     diagnostics["density_projection_count"] = float(density_projection_count)
     diagnostics["speed_projection_count"] = float(speed_projection_count)
+    # CTM receiving 제약으로 본선 진입 못한 대기 차량[veh] — origin 보관 보존 확인용.
+    diagnostics["mainline_origin_queue_total_veh"] = float(
+        sum(max(0.0, q) for q in state.mainline_origin_queue.values())
+    )
     diagnostics["density_exceedance_count"] = float(sum(
         1
         for values in state.freeway_density.values()

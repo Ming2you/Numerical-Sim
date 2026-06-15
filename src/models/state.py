@@ -373,9 +373,13 @@ class FreewayFollowerConfig:
     density_penalty: float = 10.0
     metering_smoothness_weight: float = 0.1
     vsl_smoothness_weight: float = 0.1
-    # Option C 메커니즘 B(다운스트림 결합): 병목 segment가 임계 초과(p_down>0)일 때만
-    # 상류 metering(seg1→seg2 유입↓)을 보상하는 결합 페널티 가중. free-flow 시 p_down=0이라
-    # 불필요 지연을 만들지 않는다. w_couple_rho/w_couple_v는 p_down 구성요소 가중.
+    # WU-CD-F freeway agent의 VSL multi-step 예측 horizon(Wu Np=10). storage-aware probe가
+    # "VSL↓→off-ramp 유입↓→storage 회복→λ_eff 회복→본선 차량수↓"의 multi-step 이득을
+    # 보려면 한두 step으로는 부족하다(off-ramp 동역학이 여러 step에 걸쳐 회복). 0 이하면
+    # mpc.horizon_steps로 fallback. 비용 폭증을 막기 위해 segment 후보 가지치기는 유지.
+    freeway_prediction_horizon_steps: int = 10
+    # 메커니즘 B(인위적 p_down/downstream_coupling) 키는 다른 controller 호환을 위해
+    # 정의만 유지하되 WU-CD-F probe에서는 사용하지 않는다(활성화는 순수 TTS 예측에서만).
     downstream_coupling_weight: float = 0.05
     downstream_coupling_rho_weight: float = 1.0
     downstream_coupling_v_weight: float = 1.0
@@ -508,6 +512,9 @@ class TrafficState:
     urban_queue: Dict[str, float]
     boundary_queue: Dict[str, float]
     freeway_effective_lanes: Dict[str, List[float]] = field(default_factory=dict)
+    # 본선 진입 origin 큐[veh]: CTM receiving 제약으로 segment 0에 못 들어간 본선 수요를
+    # 링크별로 보관한다(spec §3.1.2 demand-supply 개정, 차량보존). freeway entry에서만 사용.
+    mainline_origin_queue: Dict[str, float] = field(default_factory=dict)
     urban_movement_queue: Dict[str, float] = field(default_factory=dict)
     urban_link_storage: Dict[str, float] = field(default_factory=dict)
     urban_arrival_buffer: Dict[str, Dict[int, float]] = field(default_factory=dict)
@@ -544,6 +551,7 @@ class TrafficState:
             urban_queue={m: 20.0 for m in net.movement_links},
             boundary_queue={m: 20.0 for m in net.movement_links},
             freeway_effective_lanes=lanes,
+            mainline_origin_queue={link: 0.0 for link in net.freeway_links},
             # 게이트 대기열(boundary_in)만 초기 20대를 β로 나눠 갖고, 내부 큐는 0에서 시작한다.
             urban_movement_queue={
                 movement: (
@@ -606,7 +614,7 @@ class TrafficState:
                 )
             )
             for link in net.freeway_links
-        ) + sum(self.ramp_queue.values()))
+        ) + sum(self.ramp_queue.values()) + sum(self.mainline_origin_queue.values()))
 
     def total_urban_vehicles(self, net=None) -> float:
         """urban 총 차량 수. net을 주면 링크 in-transit 점유까지 포함한다.

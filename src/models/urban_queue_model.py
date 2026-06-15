@@ -86,7 +86,12 @@ def movement_storage_capacity(
 # spec §3.3 (397행): "receiving space belongs to a directed link." movement 점큐 x[o,s,d]는
 # 그 movement가 올라온 origin 링크 l_{o,s} 위 점유로 존재하므로, 그 링크의 가용공간 S를
 # 줄여야 한다. cfg 객체별로 storage 링크 → 그 링크를 origin으로 하는 movement 목록을 캐시한다.
-_ORIGIN_STORAGE_MOVEMENTS_CACHE: Dict[int, Dict[str, list[str]]] = {}
+# 값에 cfg 참조를 함께 보관해 id 재사용(GC 후 동일 id의 새 cfg) 시 stale 캐시를
+# 반환하지 않도록 한다(`cached_cfg is cfg` 검증). 직전 구현은 id(cfg)만 키로 써,
+# 한 cfg가 GC된 뒤 다른 network의 cfg가 같은 id를 받으면 stale movement 목록을
+# 반환했다(테스트 순서 의존 버그). WU-CD-F probe가 _effective_available_space를
+# 호출하면서 이 캐시를 더 빈번히 채워 그 잠복 버그가 표면화됨.
+_ORIGIN_STORAGE_MOVEMENTS_CACHE: Dict[int, tuple[ExperimentConfig, Dict[str, list[str]]]] = {}
 
 
 def _origin_storage_movements(cfg: ExperimentConfig) -> Dict[str, list[str]]:
@@ -98,15 +103,15 @@ def _origin_storage_movements(cfg: ExperimentConfig) -> Dict[str, list[str]]:
     링크가 아니라 자연히 제외된다."""
     key = id(cfg)
     cached = _ORIGIN_STORAGE_MOVEMENTS_CACHE.get(key)
-    if cached is not None:
-        return cached
+    if cached is not None and cached[0] is cfg:
+        return cached[1]
     storage_links = set(cfg.network.urban_link_storage_veh.keys())
     mapping: Dict[str, list[str]] = {}
     for movement, spec in cfg.network.urban_movements.items():
         origin = str(spec.get("origin", ""))
         if origin in storage_links:
             mapping.setdefault(origin, []).append(movement)
-    _ORIGIN_STORAGE_MOVEMENTS_CACHE[key] = mapping
+    _ORIGIN_STORAGE_MOVEMENTS_CACHE[key] = (cfg, mapping)
     return mapping
 
 
