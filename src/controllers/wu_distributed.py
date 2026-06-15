@@ -225,12 +225,15 @@ class WuDistributedController:
             y[f"mainline_{link}"] = float(max(0.0, demand.freeway_mainline.get(link, 0.0)))
         # 메커니즘 B: 병목 segment(off-ramp seg) 다운스트림 압력 p_down.
         # = w_rho·max(0, ρ_seg2−ρ_crit) + w_v·max(0, v_free−v_seg2). >0이면 병목이
-        # 임계 초과/감속 → 상류 metering(seg1→seg2 유입↓) 보상 신호. free-flow면 0.
+        # 임계 초과/감속 → 상류 metering(seg1→seg2 유입↓) 보상 신호.
+        # 게이트: ρ_b ≤ ρ_crit(free-flow)이면 p_down=0. capacity-drop 회피가 목적이므로
+        # 병목이 임계 초과(혹은 capacity-drop active)일 때만 압력을 켠다. v항이 free-flow
+        # (v < v_free이기만 하면)에서도 양수가 되어 상류 VSL을 불필요하게 낮추던 결함 차단.
         ff = self.cfg.freeway_follower
         for link in net.freeway_links:
             rhos = state.freeway_density.get(link, [])
             speeds = state.freeway_speed.get(link, [])
-            if rhos:
+            if rhos and float(rhos[-1]) > net.rho_crit:
                 rho_b = float(rhos[-1])
                 v_b = float(speeds[-1]) if speeds else net.v_free
                 p_down = (
