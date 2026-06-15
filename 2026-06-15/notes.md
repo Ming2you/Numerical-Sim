@@ -86,3 +86,53 @@ spillback)는 **자연 spillback 부재로 진행 불가** — forced-state 검�
 정직한 입증 수단이다. 지시의 단계 게이트("안 오르면 중단·보고")에 따라 중단하고 보고함.
 
 
+
+---
+
+## 후속 세션 — S_eff(링크 유효 가용공간) 구현으로 자연 spillback 형성 (Claude Fable 5)
+
+### 진단: 이전 "자연형성 불가"의 진짜 원인
+직전 결론("rejoin 링크 D_to_A/D_to_E가 절대 안 차서 receiving 게이트가 안 닫힌다")의
+근본 원인은 **movement 점큐가 어느 링크 storage에도 점유로 안 잡힌 구현 gap**이었다.
+spec §3.3 397행: "receiving space belongs to a directed link" — 큐 x[o,s,d]는 링크
+l_{o,s} 위 점유이므로 그 링크의 S를 줄여야 한다. 기존 코드는 차량이 교차로 도착 시
+storage를 복원하고 점큐로 옮겨, 점큐 25,000대가 쌓여도 origin 링크 storage가 "빈" 상태로
+보였다. 그래서 하류 grid가 점큐로 막혀도 그 링크 S가 비어 보여 backup이 전파 안 됨.
+
+### 구현 (urban_queue_model.py)
+- 신규 `_origin_storage_movements(cfg)`: storage 링크 → 그 링크를 origin으로 점유하는
+  movement 목록 캐시(id(cfg) 키). internal·boundary_out·on_ramp만 잡힘(origin이 실제
+  storage 링크). boundary_in(origin=게이트 in링크)·off_ramp(점큐 미사용)는 자연 제외.
+- 신규 `_effective_available_space(state,cfg,link)`:
+  S_eff(L) = urban_link_storage[L] − Σ(점큐 m : origin(m)==L), 0 clamp.
+- 적용 3지점(모두 receiving 공간 체크): (1) movement 방출 게이트(intended_by_storage
+  루프, 옛 `urban_link_storage.get(storage_link)` → S_eff), (2) `_drain_offramp_storage`의
+  receiving_space, (3) `off_ramp_capacity_by_freeway_link`.
+- 게이팅 계산만 변경, storage 값/차량 생성·삭제 없음 → 차량보존 불변.
+
+### G1 보존(하드 게이트) 통과
+- test_grid_routing 10/10 OK. 전체 unittest 113/113 OK.
+- 직접 계측: closed-loop substep 보존 항등식 max|residual| = 2.8e-13 (80 steps, 부동소수점 한계).
+
+### G2 backup 전파 입증 — S_eff ablation (fixed/uncontrolled closed-loop, 250 steps)
+같은 demand에서 S_eff ON vs OFF(plain storage availability) 비교:
+| 시나리오 (urban/fw/ramp/split) | S_eff ON | S_eff OFF(옛 동작) |
+|---|---|---|
+| 2.5 / 1.3 / 1.3 / 0.35 | off-ramp 100%, λ_eff 1.650 | off-ramp 13%, λ_eff 1.990 |
+| 3.0 / 1.4 / 1.3 / 0.40 | off-ramp 100%, λ_eff 1.650 | off-ramp 27%, λ_eff 1.985 |
+| 3.5 / 1.5 / 1.3 / 0.50 | off-ramp 100%, λ_eff 1.650 | off-ramp 100%, λ_eff 1.650 |
+- S_eff OFF면 중간부하에서 off-ramp 13~27%만 차고 λ_eff≈2.0(식22 미발동) = 이전 세션의
+  "자연형성 불가" 상태. S_eff ON이면 off-ramp 100%·λ_eff 1.65(lane_reduction 0.35 전량)로
+  식22 발동. → S_eff가 backup 전파의 결정적 원인임을 ablation으로 입증.
+- 메커니즘 경로 계측(us3.5/fw1.5/split0.7): off-ramp receiving link D_to_A·D_to_E·F_to_C·
+  F_to_E의 S_eff=0.0(점큐가 storage 완전 점유) → `_drain_offramp_storage` 방출 차단 →
+  off-ramp storage 100% → offramp_spillback_lambda_eff(식22) → λ_eff 1.65 < lanes 2.
+- 주의: split override는 `apply_scenario_network_overrides(cfg,scen)`로 cfg 갱신해야 적용됨
+  (ScenarioConfig에만 넣으면 0.06 기본값 유지 — 이전 측정의 함정).
+- grid 유효점유(storage occ + 점큐)는 us2.5/3.5에서 13/14 링크 ≥50%(점큐 폭주). 단 grid
+  순수 storage occ는 transit-only라 낮음 — backup의 물리 저장소는 점큐(=링크 점유)다.
+
+### 단계 게이트 판정
+G1·G2 모두 통과. 이전 세션이 "자연 spillback 부재"로 중단했던 지점을 S_eff로 해소.
+다음: step3 n_crit 재calibration(plant 동역학 변경됨) → step4 VSL ablation →
+step5 메커니즘 B 제거 → step6 test_c 자연 spillback 갱신.

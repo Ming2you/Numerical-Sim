@@ -83,6 +83,52 @@ def movement_storage_capacity(
     return float(cfg.network.urban_link_storage_veh.get(receiving, cfg.network.boundary_queue_max_veh))
 
 
+# spec §3.3 (397행): "receiving space belongs to a directed link." movement 점큐 x[o,s,d]는
+# 그 movement가 올라온 origin 링크 l_{o,s} 위 점유로 존재하므로, 그 링크의 가용공간 S를
+# 줄여야 한다. cfg 객체별로 storage 링크 → 그 링크를 origin으로 하는 movement 목록을 캐시한다.
+_ORIGIN_STORAGE_MOVEMENTS_CACHE: Dict[int, Dict[str, list[str]]] = {}
+
+
+def _origin_storage_movements(cfg: ExperimentConfig) -> Dict[str, list[str]]:
+    """storage 링크 → 그 링크를 origin으로 점유하는 movement 목록 매핑.
+
+    internal·boundary_out·on_ramp movement는 origin이 실제 storage 링크 l_{o,s}이고
+    그 점큐가 urban_movement_queue에 쌓인다. boundary_in(origin=게이트 in링크)·
+    off_ramp(origin=ramp 이름, 점큐는 storage occupancy로 직접 잡힘)는 origin이 storage
+    링크가 아니라 자연히 제외된다."""
+    key = id(cfg)
+    cached = _ORIGIN_STORAGE_MOVEMENTS_CACHE.get(key)
+    if cached is not None:
+        return cached
+    storage_links = set(cfg.network.urban_link_storage_veh.keys())
+    mapping: Dict[str, list[str]] = {}
+    for movement, spec in cfg.network.urban_movements.items():
+        origin = str(spec.get("origin", ""))
+        if origin in storage_links:
+            mapping.setdefault(origin, []).append(movement)
+    _ORIGIN_STORAGE_MOVEMENTS_CACHE[key] = mapping
+    return mapping
+
+
+def _effective_available_space(
+    state: TrafficState,
+    cfg: ExperimentConfig,
+    link: str,
+) -> float:
+    """링크 L의 유효 가용공간 S_eff(L).
+
+    S_eff(L) = urban_link_storage[L] − Σ(urban_movement_queue[m] : origin(m)==L), 0 이상 clamp.
+    그 링크 끝(교차로)에서 대기 중인 movement 점큐를 그 링크의 점유로 잡아, 하류가 막혀
+    점큐가 쌓이면 그 링크 S_eff가 줄어 상류 movement가 receiving 제약에 걸리고 backup이
+    전파된다(spec §3.3.2, 397행). 게이팅 계산에만 쓰고 storage 값 자체는 바꾸지 않으므로
+    차량보존 불변이다."""
+    available = max(0.0, state.urban_link_storage.get(link, 0.0))
+    point_queue = 0.0
+    for movement in _origin_storage_movements(cfg).get(link, ()):  # noqa: B007
+        point_queue += max(0.0, state.urban_movement_queue.get(movement, 0.0))
+    return max(0.0, available - point_queue)
+
+
 def movement_density_values(
     state: TrafficState,
     cfg: ExperimentConfig,
@@ -283,7 +329,8 @@ def off_ramp_capacity_by_freeway_link(
     for off_ramp in cfg.network.off_ramps:
         link = cfg.network.off_ramp_from_freeway[off_ramp]
         storage_link = cfg.network.off_ramp_storage_link[off_ramp]
-        available = max(0.0, state.urban_link_storage.get(storage_link, 0.0))
+        # S_eff: storage 링크에 origin을 둔 점큐가 있으면 반영(spec §3.3.2, 397행).
+        available = _effective_available_space(state, cfg, storage_link)
         cap[link] = cap.get(link, 0.0) + available / max(horizon_h, 1.0e-9)
     return cap
 
@@ -349,7 +396,8 @@ def _drain_offramp_storage(
             intended = min(beta * occupancy, dt_h * green_fraction * cap_flow)
             receiving_link = str(spec.get("receiving_link", ""))
             if receiving_link and receiving_link in state.urban_link_storage:
-                receiving_space = max(0.0, state.urban_link_storage.get(receiving_link, 0.0))
+                # S_eff: 하류 링크 점큐 반영(spec §3.3.2, 397행) → off-ramp spillback(식22).
+                receiving_space = _effective_available_space(state, cfg, receiving_link)
                 actual = min(intended, receiving_space)
             else:
                 actual = intended
@@ -745,7 +793,8 @@ def urban_substep(
 
     actual_departure: Dict[str, float] = dict(no_storage_intended)
     for storage_link, intended in intended_by_storage.items():
-        available_space = max(0.0, state.urban_link_storage.get(storage_link, 0.0))
+        # S_eff: 하류 링크 끝 점큐를 점유로 반영(spec §3.3.2, 397행) → backup 전파.
+        available_space = _effective_available_space(state, cfg, storage_link)
         actual_departure.update(_allocate_receiving_counts(
             cfg.urban_follower.receiving_space_rule,
             intended,
