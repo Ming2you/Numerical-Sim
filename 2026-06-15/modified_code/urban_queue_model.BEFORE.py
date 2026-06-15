@@ -250,13 +250,8 @@ def schedule_offramp_arrivals(
 ) -> tuple[float, float]:
     """Insert freeway-to-off-ramp vehicles into directed urban storage.
 
-    off-ramp 차량은 storage 링크(= Wu 식17 off-ramp 큐 n_{m,d})에 적재된다. 여기서는
-    점유만 생성(보존: accepted = 유입)하고, 교차로로의 방출은 매 substep에서 하류
-    receiving 공간에 게이트해 드레인한다(Wu 식3, `_drain_offramp_storage`). 이전 구현은
-    고정 시간지연 후 하류 정체와 무관하게 무조건 release해 storage가 transit 링크로만
-    동작(점유 self-limiting)했고 capacity-drop(식22)이 발동하지 않았다.
-    arrival buffer/release buffer 스케줄을 쓰지 않으므로 하류 정체 시 점유가 누적된다.
-    Returns `(accepted, rejected)`.
+    off-ramp 차량은 storage 링크를 지나 교차로에 도착하면 β로 분산 합류한다(종료 아님).
+    arrival buffer key = storage 링크(approach source). Returns `(accepted, rejected)`.
     """
     ensure_urban_state(state, cfg)
     if vehicles <= 0.0:
@@ -269,6 +264,10 @@ def schedule_offramp_arrivals(
     if accepted <= 0.0:
         return 0.0, rejected
     state.urban_link_storage[storage_link] = max(0.0, available - accepted)
+    delay_steps = _link_delay_steps(state, cfg, storage_link)
+    arrival_step = urban_step_index + delay_steps
+    _schedule(state.urban_arrival_buffer, storage_link, arrival_step, accepted)
+    _schedule(state.urban_storage_release_buffer, storage_link, arrival_step, accepted)
     return accepted, rejected
 
 
@@ -302,77 +301,6 @@ def _schedule(buffer: Dict[str, Dict[int, float]], key: str, step: int, vehicles
 def _pop_buffer(buffer: Dict[str, Dict[int, float]], key: str, step: int) -> float:
     values = buffer.setdefault(key, {})
     return float(values.pop(step, 0.0))
-
-
-def _drain_offramp_storage(
-    state: TrafficState,
-    control: ControlAction,
-    cfg: ExperimentConfig,
-    specs: Mapping[str, Mapping[str, object]],
-    step_idx: int,
-    routing: Mapping[str, list[tuple[str, float]]],
-) -> Dict[str, float]:
-    """off-ramp storage(=Wu 식17 off-ramp 큐)를 하류 교차로로 Wu 식3대로 방출한다.
-
-    방출률 = green·포화유율·하류 수용공간의 min. storage 점유를 β로 off_ramp movement에
-    나눠, 각 movement의 하류 receiving_link 가용공간에 게이트해 방출한다. 하류가 차면
-    방출이 막혀 storage 점유가 누적(spillback) → effective_lane_profile의 λ_eff↓(식22).
-    혼잡 해소 시 가용공간 복원으로 정상 방출(점유·λ_eff 복원).
-
-    차량보존: storage occupancy(cap−available)와 movement 큐·하류 링크 점유 모두
-    urban_total_vehicles에 포함되므로 storage→하류 링크 이동은 점유 중립이다. 여기서는
-    off_ramp movement 큐를 경유하지 않고 storage→receiving_link로 직접 전달한다
-    (off_ramp movement는 교차로 stop-line이 아니라 ramp 합류부라 별도 신호 대기 큐가 없다).
-    Returns off_ramp별 방출 차량수.
-    """
-    net = cfg.network
-    dt_h = cfg.simulation.T_u_h
-    departures: Dict[str, float] = {}
-    for off_ramp in net.off_ramps:
-        storage_link = net.off_ramp_storage_link.get(off_ramp, "")
-        if not storage_link or storage_link not in state.urban_link_storage:
-            continue
-        capacity = float(net.urban_link_storage_veh.get(storage_link, 0.0))
-        occupancy = max(0.0, capacity - state.urban_link_storage.get(storage_link, capacity))
-        if occupancy <= 0.0:
-            continue
-        movements = [m for m in net.off_ramp_to_movement.get(off_ramp, []) if m in specs]
-        released_total = 0.0
-        for movement in movements:
-            spec = specs[movement]
-            beta = float(spec.get("beta", 0.0))
-            if beta <= 0.0:
-                continue
-            cap_flow = _movement_capacity_flow(control, cfg, movement, spec)
-            green_fraction = _phase_green_fraction(control, cfg, spec, urban_step_index=step_idx)
-            # Wu 식3: green·포화유율·(β 몫의 storage 점유)·하류 수용공간의 min.
-            intended = min(beta * occupancy, dt_h * green_fraction * cap_flow)
-            receiving_link = str(spec.get("receiving_link", ""))
-            if receiving_link and receiving_link in state.urban_link_storage:
-                receiving_space = max(0.0, state.urban_link_storage.get(receiving_link, 0.0))
-                actual = min(intended, receiving_space)
-            else:
-                actual = intended
-            if actual <= 0.0:
-                continue
-            released_total += actual
-            if receiving_link in state.urban_link_storage:
-                state.urban_link_storage[receiving_link] = max(
-                    0.0,
-                    state.urban_link_storage.get(receiving_link, 0.0) - actual,
-                )
-                delay_steps = _link_delay_steps(state, cfg, receiving_link)
-                arrival_step = step_idx + delay_steps
-                if receiving_link in routing:
-                    _schedule(state.urban_arrival_buffer, receiving_link, arrival_step, actual)
-                _schedule(state.urban_storage_release_buffer, receiving_link, arrival_step, actual)
-        if released_total > 0.0:
-            state.urban_link_storage[storage_link] = min(
-                capacity,
-                state.urban_link_storage.get(storage_link, 0.0) + released_total,
-            )
-        departures[off_ramp] = released_total
-    return departures
 
 
 def _link_delay_steps(state: TrafficState, cfg: ExperimentConfig, storage_link: str) -> int:
@@ -717,22 +645,11 @@ def urban_substep(
         onramp_green_releases_veh += released_total
         onramp_green_release_shortfall_veh += max(0.0, requested_total - released_total)
 
-    # off-ramp storage(=Wu 식17 큐)를 하류 receiving 공간에 게이트해 방출(Wu 식3). 하류
-    # 정체 시 방출이 막혀 storage 점유 누적(spillback)→λ_eff↓(식22). stage 2 전에 실행해
-    # 같은 substep의 하류 가용공간을 두 흐름이 공유하게 한다.
-    drained = _drain_offramp_storage(state, control, cfg, specs, step_idx, routing)
-    for off_ramp, released in drained.items():
-        off_ramp_departures[off_ramp] = off_ramp_departures.get(off_ramp, 0.0) + released
-        total_departures_veh += released
-        inbound_service_veh += released  # off-ramp 합류 = perimeter 유입.
-
     intended_by_storage: Dict[str, Dict[str, float]] = {}
     no_storage_intended: Dict[str, float] = {}
     for movement, spec in specs.items():
         if str(spec.get("ramp", "")):
             continue  # ramp행 movement는 위 transfer 루프에서 처리됨.
-        if str(spec.get("kind", "")) == "off_ramp":
-            continue  # off_ramp movement는 _drain_offramp_storage가 storage에서 직접 방출.
         available = max(0.0, state.urban_movement_queue.get(movement, 0.0))
         cap_flow = _movement_capacity_flow(control, cfg, movement, spec)
         green_fraction = _phase_green_fraction(control, cfg, spec, urban_step_index=step_idx)

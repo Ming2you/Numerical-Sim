@@ -110,34 +110,34 @@ class BetaSplitArrivalTests(unittest.TestCase):
         accepted, rejected = schedule_offramp_arrivals(state, cfg, "OR_D_W", 60.0, 0)
         self.assertAlmostEqual(accepted, 60.0)
         self.assertAlmostEqual(rejected, 0.0)
-        # OR storage 링크에 점유가 생기고(transit), 도착 step에 β분할로 movement 큐 합류.
+        # OR storage 링크(=Wu 식17 off-ramp 큐)에 점유가 생긴다. 고정지연 arrival 스케줄은
+        # 더 이상 쓰지 않고(Wu 식3 하류 게이트 드레인으로 대체), substep마다 하류 수용공간에
+        # 게이트해 그리드로 방출된다.
         storage = cfg.network.off_ramp_storage_link["OR_D_W"]
         cap = cfg.network.urban_link_storage_veh[storage]
         self.assertAlmostEqual(cap - state.urban_link_storage[storage], 60.0)
-        arrival_steps = sorted(state.urban_arrival_buffer[storage])
-        self.assertTrue(arrival_steps)
+        self.assertFalse(state.urban_arrival_buffer.get(storage))
         control = ControlAction.fixed(cfg)
         demand = DemandProfile(cfg, ScenarioConfig("test", urban_scale=0.0, ramp_scale=0.0)).at(0.0)
-        total_off_queue = 0.0
-        for step in range(arrival_steps[-1] + 1):
+        # 하류가 비어 있으므로 여러 substep에 걸쳐 storage가 그리드로 정상 방출돼야 한다.
+        for step in range(20):
             urban_substep(state, control, demand, cfg, urban_step_index=step)
-        # 도착분은 D_offW_* movement로 갔다가 green service로 그리드 링크에 deposit된다.
-        # 어느 쪽이든 "소멸"이 아니라 urban 시스템 안에 남아 있어야 한다.
+        # "소멸"이 아니라 urban 시스템 안에 남아 있어야 한다(보존).
         total = urban_total_vehicles(state, cfg)
-        # boundary_out sink로 일부 빠질 수 있으므로 OR 60대 중 잔존+이탈을 합산 확인은
-        # 보존 테스트에서 수행. 여기서는 off_ramp movement 경로가 실제로 동작했는지 확인.
         self.assertGreater(total, 0.0)
         offw_movements = cfg.network.off_ramp_to_movement["OR_D_W"]
         self.assertEqual(
             sorted(offw_movements),
             sorted(["D_offW_to_N", "D_offW_to_E", "D_offW_to_W"]),
         )
-        total_off_queue = sum(state.urban_movement_queue.get(m, 0.0) for m in offw_movements)
+        # storage 점유가 줄고(드레인) 차량은 하류 그리드 링크 점유로 옮겨가야 한다.
+        storage_occ_after = cap - state.urban_link_storage[storage]
+        self.assertLess(storage_occ_after, 60.0)
         occupancy_grid = sum(
             max(0.0, cfg.network.urban_link_storage_veh[l] - state.urban_link_storage.get(l, 0.0))
             for l in ("D_to_A", "D_to_E", "D_left_out")
         )
-        self.assertGreater(total_off_queue + occupancy_grid, 0.0)
+        self.assertGreater(occupancy_grid, 0.0)
 
 
 class ConservationTests(unittest.TestCase):
