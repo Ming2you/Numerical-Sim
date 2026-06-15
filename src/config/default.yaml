@@ -182,14 +182,16 @@ leader:
   w_L: 0.05
   N_P_star_range:
   - 0.0
-  - 600.0
+  - 850.0
   N_UF_star_range:
   - 0.0
   - 6000.0
-  # cycle 위상(offset) plant 도입 후 재calibration(outputs/calib_phasemodel, peak_demand,
-  # urban-scales 0.5~3.0, T=1800): MFD 정점 production 20591 veh/h @ N_P=521.281.
-  # (그리드 라우팅 직후 값은 476.801 — outputs/calib_gridrouting.)
-  N_P_crit_veh: 521.281
+  # off-ramp 하류게이트(Wu 식3) plant 재calibration(2026-06-15/results/
+  # calib_phasemodel_offrampgate, peak_demand, urban-scales 0.5~3.0, T=1800):
+  # MFD 정점 production 35230 veh/h @ N_P=778.703. off-ramp spillback이 고수요에서
+  # urban storage에 차량을 더 잡아둬 production 정점이 높은 accumulation으로 이동.
+  # (직전 cycle 위상 plant 값은 521.281 — outputs/calib_phasemodel.)
+  N_P_crit_veh: 778.703
   N_P_candidate_lower_factor: 0.9
   N_P_candidate_upper_factor: 1.05
   N_P_star_unit: veh

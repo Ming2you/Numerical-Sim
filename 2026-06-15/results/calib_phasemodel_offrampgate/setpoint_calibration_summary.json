@@ -1,0 +1,87 @@
+{
+  "config": "src/config/default.yaml",
+  "scenario": "peak_demand",
+  "baseline": "fixed_signal_fixed_speed",
+  "urban_scales": [
+    0.5,
+    0.75,
+    1.0,
+    1.25,
+    1.5,
+    2.0,
+    2.5,
+    3.0
+  ],
+  "estimate": {
+    "n_crit_veh": 778.7032881717039,
+    "max_production_veh_h": 35230.45827045819,
+    "source_urban_scale": 3.0,
+    "source_time_sec": 1080.0
+  },
+  "runs": [
+    {
+      "scenario": "peak_demand_urban_scale_0.5",
+      "urban_scale": 0.5,
+      "total_ttt": 468.6487820772128,
+      "urban_ttt": 129.69239132985246,
+      "points": 10,
+      "path": "2026-06-15\\results\\calib_phasemodel_offrampgate\\urban_scale_0.5"
+    },
+    {
+      "scenario": "peak_demand_urban_scale_0.75",
+      "urban_scale": 0.75,
+      "total_ttt": 582.7643635216525,
+      "urban_ttt": 175.60532734171193,
+      "points": 10,
+      "path": "2026-06-15\\results\\calib_phasemodel_offrampgate\\urban_scale_0.75"
+    },
+    {
+      "scenario": "peak_demand_urban_scale_1",
+      "urban_scale": 1.0,
+      "total_ttt": 688.8790634249071,
+      "urban_ttt": 229.7557652016112,
+      "points": 10,
+      "path": "2026-06-15\\results\\calib_phasemodel_offrampgate\\urban_scale_1"
+    },
+    {
+      "scenario": "peak_demand_urban_scale_1.25",
+      "urban_scale": 1.25,
+      "total_ttt": 789.0795290125018,
+      "urban_ttt": 291.8845915883484,
+      "points": 10,
+      "path": "2026-06-15\\results\\calib_phasemodel_offrampgate\\urban_scale_1.25"
+    },
+    {
+      "scenario": "peak_demand_urban_scale_1.5",
+      "urban_scale": 1.5,
+      "total_ttt": 887.2179953925734,
+      "urban_ttt": 362.83635051594274,
+      "points": 10,
+      "path": "2026-06-15\\results\\calib_phasemodel_offrampgate\\urban_scale_1.5"
+    },
+    {
+      "scenario": "peak_demand_urban_scale_2",
+      "urban_scale": 2.0,
+      "total_ttt": 1111.601743776447,
+      "urban_ttt": 549.9227667619837,
+      "points": 10,
+      "path": "2026-06-15\\results\\calib_phasemodel_offrampgate\\urban_scale_2"
+    },
+    {
+      "scenario": "peak_demand_urban_scale_2.5",
+      "urban_scale": 2.5,
+      "total_ttt": 1358.2380870845163,
+      "urban_ttt": 772.3853275991992,
+      "points": 10,
+      "path": "2026-06-15\\results\\calib_phasemodel_offrampgate\\urban_scale_2.5"
+    },
+    {
+      "scenario": "peak_demand_urban_scale_3",
+      "urban_scale": 3.0,
+      "total_ttt": 1618.239756236822,
+      "urban_ttt": 1014.1245645260473,
+      "points": 10,
+      "path": "2026-06-15\\results\\calib_phasemodel_offrampgate\\urban_scale_3"
+    }
+  ]
+}
