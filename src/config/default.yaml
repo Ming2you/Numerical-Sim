@@ -217,7 +217,7 @@ freeway_follower:
   density_penalty: 10.0
   metering_smoothness_weight: 0.1
   vsl_smoothness_weight: 0.1
-  downstream_coupling_weight: 0.05
+  downstream_coupling_weight: 0.02
   downstream_coupling_rho_weight: 1.0
   downstream_coupling_v_weight: 1.0
   horizon_beam_width: 2
