@@ -1,0 +1,87 @@
+{
+  "config": "src/config/default.yaml",
+  "scenario": "peak_demand",
+  "baseline": "fixed_signal_fixed_speed",
+  "urban_scales": [
+    0.5,
+    0.75,
+    1.0,
+    1.25,
+    1.5,
+    2.0,
+    2.5,
+    3.0
+  ],
+  "estimate": {
+    "n_crit_veh": 725.8966450661195,
+    "max_production_veh_h": 33805.261874473705,
+    "source_urban_scale": 3.0,
+    "source_time_sec": 1080.0
+  },
+  "runs": [
+    {
+      "scenario": "peak_demand_urban_scale_0.5",
+      "urban_scale": 0.5,
+      "total_ttt": 7670.378522492706,
+      "urban_ttt": 4564.582173525167,
+      "points": 40,
+      "path": "2026-06-15\\results\\setpoint_calibration_post_seff\\urban_scale_0.5"
+    },
+    {
+      "scenario": "peak_demand_urban_scale_0.75",
+      "urban_scale": 0.75,
+      "total_ttt": 9509.759848750185,
+      "urban_ttt": 6176.626905944845,
+      "points": 40,
+      "path": "2026-06-15\\results\\setpoint_calibration_post_seff\\urban_scale_0.75"
+    },
+    {
+      "scenario": "peak_demand_urban_scale_1",
+      "urban_scale": 1.0,
+      "total_ttt": 11247.282694239362,
+      "urban_ttt": 7766.018261122512,
+      "points": 40,
+      "path": "2026-06-15\\results\\setpoint_calibration_post_seff\\urban_scale_1"
+    },
+    {
+      "scenario": "peak_demand_urban_scale_1.25",
+      "urban_scale": 1.25,
+      "total_ttt": 12887.98808550517,
+      "urban_ttt": 9316.683981986205,
+      "points": 40,
+      "path": "2026-06-15\\results\\setpoint_calibration_post_seff\\urban_scale_1.25"
+    },
+    {
+      "scenario": "peak_demand_urban_scale_1.5",
+      "urban_scale": 1.5,
+      "total_ttt": 14555.275639679157,
+      "urban_ttt": 10927.475570224771,
+      "points": 40,
+      "path": "2026-06-15\\results\\setpoint_calibration_post_seff\\urban_scale_1.5"
+    },
+    {
+      "scenario": "peak_demand_urban_scale_2",
+      "urban_scale": 2.0,
+      "total_ttt": 18381.745763902392,
+      "urban_ttt": 14690.338882666783,
+      "points": 40,
+      "path": "2026-06-15\\results\\setpoint_calibration_post_seff\\urban_scale_2"
+    },
+    {
+      "scenario": "peak_demand_urban_scale_2.5",
+      "urban_scale": 2.5,
+      "total_ttt": 22478.454652841247,
+      "urban_ttt": 18752.498350707545,
+      "points": 40,
+      "path": "2026-06-15\\results\\setpoint_calibration_post_seff\\urban_scale_2.5"
+    },
+    {
+      "scenario": "peak_demand_urban_scale_3",
+      "urban_scale": 3.0,
+      "total_ttt": 26718.694339953432,
+      "urban_ttt": 22969.4559772497,
+      "points": 40,
+      "path": "2026-06-15\\results\\setpoint_calibration_post_seff\\urban_scale_3"
+    }
+  ]
+}
