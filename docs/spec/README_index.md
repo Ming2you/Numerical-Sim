@@ -23,6 +23,7 @@ This folder splits the implementation specification by top-level section so an L
 - `14_definition_of_done.md`
 - `15_caveats.md`
 - `16_six_controller_comparison.md`
+- `17_relaxed_quantized_fast_mode.md`
 
 ## Recommended use
 
@@ -32,5 +33,7 @@ This folder splits the implementation specification by top-level section so an L
 4. Keep `15_caveats.md` attached to every coding task.
 5. For benchmark implementation and post-analysis, also provide
    `16_six_controller_comparison.md` and `../literature_grounded_post_analysis_plan.md`.
+6. For computation-cost reduction of the four-controller benchmark, also provide
+   `17_relaxed_quantized_fast_mode.md`.
 
 Do not give the entire full spec to the coding agent unless the task requires cross-section integration.
