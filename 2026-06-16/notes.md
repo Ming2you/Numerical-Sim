@@ -86,10 +86,32 @@ Codex가 push한 `e94cd1f`(상류 plain seg0 추가, freeway_segments_per_link 3
 - **중요**: n_crit은 leader 전용. WU-CD-F는 `leader_enabled=False`라 n_crit이 WU VSL에 무영향.
 - WU-CD-F peak 3600s 재실행: total TTT=2474.4 (재calibration 전후 동일 — 무영향 확인).
 - VSL 활성: `seg0`만 — FW_E 17/20, FW_W 15/20, min 50 km/h. seg1~3은 항상 100.
-- 즉 Codex 상류 seg0 토폴로지로 VSL이 **활성 가능**해졌으나 total 불변 → **net-neutral 재확인**.
-  원인: freeway local TTS(`freeway_vehicle_count_by_link`)가 metering으로 entry 큐
-  (`mainline_origin_queue`)로 밀린 차량을 제외 → agent 자기 목적함수만 낮춤. 총 지표(state:617)는
-  그 큐를 포함하므로 fw↑·urban↓로 상쇄.
+- (정정 아래 참조) 최초엔 "net-neutral 재확인"이라 적었으나, 그건 3-seg(이전) vs 4-seg(이후)
+  교란된 비교였고 틀렸음.
+
+## ★ 정정 — VSL은 net-neutral 아님(같은 토폴로지 counterfactual)
+앞 절의 "net-neutral"은 오류. 근거가 3-세그먼트(2474.438) vs 4-세그먼트(2474.384)
+**교란 비교**였고, "entry 큐로 밀린다"도 측정 아닌 추론이었다. 같은 4-세그먼트에서 VSL만
+on/off한 깨끗한 counterfactual 결과:
+
+| 시나리오 | VSL 활성 | Δtotal(자유−고정) | % | Δurban | Δfreeway |
+|---|---|---|---|---|---|
+| low_demand | 0/20 | 0.0 | 0.00% | 0.0 | 0.0 |
+| medium_demand | 4/20 | −6.4 | −1.20% | +0.2 | −6.6 |
+| peak_demand | 17/20 | −48.6 | **−1.93%** | −28.0 | −20.6 |
+| oversaturated_demand | 0/20 | 0.0 | 0.00% | 0.0 | 0.0 |
+| incident_or_capacity_drop | 16/20 | −45.1 | **−1.99%** | −25.4 | −19.6 |
+| capacity_drop | 0/20 | 0.0 | 0.00% | 0.0 | 0.0 |
+
+- VSL은 **혼잡하되 회복 가능한** regime(medium/peak/incident)에서 total을 **실제로 줄인다**(−1.2~2.0%).
+  저수요(혼잡無)·과포화/capacity_drop(metering 불가)에선 VSL 자체가 안 켜지고 효과 0 — 정직한 한계.
+- peak에서 **urban·freeway가 동시에 개선**(−28/−20.6) — tradeoff 상쇄가 아니다.
+- **urban green은 불변(Δ=0)** — urban agent가 결정을 바꿔서가 아니라, VSL 상류 metering이
+  freeway→off-ramp→urban 유입을 줄이는 **plant 물리**로 urban이 이득. entry 큐(mainline_origin_queue)는
+  오히려 −4.8로 감소(밀려나지 않음 — 이전 추론 반증).
+- 메커니즘: off-ramp capacity-drop 회복 아님(storage binding=0, lane loss~0). 순수 mainstream
+  metering(CTM receiving 하 하류 유입 완화). Codex의 상류 plain seg0 추가가 metering 지점을
+  만들어 VSL을 비로소 유효화. (이전 세션 net-neutral은 그 seg0 없던 옛 토폴로지 결과.)
 
 ## 게이트
 - 전체 `unittest discover` 통과(아래 실행 확인). 수정 전 1건 실패(750.0 하드코딩)→상대값으로 해결.

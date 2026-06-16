@@ -1,6 +1,35 @@
 # VSL 조사 최종 결론 (2026-06-16)
 
-## 한 줄 결론
+> ## ⚠️ 정정 (2026-06-16 오후) — 아래 "net-neutral" 결론은 SUPERSEDED
+>
+> 아래 본문의 net-neutral 결론은 **상류 plain 세그먼트가 없던 옛 3-세그먼트 토폴로지** 결과다.
+> Codex가 각 freeway 링크에 **상류 plain seg0를 추가**(e94cd1f, segments_per_link 3→4)해 off-ramp
+> 병목 *상류*에 mainstream-metering 지점이 생긴 뒤, **같은 토폴로지에서 VSL만 on/off한 깨끗한
+> counterfactual** 결과 VSL은 더 이상 net-neutral이 아니다.
+>
+> | 시나리오 | VSL 활성 | Δtotal(자유−고정) | % | Δurban | Δfreeway |
+> |---|---|---|---|---|---|
+> | low_demand | 0/20 | 0.0 | 0.00% | 0.0 | 0.0 |
+> | medium_demand | 4/20 | −6.4 | −1.20% | +0.2 | −6.6 |
+> | peak_demand | 17/20 | −48.6 | **−1.93%** | −28.0 | −20.6 |
+> | oversaturated_demand | 0/20 | 0.0 | 0.00% | 0.0 | 0.0 |
+> | incident_or_capacity_drop | 16/20 | −45.1 | **−1.99%** | −25.4 | −19.6 |
+> | capacity_drop | 0/20 | 0.0 | 0.00% | 0.0 | 0.0 |
+>
+> - **VSL은 혼잡하되 회복 가능한 regime(medium/peak/incident)에서 total을 실제로 −1.2~2.0% 줄인다.**
+>   저수요(혼잡無)·과포화/capacity_drop(metering 불가)에선 VSL이 안 켜지고 효과 0 — 정직한 한계.
+> - peak에서 **urban·freeway 동시 개선**(−28/−20.6) — tradeoff 상쇄가 아니다.
+> - **urban green 불변(Δ=0)**: urban agent가 결정을 바꿔서가 아니라, VSL 상류 metering이
+>   freeway→off-ramp→urban 유입을 줄이는 **plant 물리**로 urban이 이득. entry 큐는 오히려 감소(−4.8).
+> - 메커니즘은 off-ramp capacity-drop 회복이 아니라(storage binding=0) 순수 **mainstream metering**.
+> - 본문이 net-neutral 근거로 든 cross-topology 비교(3-seg 2474.438 vs 4-seg 2474.384)는 **교란된
+>   비교**였고, "entry 큐로 밀린다"는 측정 아닌 추론이라 모두 철회한다.
+>
+> 아래 본문은 **옛 토폴로지에서의 조사 이력**으로 보존한다.
+
+---
+
+## 한 줄 결론 (옛 토폴로지 — SUPERSEDED)
 
 **Wu et al.(2022)의 VSL 메커니즘을 충실히 재현했고, 우리 네트워크에서 VSL은 net-neutral이다** —
 off-ramp spillback이 강하게 있어도(λ_eff=1.65) VSL이 주는 urban relief와 freeway holding cost가
