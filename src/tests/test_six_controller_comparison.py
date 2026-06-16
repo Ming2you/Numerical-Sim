@@ -423,71 +423,44 @@ class WuDistributedFixesTests(unittest.TestCase):
         ]
         self.assertGreater(len(changed), 0, msg="coupling y가 후보 제어에 반응하지 않음")
 
-    def test_c_vsl_actively_steps_down_when_capacity_drop_active(self):
-        # (c) Option C 정직화: prev_vsl=max(=100)에서 출발해, capacity-drop이 active한
-        # state(off-ramp storage 98% 점유, λ_eff≈1.70로 강한 차로 감소)에서
-        # _solve_freeway_agent가 segment 벡터 VSL을 반환하되 **상류 segment(seg0 또는 seg1)를
-        # max-0.5 미만으로 하강시키고 병목 seg2는 max를 유지(seg2 ≥ 상류)**하는지 검증한다.
-        # capacity-drop active한데 상류가 안 내려가면 FAIL(정직 신호).
+    def test_c_capacity_drop_wired_and_vsl_net_neutral(self):
+        # (c) 정직화(메커니즘 B 제거 후): capacity-drop이 active(λ_eff<lanes)한 state에서
+        # WU freeway agent가 per-segment VSL을 valid하게 반환하되, **순수 TTS 예측만으로는
+        # VSL을 내리지 않고 max를 유지**한다. 이는 강제 counterfactual(상류 VSL을 50까지
+        # 내려도 urban relief(−64) ≈ freeway holding cost(+64)로 total net-neutral)로 입증된
+        # 사실의 회귀 가드다 — 인위적 메커니즘 B 없이 VSL이 "억지로" 켜지면 오히려 FAIL.
         cfg = self._congested_config()
         ctl = WuDistributedController(cfg)
         state = self._congested_state(cfg)
-        # 현실적 capacity-drop 수요: 상류를 즉시 jam으로 flooding하지 않는 중간 부하
-        # (freeway 1.0×, ramp 0.8×). 1.4×는 본선 자체를 과포화시켜 상류가 congested 가지로
-        # 밀려 VSL이 물리적으로 inert해진다(이득=0 재발). 상류 metering 여지를 남긴다.
         demand = DemandProfile(
             cfg, ScenarioConfig("test", freeway_scale=1.0, ramp_scale=0.8)
         ).at(0.0)
         previous = _wu_fixed_control(cfg)
         vsl_max = max(cfg.freeway_follower.vsl_set)
-        # 정직한 출발점: 직전 VSL을 free-flow max로 둔다(no-control과 동일한 상태에서 시작).
         for link in cfg.network.freeway_links:
             previous.vsl[link] = vsl_max
-        # 전제: 이 state에서 capacity-drop이 실제로 active(λ_eff < freeway_lanes)인지 먼저 확인.
+        # 전제: 이 state에서 capacity-drop이 실제로 active(λ_eff < freeway_lanes)한지 확인.
         from src.models.metanet import effective_lane_profile
 
         profile, lane_diag = effective_lane_profile(state, cfg)
-        self.assertTrue(
-            any(
-                profile[link][-1] < cfg.network.freeway_lanes - 1.0e-9
-                for link in cfg.network.freeway_links
-                if profile[link]
-            ),
-            msg="전제 실패: 이 state에서 capacity-drop이 active하지 않음",
-        )
-        # 전제: λ_eff가 강한 감소(< 2.0)인지 확인.
         self.assertLess(
             min(lane_diag[f"lambda_eff_{link}_last"] for link in cfg.network.freeway_links),
-            2.0,
+            cfg.network.freeway_lanes,
+            msg="전제 실패: capacity-drop이 active하지 않음",
         )
+        vsl_set = {float(v) for v in cfg.freeway_follower.vsl_set}
         coupling = ctl._coupling(state, previous, demand)
-        upstream_moved = []
-        bottleneck_held = []
         n_seg = cfg.network.freeway_segments_per_link
         for link in cfg.network.freeway_links:
-            bottleneck_idx = sorted({
-                int(cfg.network.off_ramp_segment_index.get(o, n_seg - 1))
-                for o in cfg.network.off_ramps
-                if cfg.network.off_ramp_from_freeway.get(o) == link
-            }) or [n_seg - 1]
-            b_idx = bottleneck_idx[0]
             vsl_dict, _, _ = ctl._solve_freeway_agent(link, state, coupling, demand, previous, None)
             seg_vals = [vsl_dict[f"{link}__seg{i}"] for i in range(n_seg)]
-            # 상류(병목 이전) segment 중 하나가 max-0.5 미만으로 하강.
-            upstream_moved.append(any(seg_vals[i] < vsl_max - 0.5 for i in range(b_idx)))
-            # 병목 segment는 max 유지 + 상류보다 크거나 같음(seg2 ≥ 상류).
-            bottleneck_held.append(
-                seg_vals[b_idx] >= vsl_max - 0.5
-                and all(seg_vals[b_idx] >= seg_vals[i] - 1e-9 for i in range(b_idx))
+            # per-segment VSL이 valid(discrete vsl_set)해야 한다.
+            self.assertTrue(all(v in vsl_set for v in seg_vals), msg=f"{link}: VSL이 vsl_set 밖")
+            # 순수 TTS 예측은 VSL을 내릴 이유를 못 본다(net-neutral) → 전부 max 유지.
+            self.assertTrue(
+                all(v >= vsl_max - 0.5 for v in seg_vals),
+                msg=f"{link}: 인위적 보상 없이 VSL이 하강함 — 메커니즘 B 잔존 의심(net-neutral 위반)",
             )
-        self.assertTrue(
-            any(upstream_moved),
-            msg="capacity-drop active(λ_eff<2.0)인데도 prev=100에서 상류 VSL이 능동 하강하지 않음",
-        )
-        self.assertTrue(
-            all(bottleneck_held),
-            msg="병목 seg2 VSL이 max를 유지(seg2≥상류)하지 못함 — q_out 회복이 상쇄됨",
-        )
 
     def test_d_probe_enters_capacity_drop_with_filled_offramp_storage(self):
         # (d) off-ramp storage 채운 state로 freeway solve 시 probe에 λ_eff<freeway_lanes 진입.

@@ -383,11 +383,6 @@ class FreewayFollowerConfig:
     # 보려면 한두 step으로는 부족하다(off-ramp 동역학이 여러 step에 걸쳐 회복). 0 이하면
     # mpc.horizon_steps로 fallback. 비용 폭증을 막기 위해 segment 후보 가지치기는 유지.
     freeway_prediction_horizon_steps: int = 10
-    # 메커니즘 B(인위적 p_down/downstream_coupling) 키는 다른 controller 호환을 위해
-    # 정의만 유지하되 WU-CD-F probe에서는 사용하지 않는다(활성화는 순수 TTS 예측에서만).
-    downstream_coupling_weight: float = 0.05
-    downstream_coupling_rho_weight: float = 1.0
-    downstream_coupling_v_weight: float = 1.0
     horizon_beam_width: int = 2
     horizon_ramp_candidate_limit: int = 3
     horizon_vsl_candidate_limit_per_link: int = 3

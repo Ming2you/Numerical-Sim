@@ -27,6 +27,9 @@ class ScenarioConfig:
     # off-ramp split ratio를 이 시나리오에서만 덮어쓴다(None이면 NetworkConfig 0.06 유지).
     # capacity-drop 유발 무대를 만들기 위한 시나리오 한정 주입 — plant 보존식은 불변.
     off_ramp_split_ratio_override: Optional[Dict[str, float]] = None
+    # boundary_out 유한 출구용량[veh/h]을 이 시나리오에서만 덮어쓴다(None이면 1600 유지).
+    # heavy-transfer 시나리오에서만 cap을 낮춰 off-ramp 홍수가 urban을 포화시키게 한다(A″-4).
+    boundary_out_capacity_override: Optional[float] = None
     metadata: Dict[str, float] = field(default_factory=dict)
 
     @classmethod
@@ -43,6 +46,9 @@ class ScenarioConfig:
             known["off_ramp_split_ratio_override"] = {
                 str(k): float(v) for k, v in raw_override.items()
             }
+        cap_override = raw.get("boundary_out_capacity_override")
+        if cap_override is not None:
+            known["boundary_out_capacity_override"] = float(cap_override)
         return cls(name=name, **known)
 
 
@@ -62,13 +68,21 @@ def apply_scenario_network_overrides(
 
     off_ramp_split_ratio는 plant·모든 controller가 단일하게 cfg.network에서 읽으므로,
     여기서 한 번만 덮어쓰면 모든 사용처에 일관 적용된다. override가 None이면 cfg를 그대로
-    반환(기존 0.06 동작 유지). 차량보존식·β합류 로직은 건드리지 않고 split 값만 주입한다."""
+    반환(기존 0.06 동작 유지). 차량보존식·β합류 로직은 건드리지 않고 split·cap 값만 주입한다.
+    boundary_out cap도 동일 패턴으로 시나리오 한정 주입한다(A″-4)."""
+    network_updates: Dict[str, object] = {}
     override = scenario.off_ramp_split_ratio_override
-    if not override:
+    if override:
+        merged = dict(cfg.network.off_ramp_split_ratio)
+        merged.update({str(k): float(v) for k, v in override.items()})
+        network_updates["off_ramp_split_ratio"] = merged
+    if scenario.boundary_out_capacity_override is not None:
+        network_updates["boundary_out_capacity_veh_h"] = float(
+            scenario.boundary_out_capacity_override
+        )
+    if not network_updates:
         return cfg
-    merged = dict(cfg.network.off_ramp_split_ratio)
-    merged.update({str(k): float(v) for k, v in override.items()})
-    return cfg.with_updates({"network": {"off_ramp_split_ratio": merged}})
+    return cfg.with_updates({"network": network_updates})
 
 
 class DemandProfile:

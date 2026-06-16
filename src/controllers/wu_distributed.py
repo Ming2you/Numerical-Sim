@@ -223,26 +223,6 @@ class WuDistributedController:
             rhos = state.freeway_density.get(link, [])
             y[f"rho_{link}"] = float(np.mean(rhos)) if rhos else 0.0
             y[f"mainline_{link}"] = float(max(0.0, demand.freeway_mainline.get(link, 0.0)))
-        # 메커니즘 B: 병목 segment(off-ramp seg) 다운스트림 압력 p_down.
-        # = w_rho·max(0, ρ_seg2−ρ_crit) + w_v·max(0, v_free−v_seg2). >0이면 병목이
-        # 임계 초과/감속 → 상류 metering(seg1→seg2 유입↓) 보상 신호.
-        # 게이트: ρ_b ≤ ρ_crit(free-flow)이면 p_down=0. capacity-drop 회피가 목적이므로
-        # 병목이 임계 초과(혹은 capacity-drop active)일 때만 압력을 켠다. v항이 free-flow
-        # (v < v_free이기만 하면)에서도 양수가 되어 상류 VSL을 불필요하게 낮추던 결함 차단.
-        ff = self.cfg.freeway_follower
-        for link in net.freeway_links:
-            rhos = state.freeway_density.get(link, [])
-            speeds = state.freeway_speed.get(link, [])
-            if rhos and float(rhos[-1]) > net.rho_crit:
-                rho_b = float(rhos[-1])
-                v_b = float(speeds[-1]) if speeds else net.v_free
-                p_down = (
-                    ff.downstream_coupling_rho_weight * max(0.0, rho_b - net.rho_crit)
-                    + ff.downstream_coupling_v_weight * max(0.0, net.v_free - v_b)
-                )
-            else:
-                p_down = 0.0
-            y[f"p_down_{link}"] = float(p_down)
         return y
 
     # ---------- urban agent local solve ----------
@@ -371,30 +351,22 @@ class WuDistributedController:
         """segment 벡터 VSL 후보 탐색 — 반환 (vsl_dict, local objective, evaluations).
 
         Option C: 후보는 segment별 VSL 조합(_freeway_segment_candidates). 각 후보를
-        storage-aware probe로 K_cf substep 적분해, 상류 metering→seg1→seg2 유입↓→
-        off-ramp storage 유입↓→λ_eff 회복(capacity-drop 회피)이 link 차량합(메커니즘 A)에
-        반영되게 한다. 메커니즘 B: p_down>0(병목 임계 초과)일 때만 후보의 첫-substep
-        seg1→seg2 유입에 결합 페널티를 부과해 상류 metering을 보상.
+        storage-aware probe로 Np(freeway_prediction_horizon_steps)×K_cf substep 적분해,
+        상류 metering→seg1→seg2 유입↓→off-ramp storage 유입↓→λ_eff 회복(capacity-drop
+        회피)이 horizon 누적 link 차량합(순수 TTS, 메커니즘 A)에 반영되게 한다. 인위적
+        결합 페널티(메커니즘 B)는 없다 — VSL 활성화는 순수 TTS 예측에서만 나온다.
         반환 dict 키는 segment 키 `{link}__seg{i}`(plant가 segment_vsl로 읽음)."""
         net = self.cfg.network
         sim = self.cfg.simulation
-        horizon = max(1, self.cfg.mpc.horizon_steps)
-        dt_h = sim.T_f_h
+        # Wu Np=10 정신: freeway agent probe는 λ-recovery가 여러 step에 걸쳐 누적되도록
+        # freeway_prediction_horizon_steps를 쓴다(0 이하면 mpc.horizon_steps fallback).
         ff = self.cfg.freeway_follower
+        horizon = max(1, ff.freeway_prediction_horizon_steps or self.cfg.mpc.horizon_steps)
+        dt_h = sim.T_f_h
         vsl_max = max(ff.vsl_set)
         smooth_w = ff.vsl_smoothness_weight
         n_seg = len(state.freeway_density.get(link, [])) or net.freeway_segments_per_link
         prev_vec = [segment_vsl(previous, link, i, self.cfg) for i in range(n_seg)]
-        # 메커니즘 B 결합: p_down>0이면 상류 metering(merge seg→병목 유입)을 보상.
-        p_down = max(0.0, float(coupling.get(f"p_down_{link}", 0.0)))
-        w_couple = ff.downstream_coupling_weight
-        # 병목 직전 segment(merge seg=병목-1) 인덱스 — 첫-substep 유입 평가용.
-        bottleneck_idx = sorted({
-            int(net.off_ramp_segment_index.get(o, n_seg - 1))
-            for o in net.off_ramps
-            if net.off_ramp_from_freeway.get(o) == link
-        }) or [n_seg - 1]
-        upstream_of_bottleneck = max(0, bottleneck_idx[0] - 1)
 
         candidates = self._freeway_segment_candidates(link, n_seg, previous)
         best_vec, best_obj = list(prev_vec), float("inf")
@@ -414,7 +386,6 @@ class WuDistributedController:
                 candidate_control.vsl[f"{link}__seg{i}"] = float(v)
             cost = 0.0
             first_offramp_flow = 0.0
-            inflow_to_bottleneck_acc = 0.0
             first_substep = True
             for _ in range(horizon):
                 for _ in range(sim.K_cf):
@@ -443,19 +414,6 @@ class WuDistributedController:
                         self.cfg,
                         interval_h=dt_h,
                     )
-                    # 메커니즘 B: merge seg(병목 직전)의 유출유량 = 병목 유입 = ρ·v·λ.
-                    # 후보 상류 VSL↓는 substep이 진행될수록 v_u를 낮춰 이 유입을 줄인다.
-                    # 전 substep에 걸쳐 누적해야 VSL 효과가 후보 간 차이를 만든다(첫 substep만
-                    # 보면 VSL이 아직 작동 전이라 후보 무차별 — 직전 0이득의 한 원인).
-                    vc = probe.freeway_vehicle_count_by_link(net).get(link, [])
-                    speeds = probe.freeway_speed.get(link, [])
-                    lanes = probe.freeway_effective_lanes.get(link, [])
-                    if upstream_of_bottleneck < len(vc):
-                        seg_len = net.freeway_segment_length_km
-                        lane_u = lanes[upstream_of_bottleneck] if upstream_of_bottleneck < len(lanes) else net.freeway_lanes
-                        rho_u = vc[upstream_of_bottleneck] / max(seg_len * max(lane_u, 1.0e-9), 1.0e-9)
-                        v_u = speeds[upstream_of_bottleneck] if upstream_of_bottleneck < len(speeds) else net.v_free
-                        inflow_to_bottleneck_acc += max(0.0, rho_u * v_u * max(lane_u, 0.0)) * dt_h
                     _, fw_diag = freeway_substep(
                         probe,
                         candidate_control,
@@ -487,9 +445,6 @@ class WuDistributedController:
                     # density_penalty 항은 제거 — storage-aware probe가 capacity-drop을
                     # TTS에 내생화하므로 별도 패널티 없이 VSL이 혼잡 시 작동한다.
                     cost += (link_vehicles + link_ramp_queue) * dt_h
-            # 메커니즘 B: 병목 임계 초과(p_down>0) 시에만 누적 병목 유입에 결합 페널티.
-            # free-flow면 p_down=0이라 이 항이 사라져 불필요 지연을 만들지 않는다.
-            cost += w_couple * p_down * inflow_to_bottleneck_acc
             # smoothness: segment별 직전값 대비 변화량 합.
             cost += smooth_w * sum(abs(v - prev_vec[i]) for i, v in enumerate(vec))
             if leader is not None:
@@ -540,6 +495,7 @@ class WuDistributedController:
             # 가용 공간으로 제약(도시 포화 시 spillback → drain 막힘 → storage 정체 →
             # capacity-drop 지속). 이게 혼잡 interval에서 VSL이 작동하는 물리 경로다.
             drain = 0.0
+            recv_intake: Dict[str, float] = {}
             for signal, movement in self._offramp_drain_flow.get(off_ramp, []):
                 rate = self._signal_leaving_rate(signal, movement, control)
                 recv_link = str(self._specs[movement].get("receiving_link", ""))
@@ -548,10 +504,28 @@ class WuDistributedController:
                     recv_avail = float(probe.urban_link_storage.get(recv_link, recv_cap))
                     rate = min(rate, max(0.0, recv_avail) / max(dt_h, 1.0e-9))
                 drain += rate
+                if recv_link:
+                    recv_intake[recv_link] = recv_intake.get(recv_link, 0.0) + rate
             available = float(probe.urban_link_storage.get(storage_link, capacity))
             occupied = max(0.0, capacity - available)
             occupied = min(capacity, max(0.0, occupied + (inflow - drain) * dt_h))
             probe.urban_link_storage[storage_link] = capacity - occupied
+            # A″-3: 드레인된 차량이 receiving 도시 링크 공간을 점유하게 한다(보존).
+            # 자유-sink 시절엔 drain이 receiving 공간을 갉아먹지 않아 도시가 절대 포화되지
+            # 않았고, 그래서 off-ramp storage가 VSL과 무관하게 항상 빠져 λ_eff가 늘 회복돼
+            # VSL이 이득을 못 봤다(메커니즘 A inert). 점유분은 도시 자체 유한출구(A″-1의
+            # boundary_out_capacity)로만 풀려 도시 혼잡 주원인=off-ramp 홍수일 때 도시가
+            # 포화 유지되고, VSL↓로 유입을 끊으면 풀린다(Wu λ-recovery 채널).
+            urban_exit = float(net.boundary_out_capacity_veh_h)
+            for recv_link, intake in recv_intake.items():
+                recv_cap = float(net.urban_link_storage_veh.get(recv_link, 0.0))
+                if recv_cap <= 0.0:
+                    continue
+                recv_avail = float(probe.urban_link_storage.get(recv_link, recv_cap))
+                recv_occ = max(0.0, recv_cap - recv_avail)
+                relief = urban_exit if urban_exit > 0.0 else float("inf")
+                recv_occ = min(recv_cap, max(0.0, recv_occ + (intake - relief) * dt_h))
+                probe.urban_link_storage[recv_link] = recv_cap - recv_occ
 
     # ---------- 합의 루프 (Wu §IV-D) ----------
 
