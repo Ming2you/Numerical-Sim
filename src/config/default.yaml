@@ -196,7 +196,11 @@ leader:
   # movement 점큐가 origin 링크 점유로 잡혀 backup이 더 일찍 전파 → critical
   # accumulation이 778.703→725.897로 하락. (직전 off-ramp게이트 plant 값 778.703,
   # 그 이전 cycle 위상 plant 521.281.)
-  N_P_crit_veh: 725.897
+  # 2026-06-16 재calibration: CTM receiving/supply + boundary_out 유한용량 +
+  # 4-세그먼트 토폴로지(상류 plain seg0) 반영. peak_demand scale 0.5~3.0, T_total 7200의
+  # MFD 정점에서 725.897→556.081로 하락(binned 정점 ~528, argmax 556 일치). 직전 725.897은
+  # 정점을 지난 congested branch라 leader setpoint가 과대(perimeter 과소개입)였음.
+  N_P_crit_veh: 556.081
   N_P_candidate_lower_factor: 0.9
   N_P_candidate_upper_factor: 1.05
   N_P_star_unit: veh

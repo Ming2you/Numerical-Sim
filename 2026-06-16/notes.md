@@ -58,3 +58,42 @@ release된 차량이 점유에서 사라지고 sink로도 기록 안 돼 **보�
 
 ## 커밋
 - (아래 커밋 해시 참조) push 금지.
+
+---
+
+# 2026-06-16 (오후) — n_crit 재calibration (4-세그먼트 토폴로지 반영)
+
+## 배경
+Codex가 push한 `e94cd1f`(상류 plain seg0 추가, freeway_segments_per_link 3→4)로 plant가
+바뀌었는데 leader의 `N_P_crit_veh`는 옛 값(725.897) 그대로였다. smoke 테스트가 출력하던
+`n_crit=212.121`은 정상 calibration이 아니라 **smoke 인자(scale 0.75,1.0 / T_total 180s)**
+산물이라 무효. 실제 값을 재확인.
+
+## 정상 calibration 결과 (peak_demand, scale 0.5~3.0, T_total 7200)
+- `calibrate_setpoints.py` argmax: **n_crit=556.081** (max production 34601 @ scale 3.0).
+- MFD binned 곡선도 accumulation ~528에서 production 정점(26588) 후 급락(641→16923) —
+  congested branch 확인. binned 정점(528)과 argmax(556) 일치 → **n_crit≈530~560 신뢰**.
+- 옛 725.897은 정점을 지난 congested branch라 과대(leader setpoint 밴드가 항상 정점 위 →
+  perimeter 과소개입). 354.809(state.py 기본)는 config가 덮어써 미사용.
+
+## 변경 (파일:라인)
+1. `src/config/default.yaml`: `N_P_crit_veh: 725.897 → 556.081` (+ 재calibration 근거 주석).
+2. `src/tests/test_metanet_equations.py:89`: config 단언 725.897 → 556.081.
+3. `src/tests/test_constraints.py` `test_leader_candidate_budget_...`: previous N_P_star
+   하드코딩 750.0 → `0.95×cfg.leader.N_P_crit_veh`(밴드 중앙). 미래 재calibration에 견고.
+
+## WU VSL 확인 (요청)
+- **중요**: n_crit은 leader 전용. WU-CD-F는 `leader_enabled=False`라 n_crit이 WU VSL에 무영향.
+- WU-CD-F peak 3600s 재실행: total TTT=2474.4 (재calibration 전후 동일 — 무영향 확인).
+- VSL 활성: `seg0`만 — FW_E 17/20, FW_W 15/20, min 50 km/h. seg1~3은 항상 100.
+- 즉 Codex 상류 seg0 토폴로지로 VSL이 **활성 가능**해졌으나 total 불변 → **net-neutral 재확인**.
+  원인: freeway local TTS(`freeway_vehicle_count_by_link`)가 metering으로 entry 큐
+  (`mainline_origin_queue`)로 밀린 차량을 제외 → agent 자기 목적함수만 낮춤. 총 지표(state:617)는
+  그 큐를 포함하므로 fw↑·urban↓로 상쇄.
+
+## 게이트
+- 전체 `unittest discover` 통과(아래 실행 확인). 수정 전 1건 실패(750.0 하드코딩)→상대값으로 해결.
+
+## 다음
+- proposed(leader) 4-controller는 n_crit 556으로 **재실행 필요**(현 +26~37%는 옛 n_crit 기반 잠정치).
+- capacity_drop에서 proposed 열위 원인(leader) 진단.
