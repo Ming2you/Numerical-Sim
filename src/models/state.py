@@ -213,9 +213,10 @@ class NetworkConfig:
     ])
     boundary_queue_max_veh: float = 240.0
     # boundary_out(출구) 링크당 시스템 이탈 유량 상한[veh/h] — 모델 밖 하류 도로 용량(A″-1).
-    # 유한값이면 출구가 binding해 off-ramp 홍수가 urban을 포화시킬 수 있고, 유입을 끊으면
-    # urban이 회복된다(roadmap §4 A″-1). 0 이하이면 자유 sink(무제한)로 동작(하위호환).
-    boundary_out_capacity_veh_h: float = 500.0
+    # 1600은 5개 표준 시나리오를 비왜곡(TTT 차이 ≤0.2%)하도록 calibration된 값이다. 표준
+    # 운영엔 binding 안 하고, off-ramp split을 올린 heavy-transfer 시나리오에서만 출구가
+    # binding해 off-ramp spillback을 형성한다(유입을 끊으면 urban 회복). 0 이하이면 자유 sink.
+    boundary_out_capacity_veh_h: float = 1600.0
     movement_capacity_veh_h: float = 1400.0
     # urban_movements/turning_ratios/on·off_ramp_to_movement는 비워두면
     # grid_node_legs 토폴로지에서 자동 유도된다(__post_init__, grid_routing_proposal §3).
