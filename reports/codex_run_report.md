@@ -486,3 +486,228 @@ C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\p
 
 - Full closed-loop performance criteria were not evaluated in this pass.
 - Next modification: rerun the primary 4-controller comparison because proposed VSL authority was previously link-level while Wu VSL authority was segment-level.
+## 2026-06-16: WU-CD-F peak 3600s VSL activation diagnosis
+
+### Implemented / Run
+
+- Ran `WU-CD-F` for `peak_demand`, `T_total=3600 s`.
+- Checked link-level and segment-level VSL time series, capacity-drop diagnostics, off-ramp storage binding, density exceedance, and WU VSL candidate vectors.
+- Wrote detailed report: `outputs/wu_cd_f_peak_3600_vsl_diagnosis/vsl_activation_report.md`.
+
+### Commands
+
+Baseline run command: not run in this VSL diagnosis pass.
+
+Proposed-controller run command: not run in this VSL diagnosis pass.
+
+WU run command:
+
+```text
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m src.experiments.six_controller_comparison --scenario peak_demand --T-total 3600 --controllers WU-CD-F --output outputs\wu_cd_f_peak_3600_vsl_diagnosis
+```
+
+### Metrics
+
+- Baseline Total TTT/TTS: N/A.
+- WU-CD-F Total TTT/TTS: `2474.438 veh-h`.
+- WU-CD-F freeway TTT: `1428.690 veh-h`.
+- WU-CD-F urban TTT: `1045.748 veh-h`.
+- WU-CD-F total delay: `1936.572 veh-h`.
+- WU-CD-F throughput: `9024.1 veh/h`.
+- Improvement rate: N/A, no baseline run in this pass.
+- Boundary queue balancing result: not evaluated as acceptance criterion in this pass.
+- Control validation summary: WU authority ok; VSL remained at `100 km/h` on every link/segment.
+
+### VSL Diagnosis
+
+- VSL active intervals: `0 / 20`.
+- Minimum link and segment VSL: `100 km/h`.
+- `capacity_drop_active_steps`: `20 / 20`, but max lane loss was only `0.000261 lanes`.
+- Max off-ramp occupancy ratio was `0.014189`; off-ramp storage binding and blocked flow were both `0`.
+- Current WU candidate vectors after the corrected topology are:
+  - `FW_W`: `[100,100,80]`, `[100,100,90]`, `[100,100,100]`
+  - `FW_E`: `[100,100,80]`, `[100,100,90]`, `[100,100,100]`
+- Because off-ramps are now on segments 0 and 1, the WU candidate rule freezes both off-ramp segments at max/previous VSL and only allows segment 2 to change. Segment 2 is downstream of both off-ramps, so lowering it does not recover off-ramp storage and only adds freeway TTS cost.
+
+### Failed criteria and next modification
+
+- This was not a full acceptance run.
+- VSL non-activation is explained by weak physical spillback plus a candidate-set/topology mismatch.
+- Next modification: decide whether VSL may be applied on the off-ramp segment itself or add/identify an upstream controllable VSL segment before the first off-ramp.
+
+## 2026-06-16: Upstream simple segment topology and WU-CD-F 3600s VSL rerun
+
+### Implemented / reviewed
+
+- Added one upstream simple freeway segment to each of `FW_W` and `FW_E`.
+- `freeway_segments_per_link` changed from `3` to `4`; `freeway_segment_length_km` remains `0.5 km`.
+- The new `seg0` has no on-ramp or off-ramp.
+- Existing ramp/off-ramp meanings were shifted downstream:
+  - D off-ramps: `seg1`
+  - F off-ramps: `seg2`
+  - D/F on-ramp merge: `seg2`
+- Updated topology tests and the Wu distributed regression test so Wu VSL can be checked on the new upstream segment.
+- Adjusted `DistributedCoordinator` lane-loss lookup to read the agent's own segment lane profile instead of the last segment.
+- Wrote detailed diagnosis: `reports/wu_cd_f_peak_3600_vsl_upstream_segment_report.md`.
+
+### Files changed
+
+- `src/models/state.py`
+- `src/config/default.yaml`
+- `src/controllers/distributed_coordinator.py`
+- `src/tests/test_metanet_equations.py`
+- `src/tests/test_constraints.py`
+- `src/tests/test_six_controller_comparison.py`
+- `reports/wu_cd_f_peak_3600_vsl_upstream_segment_report.md`
+- `reports/codex_run_report.md`
+
+### Commands
+
+Baseline run command: not run in this pass.
+
+Proposed-controller run command: not run in this pass.
+
+WU run command:
+
+```text
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m src.experiments.six_controller_comparison --scenario peak_demand --T-total 3600 --controllers WU-CD-F --output outputs\wu_cd_f_peak_3600_vsl_upstream_segment
+```
+
+Validation commands:
+
+```text
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m py_compile src\models\state.py src\models\metanet.py src\controllers\distributed_coordinator.py src\controllers\wu_distributed.py src\tests\test_metanet_equations.py src\tests\test_constraints.py src\tests\test_six_controller_comparison.py
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest src.tests.test_metanet_equations src.tests.test_constraints.ConstraintTests.test_distributed_agent_partition_matches_topology src.tests.test_constraints.ConstraintTests.test_distributed_coordinator_returns_per_agent_diagnostics src.tests.test_constraints.ConstraintTests.test_leaderless_metering_prediction_includes_upstream_mainline_flow src.tests.test_constraints.ConstraintTests.test_freeway_follower_handles_capacity_drop_with_valid_vsl src.tests.test_constraints.ConstraintTests.test_freeway_follower_vsl_candidates_are_segment_level src.tests.test_six_controller_comparison.WuDistributedFixesTests -v
+```
+
+### Metrics
+
+- Baseline Total TTT/TTS: N/A.
+- Proposed Total TTT/TTS: N/A.
+- WU-CD-F Total TTT/TTS: `2474.384 veh-h`.
+- WU-CD-F freeway TTT: `1525.292 veh-h`.
+- WU-CD-F urban TTT: `949.092 veh-h`.
+- WU-CD-F total delay: `1905.065 veh-h`.
+- WU-CD-F throughput: `9108.2 veh/h`.
+- Improvement rate: N/A, no baseline comparison in this pass.
+- Boundary queue balancing result: not evaluated as acceptance criterion in this pass.
+
+### Control validation summary
+
+- `py_compile`: PASS.
+- Related unit tests: `31` tests PASS.
+- WU-CD-F 3600s run completed and `authority_ok=True`.
+- VSL activation:
+  - Any VSL active interval: `17 / 20`.
+  - `FW_W seg0`: active `15 / 20`, min `50 km/h`.
+  - `FW_E seg0`: active `17 / 20`, min `50 km/h`.
+  - `seg1`, `seg2`, and `seg3` remained `100 km/h` on both links.
+- Spillback/storage:
+  - `capacity_drop_active=1`, but max lane loss is still tiny (`~0.000247 lanes`).
+  - `offramp_storage_binding=0`.
+  - `offramp_blocked_flow_total=0`.
+
+### Failed criteria and next modification
+
+- This is not a full acceptance run.
+- The topology issue is resolved: Wu VSL can now activate on an upstream plain segment.
+- Remaining issue: the `peak_demand` 3600s scenario still does not create binding off-ramp storage, so VSL activation is not yet evidence of strong spillback mitigation.
+- Next modification: run the full 4-controller comparison on the new topology, and separately design a stronger spillback scenario if the research question is specifically VSL response to off-ramp storage saturation.
+
+## 2026-06-16: Full primary 4-controller scenario comparison, 3600s
+
+### Implemented / run
+
+- Ran all configured scenarios with the primary 4-controller set:
+  - `WU-CD-F`
+  - `PROPOSED-FOLLOWERS-ONLY`
+  - `PROPOSED-STACKELBERG`
+  - `PROPOSED-CENTRALIZED`
+- Horizon: `3600 s`.
+- Topology: 4-segment freeway links with upstream simple `seg0`.
+- Output root: `outputs/four_controller_all_scenarios_3600_upstream_segment`.
+- Detailed report: `reports/four_controller_all_scenarios_3600_upstream_segment_report.md`.
+
+### Commands
+
+Baseline run command: not applicable as a no-control baseline; this pass uses spec 16 pairwise baselines between controllers.
+
+Proposed-controller run command pattern:
+
+```text
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m src.experiments.six_controller_comparison --scenario <scenario> --T-total 3600 --controllers WU-CD-F,PROPOSED-FOLLOWERS-ONLY,PROPOSED-STACKELBERG,PROPOSED-CENTRALIZED --output outputs\four_controller_all_scenarios_3600_upstream_segment\<scenario>
+```
+
+### Scenario metrics
+
+| Scenario | Best TTT controller | WU-CD-F TTT | P-FO TTT | P-Stack TTT | P-Cent TTT |
+|---|---|---:|---:|---:|---:|
+| low_demand | WU-CD-F | 347.823 | 405.402 | 450.171 | 377.590 |
+| medium_demand | WU-CD-F | 529.830 | 1047.055 | 912.089 | 932.878 |
+| peak_demand | PROPOSED-CENTRALIZED | 2474.384 | 1712.395 | 1831.105 | 1626.092 |
+| oversaturated_demand | PROPOSED-CENTRALIZED | 4482.918 | 2915.558 | 3248.717 | 2810.376 |
+| incident_or_capacity_drop | PROPOSED-CENTRALIZED | 2218.689 | 1646.729 | 1679.822 | 1554.556 |
+| capacity_drop | WU-CD-F | 8012.501 | 8411.293 | 10269.381 | 9326.771 |
+
+### Main findings
+
+- `peak_demand`: `PROPOSED-STACKELBERG` improves TTT by `26.00%` vs `WU-CD-F`; `PROPOSED-CENTRALIZED` improves by `34.28%`.
+- `oversaturated_demand`: `PROPOSED-STACKELBERG` improves TTT by `27.53%`; `PROPOSED-CENTRALIZED` improves by `37.31%`.
+- `incident_or_capacity_drop`: `PROPOSED-STACKELBERG` improves TTT by `24.29%`; `PROPOSED-CENTRALIZED` improves by `29.93%`.
+- `low_demand` and `medium_demand`: proposed controllers are worse than `WU-CD-F`.
+- `capacity_drop`: proposed controllers are worse than `WU-CD-F`; `PROPOSED-STACKELBERG` is the worst case with `10269.381 veh-h` TTT and `7775.1 veh/h` throughput.
+
+### Failed criteria and next modification
+
+- Full acceptance is not claimed.
+- Proposed Stackelberg does not dominate across scenarios and fails the `capacity_drop` stress case.
+- Low/medium demand also show unnecessary control restriction relative to Wu.
+- Next modification: diagnose why the Leader/allocation layer worsens throughput and terminal vehicles in `capacity_drop`, then rerun at least `capacity_drop`, `medium_demand`, and `peak_demand` before any full 7200s run.
+
+## 2026-06-16: freeway upstream plain segment topology update
+
+### 구현 내용
+
+- `FW_W`, `FW_E` 각각의 기존 segment 0 앞에 동일 길이 `0.5 km` upstream plain segment를 추가하는 형태로 기본 topology를 재구성했습니다.
+- `freeway_segments_per_link`를 `3 -> 4`로 늘렸고, 기존 segment length는 유지했습니다. 따라서 link당 총 freeway 길이는 `1.5 km -> 2.0 km`가 됩니다.
+- 새 segment 0에는 on-ramp/off-ramp가 붙지 않도록 기존 segment-level 연결을 한 칸 downstream으로 이동했습니다.
+  - on-ramp merge: `R_D_W`, `R_F_W`, `R_D_E`, `R_F_E` = segment 2
+  - off-ramp: `OR_D_W`, `OR_D_E` = segment 1
+  - off-ramp: `OR_F_W`, `OR_F_E` = segment 2
+- topology/diagnostics 테스트를 4-segment agent partition과 새 off-ramp index에 맞춰 갱신했습니다.
+- Wu regression fixture를 새 topology에 맞춰 갱신했고, Wu가 off-ramp 병목 segment는 max VSL로 유지하면서 upstream plain segment `seg0`에서 VSL 후보를 낮출 수 있음을 검증하도록 수정했습니다.
+
+### 변경 파일
+
+- `src/models/state.py`
+- `src/config/default.yaml`
+- `src/tests/test_constraints.py`
+- `src/tests/test_metanet_equations.py`
+- `src/tests/test_six_controller_comparison.py`
+- `reports/codex_run_report.md`
+
+### 실행 명령
+
+Baseline run command: not run in this topology-only pass.
+
+Proposed-controller run command: not run in this topology-only pass.
+
+Validation commands:
+
+```text
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m py_compile src\models\state.py src\models\metanet.py src\tests\test_constraints.py src\tests\test_metanet_equations.py src\tests\test_six_controller_comparison.py
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest src.tests.test_metanet_equations src.tests.test_constraints src.tests.test_six_controller_comparison.WuDistributedFixesTests -v
+```
+
+### 지표
+
+- Baseline Total TTT/TTS: N/A, closed-loop baseline not run.
+- Proposed Total TTT/TTS: N/A, closed-loop proposed controller not run.
+- Improvement rate: N/A.
+- Boundary queue balancing result: N/A, no closed-loop acceptance run in this pass.
+- Control validation summary: compile passed; related unit/regression tests `59 tests OK`.
+
+### 실패 기준 및 다음 수정
+
+- Full acceptance criteria are not evaluated in this pass because no closed-loop baseline/proposed simulation was run.
+- Remaining risk: total freeway length changed from `1.5 km` to `2.0 km`; future closed-loop comparisons should be regenerated under the new topology before interpreting TTT improvements.

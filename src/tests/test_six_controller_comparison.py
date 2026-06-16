@@ -368,8 +368,8 @@ class WuDistributedFixesTests(unittest.TestCase):
             state.urban_movement_queue[movement] = 80.0
         for link in net.freeway_links:
             # seg0/seg1은 free-flow 가지(ρ<ρ_crit=33.5)로 metering 여지 확보, seg2는 병목 jam.
-            state.freeway_density[link] = [15.0, 20.0, 40.0]
-            state.freeway_speed[link] = [88.0, 80.0, 48.0]
+            state.freeway_density[link] = [15.0, 20.0, 40.0, 35.0]
+            state.freeway_speed[link] = [95.0, 88.0, 80.0, 48.0]
         # ramp 큐를 비워 probe에서 상류가 즉시 jam으로 flooding되지 않게 한다(현실적 metering).
         for ramp in net.ramps:
             state.ramp_queue[ramp] = 0.0
@@ -423,12 +423,10 @@ class WuDistributedFixesTests(unittest.TestCase):
         ]
         self.assertGreater(len(changed), 0, msg="coupling y가 후보 제어에 반응하지 않음")
 
-    def test_c_capacity_drop_wired_and_vsl_net_neutral(self):
-        # (c) 정직화(메커니즘 B 제거 후): capacity-drop이 active(λ_eff<lanes)한 state에서
-        # WU freeway agent가 per-segment VSL을 valid하게 반환하되, **순수 TTS 예측만으로는
-        # VSL을 내리지 않고 max를 유지**한다. 이는 강제 counterfactual(상류 VSL을 50까지
-        # 내려도 urban relief(−64) ≈ freeway holding cost(+64)로 total net-neutral)로 입증된
-        # 사실의 회귀 가드다 — 인위적 메커니즘 B 없이 VSL이 "억지로" 켜지면 오히려 FAIL.
+    def test_c_capacity_drop_wired_and_upstream_vsl_available(self):
+        # (c) 새 4-segment topology 검증: seg0은 ramp 없는 단순 상류부이고, off-ramp 병목은
+        # seg1/seg2에 있다. Wu freeway agent는 병목 segment 자체를 max VSL로 보존하면서
+        # 상류 단순 segment의 per-segment VSL 후보를 낮출 수 있어야 한다.
         cfg = self._congested_config()
         ctl = WuDistributedController(cfg)
         state = self._congested_state(cfg)
@@ -460,10 +458,15 @@ class WuDistributedFixesTests(unittest.TestCase):
             seg_vals = [vsl_dict[f"{link}__seg{i}"] for i in range(n_seg)]
             # per-segment VSL이 valid(discrete vsl_set)해야 한다.
             self.assertTrue(all(v in vsl_set for v in seg_vals), msg=f"{link}: VSL이 vsl_set 밖")
-            # 순수 TTS 예측은 VSL을 내릴 이유를 못 본다(net-neutral) → 전부 max 유지.
-            self.assertTrue(
-                all(v >= vsl_max - 0.5 for v in seg_vals),
-                msg=f"{link}: 인위적 보상 없이 VSL이 하강함 — 메커니즘 B 잔존 의심(net-neutral 위반)",
+            # 병목 off-ramp segment는 max VSL을 유지하고, 새 상류 단순 segment가 metering 역할을 맡는다.
+            for off_ramp in cfg.network.off_ramps:
+                if cfg.network.off_ramp_from_freeway.get(off_ramp) == link:
+                    idx = cfg.network.off_ramp_segment_index[off_ramp]
+                    self.assertGreaterEqual(seg_vals[idx], vsl_max - 0.5)
+            self.assertLess(
+                seg_vals[0],
+                vsl_max,
+                msg=f"{link}: upstream plain segment VSL was not selected",
             )
 
     def test_d_probe_enters_capacity_drop_with_filled_offramp_storage(self):

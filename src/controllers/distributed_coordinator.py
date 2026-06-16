@@ -398,7 +398,9 @@ class DistributedCoordinator:
         rhos = [all_rhos[agent.segment_index]] if 0 <= agent.segment_index < len(all_rhos) else all_rhos
         max_density = max(rhos) if rhos else 0.0
         density_ratio = max_density / max(net.rho_crit, 1.0e-9)
-        lane_loss = max(0.0, net.freeway_lanes - (lane_profile.get(agent.link, [net.freeway_lanes])[-1]))
+        lanes_for_link = lane_profile.get(agent.link, [net.freeway_lanes])
+        lane_idx = agent.segment_index if 0 <= agent.segment_index < len(lanes_for_link) else len(lanes_for_link) - 1
+        lane_loss = max(0.0, net.freeway_lanes - lanes_for_link[lane_idx])
         desired = self._agent_vsl(density_ratio, lane_loss, current.vsl.get(agent.link, max(self.cfg.freeway_follower.vsl_set)))
         density_excess = sum(max(0.0, rho - net.rho_crit) for rho in rhos)
         # 잔차는 달성가능 목표(min(target, Σ물리상한)) 기준 — 수요 부족으로 덜 방출한 것을

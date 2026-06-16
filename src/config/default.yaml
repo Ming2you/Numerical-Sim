@@ -19,7 +19,7 @@ network:
   freeway_links:
   - FW_W
   - FW_E
-  freeway_segments_per_link: 3
+  freeway_segments_per_link: 4
   freeway_segment_length_km: 0.5
   freeway_lanes: 2
   v_free: 100.0
@@ -42,10 +42,10 @@ network:
     R_D_E: 1500.0
     R_F_E: 1500.0
   ramp_merge_segment_index:
-    R_D_W: 1
-    R_F_W: 1
-    R_D_E: 1
-    R_F_E: 1
+    R_D_W: 2
+    R_F_W: 2
+    R_D_E: 2
+    R_F_E: 2
   ramp_queue_max_veh: 180.0
   signals:
   - A
@@ -134,10 +134,10 @@ network:
     OR_D_E: FW_E
     OR_F_E: FW_E
   off_ramp_segment_index:
-    OR_D_W: 0
-    OR_F_W: 1
-    OR_D_E: 0
-    OR_F_E: 1
+    OR_D_W: 1
+    OR_F_W: 2
+    OR_D_E: 1
+    OR_F_E: 2
   off_ramp_storage_link:
     OR_D_W: OR_D_W_storage
     OR_F_W: OR_F_W_storage

@@ -178,7 +178,7 @@ class SimulationConfig:
 @dataclass
 class NetworkConfig:
     freeway_links: List[str] = field(default_factory=lambda: ["FW_W", "FW_E"])
-    freeway_segments_per_link: int = 3
+    freeway_segments_per_link: int = 4
     freeway_segment_length_km: float = 0.5
     freeway_lanes: int = 2
     v_free: float = 100.0
@@ -193,7 +193,7 @@ class NetworkConfig:
         "R_D_W": 1500.0, "R_F_W": 1500.0, "R_D_E": 1500.0, "R_F_E": 1500.0
     })
     ramp_merge_segment_index: Dict[str, int] = field(default_factory=lambda: {
-        "R_D_W": 1, "R_F_W": 1, "R_D_E": 1, "R_F_E": 1
+        "R_D_W": 2, "R_F_W": 2, "R_D_E": 2, "R_F_E": 2
     })
     ramp_queue_max_veh: float = 180.0
     signals: List[str] = field(default_factory=lambda: ["A", "B", "C", "D", "F"])
@@ -239,7 +239,7 @@ class NetworkConfig:
         "OR_F_E": "FW_E",
     })
     off_ramp_segment_index: Dict[str, int] = field(default_factory=lambda: {
-        "OR_D_W": 0, "OR_F_W": 1, "OR_D_E": 0, "OR_F_E": 1
+        "OR_D_W": 1, "OR_F_W": 2, "OR_D_E": 1, "OR_F_E": 2
     })
     off_ramp_storage_link: Dict[str, str] = field(default_factory=lambda: {
         "OR_D_W": "OR_D_W_storage",

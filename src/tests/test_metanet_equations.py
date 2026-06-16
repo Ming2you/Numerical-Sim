@@ -98,10 +98,13 @@ class MetanetEquationTests(unittest.TestCase):
         self.assertIn("R_D_W", cfg.network.on_ramp_to_movement)
         self.assertIn("OR_D_W", cfg.network.off_ramps)
         self.assertIn("OR_D_W_storage", cfg.network.urban_link_storage_veh)
-        self.assertEqual(cfg.network.off_ramp_segment_index["OR_D_W"], 0)
-        self.assertEqual(cfg.network.off_ramp_segment_index["OR_F_W"], 1)
-        self.assertEqual(cfg.network.off_ramp_segment_index["OR_D_E"], 0)
-        self.assertEqual(cfg.network.off_ramp_segment_index["OR_F_E"], 1)
+        self.assertEqual(cfg.network.freeway_segments_per_link, 4)
+        self.assertEqual(cfg.network.ramp_merge_segment_index["R_D_W"], 2)
+        self.assertEqual(cfg.network.ramp_merge_segment_index["R_F_W"], 2)
+        self.assertEqual(cfg.network.off_ramp_segment_index["OR_D_W"], 1)
+        self.assertEqual(cfg.network.off_ramp_segment_index["OR_F_W"], 2)
+        self.assertEqual(cfg.network.off_ramp_segment_index["OR_D_E"], 1)
+        self.assertEqual(cfg.network.off_ramp_segment_index["OR_F_E"], 2)
         self.assertTrue(cfg.freeway_offramp_capacity_drop.enabled)
         self.assertGreaterEqual(cfg.freeway_offramp_capacity_drop.lane_reduction, 0.0)
         self.assertLess(cfg.freeway_offramp_capacity_drop.lane_reduction, cfg.network.freeway_lanes)
@@ -267,11 +270,12 @@ class MetanetEquationTests(unittest.TestCase):
 
         lane_profile, diag = effective_lane_profile(state, cfg)
 
-        self.assertLess(lane_profile["FW_W"][0], cfg.network.freeway_lanes)
-        self.assertAlmostEqual(lane_profile["FW_W"][1], cfg.network.freeway_lanes)
+        self.assertAlmostEqual(lane_profile["FW_W"][0], cfg.network.freeway_lanes)
+        self.assertLess(lane_profile["FW_W"][1], cfg.network.freeway_lanes)
         self.assertAlmostEqual(lane_profile["FW_W"][2], cfg.network.freeway_lanes)
-        self.assertGreater(diag["capacity_drop_lane_loss_FW_W_seg0"], 0.0)
-        self.assertAlmostEqual(diag["capacity_drop_lane_loss_FW_W_seg1"], 0.0)
+        self.assertAlmostEqual(lane_profile["FW_W"][3], cfg.network.freeway_lanes)
+        self.assertAlmostEqual(diag["capacity_drop_lane_loss_FW_W_seg0"], 0.0)
+        self.assertGreater(diag["capacity_drop_lane_loss_FW_W_seg1"], 0.0)
 
     def test_offramp_flow_uses_segment_specific_storage_capacity(self):
         cfg = ExperimentConfig.from_file(
@@ -280,10 +284,12 @@ class MetanetEquationTests(unittest.TestCase):
         )
         state = TrafficState.initial(cfg)
         for link in cfg.network.freeway_links:
-            state.freeway_density[link] = [0.0, 0.0, 0.0]
-            state.freeway_speed[link] = [80.0, 80.0, 80.0]
-            state.freeway_effective_lanes[link] = [cfg.network.freeway_lanes] * 3
-        state.freeway_density["FW_W"] = [20.0, 20.0, 0.0]
+            state.freeway_density[link] = [0.0 for _ in range(cfg.network.freeway_segments_per_link)]
+            state.freeway_speed[link] = [80.0 for _ in range(cfg.network.freeway_segments_per_link)]
+            state.freeway_effective_lanes[link] = [
+                cfg.network.freeway_lanes for _ in range(cfg.network.freeway_segments_per_link)
+            ]
+        state.freeway_density["FW_W"] = [0.0, 20.0, 20.0, 0.0]
         for storage_link in cfg.network.off_ramp_storage_link.values():
             state.urban_link_storage[storage_link] = cfg.network.urban_link_storage_veh[storage_link]
         state.urban_link_storage["OR_D_W_storage"] = 0.0
@@ -412,8 +418,12 @@ class MetanetEquationTests(unittest.TestCase):
         )
         state = TrafficState.initial(cfg)
         for link in cfg.network.freeway_links:
-            state.freeway_density[link] = [10.0, 10.0, 10.0]
-            state.freeway_speed[link] = [0.0, 0.0, 0.0]
+            state.freeway_density[link] = [
+                10.0 for _ in range(cfg.network.freeway_segments_per_link)
+            ]
+            state.freeway_speed[link] = [
+                0.0 for _ in range(cfg.network.freeway_segments_per_link)
+            ]
         demand = DemandStep(
             freeway_mainline={link: 0.0 for link in cfg.network.freeway_links},
             urban_boundary={link: 0.0 for link in cfg.network.movement_links},
@@ -426,9 +436,11 @@ class MetanetEquationTests(unittest.TestCase):
         expected_merge_density = 10.0 + cfg.simulation.T_f_h / (
             cfg.network.freeway_segment_length_km * cfg.network.freeway_lanes
         ) * 900.0
-        self.assertAlmostEqual(state.freeway_density["FW_W"][1], expected_merge_density)
-        self.assertAlmostEqual(state.freeway_density["FW_W"][0], 10.0)
-        self.assertAlmostEqual(state.freeway_density["FW_W"][2], 10.0)
+        merge_idx = cfg.network.ramp_merge_segment_index["R_D_W"]
+        self.assertAlmostEqual(state.freeway_density["FW_W"][merge_idx], expected_merge_density)
+        for i, rho in enumerate(state.freeway_density["FW_W"]):
+            if i != merge_idx:
+                self.assertAlmostEqual(rho, 10.0)
 
 
 if __name__ == "__main__":

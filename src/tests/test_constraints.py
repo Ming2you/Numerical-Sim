@@ -38,13 +38,16 @@ class ConstraintTests(unittest.TestCase):
         cfg = short_config()
         urban_agents, freeway_agents = build_agent_specs(cfg)
         self.assertEqual(len(urban_agents), 5)
-        self.assertEqual(len(freeway_agents), 6)
+        self.assertEqual(len(freeway_agents), 8)
         self.assertEqual({agent.id for agent in urban_agents}, {"U_A", "U_B", "U_C", "U_D", "U_F"})
-        self.assertEqual({agent.id for agent in freeway_agents}, {"F_W0", "F_W1", "F_W2", "F_E0", "F_E1", "F_E2"})
+        self.assertEqual(
+            {agent.id for agent in freeway_agents},
+            {"F_W0", "F_W1", "F_W2", "F_W3", "F_E0", "F_E1", "F_E2", "F_E3"},
+        )
         d_agent = next(agent for agent in urban_agents if agent.id == "U_D")
         self.assertIn("D_N_to_onW", d_agent.movements)
         self.assertIn("D_offW_to_N", d_agent.movements)
-        fw_merge_agent = next(agent for agent in freeway_agents if agent.id == "F_W1")
+        fw_merge_agent = next(agent for agent in freeway_agents if agent.id == "F_W2")
         self.assertIn("R_D_W", fw_merge_agent.ramps)
         self.assertIn("R_F_W", fw_merge_agent.ramps)
         freeway_ids = {agent.id for agent in freeway_agents}
@@ -52,7 +55,7 @@ class ConstraintTests(unittest.TestCase):
             self.assertTrue(set(agent.neighbors).issubset(freeway_ids))
         self.assertEqual(
             set(d_agent.neighbors),
-            {"F_W0", "F_W1", "F_E0", "F_E1"},
+            {"F_W1", "F_W2", "F_E1", "F_E2"},
         )
 
     def test_freeway_follower_vsl_candidates_are_segment_level(self):
@@ -100,9 +103,9 @@ class ConstraintTests(unittest.TestCase):
         )
         self.assertEqual(result.control.diagnostics["distributed_player_active"], 1.0)
         self.assertEqual(result.control.diagnostics["distributed_urban_agent_count"], 5.0)
-        self.assertEqual(result.control.diagnostics["distributed_freeway_agent_count"], 6.0)
+        self.assertEqual(result.control.diagnostics["distributed_freeway_agent_count"], 8.0)
         self.assertIn("agent_U_A_objective", result.control.diagnostics)
-        self.assertIn("agent_F_W1_objective", result.control.diagnostics)
+        self.assertIn("agent_F_W2_objective", result.control.diagnostics)
         self.assertEqual(set(result.control.vsl), set(cfg.network.freeway_links))
         boundary_out_total = sum(
             result.control.inflow_outflow_allocation[movement]
@@ -130,12 +133,13 @@ class ConstraintTests(unittest.TestCase):
         coordinator = DistributedCoordinator(cfg)
         state = TrafficState.initial(cfg)
         demand = DemandProfile(cfg, ScenarioConfig("test")).at(0.0)
-        agent = next(item for item in coordinator.freeway_agents if item.id == "F_W1")
+        agent = next(item for item in coordinator.freeway_agents if item.id == "F_W2")
         upper = {ramp: cfg.network.ramp_capacity_veh_h[ramp] for ramp in agent.ramps}
 
-        state.freeway_flow["FW_W"][0] = 0.0
+        upstream_idx = agent.segment_index - 1
+        state.freeway_flow["FW_W"][upstream_idx] = 0.0
         low_inflow_target = coordinator._leaderless_metering_target(agent, state, upper, demand)
-        state.freeway_flow["FW_W"][0] = 8000.0
+        state.freeway_flow["FW_W"][upstream_idx] = 8000.0
         high_inflow_target = coordinator._leaderless_metering_target(agent, state, upper, demand)
 
         self.assertLess(high_inflow_target, low_inflow_target)
@@ -443,9 +447,9 @@ class ConstraintTests(unittest.TestCase):
         )
         state = TrafficState.initial(cfg)
         for link in cfg.network.freeway_links:
-            state.freeway_density[link] = [28.0, 34.0, 45.0]
-            state.freeway_speed[link] = [90.0, 75.0, 45.0]
-            state.freeway_effective_lanes[link] = [2.0, 2.0, 2.0]
+            state.freeway_density[link] = [28.0, 28.0, 34.0, 45.0]
+            state.freeway_speed[link] = [90.0, 90.0, 75.0, 45.0]
+            state.freeway_effective_lanes[link] = [2.0, 2.0, 2.0, 2.0]
         for storage_link in cfg.network.off_ramp_storage_link.values():
             state.urban_link_storage[storage_link] = 0.0
 
