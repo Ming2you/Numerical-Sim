@@ -9,7 +9,7 @@ import numpy as np
 from src.controllers.leader import LeaderAction
 from src.models.demand import DemandStep
 from src.models.metanet import compute_ramp_release_flows, freeway_substep
-from src.models.state import ControlAction, ExperimentConfig, TrafficState
+from src.models.state import ControlAction, ExperimentConfig, TrafficState, segment_vsl
 from src.models.urban_queue_model import (
     ensure_urban_state,
     estimate_onramp_green_release_flows,
@@ -82,6 +82,25 @@ def _aggregate_prediction_diagnostics(rows: list[Dict[str, float]]) -> Dict[str,
         else:
             out[key] = float(sum(values))
     return out
+
+
+def _offramp_flow_from_diagnostics(
+    fw_diag: Dict[str, float],
+    cfg: ExperimentConfig,
+    off_ramp: str,
+) -> float:
+    direct_key = f"offramp_flow_{off_ramp}"
+    if direct_key in fw_diag:
+        return max(0.0, float(fw_diag.get(direct_key, 0.0)))
+    net = cfg.network
+    link = net.off_ramp_from_freeway[off_ramp]
+    link_ratio_total = sum(
+        ratio
+        for candidate, ratio in net.off_ramp_split_ratio.items()
+        if net.off_ramp_from_freeway.get(candidate) == link
+    )
+    share = net.off_ramp_split_ratio.get(off_ramp, 0.0) / max(link_ratio_total, 1.0e-9)
+    return max(0.0, float(fw_diag.get(f"offramp_flow_{link}", 0.0))) * share
 
 
 class FreewayFollower:
@@ -233,17 +252,68 @@ class FreewayFollower:
             "step_capacity": float(np.sum(upper)),
         }
 
-    def _vsl_candidates(self, previous_control: Optional[ControlAction]) -> Dict[str, list[float]]:
+    def _vsl_candidates(
+        self,
+        state: TrafficState,
+        previous_control: Optional[ControlAction],
+    ) -> Dict[str, list[Dict[str, float]]]:
         fc = self.cfg.freeway_follower
         vsl_set = sorted(float(v) for v in fc.vsl_set)
-        previous = previous_control.vsl if previous_control else {}
-        out: Dict[str, list[float]] = {}
+        previous = previous_control or ControlAction.fixed(self.cfg)
+        out: Dict[str, list[Dict[str, float]]] = {}
         for link in self.cfg.network.freeway_links:
-            prev = previous.get(link, max(vsl_set))
-            feasible = [v for v in vsl_set if abs(v - prev) <= fc.max_vsl_step + 1.0e-9]
-            feasible = feasible or vsl_set
-            limit = max(1, int(fc.horizon_vsl_candidate_limit_per_link))
-            out[link] = sorted(feasible, key=lambda v: (abs(v - prev), v))[:limit]
+            n_segments = len(state.freeway_density.get(link, [])) or self.cfg.network.freeway_segments_per_link
+            prev_vec = [segment_vsl(previous, link, i, self.cfg) for i in range(n_segments)]
+
+            # Spec 4.3/3.1.4: proposed follower도 link 단일값이 아니라 segment VSL 벡터를
+            # 후보로 평가한다. 후보 폭발을 피하려고 baseline + 단일 segment 변화 후보를 쓰되,
+            # 모든 segment가 독립적으로 낮아질 수 있게 한다.
+            baseline = {f"{link}__seg{i}": float(prev_vec[i]) for i in range(n_segments)}
+            baseline[link] = float(min(prev_vec) if prev_vec else max(vsl_set))
+            candidates: list[Dict[str, float]] = [baseline]
+            seen = {tuple(round(prev_vec[i], 6) for i in range(n_segments))}
+
+            per_segment_options: list[list[float]] = []
+            for i, prev_i in enumerate(prev_vec):
+                feasible = [v for v in vsl_set if abs(v - prev_i) <= fc.max_vsl_step + 1.0e-9]
+                feasible = feasible or vsl_set
+                lower = [v for v in feasible if v < prev_i - 1.0e-9]
+                higher = [v for v in feasible if v > prev_i + 1.0e-9]
+                ordered = (
+                    sorted(lower, key=lambda value: (abs(value - prev_i), -value))
+                    + [prev_i]
+                    + sorted(higher, key=lambda value: (abs(value - prev_i), value))
+                )
+                # 중복 제거. prev가 vsl_set 밖이면 가장 가까운 feasible 후보로 보정된다.
+                compact: list[float] = []
+                for value in ordered:
+                    nearest = min(feasible, key=lambda v: abs(v - value))
+                    if nearest not in compact:
+                        compact.append(float(nearest))
+                per_segment_options.append(compact)
+
+            max_candidates = max(1, int(fc.horizon_vsl_candidate_limit_per_link))
+            for rank in range(max(len(options) for options in per_segment_options) if per_segment_options else 0):
+                for i, options in enumerate(per_segment_options):
+                    if len(candidates) >= max_candidates:
+                        break
+                    if rank >= len(options):
+                        continue
+                    value = options[rank]
+                    if abs(value - prev_vec[i]) <= 1.0e-9:
+                        continue
+                    vec = list(prev_vec)
+                    vec[i] = value
+                    key = tuple(round(v, 6) for v in vec)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    candidate = {f"{link}__seg{j}": float(vec[j]) for j in range(n_segments)}
+                    candidate[link] = float(min(vec))
+                    candidates.append(candidate)
+                if len(candidates) >= max_candidates:
+                    break
+            out[link] = candidates
         return out
 
     def _apply_onramp_boundary_forecast(
@@ -339,14 +409,7 @@ class FreewayFollower:
         net = self.cfg.network
         dt_h = self.cfg.simulation.T_f_h
         for off_ramp in net.off_ramps:
-            link = net.off_ramp_from_freeway[off_ramp]
-            link_ratio_total = sum(
-                ratio
-                for candidate, ratio in net.off_ramp_split_ratio.items()
-                if net.off_ramp_from_freeway.get(candidate) == link
-            )
-            share = net.off_ramp_split_ratio.get(off_ramp, 0.0) / max(link_ratio_total, 1.0e-9)
-            vehicles = fw_diag.get(f"offramp_flow_{link}", 0.0) * share * dt_h
+            vehicles = _offramp_flow_from_diagnostics(fw_diag, self.cfg, off_ramp) * dt_h
             storage_link = net.off_ramp_storage_link[off_ramp]
             before = max(0.0, state.urban_link_storage.get(storage_link, 0.0))
             state.urban_link_storage[storage_link] = max(0.0, before - vehicles)
@@ -432,8 +495,10 @@ class FreewayFollower:
             for r in net.ramps
         )
         smooth_vsl = sum(
-            abs(vsl[l] - node.last_control.vsl.get(l, vsl[l]))
-            for l in net.freeway_links
+            abs(vsl.get(f"{link}__seg{i}", segment_vsl(node.last_control, link, i, self.cfg))
+                - segment_vsl(node.last_control, link, i, self.cfg))
+            for link in net.freeway_links
+            for i in range(len(node.state.freeway_density.get(link, [])))
         )
         increment = (
             fw_ttt
@@ -488,10 +553,12 @@ class FreewayFollower:
                     remaining_forecast,
                     node.last_control,
                 )
-                candidates_by_link = self._vsl_candidates(node.last_control)
+                candidates_by_link = self._vsl_candidates(node.state, node.last_control)
                 for ramp_metering in ramp_candidates:
                     for values in product(*(candidates_by_link[link] for link in links)):
-                        vsl = {link: float(value) for link, value in zip(links, values)}
+                        vsl: Dict[str, float] = {}
+                        for candidate in values:
+                            vsl.update(candidate)
                         next_beam.append(self._transition_node(
                             node,
                             leader,

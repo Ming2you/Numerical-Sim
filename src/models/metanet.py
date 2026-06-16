@@ -76,6 +76,17 @@ def _ramp_merge_index(cfg: ExperimentConfig, ramp: str, n_segments: int) -> int:
     return n_segments // 2
 
 
+def _configured_segment_index(
+    configured: Dict[str, int],
+    key: str,
+    default: int,
+    n_segments: int,
+) -> int:
+    if isinstance(configured, dict) and key in configured:
+        return int(_clip(float(configured[key]), 0.0, float(n_segments - 1)))
+    return int(_clip(float(default), 0.0, float(n_segments - 1)))
+
+
 def offramp_spillback_lambda_eff(
     occupancy_veh: float,
     capacity_veh: float,
@@ -134,12 +145,17 @@ def effective_lane_profile(
             float(drop.gamma),
             float(drop.b),
         )
-        last_idx = len(profile[link]) - 1
-        profile[link][last_idx] = min(profile[link][last_idx], lambda_eff)
+        segment_idx = _configured_segment_index(
+            getattr(net, "off_ramp_segment_index", {}),
+            off_ramp,
+            len(profile[link]) - 1,
+            len(profile[link]),
+        )
+        profile[link][segment_idx] = min(profile[link][segment_idx], lambda_eff)
         diagnostics[f"offramp_occupancy_ratio_{off_ramp}"] = float(ratio)
-        diagnostics[f"lambda_eff_{link}_last"] = float(profile[link][last_idx])
-        diagnostics[f"capacity_drop_lane_loss_{link}_last"] = float(
-            max(0.0, net.freeway_lanes - profile[link][last_idx])
+        diagnostics[f"lambda_eff_{link}_seg{segment_idx}"] = float(profile[link][segment_idx])
+        diagnostics[f"capacity_drop_lane_loss_{link}_seg{segment_idx}"] = float(
+            max(0.0, net.freeway_lanes - profile[link][segment_idx])
         )
 
     for link, lanes in profile.items():
@@ -147,7 +163,13 @@ def effective_lane_profile(
             continue
         diagnostics.setdefault(f"lambda_eff_{link}_last", float(lanes[-1]))
         diagnostics.setdefault(f"capacity_drop_lane_loss_{link}_last", 0.0)
-        if lanes[-1] < net.freeway_lanes - 1.0e-9:
+        for i, lane in enumerate(lanes):
+            diagnostics.setdefault(f"lambda_eff_{link}_seg{i}", float(lane))
+            diagnostics.setdefault(
+                f"capacity_drop_lane_loss_{link}_seg{i}",
+                float(max(0.0, net.freeway_lanes - lane)),
+            )
+        if min(lanes) < net.freeway_lanes - 1.0e-9:
             diagnostics["capacity_drop_active"] = 1.0
     return profile, diagnostics
 
@@ -266,6 +288,17 @@ def freeway_substep(
         speeds = list(state.freeway_speed[link])
         previous_lanes = list(state.freeway_effective_lanes.get(link, []))
         lanes_now = lane_now_by_link[link]
+        offramps_by_segment: Dict[int, list[str]] = {}
+        for off_ramp in net.off_ramps:
+            if net.off_ramp_from_freeway.get(off_ramp) != link:
+                continue
+            segment_idx = _configured_segment_index(
+                getattr(net, "off_ramp_segment_index", {}),
+                off_ramp,
+                len(rhos) - 1,
+                len(rhos),
+            )
+            offramps_by_segment.setdefault(segment_idx, []).append(off_ramp)
         vehicles = [
             max(0.0, rho) * net.freeway_segment_length_km * max(lane, 1.0e-9)
             for rho, lane in zip(rhos, previous_lanes)
@@ -301,9 +334,22 @@ def freeway_substep(
             max(0.0, receiving[i] - max(0.0, ramp_in_by_link[link][i]))
             for i in range(len(rho_for_flow))
         ]
-        # q_inter[i] = segment i -> i+1 실제 흐름 = min(sending[i], 하류 supply).
+        # 각 segment에서 빠지는 off-ramp split은 downstream mainline sending에서 제외한다.
+        off_ratio_by_segment = [
+            _clip(
+                sum(net.off_ramp_split_ratio.get(off_ramp, 0.0) for off_ramp in offramps_by_segment.get(i, [])),
+                0.0,
+                1.0,
+            )
+            for i in range(len(rho_for_flow))
+        ]
+        mainline_sending = [
+            (1.0 - off_ratio_by_segment[i]) * q_values[i]
+            for i in range(len(rho_for_flow))
+        ]
+        # q_inter[i] = segment i -> i+1 실제 본선 흐름 = min(mainline sending, 하류 supply).
         q_inter = [
-            min(q_values[i], receiving_for_mainline[i + 1])
+            min(mainline_sending[i], receiving_for_mainline[i + 1])
             for i in range(len(rho_for_flow) - 1)
         ]
         # 진입 경계: 본선 수요 + origin 큐 환산을 receiving[0]·q_cap으로 제한, 못 들어간
@@ -329,25 +375,36 @@ def freeway_substep(
             # Spec 3.1.2 밀도 갱신: q_in/q_out은 veh/h, dt는 hour 단위로 계산한다.
             q_in = entry_realized if i == 0 else q_inter[i - 1]
             q_in += ramp_in_by_link[link][i]
-            q_out = q_values[i] if i == len(rhos) - 1 else q_inter[i]
+            q_out = mainline_sending[i] if i == len(rhos) - 1 else q_inter[i]
             boundary_speed_cap = None
-            if i == len(rhos) - 1:
-                normal_out = q_values[i]
-                off_ratio = sum(
-                    ratio
-                    for off_ramp, ratio in net.off_ramp_split_ratio.items()
-                    if net.off_ramp_from_freeway.get(off_ramp) == link
-                )
-                off_ratio = _clip(off_ratio, 0.0, 1.0)
-                normal_off = off_ratio * normal_out
-                cap = None if offramp_capacity_veh_h is None else offramp_capacity_veh_h.get(link)
+            effective_off_total = 0.0
+            normal_off_total = 0.0
+            for off_ramp in offramps_by_segment.get(i, []):
+                ratio = _clip(net.off_ramp_split_ratio.get(off_ramp, 0.0), 0.0, 1.0)
+                normal_off = ratio * q_values[i]
+                if offramp_capacity_veh_h is None:
+                    cap = None
+                else:
+                    cap = offramp_capacity_veh_h.get(
+                        off_ramp,
+                        offramp_capacity_veh_h.get(link),
+                    )
                 effective_off = normal_off if cap is None else min(normal_off, max(0.0, cap))
-                q_out = (1.0 - off_ratio) * normal_out + effective_off
-                offramp_flow_acc[link] += effective_off
-                offramp_blocked_acc[link] += max(0.0, normal_off - effective_off)
-                mainline_exit_acc[link] += (1.0 - off_ratio) * normal_out
-                if normal_off > effective_off + 1.0e-9:
+                effective_off_total += effective_off
+                normal_off_total += normal_off
+                offramp_flow_acc[off_ramp] = offramp_flow_acc.get(off_ramp, 0.0) + effective_off
+                offramp_blocked_acc[off_ramp] = offramp_blocked_acc.get(off_ramp, 0.0) + max(
+                    0.0,
+                    normal_off - effective_off,
+                )
+            if normal_off_total > 0.0:
+                q_out += effective_off_total
+                offramp_flow_acc[link] += effective_off_total
+                offramp_blocked_acc[link] += max(0.0, normal_off_total - effective_off_total)
+                if normal_off_total > effective_off_total + 1.0e-9:
                     boundary_speed_cap = q_out / max(rho * lanes_now[i], 1.0e-9)
+            if i == len(rhos) - 1:
+                mainline_exit_acc[link] += mainline_sending[i]
             vehicle_raw = vehicles[i] + dt_h * (q_in - q_out)
             vehicle_new = max(0.0, vehicle_raw)
             if abs(vehicle_new - vehicle_raw) > 1.0e-9:
@@ -436,10 +493,17 @@ def freeway_substep(
     diagnostics["mean_segment_flow"] = flow_acc / flow_count if flow_count else 0.0
     diagnostics.update(lane_diag_start)
     diagnostics["offramp_storage_binding"] = float(any(v > 1.0e-9 for v in offramp_blocked_acc.values()))
-    diagnostics["offramp_flow_total"] = float(sum(offramp_flow_acc.values()))
-    diagnostics["offramp_blocked_flow_total"] = float(sum(offramp_blocked_acc.values()))
+    diagnostics["offramp_flow_total"] = float(
+        sum(offramp_flow_acc.get(off_ramp, 0.0) for off_ramp in net.off_ramps)
+    )
+    diagnostics["offramp_blocked_flow_total"] = float(
+        sum(offramp_blocked_acc.get(off_ramp, 0.0) for off_ramp in net.off_ramps)
+    )
     # 완료차량 회계: 본선 이탈 유량[veh/h] — × T_f_h 적분 시 이탈 차량수.
     diagnostics["mainline_exit_flow_total"] = float(sum(mainline_exit_acc.values()))
+    for off_ramp in net.off_ramps:
+        diagnostics[f"offramp_flow_{off_ramp}"] = float(offramp_flow_acc.get(off_ramp, 0.0))
+        diagnostics[f"offramp_blocked_flow_{off_ramp}"] = float(offramp_blocked_acc.get(off_ramp, 0.0))
     for link in net.freeway_links:
         diagnostics[f"offramp_flow_{link}"] = float(offramp_flow_acc.get(link, 0.0))
         diagnostics[f"offramp_blocked_flow_{link}"] = float(offramp_blocked_acc.get(link, 0.0))

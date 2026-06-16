@@ -336,7 +336,10 @@ def off_ramp_capacity_by_freeway_link(
         storage_link = cfg.network.off_ramp_storage_link[off_ramp]
         # S_eff: storage 링크에 origin을 둔 점큐가 있으면 반영(spec §3.3.2, 397행).
         available = _effective_available_space(state, cfg, storage_link)
-        cap[link] = cap.get(link, 0.0) + available / max(horizon_h, 1.0e-9)
+        flow_cap = available / max(horizon_h, 1.0e-9)
+        # off-ramp별 cap을 기본으로 제공하고, link aggregate는 legacy 호출 호환용으로 보존한다.
+        cap[off_ramp] = flow_cap
+        cap[link] = cap.get(link, 0.0) + flow_cap
     return cap
 
 

@@ -444,7 +444,11 @@ class WuDistributedFixesTests(unittest.TestCase):
 
         profile, lane_diag = effective_lane_profile(state, cfg)
         self.assertLess(
-            min(lane_diag[f"lambda_eff_{link}_last"] for link in cfg.network.freeway_links),
+            min(
+                lane_diag[f"lambda_eff_{link}_seg{i}"]
+                for link in cfg.network.freeway_links
+                for i in range(len(profile[link]))
+            ),
             cfg.network.freeway_lanes,
             msg="전제 실패: capacity-drop이 active하지 않음",
         )
@@ -470,7 +474,7 @@ class WuDistributedFixesTests(unittest.TestCase):
         state = self._congested_state(cfg)
         profile, _ = effective_lane_profile(state, cfg)
         entered = any(
-            profile[link][-1] < cfg.network.freeway_lanes - 1.0e-9
+            min(profile[link]) < cfg.network.freeway_lanes - 1.0e-9
             for link in cfg.network.freeway_links
             if profile[link]
         )

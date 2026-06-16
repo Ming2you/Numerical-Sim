@@ -16,6 +16,24 @@ from src.models.urban_queue_model import (
 )
 
 
+def _offramp_flow_from_diagnostics(
+    fw_diag: Dict[str, float],
+    cfg: ExperimentConfig,
+    off_ramp: str,
+) -> float:
+    direct_key = f"offramp_flow_{off_ramp}"
+    if direct_key in fw_diag:
+        return max(0.0, float(fw_diag.get(direct_key, 0.0)))
+    link = cfg.network.off_ramp_from_freeway[off_ramp]
+    link_ratio_total = sum(
+        ratio
+        for candidate, ratio in cfg.network.off_ramp_split_ratio.items()
+        if cfg.network.off_ramp_from_freeway.get(candidate) == link
+    )
+    share = cfg.network.off_ramp_split_ratio.get(off_ramp, 0.0) / max(link_ratio_total, 1.0e-9)
+    return max(0.0, float(fw_diag.get(f"offramp_flow_{link}", 0.0))) * share
+
+
 @dataclass
 class CoupledStepResult:
     freeway_ttt: float
@@ -196,14 +214,7 @@ def run_coupled_interval(
         # freeway에서 빠져나온 off-ramp 차량은 다음 urban substep 이후 storage/buffer로 들어간다.
         next_urban_step = start_urban_step + (freeway_substep_index + 1) * sim.K_fu
         for off_ramp in cfg.network.off_ramps:
-            link = cfg.network.off_ramp_from_freeway[off_ramp]
-            link_ratio_total = sum(
-                ratio
-                for candidate, ratio in cfg.network.off_ramp_split_ratio.items()
-                if cfg.network.off_ramp_from_freeway.get(candidate) == link
-            )
-            share = cfg.network.off_ramp_split_ratio.get(off_ramp, 0.0) / max(link_ratio_total, 1.0e-9)
-            flow = fw_diag.get(f"offramp_flow_{link}", 0.0) * share
+            flow = _offramp_flow_from_diagnostics(fw_diag, cfg, off_ramp)
             vehicles = flow * sim.T_f_h
             accepted, rejected = schedule_offramp_arrivals(state, cfg, off_ramp, vehicles, next_urban_step)
             accepted_offramp += accepted

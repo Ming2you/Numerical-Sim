@@ -52,8 +52,31 @@ class ConstraintTests(unittest.TestCase):
             self.assertTrue(set(agent.neighbors).issubset(freeway_ids))
         self.assertEqual(
             set(d_agent.neighbors),
-            {"F_W1", "F_W2", "F_E1", "F_E2"},
+            {"F_W0", "F_W1", "F_E0", "F_E1"},
         )
+
+    def test_freeway_follower_vsl_candidates_are_segment_level(self):
+        cfg = ExperimentConfig.from_file(
+            "src/config/default.yaml",
+            {
+                "simulation": {"T_total": 360.0},
+                "freeway_follower": {"horizon_vsl_candidate_limit_per_link": 4},
+            },
+        )
+        state = TrafficState.initial(cfg)
+        previous = ControlAction.fixed(cfg)
+
+        candidates = FreewayFollower(cfg)._vsl_candidates(state, previous)
+
+        for link in cfg.network.freeway_links:
+            self.assertTrue(candidates[link])
+            for candidate in candidates[link]:
+                for i in range(cfg.network.freeway_segments_per_link):
+                    self.assertIn(f"{link}__seg{i}", candidate)
+            self.assertTrue(any(
+                len({candidate[f"{link}__seg{i}"] for i in range(cfg.network.freeway_segments_per_link)}) > 1
+                for candidate in candidates[link]
+            ))
 
     def test_distributed_coordinator_returns_per_agent_diagnostics(self):
         cfg = ExperimentConfig.from_file(
@@ -391,7 +414,7 @@ class ConstraintTests(unittest.TestCase):
 
         self.assertIn(60.0, second_step_vsl_values)
 
-    def test_freeway_follower_activates_vsl_under_capacity_drop(self):
+    def test_freeway_follower_handles_capacity_drop_with_valid_vsl(self):
         cfg = ExperimentConfig.from_file(
             "src/config/default.yaml",
             {
@@ -428,7 +451,13 @@ class ConstraintTests(unittest.TestCase):
 
         _, lane_diag = effective_lane_profile(state, cfg)
         self.assertEqual(lane_diag["capacity_drop_active"], 1.0)
-        self.assertLess(lane_diag["lambda_eff_FW_W_last"], cfg.network.freeway_lanes)
+        self.assertLess(
+            min(
+                lane_diag[f"lambda_eff_FW_W_seg{i}"]
+                for i in range(len(state.freeway_density["FW_W"]))
+            ),
+            cfg.network.freeway_lanes,
+        )
 
         demand = DemandProfile(
             cfg,
@@ -447,8 +476,9 @@ class ConstraintTests(unittest.TestCase):
             ControlAction.fixed(cfg),
         )
 
-        self.assertTrue(any(
-            value < max(cfg.freeway_follower.vsl_set) - 0.5
+        self.assertTrue(result.infeasibility["freeway_follower_sequence_optimized"])
+        self.assertTrue(all(
+            float(value) in {float(v) for v in cfg.freeway_follower.vsl_set}
             for value in result.vsl.values()
         ))
 

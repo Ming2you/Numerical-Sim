@@ -47,6 +47,34 @@ def _wu_fixed_control(cfg: ExperimentConfig) -> ControlAction:
     return ControlAction.uncontrolled(cfg)
 
 
+def _split_link_offramp_flow(
+    cfg: ExperimentConfig,
+    link: str,
+    off_ramp: str,
+    link_flow: float,
+) -> float:
+    net = cfg.network
+    link_split = sum(
+        ratio
+        for candidate, ratio in net.off_ramp_split_ratio.items()
+        if net.off_ramp_from_freeway.get(candidate) == link
+    )
+    this_split = float(net.off_ramp_split_ratio.get(off_ramp, 0.0))
+    return max(0.0, float(link_flow)) * this_split / max(link_split, 1.0e-9)
+
+
+def _offramp_flow_from_diagnostics(
+    fw_diag: Mapping[str, float],
+    cfg: ExperimentConfig,
+    off_ramp: str,
+) -> float:
+    direct_key = f"offramp_flow_{off_ramp}"
+    if direct_key in fw_diag:
+        return max(0.0, float(fw_diag.get(direct_key, 0.0)))
+    link = cfg.network.off_ramp_from_freeway.get(off_ramp, "")
+    return _split_link_offramp_flow(cfg, link, off_ramp, float(fw_diag.get(f"offramp_flow_{link}", 0.0)))
+
+
 class WuDistributedController:
     """Wu §IV-D 6단계 합의 루프의 경량 재구성.
 
@@ -128,7 +156,11 @@ class WuDistributedController:
                     self._offramp_drain_flow.setdefault(off_ramp, []).append(
                         (str(spec.get("signal", "")), movement)
                     )
-        self._last_offramp_flow: Dict[str, float] = {link: 0.0 for link in net.freeway_links}
+        self._last_offramp_flow: Dict[str, float] = {
+            **{link: 0.0 for link in net.freeway_links},
+            **{off_ramp: 0.0 for off_ramp in net.off_ramps},
+        }
+        self._has_last_offramp_flow = False
 
     def _signal_leaving_rate(
         self,
@@ -158,14 +190,6 @@ class WuDistributedController:
             float(net.grid_link_storage_veh) * net.urban_avg_vehicle_length_m / 1000.0
             / max(net.urban_avg_speed_km_h, 1.0e-9)
         )
-        # link당 off-ramp split 합(link 합산 유출을 off_ramp별로 분배).
-        link_split = {
-            link: sum(
-                ratio for o, ratio in net.off_ramp_split_ratio.items()
-                if net.off_ramp_from_freeway.get(o) == link
-            )
-            for link in net.freeway_links
-        }
         occupancy_weight = 0.5  # 점유 방출 보조항 가중(<1) — 상류 후보 green이 주채널.
         # 신호·phase별 도착유량 추정: 게이트 수요(β분할) + off-ramp 후보 유입 + 상류
         # 신호의 후보 green leaving rate(+점유 방출 보조) — local solve 동안 고정.
@@ -184,14 +208,12 @@ class WuDistributedController:
                         # freeway→urban 결합: freeway agent 후보 VSL의 off-ramp 유출 재사용.
                         off_ramp = str(spec.get("off_ramp", ""))
                         link = net.off_ramp_from_freeway.get(off_ramp, "")
-                        link_flow = float(self._last_offramp_flow.get(link, 0.0))
-                        this_split = float(net.off_ramp_split_ratio.get(off_ramp, 0.0))
-                        if link_flow > 0.0 and link_split.get(link, 0.0) > 0.0:
-                            off_inflow = link_flow * this_split / link_split[link]
+                        if self._has_last_offramp_flow:
+                            off_inflow = float(self._last_offramp_flow.get(off_ramp, 0.0))
                         else:
                             # 초기(아직 freeway solve 전): 현재 본선 유량 폴백.
                             base = state.freeway_flow.get(link, [0.0])[-1] if state.freeway_flow.get(link) else 0.0
-                            off_inflow = max(0.0, base * this_split)
+                            off_inflow = _split_link_offramp_flow(self.cfg, link, off_ramp, base)
                         arr[phase_id] += beta * max(0.0, off_inflow)
                     else:
                         # urban→urban: 상류 신호의 후보 green leaving rate(주채널) +
@@ -370,7 +392,11 @@ class WuDistributedController:
 
         candidates = self._freeway_segment_candidates(link, n_seg, previous)
         best_vec, best_obj = list(prev_vec), float("inf")
-        best_offramp_flow = 0.0
+        best_offramp_flow: Dict[str, float] = {
+            off_ramp: 0.0
+            for off_ramp in net.off_ramps
+            if net.off_ramp_from_freeway.get(off_ramp) == link
+        }
         evals = 0
         for vec in candidates:
             probe = state.copy()
@@ -385,7 +411,7 @@ class WuDistributedController:
             for i, v in enumerate(vec):
                 candidate_control.vsl[f"{link}__seg{i}"] = float(v)
             cost = 0.0
-            first_offramp_flow = 0.0
+            first_offramp_flow = dict(best_offramp_flow)
             first_substep = True
             for _ in range(horizon):
                 for _ in range(sim.K_cf):
@@ -431,7 +457,10 @@ class WuDistributedController:
                     self._update_probe_offramp_storage(probe, fw_diag, candidate_control, dt_h)
                     if first_substep:
                         # coupling freeway→urban이 재사용할 후보 VSL의 off-ramp 유출[veh/h].
-                        first_offramp_flow = max(0.0, float(fw_diag.get(f"offramp_flow_{link}", 0.0)))
+                        first_offramp_flow = {
+                            off_ramp: _offramp_flow_from_diagnostics(fw_diag, self.cfg, off_ramp)
+                            for off_ramp in best_offramp_flow
+                        }
                         first_substep = False
 
                     # Wu local TTS: 해당 freeway agent의 segment 차량과 연결 ramp queue.
@@ -453,10 +482,18 @@ class WuDistributedController:
             evals += 1
             if cost < best_obj:
                 best_obj, best_vec = cost, list(vec)
-                best_offramp_flow = first_offramp_flow
+                best_offramp_flow = dict(first_offramp_flow)
         # 선택된 후보 VSL의 off-ramp 유출을 캐시 — coupling freeway→urban이 재시뮬
         # 없이 후보 반응형 off-ramp inflow로 재사용한다.
-        self._last_offramp_flow[link] = float(best_offramp_flow if best_obj < float("inf") else 0.0)
+        if best_obj < float("inf"):
+            for off_ramp, flow in best_offramp_flow.items():
+                self._last_offramp_flow[off_ramp] = float(flow)
+            self._last_offramp_flow[link] = float(sum(best_offramp_flow.values()))
+            self._has_last_offramp_flow = True
+        else:
+            for off_ramp in best_offramp_flow:
+                self._last_offramp_flow[off_ramp] = 0.0
+            self._last_offramp_flow[link] = 0.0
         # segment 키 dict 반환(+ link 키는 min-over-segment로 하위호환 fallback 보존).
         vsl_dict: Dict[str, float] = {f"{link}__seg{i}": float(v) for i, v in enumerate(best_vec)}
         vsl_dict[link] = float(min(best_vec)) if best_vec else vsl_max
@@ -482,15 +519,7 @@ class WuDistributedController:
             if not link or not storage_link:
                 continue
             capacity = float(net.urban_link_storage_veh.get(storage_link, 0.0))
-            # link 합산 off-ramp 유출을 이 off_ramp split 몫으로 분배.
-            link_split = sum(
-                ratio
-                for o, ratio in net.off_ramp_split_ratio.items()
-                if net.off_ramp_from_freeway.get(o) == link
-            )
-            this_split = float(net.off_ramp_split_ratio.get(off_ramp, 0.0))
-            share = this_split / max(link_split, 1.0e-9)
-            inflow = max(0.0, float(fw_diag.get(f"offramp_flow_{link}", 0.0))) * share
+            inflow = _offramp_flow_from_diagnostics(fw_diag, self.cfg, off_ramp)
             # drain = 하류 신호 off_ramp movement green 처리량, 단 receiving 도시 링크
             # 가용 공간으로 제약(도시 포화 시 spillback → drain 막힘 → storage 정체 →
             # capacity-drop 지속). 이게 혼잡 interval에서 VSL이 작동하는 물리 경로다.

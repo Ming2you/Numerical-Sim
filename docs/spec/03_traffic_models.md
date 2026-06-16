@@ -90,7 +90,7 @@ This is a conservation equation. Do not add or remove vehicles inside a link exc
 
 #### 3.1.2a Off-ramp spill-back capacity drop
 
-When an off-ramp storage link is occupied, represent spill-back as an effective lane-number reduction on the upstream freeway link's last segment. Let:
+When an off-ramp storage link is occupied, represent spill-back as an effective lane-number reduction on the configured off-ramp segment of the upstream freeway link. If no segment is configured for a legacy case, fall back to the last segment. Let:
 
 ```text
 N[m,i](k)          = rho[m,i](k) * L[m] * lambda_prev[m,i](k)  # vehicles
@@ -103,7 +103,7 @@ gamma[m,d], b_cd   = spill-back shape parameters
 Use a generalized Wu-style effective lane number:
 
 ```text
-lambda_eff[m,last](k)
+lambda_eff[m,i_off](k)
     = lambda_m
       - delta_lambda
         * (1 - exp( -(1 / b_cd) * (n_off[m,d](k) / (gamma[m,d] * C[m,d])) ** b_cd ))
@@ -116,7 +116,7 @@ n_off = 0      -> lambda_eff = lambda_m
 n_off = C      -> lambda_eff = lambda_m - delta_lambda
 ```
 
-For links without active off-ramp spill-back, `lambda_eff = lambda_m`.
+For links without active off-ramp spill-back, `lambda_eff = lambda_m`. If one freeway link has multiple off-ramps, each off-ramp uses its own configured segment and storage link; do not aggregate the link-level off-ramp capacity and then redistribute it after vehicles have already left the freeway.
 
 Because `rho` is a per-lane density, changing `lambda_eff` must preserve vehicles. Do not update density by only changing the denominator in the original conservation equation. Instead use segment vehicle count as the conserved quantity:
 
@@ -597,7 +597,7 @@ This synchronization replaces a separate freeway-only queue update for the same 
 
 #### 3.4.2 Off-ramp interaction
 
-Consider an off-ramp `r` from the last segment of freeway link `m` to urban intersection `s`. The off-ramp storage is represented by directed urban link `l_{r,s}` with available storage `S[r,s]`.
+Consider an off-ramp `r` from configured segment `i_off(r)` of freeway link `m` to urban intersection `s`. The off-ramp storage is represented by directed urban link `l_{r,s}` with available storage `S[r,s]`.
 
 Step A. Over the urban substeps, determine how many vehicles can leave the off-ramp link toward intersection `s`:
 
@@ -615,30 +615,30 @@ q_max_r1(k_f)
 
 This equation states that freeway outflow into the off-ramp is limited by the storage that remains available at the end of the period plus the vehicles that leave the off-ramp during the period.
 
-Step C. Limit the mainline/off-ramp outflow using this boundary condition:
+Step C. Limit the off-ramp branch outflow using this boundary condition:
 
 ```text
-q_m_last_effective(k_f)
-    = min(q_m_last_normal(k_f), q_max_r1(k_f))
+q_off_r_effective(k_f)
+    = min(q_off_r_normal(k_f), q_max_r1(k_f))
 ```
 
-where `q_m_last_normal` is the outflow that would leave the last freeway segment if the off-ramp were not blocked.
+where `q_off_r_normal` is the off-ramp branch flow from segment `i_off(r)` if the off-ramp were not blocked. Mainline flow from that segment to the downstream segment/link is handled separately.
 
-Step D. If the off-ramp boundary is binding, recalculate the speed of the last freeway segment consistently with the reduced outflow:
+Step D. If the off-ramp boundary is binding, recalculate the speed of the configured off-ramp segment consistently with the reduced total segment outflow:
 
 ```text
-if q_m_last_normal(k_f) <= q_max_r1(k_f):
-    v_m_last_effective(k_f) = v_m_last_normal(k_f)
+if q_off_r_normal(k_f) <= q_max_r1(k_f):
+    v_m_i_off_effective(k_f) = v_m_i_off_normal(k_f)
 else:
-    v_m_last_effective(k_f)
-        = q_m_last_effective(k_f)
-          / max(rho[m,last](k_f) * lanes[m], eps)
+    v_m_i_off_effective(k_f)
+        = q_segment_out_effective(k_f)
+          / max(rho[m,i_off](k_f) * lambda_eff[m,i_off](k_f), eps)
 ```
 
 Step E. Spread the effective freeway outflow into the off-ramp urban link over urban substeps:
 
 ```text
-m_enter_offramp(k_u0 + j) = q_m_last_effective(k_f) * T_u_h,
+m_enter_offramp(k_u0 + j) = q_off_r_effective(k_f) * T_u_h,
 for j = 0, ..., R_fu - 1
 ```
 

@@ -239,7 +239,7 @@ class NetworkConfig:
         "OR_F_E": "FW_E",
     })
     off_ramp_segment_index: Dict[str, int] = field(default_factory=lambda: {
-        "OR_D_W": 2, "OR_F_W": 2, "OR_D_E": 2, "OR_F_E": 2
+        "OR_D_W": 0, "OR_F_W": 1, "OR_D_E": 0, "OR_F_E": 1
     })
     off_ramp_storage_link: Dict[str, str] = field(default_factory=lambda: {
         "OR_D_W": "OR_D_W_storage",

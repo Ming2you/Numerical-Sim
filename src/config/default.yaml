@@ -134,10 +134,10 @@ network:
     OR_D_E: FW_E
     OR_F_E: FW_E
   off_ramp_segment_index:
-    OR_D_W: 2
-    OR_F_W: 2
-    OR_D_E: 2
-    OR_F_E: 2
+    OR_D_W: 0
+    OR_F_W: 1
+    OR_D_E: 0
+    OR_F_E: 1
   off_ramp_storage_link:
     OR_D_W: OR_D_W_storage
     OR_F_W: OR_F_W_storage

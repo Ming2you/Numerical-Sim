@@ -13,6 +13,7 @@ from src.models.metanet import (
     segment_flow_veh_h,
 )
 from src.models.state import ControlAction, ExperimentConfig, TrafficState
+from src.models.urban_queue_model import off_ramp_capacity_by_freeway_link, schedule_offramp_arrivals
 
 
 class MetanetEquationTests(unittest.TestCase):
@@ -97,6 +98,10 @@ class MetanetEquationTests(unittest.TestCase):
         self.assertIn("R_D_W", cfg.network.on_ramp_to_movement)
         self.assertIn("OR_D_W", cfg.network.off_ramps)
         self.assertIn("OR_D_W_storage", cfg.network.urban_link_storage_veh)
+        self.assertEqual(cfg.network.off_ramp_segment_index["OR_D_W"], 0)
+        self.assertEqual(cfg.network.off_ramp_segment_index["OR_F_W"], 1)
+        self.assertEqual(cfg.network.off_ramp_segment_index["OR_D_E"], 0)
+        self.assertEqual(cfg.network.off_ramp_segment_index["OR_F_E"], 1)
         self.assertTrue(cfg.freeway_offramp_capacity_drop.enabled)
         self.assertGreaterEqual(cfg.freeway_offramp_capacity_drop.lane_reduction, 0.0)
         self.assertLess(cfg.freeway_offramp_capacity_drop.lane_reduction, cfg.network.freeway_lanes)
@@ -246,6 +251,84 @@ class MetanetEquationTests(unittest.TestCase):
         freeway_substep(drop, control, demand, cfg, include_ramp_queue_ttt=False)
 
         self.assertLess(drop.freeway_speed["FW_W"][0], base.freeway_speed["FW_W"][0])
+
+    def test_capacity_drop_uses_configured_offramp_segment(self):
+        cfg = ExperimentConfig.from_file(
+            "src/config/default.yaml",
+            {
+                "simulation": {"T_total": 10.0, "T_f": 10.0, "T_u": 5.0, "control_interval": 10.0},
+                "freeway_offramp_capacity_drop": {"enabled": True, "lane_reduction": 0.35},
+            },
+        )
+        state = TrafficState.initial(cfg)
+        for storage_link in cfg.network.off_ramp_storage_link.values():
+            state.urban_link_storage[storage_link] = cfg.network.urban_link_storage_veh[storage_link]
+        state.urban_link_storage["OR_D_W_storage"] = 0.0
+
+        lane_profile, diag = effective_lane_profile(state, cfg)
+
+        self.assertLess(lane_profile["FW_W"][0], cfg.network.freeway_lanes)
+        self.assertAlmostEqual(lane_profile["FW_W"][1], cfg.network.freeway_lanes)
+        self.assertAlmostEqual(lane_profile["FW_W"][2], cfg.network.freeway_lanes)
+        self.assertGreater(diag["capacity_drop_lane_loss_FW_W_seg0"], 0.0)
+        self.assertAlmostEqual(diag["capacity_drop_lane_loss_FW_W_seg1"], 0.0)
+
+    def test_offramp_flow_uses_segment_specific_storage_capacity(self):
+        cfg = ExperimentConfig.from_file(
+            "src/config/default.yaml",
+            {"simulation": {"T_total": 10.0, "T_f": 10.0, "T_u": 5.0, "control_interval": 10.0}},
+        )
+        state = TrafficState.initial(cfg)
+        for link in cfg.network.freeway_links:
+            state.freeway_density[link] = [0.0, 0.0, 0.0]
+            state.freeway_speed[link] = [80.0, 80.0, 80.0]
+            state.freeway_effective_lanes[link] = [cfg.network.freeway_lanes] * 3
+        state.freeway_density["FW_W"] = [20.0, 20.0, 0.0]
+        for storage_link in cfg.network.off_ramp_storage_link.values():
+            state.urban_link_storage[storage_link] = cfg.network.urban_link_storage_veh[storage_link]
+        state.urban_link_storage["OR_D_W_storage"] = 0.0
+
+        demand = DemandStep(
+            freeway_mainline={link: 0.0 for link in cfg.network.freeway_links},
+            urban_boundary={link: 0.0 for link in cfg.network.movement_links},
+            ramp_arrival={ramp: 0.0 for ramp in cfg.network.ramps},
+        )
+        control = ControlAction.fixed(cfg)
+        control.ramp_metering = {ramp: 0.0 for ramp in cfg.network.ramps}
+        capacity = off_ramp_capacity_by_freeway_link(state, cfg, interval_h=cfg.simulation.T_f_h)
+
+        _, diag = freeway_substep(
+            state,
+            control,
+            demand,
+            cfg,
+            offramp_capacity_veh_h=capacity,
+            include_ramp_queue_ttt=False,
+        )
+
+        self.assertAlmostEqual(diag["offramp_flow_OR_D_W"], 0.0)
+        self.assertGreater(diag["offramp_blocked_flow_OR_D_W"], 0.0)
+        self.assertGreater(diag["offramp_flow_OR_F_W"], 0.0)
+        self.assertAlmostEqual(
+            diag["offramp_flow_FW_W"],
+            diag["offramp_flow_OR_D_W"] + diag["offramp_flow_OR_F_W"],
+        )
+        _, rejected_d = schedule_offramp_arrivals(
+            state,
+            cfg,
+            "OR_D_W",
+            diag["offramp_flow_OR_D_W"] * cfg.simulation.T_f_h,
+            1,
+        )
+        _, rejected_f = schedule_offramp_arrivals(
+            state,
+            cfg,
+            "OR_F_W",
+            diag["offramp_flow_OR_F_W"] * cfg.simulation.T_f_h,
+            1,
+        )
+        self.assertAlmostEqual(rejected_d, 0.0)
+        self.assertAlmostEqual(rejected_f, 0.0)
 
     def test_vsl_changes_speed_mechanism_under_spillback_density(self):
         cfg = ExperimentConfig.from_file(

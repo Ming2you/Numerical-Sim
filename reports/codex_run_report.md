@@ -153,7 +153,7 @@ Wu freeway TTT가 no-control과 전 시나리오에서 동일하므로, 기존 �
 
 ### 다음 수정
 
-Wu urban local objective가 downstream storage와 freeway congestion cost를 충분히 반영하지 못해 혼잡 시 green 변경이 urban TTT를 늘립니다. 다음 단계에서는 이 objective와 green 후보 평가를 coupled horizon 기준으로 보강한 뒤, corrected no-control을 포함한 6-controller 전체 표를 재생성해야 합니다.
+Wu urban local objective가 downstream storage와 freeway congestion cost를 충분히 반영하지 못해 혼잡 시 green 변경이 urban TTT를 늘립니다. 다음 단계에서는 이 objective와 green 후보 평가를 coupled horizon 기준으로 보강한 뒤, corrected no-control을 포함한 primary 4-controller 전체 표를 재생성해야 합니다.
 
 ## 2026-06-12: 수정 후 original Stackelberg quick validation
 
@@ -372,3 +372,117 @@ Solver 진단:
   urban-to-urban arrival와 freeway boundary coupling이 candidate control의 outgoing
   prediction이 아니라 현재 state를 다시 읽는 값이므로, Wu distributed exchange가
   실질적으로 갱신되지 않는 구조가 다음 수정 대상이다.
+## 2026-06-16: off-ramp segment topology and storage coupling fix
+
+### Implemented
+
+- Corrected the default freeway off-ramp topology so each three-segment freeway link has one off-ramp on segment 0 and one off-ramp on segment 1:
+  - `OR_D_W`, `OR_D_E` -> segment 0
+  - `OR_F_W`, `OR_F_E` -> segment 1
+- Updated METANET capacity-drop logic to apply `lambda_eff` on each off-ramp's configured segment instead of always the last segment.
+- Updated freeway off-ramp outflow to compute per-off-ramp branch flows and per-off-ramp storage caps before vehicles leave the freeway.
+- Preserved link-level `offramp_flow_FW_*` diagnostics as aggregates, but changed coupled plant, freeway follower prediction, and Wu distributed prediction to prefer direct `offramp_flow_OR_*` diagnostics.
+- Updated the traffic-model spec so off-ramp interaction is segment-aware.
+- Added/updated tests for configured off-ramp segment capacity drop and per-off-ramp storage-capacity coupling.
+
+### Files changed
+
+- `docs/spec/03_traffic_models.md`
+- `src/config/default.yaml`
+- `src/controllers/freeway_follower.py`
+- `src/controllers/wu_distributed.py`
+- `src/models/metanet.py`
+- `src/models/state.py`
+- `src/models/urban_queue_model.py`
+- `src/simulation/coupling.py`
+- `src/tests/test_metanet_equations.py`
+- `src/tests/test_six_controller_comparison.py`
+- `src/tests/test_constraints.py`
+
+### Run commands
+
+Baseline run command: not run in this topology-fix pass.
+
+Proposed-controller run command: not run in this topology-fix pass.
+
+Validation commands:
+
+```text
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m py_compile src\models\metanet.py src\models\urban_queue_model.py src\simulation\coupling.py src\controllers\freeway_follower.py src\controllers\wu_distributed.py src\models\state.py src\tests\test_metanet_equations.py
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest src.tests.test_metanet_equations -v
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest src.tests.test_six_controller_comparison.WuDistributedFixesTests -v
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest src.tests.test_metanet_equations src.tests.test_six_controller_comparison.WuDistributedFixesTests src.tests.test_constraints.ConstraintTests.test_freeway_follower_handles_capacity_drop_with_valid_vsl -v
+```
+
+### Metrics
+
+- Baseline Total TTT/TTS: N/A, no closed-loop baseline run in this pass.
+- Proposed Total TTT/TTS: N/A, no closed-loop proposed run in this pass.
+- Improvement rate: N/A.
+- Boundary queue balancing result: N/A for closed-loop metrics; targeted off-ramp storage test passes.
+- Control validation summary: compile passed; 21 METANET tests, 5 Wu distributed regression tests, and 1 capacity-drop constraint test passed together (27 tests total).
+
+### Targeted storage-coupling reproduction
+
+With `OR_D_W_storage` full and `OR_F_W_storage` available on the same `FW_W` freeway link:
+
+```text
+offramp_flow_OR_D_W = 0.0
+offramp_blocked_flow_OR_D_W = 192.0
+offramp_flow_OR_F_W = 192.0
+offramp_flow_FW_W = 192.0
+offramp_flow_total = 192.0
+accepted OR_D_W = 0.0, rejected OR_D_W = 0.0
+accepted OR_F_W = 0.5333333333333333, rejected OR_F_W = 0.0
+```
+
+This verifies that a full first-segment off-ramp no longer causes vehicles from the second-segment off-ramp to be rejected through link-level redistribution.
+
+### Failed criteria and next modification
+
+- Full closed-loop performance criteria were not evaluated in this pass.
+- Next modification: rerun the primary 4-controller comparison after this topology fix, because TTT/delay/throughput comparisons before this change used an incorrect off-ramp geometry.
+
+## 2026-06-16: proposed FreewayFollower segment-level VSL correction
+
+### Implemented
+
+- Confirmed a controller-asymmetry bug: Wu distributed controller used segment-level VSL candidates, but the proposed default two-block `FreewayFollower` only explored link-level VSL candidates.
+- Updated the proposed `FreewayFollower` to generate segment-vector VSL candidates with keys such as `FW_W__seg0`, `FW_W__seg1`, and `FW_W__seg2`.
+- Kept the link-level key as a fallback/summary value so existing diagnostics and compatibility paths still work, while the plant reads segment keys through `segment_vsl`.
+- Updated VSL smoothness scoring to compare segment-level VSL values against the previous segment-level action.
+- Updated distributed topology test expectations after the off-ramp segment correction.
+- Added a regression test that fails if the proposed `FreewayFollower` falls back to link-only VSL candidate generation.
+
+### Files changed
+
+- `src/controllers/freeway_follower.py`
+- `src/tests/test_constraints.py`
+- `reports/codex_run_report.md`
+
+### Run commands
+
+Baseline run command: not run in this controller-granularity pass.
+
+Proposed-controller run command: not run in this controller-granularity pass.
+
+Validation commands:
+
+```text
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m py_compile src\controllers\freeway_follower.py src\tests\test_constraints.py
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest src.tests.test_constraints.ConstraintTests.test_freeway_follower_vsl_candidates_are_segment_level src.tests.test_constraints.ConstraintTests.test_vsl_values_are_discrete src.tests.test_constraints.ConstraintTests.test_distributed_agent_partition_matches_topology -v
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest src.tests.test_metanet_equations src.tests.test_six_controller_comparison.WuDistributedFixesTests src.tests.test_constraints.ConstraintTests.test_freeway_follower_handles_capacity_drop_with_valid_vsl src.tests.test_constraints.ConstraintTests.test_freeway_follower_vsl_candidates_are_segment_level src.tests.test_constraints.ConstraintTests.test_vsl_values_are_discrete src.tests.test_constraints.ConstraintTests.test_distributed_agent_partition_matches_topology -v
+```
+
+### Metrics
+
+- Baseline Total TTT/TTS: N/A, no closed-loop baseline run in this pass.
+- Proposed Total TTT/TTS: N/A, no closed-loop proposed run in this pass.
+- Improvement rate: N/A.
+- Boundary queue balancing result: N/A for closed-loop metrics.
+- Control validation summary: compile passed; 30 related tests passed.
+
+### Failed criteria and next modification
+
+- Full closed-loop performance criteria were not evaluated in this pass.
+- Next modification: rerun the primary 4-controller comparison because proposed VSL authority was previously link-level while Wu VSL authority was segment-level.
