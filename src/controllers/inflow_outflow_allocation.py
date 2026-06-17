@@ -6,6 +6,7 @@ from typing import Dict, Iterable, Mapping
 import numpy as np
 
 from src.controllers.leader import LeaderAction
+from src.models.demand import DemandStep
 from src.models.state import ExperimentConfig, TrafficState
 from src.models.urban_queue_model import (
     boundary_group_key,
@@ -47,9 +48,15 @@ class InflowOutflowAllocationModule:
         self.cfg = cfg
         self.solve_count = 0
 
-    def solve(self, state: TrafficState, leader: LeaderAction) -> AllocationResult:
+    def solve(
+        self,
+        state: TrafficState,
+        leader: LeaderAction,
+        forecast: "list[DemandStep] | None" = None,
+    ) -> AllocationResult:
         # 2026-06-13 재정의(spec 16.7): leaderless 모드 제거 — 이 모듈은 Leader target을
         # 입력으로 갖는 coordination 기구이므로 leader 없이는 호출되지 않는다.
+        # forecast가 주어지면 target이 예측 off-ramp 외란 유입을 반영한다(진단 문서 §4).
         self.solve_count += 1
         specs = movement_specs(self.cfg)
         movements = [
@@ -60,7 +67,7 @@ class InflowOutflowAllocationModule:
         if not movements:
             return AllocationResult({}, {}, 0.0, 0.0, 0.0, {"allocation_module_active": 1.0})
 
-        target = urban_accumulation_feedback_flow(state, self.cfg, leader.N_P_star)
+        target = urban_accumulation_feedback_flow(state, self.cfg, leader.N_P_star, forecast)
         lower, upper = self._bounds(movements, specs, leader)
         kinds = [str(specs[m].get("kind", "")) for m in movements]
         target = self._clip_target(target, lower, upper, kinds)

@@ -273,6 +273,35 @@ class DistributedCoordinator:
             and agent.id in self.coupling_freeway_ids
         )
 
+    def _forecast_offramp_arrivals(
+        self,
+        state: TrafficState,
+        forecast: list[DemandStep],
+        link: str,
+    ) -> float:
+        """이 freeway link에서 갈라지는 off-ramp의 horizon 누적 예측 도착량[veh].
+
+        off-ramp 도착 = diverge segment 도달 유량 × split. 현재 link 끝 유량을 기준으로
+        forecast 본선 수요 비율만큼 horizon에 걸쳐 누적한다(boundary forecast가 본선
+        수요를 바꾸면 off-ramp 예측 유입도 같이 변하게 — myopic이 아님)."""
+        net = self.cfg.network
+        dt_h = self.cfg.simulation.T_c_h
+        horizon = max(1, self.cfg.mpc.horizon_steps)
+        steps = forecast[: horizon]
+        flows = state.freeway_flow.get(link, [])
+        base_flow = float(flows[-1]) if flows else 0.0
+        base_mainline = max(1.0e-9, float(forecast[0].freeway_mainline.get(link, 0.0)))
+        total = 0.0
+        for off_ramp in net.off_ramps:
+            if net.off_ramp_from_freeway.get(off_ramp) != link:
+                continue
+            split = net.off_ramp_split_ratio.get(off_ramp, 0.0)
+            for step in steps:
+                # 본선 수요 비율로 도달 유량을 스케일 — forecast가 커지면 off-ramp 예측↑.
+                scale = max(0.0, float(step.freeway_mainline.get(link, 0.0))) / base_mainline
+                total += max(0.0, base_flow * scale * split) * dt_h
+        return float(total)
+
     def solve(
         self,
         state: TrafficState,
@@ -300,7 +329,8 @@ class DistributedCoordinator:
         current.N_P_star = leader.N_P_star if leader is not None else 0.0
         current.N_UF_star = leader.N_UF_star if leader is not None else 0.0
         allocation_plan = (
-            None if leader is None else self.urban_follower.allocation_module.solve(state, leader)
+            None if leader is None
+            else self.urban_follower.allocation_module.solve(state, leader, forecast)
         )
         coupling = self._extract_coupling(state, current, first_demand)
         best_control = current
@@ -315,13 +345,13 @@ class DistributedCoordinator:
             # physical subsystem은 그대로 — strategic controller role만 제거(plan §11).
             freeway_solves = [
                 self._fixed_freeway_solve(agent) if self._freeway_player_fixed(agent)
-                else self._solve_freeway_agent(agent, state, leader, first_demand, current, coupling)
+                else self._solve_freeway_agent(agent, state, leader, forecast, current, coupling)
                 for agent in self.freeway_agents
             ]
             freeway_response = self._freeway_response(freeway_solves)
             urban_solves = [
                 self._fixed_urban_solve(agent) if self._urban_player_fixed(agent)
-                else self._solve_urban_agent(agent, state, leader, first_demand, freeway_response, current, allocation_plan)
+                else self._solve_urban_agent(agent, state, leader, forecast, freeway_response, current, allocation_plan)
                 for agent in self.urban_agents
             ]
             candidate = self._merge_agent_controls(
@@ -367,12 +397,13 @@ class DistributedCoordinator:
         agent: AgentSpec,
         state: TrafficState,
         leader: Optional[LeaderAction],
-        demand: DemandStep,
+        forecast: list[DemandStep],
         current: ControlAction,
         coupling: Mapping[str, float],
     ) -> AgentSolve:
         net = self.cfg.network
         dt_h = self.cfg.simulation.T_f_h
+        demand = forecast[0]
         link_capacity = sum(net.ramp_capacity_veh_h[ramp] for ramp in agent.ramps)
         total_capacity = max(sum(net.ramp_capacity_veh_h.values()), 1.0e-9)
         upper: Dict[str, float] = {}
@@ -411,6 +442,7 @@ class DistributedCoordinator:
         # off-ramp 램프 storage 재귀속(design 2026-06-17): 이 freeway link에서 갈라지는
         # off-ramp storage 점유[veh]를 계산해 freeway agent 자기 비용(objective)에 가산한다.
         offramp_storage_veh = 0.0
+        offramp_capacity_veh = 0.0
         for off_ramp in net.off_ramps:
             if net.off_ramp_from_freeway.get(off_ramp) != agent.link:
                 continue
@@ -420,22 +452,35 @@ class DistributedCoordinator:
                 continue
             avail = float(state.urban_link_storage.get(storage_link, capacity))
             offramp_storage_veh += max(0.0, capacity - avail)
-        desired = self._agent_vsl(
-            density_ratio,
+            offramp_capacity_veh += capacity
+        # forecast horizon에 걸친 off-ramp 예측 유입[veh] — VSL이 낮을수록 diverge
+        # 도달량이 줄어 off-ramp storage 유입이 줄어드는 emergence를 후보 평가에 반영한다.
+        offramp_forecast_veh = self._forecast_offramp_arrivals(state, forecast, agent.link)
+        prev_vsl = current.vsl.get(agent.link, max(self.cfg.freeway_follower.vsl_set))
+        desired, vsl_eval_count = self._search_agent_vsl(
+            agent,
+            rhos,
             lane_loss,
-            current.vsl.get(agent.link, max(self.cfg.freeway_follower.vsl_set)),
+            prev_vsl,
+            offramp_storage_veh,
+            offramp_forecast_veh,
+            offramp_capacity_veh,
+            ramp_metering,
         )
         density_excess = sum(max(0.0, rho - net.rho_crit) for rho in rhos)
         # 잔차는 달성가능 목표(min(target, Σ물리상한)) 기준 — 수요 부족으로 덜 방출한 것을
         # "추적 실패"로 만들어 urban 쪽에 가짜 freeway 압력을 보내지 않게 한다.
         metering_error = abs(sum(ramp_metering.values()) - min(target, sum(upper.values())))
-        objective = (
-            sum(max(0.0, rho) * net.freeway_segment_length_km * net.freeway_lanes for rho in rhos)
-            + self.cfg.freeway_follower.density_penalty * density_excess
-            + 0.01 * metering_error
-            # off-ramp 램프 storage 점유를 자기 비용에 가산(design 2026-06-17). off-ramp가
-            # backup하면 freeway agent가 자기 비용 증가를 보고 VSL metering으로 반응한다.
-            + offramp_storage_veh
+        objective = self._freeway_agent_objective(
+            rhos,
+            density_excess,
+            metering_error,
+            ramp_metering,
+            desired,
+            prev_vsl,
+            offramp_forecast_veh,
+            offramp_storage_veh,
+            offramp_capacity_veh,
         )
         diagnostics = {
             f"agent_{agent.id}_density_excess": float(density_excess),
@@ -443,6 +488,9 @@ class DistributedCoordinator:
             f"agent_{agent.id}_min_receiving_factor": float(min_receiving),
             f"agent_{agent.id}_lane_loss": float(lane_loss),
             f"agent_{agent.id}_offramp_storage_veh": float(offramp_storage_veh),
+            f"agent_{agent.id}_offramp_forecast_veh": float(offramp_forecast_veh),
+            f"agent_{agent.id}_vsl_candidates": float(vsl_eval_count),
+            f"agent_{agent.id}_vsl_selected": float(desired),
         }
         diagnostics.update({f"agent_{agent.id}_{key}": value for key, value in lane_diag.items()})
         return AgentSolve(
@@ -485,7 +533,14 @@ class DistributedCoordinator:
             q_upstream = max(0.0, state.freeway_flow[agent.link][merge_idx - 1])
         else:
             q_upstream = max(0.0, demand.freeway_mainline.get(agent.link, 0.0))
-        best_target, best_cost = total_upper, float("inf")
+        # ramp/on-ramp 큐 비용을 제대로 가격화한다(진단 문서 §"Relation To Wu"): 이미 큐가
+        # 쌓인 ramp에 metering을 더 하면 큐 대기손실이 비선형으로 커진다. no-metering(=용량
+        # 방출, fraction=1.0)을 보호 baseline 후보로 명시 — 국소 density만으로 과도하게
+        # metering해 TTT가 악화되지 않게 한다.
+        existing_ramp_queue = sum(max(0.0, state.ramp_queue.get(r, 0.0)) for r in agent.ramps)
+        ramp_queue_max = max(net.ramp_queue_max_veh * max(len(agent.ramps), 1), 1.0e-9)
+        queue_saturation = min(1.0, existing_ramp_queue / ramp_queue_max)
+        best_target, best_cost = total_upper, float("inf")  # baseline = no-metering(용량 방출).
         for fraction in (1.0, 0.85, 0.7, 0.5):
             release = fraction * total_upper
             # Spec 3.1.2 conservation: merge 유입은 본선 상류 유량과 ramp release의 합이다.
@@ -494,56 +549,146 @@ class DistributedCoordinator:
                 rho_merge + (q_upstream + release - q_out) * dt_h / max(seg_cap_veh, 1.0e-9),
             )
             held = (total_upper - release) * dt_h  # 잡아둔 차량수[veh] — 대기비용으로 환산.
+            # 기존 ramp 큐가 포화에 가까울수록 추가로 잡아두는 비용을 가중(spillback 위험).
+            held_cost = held * (1.0 + queue_saturation)
             cost = (
                 self.cfg.freeway_follower.density_penalty * max(0.0, rho_pred - net.rho_crit)
-                + held
+                + held_cost
             )
-            if cost < best_cost:
+            # 동률(자유류 ρ_pred<ρ_crit, 모든 cost 동일)이면 no-metering을 보호: strict 비교라
+            # fraction=1.0이 먼저 best로 잡혀 유지된다.
+            if cost < best_cost - 1.0e-12:
                 best_cost, best_target = cost, release
         return float(best_target)
 
-    def _agent_vsl(
+    def _vsl_candidates(self, previous_vsl: float) -> list[float]:
+        """이 control interval에 freeway agent가 고를 수 있는 VSL 후보 집합[km/h].
+
+        full 모드: vsl_set 중 직전 VSL ±max_vsl_step 안에 드는 discrete 값(보통 3~5개,
+        Cartesian 폭증 없이 per-link 1차원). relaxed-quantized 모드: 연속 target(=max,
+        한 단계 낮춤, 두 단계 낮춤)을 공통 repair로 양자화해 소수 생성. 어느 모드든
+        후보 수가 vsl_set 크기를 넘지 않는다(Nash 루프 비용 bound)."""
+        fc = self.cfg.freeway_follower
+        vsl_set = sorted(float(v) for v in fc.vsl_set)
+        if not self.cfg.mpc.relaxed_quantized_controls:
+            feasible = [
+                v for v in vsl_set
+                if previous_vsl - fc.max_vsl_step - 1.0e-9 <= v <= previous_vsl + fc.max_vsl_step + 1.0e-9
+            ]
+            return feasible or vsl_set
+        max_vsl = max(vsl_set)
+        step = max(1.0e-9, fc.max_vsl_step)
+        out: list[float] = []
+        for raw in (max_vsl, previous_vsl, previous_vsl - step, previous_vsl - 2.0 * step):
+            repaired = repair_vsl_value(float(raw), float(previous_vsl), self.cfg)
+            if not any(abs(repaired.value - v) <= 1.0e-9 for v in out):
+                accumulate_repair_diagnostics(self._repair_diagnostics, vsl=repaired)
+                out.append(repaired.value)
+        return out
+
+    def _offramp_release_fraction(self, vsl: float) -> float:
+        """VSL[km/h] → diverge segment 도달(=off-ramp 유입) 비율 근사 [0,1].
+
+        VSL이 낮을수록 상류 유출(=diverge 도달)이 줄어 off-ramp 유입이 준다는 단조
+        관계를 1차로 근사한다. 정밀 plant 예측이 아니라 후보 순위용 경량 surrogate."""
+        max_vsl = max(float(v) for v in self.cfg.freeway_follower.vsl_set)
+        return float(np.clip(vsl / max(max_vsl, 1.0e-9), 0.0, 1.0))
+
+    def _freeway_agent_objective(
         self,
-        density_ratio: float,
+        rhos: list[float],
+        density_excess: float,
+        metering_error: float,
+        ramp_metering: Mapping[str, float],
+        vsl: float,
+        previous_vsl: float,
+        offramp_forecast_veh: float,
+        offramp_storage_veh: float,
+        offramp_capacity_veh: float = 0.0,
+    ) -> float:
+        """freeway agent 자기 비용(horizon emergence). 본선 차량·density penalty·
+        off-ramp 큐(현재 점유 + VSL이 통과시키는 예측 유입의 spillback 가중분)·본선 hold·
+        Δvsl smooth의 합. off-ramp가 포화에 가까우면 추가 유입의 spillback 비용이 비선형으로
+        커져, VSL을 낮춰(예측 유입↓) 비용을 줄이는 게 emergent하게 유리해진다. off-ramp가
+        비어 있으면 spillback 가중≈1이라 VSL을 낮출 유인이 없어 max VSL이 선택된다."""
+        net = self.cfg.network
+        fc = self.cfg.freeway_follower
+        fraction = self._offramp_release_fraction(vsl)
+        admitted = offramp_forecast_veh * fraction
+        # off-ramp 포화도[0~1+]: 점유가 용량에 가까울수록 추가 유입의 spillback 비용이 커진다.
+        occupancy_ratio = offramp_storage_veh / max(offramp_capacity_veh, 1.0e-9)
+        spillback_weight = 1.0 + max(0.0, occupancy_ratio)
+        offramp_cost = offramp_storage_veh + admitted * spillback_weight
+        # VSL을 낮춰 통과시키지 못한 차량은 본선에 잡힘(hold) — 본선 대기 비용(가중 1)으로 가산.
+        held_mainline = offramp_forecast_veh * (1.0 - fraction)
+        # Δvsl smooth: 작은 off-ramp 압력에 과민하게 VSL을 흔들지 않도록 [km/h] 단위 그대로
+        # 가격화한다. off-ramp 압력 이득이 smooth 비용을 넘어설 때만 VSL을 낮춘다(단조 emergence).
+        return float(
+            sum(max(0.0, rho) * net.freeway_segment_length_km * net.freeway_lanes for rho in rhos)
+            + fc.density_penalty * density_excess
+            + 0.01 * metering_error
+            + offramp_cost
+            + held_mainline
+            + fc.vsl_smoothness_weight * abs(vsl - previous_vsl)
+        )
+
+    def _search_agent_vsl(
+        self,
+        agent: AgentSpec,
+        rhos: list[float],
         lane_loss: float,
         previous_vsl: float,
-    ) -> float:
-        vsl_set = sorted(float(v) for v in self.cfg.freeway_follower.vsl_set)
-        max_vsl = max(vsl_set)
-        if lane_loss > 0.5 or density_ratio > 1.25:
-            target = min(vsl_set)
-        elif lane_loss > 0.1 or density_ratio > 1.05:
-            target = 60.0
-        elif density_ratio > 0.95:
-            target = 80.0
-        else:
-            target = max_vsl
-        low = previous_vsl - self.cfg.freeway_follower.max_vsl_step
-        high = previous_vsl + self.cfg.freeway_follower.max_vsl_step
-        feasible = [v for v in vsl_set if low - 1.0e-9 <= v <= high + 1.0e-9]
-        feasible = feasible or vsl_set
-        if self.cfg.mpc.relaxed_quantized_controls:
-            # Spec 17.5 proposed relaxed: heuristic VSL target도 공통 repair로 step/quantization을 통일한다.
-            repaired = repair_vsl_value(float(target), float(previous_vsl), self.cfg)
-            accumulate_repair_diagnostics(self._repair_diagnostics, vsl=repaired)
-            return repaired.value
-        return float(min(feasible, key=lambda value: (abs(value - target), value)))
+        offramp_storage_veh: float,
+        offramp_forecast_veh: float,
+        offramp_capacity_veh: float,
+        ramp_metering: Mapping[str, float],
+    ) -> tuple[float, int]:
+        """VSL 후보를 horizon objective로 평가해 최소 비용 후보를 고른다(emergence, option 2).
+
+        트리거 없음 — off-ramp storage backup·예측 유입이 objective에 들어 있어 후보 평가
+        과정에서 VSL이 자연히 낮아진다. lane-drop은 물리 제약이라 후보 평가와 별개로
+        density_excess를 통해 반영된다."""
+        net = self.cfg.network
+        # lane-drop은 통과 용량을 줄이는 물리 제약 — density_excess에 가산해 후보 평가가
+        # 차선 손실 segment에서 더 낮은 VSL을 선호하게 한다(트리거 아님, 비용 가중).
+        density_excess = sum(max(0.0, rho - net.rho_crit) for rho in rhos) + lane_loss
+        metering_error = 0.0  # VSL 선택은 metering_error와 독립 — 순위에 영향 없는 상수.
+        candidates = self._vsl_candidates(previous_vsl)
+        best_vsl, best_cost = previous_vsl, float("inf")
+        for vsl in candidates:
+            cost = self._freeway_agent_objective(
+                rhos,
+                density_excess,
+                metering_error,
+                ramp_metering,
+                vsl,
+                previous_vsl,
+                offramp_forecast_veh,
+                offramp_storage_veh,
+                offramp_capacity_veh,
+            )
+            if cost < best_cost - 1.0e-12:
+                best_cost, best_vsl = cost, float(vsl)
+        return float(best_vsl), len(candidates)
 
     def _solve_urban_agent(
         self,
         agent: AgentSpec,
         state: TrafficState,
         leader: Optional[LeaderAction],
-        demand: DemandStep,
+        forecast: list[DemandStep],
         freeway_response: FreewayFollowerResult,
         current: ControlAction,
         allocation_plan: Optional[AllocationResult],
     ) -> AgentSolve:
+        demand = forecast[0]
         # NO_F_TO_U/LOCAL_ONLY ablation: freeway 예측 압력 정보 차단 — urban은 측정된
         # 현재 off-ramp 도착(plant 경유)만 disturbance로 받는다.
         if self._block_f_to_u(agent):
             freeway_response = None
-        result = self.urban_follower.solve(state.copy(), leader, demand, freeway_response, current, allocation_plan)
+        result = self.urban_follower.solve(
+            state.copy(), leader, demand, freeway_response, current, allocation_plan, forecast=forecast,
+        )
         specs = movement_specs(self.cfg)
         green = {
             key: value

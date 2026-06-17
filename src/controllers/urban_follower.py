@@ -91,17 +91,72 @@ class UrbanFollower:
             "total_pressure": total_pressure,
         }
 
+    def _phase_arrival_forecast(
+        self,
+        state: TrafficState,
+        forecast: Optional[list[DemandStep]],
+    ) -> Dict[str, float]:
+        """phase별 horizon 누적 예측 도착량[veh]을 반환한다(forecast-aware green pressure).
+
+        Wu urban agent의 `q0 + arrival*horizon` 형태를 따라, 현재 큐 외에 미래 도착을
+        반영한다. 도착 소스: boundary_in 게이트(urban_boundary 수요×β), on-ramp 접근
+        (ramp_arrival×β), off-ramp leg(freeway flow×split×β). internal movement는 상류
+        방출 의존이라 외란 예측에서 제외한다(현재 큐로만 잡힘). forecast가 None이면 빈
+        dict — 호출처는 현재 큐만 쓰는 기존 동작으로 회귀(하위 호환)."""
+        if not forecast:
+            return {}
+        net = self.cfg.network
+        specs = movement_specs(self.cfg)
+        dt_h = self.cfg.simulation.T_c_h
+        steps = forecast[: max(1, self.cfg.mpc.horizon_steps)]
+        # off-ramp 현재 도달 유량[veh/h] = freeway link 끝 유량 × split.
+        offramp_flow: Dict[str, float] = {}
+        for off_ramp in net.off_ramps:
+            link = net.off_ramp_from_freeway.get(off_ramp, "")
+            split = net.off_ramp_split_ratio.get(off_ramp, 0.0)
+            flows = state.freeway_flow.get(link, [])
+            offramp_flow[off_ramp] = max(0.0, float(flows[-1]) if flows else 0.0) * split
+        arrivals: Dict[str, float] = {}
+        for movement, spec in specs.items():
+            phase = str(spec.get("phase", ""))
+            if not phase:
+                continue
+            kind = str(spec.get("kind", ""))
+            beta = float(spec.get("beta", 1.0))
+            per_step = 0.0
+            if kind == "boundary_in":
+                origin = str(spec.get("origin", ""))
+                per_step = sum(max(0.0, s.urban_boundary.get(origin, 0.0)) for s in steps)
+            elif kind == "on_ramp":
+                ramp = str(spec.get("ramp", ""))
+                per_step = sum(max(0.0, s.ramp_arrival.get(ramp, 0.0)) for s in steps)
+            elif kind == "off_ramp":
+                off_ramp = str(spec.get("off_ramp", ""))
+                # off-ramp 도달 유량은 forecast 본선 수요 비율로 스케일.
+                base_main = max(1.0e-9, float(steps[0].freeway_mainline.get(
+                    net.off_ramp_from_freeway.get(off_ramp, ""), 0.0)))
+                for s in steps:
+                    scale = max(0.0, float(s.freeway_mainline.get(
+                        net.off_ramp_from_freeway.get(off_ramp, ""), 0.0))) / base_main
+                    per_step += offramp_flow.get(off_ramp, 0.0) * scale
+            else:
+                continue
+            arrivals[phase] = arrivals.get(phase, 0.0) + beta * per_step * dt_h
+        return arrivals
+
     def _green_times(
         self,
         state: TrafficState,
         previous: Optional[ControlAction],
         freeway_response: object | None = None,
         allocation_plan: Optional[AllocationResult] = None,
+        phase_arrivals: Optional[Mapping[str, float]] = None,
     ) -> Dict[str, float]:
         net = self.cfg.network
         specs = movement_specs(self.cfg)
         pressure = self._freeway_pressure(freeway_response)
         phase_setpoints = self._allocation_phase_setpoints(allocation_plan)
+        arrivals = phase_arrivals or {}
         green: Dict[str, float] = {}
         total = net.effective_green_total
         for signal in net.signals:
@@ -109,12 +164,12 @@ class UrbanFollower:
                 state.urban_movement_queue.get(movement, 0.0)
                 for movement, spec in specs.items()
                 if spec.get("phase") == f"{signal}_p1"
-            )
+            ) + float(arrivals.get(f"{signal}_p1", 0.0))
             p2_queue = sum(
                 state.urban_movement_queue.get(movement, 0.0)
                 for movement, spec in specs.items()
                 if spec.get("phase") == f"{signal}_p2"
-            )
+            ) + float(arrivals.get(f"{signal}_p2", 0.0))
             has_offramp_discharge_phase = any(
                 spec.get("phase") == f"{signal}_p1" and spec.get("kind") == "off_ramp"
                 for spec in specs.values()
@@ -200,6 +255,7 @@ class UrbanFollower:
         state: TrafficState,
         previous: Optional[ControlAction],
         pressure: Mapping[str, float],
+        phase_arrivals: Optional[Mapping[str, float]] = None,
     ) -> tuple[Dict[str, float], float]:
         """P-FO(spec 16.7, 2026-06-13 재정의) green 자유 탐색 — allocation 기준점 없음.
 
@@ -220,11 +276,12 @@ class UrbanFollower:
                 pid: [m for m, spec in specs.items() if spec.get("phase") == f"{signal}_{pid}"]
                 for pid in ("p1", "p2")
             }
+            arrivals = phase_arrivals or {}
             q0 = {
                 pid: sum(
                     max(0.0, state.urban_movement_queue.get(m, 0.0))
                     for m in phase_movements[pid]
-                )
+                ) + float(arrivals.get(f"{signal}_{pid}", 0.0))  # forecast-aware: 미래 도착 가산.
                 for pid in ("p1", "p2")
             }
             for pid in ("p1", "p2"):
@@ -405,17 +462,22 @@ class UrbanFollower:
         freeway_response: object | None = None,
         previous_control: Optional[ControlAction] = None,
         allocation_plan: Optional[AllocationResult] = None,
+        forecast: Optional[list[DemandStep]] = None,
     ) -> UrbanFollowerResult:
         ensure_urban_state(state, self.cfg)
         self._repair_diagnostics = {}
         pressure = self._freeway_pressure(freeway_response)
+        # forecast-aware green pressure(진단 문서 §4): forecast가 명시되면 phase별 미래
+        # 도착을 현재 큐에 더한다. None이면 빈 dict — 현재 큐만 쓰는 기존 동작 유지(하위
+        # 호환). distributed coordinator만 forecast를 넘기므로 다른 호출처는 불변이다.
+        phase_arrivals = self._phase_arrival_forecast(state, forecast)
         if leader is None:
             # P-FO(spec 16.7, 2026-06-13 재정의): allocation module을 호출하지 않는다 —
             # green 자유탐색 + offset만 결정하고 movement service는 plant 포화유율
             # fallback(빈 allocation)에 맡긴다. 숨은 전역 target 없음.
-            return self._solve_leaderless(state, pressure, previous_control)
+            return self._solve_leaderless(state, pressure, previous_control, phase_arrivals)
         plan = allocation_plan or self.allocation_module.solve(state, leader)
-        green = self._green_times(state, previous_control, freeway_response, plan)
+        green = self._green_times(state, previous_control, freeway_response, plan, phase_arrivals)
         offsets = self._offsets(state, previous_control, green)
         allocation, residual, target_net_inflow, allocation_metrics = self._allocation(
             state,
@@ -477,9 +539,12 @@ class UrbanFollower:
         state: TrafficState,
         pressure: Mapping[str, float],
         previous_control: Optional[ControlAction],
+        phase_arrivals: Optional[Mapping[str, float]] = None,
     ) -> UrbanFollowerResult:
         """PROPOSED-FOLLOWERS-ONLY — green 자유탐색 + offset, allocation 비제어."""
-        green, search_cost = self._search_green_times(state, previous_control, pressure)
+        green, search_cost = self._search_green_times(
+            state, previous_control, pressure, phase_arrivals,
+        )
         offsets = self._offsets(state, previous_control, green)
         balance = movement_balance_summary(
             state,

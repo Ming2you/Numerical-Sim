@@ -591,14 +591,47 @@ def urban_accumulation_feedback_flow(
     state: TrafficState,
     cfg: ExperimentConfig,
     target_accumulation_veh: float,
+    forecast: "list[DemandStep] | None" = None,
 ) -> float:
-    """목표 도시 누적(N_P_star, veh)을 추적하기 위한 허용 순유입(veh/h)을 계산한다."""
+    """목표 도시 누적(N_P_star, veh)을 추적하기 위한 허용 순유입(veh/h)을 계산한다.
+
+    forecast가 주어지면 예측 외란 유입(off-ramp 도달)을 보정한다(진단 문서 §4). off-ramp
+    유입은 제어 불가 외란으로 N_P를 늘리므로, 그만큼 허용 순유입(boundary 게이팅)을 미리
+    낮춰 곧 닥칠 수요 파동에 N_P가 폭증하지 않게 한다. forecast=None이면 기존 현재상태
+    feedback만 사용(하위 호환)."""
     ensure_urban_state(state, cfg)
     error_veh = float(target_accumulation_veh) - state.protected_accumulation_veh(cfg.network)
     feedback_h = max(float(cfg.leader.N_P_feedback_horizon_h), 1.0e-9)
     raw_flow = error_veh / feedback_h
+    if forecast:
+        raw_flow -= _forecast_offramp_inflow_veh_h(state, cfg, forecast)
     limit = max(0.0, float(cfg.leader.N_P_feedback_flow_limit_veh_h))
     return float(np.clip(raw_flow, -limit, limit))
+
+
+def _forecast_offramp_inflow_veh_h(
+    state: TrafficState,
+    cfg: ExperimentConfig,
+    forecast: "list[DemandStep]",
+) -> float:
+    """horizon 평균 예측 off-ramp 유입[veh/h] — N_P를 늘리는 제어불가 외란.
+
+    off-ramp 도달 유량 = freeway link 끝 유량 × split, forecast 본선 수요 비율로 스케일."""
+    net = cfg.network
+    steps = forecast[: max(1, cfg.mpc.horizon_steps)]
+    if not steps:
+        return 0.0
+    total = 0.0
+    for off_ramp in net.off_ramps:
+        link = net.off_ramp_from_freeway.get(off_ramp, "")
+        split = net.off_ramp_split_ratio.get(off_ramp, 0.0)
+        flows = state.freeway_flow.get(link, [])
+        base_flow = max(0.0, float(flows[-1]) if flows else 0.0)
+        base_main = max(1.0e-9, float(steps[0].freeway_mainline.get(link, 0.0)))
+        for s in steps:
+            scale = max(0.0, float(s.freeway_mainline.get(link, 0.0))) / base_main
+            total += base_flow * scale * split
+    return float(total / max(len(steps), 1))
 
 
 def estimate_onramp_green_release_flows(

@@ -20,13 +20,43 @@ class Leader:
     def __init__(self, cfg: ExperimentConfig):
         self.cfg = cfg
 
+    def _forecast_demand_summary(self, forecast: list[DemandStep]) -> DemandStep:
+        """horizon 수요 요약 DemandStep — 후보 생성이 첫 스텝이 아닌 예측 수요압을 보게 한다.
+
+        진단 문서 §"Recommended fix" 4: 예측 ramp/boundary/off-ramp 수요를 후보 생성에
+        반영한다. 각 키별로 horizon peak(최대 수요)를 취해, 곧 닥칠 수요 파동에 맞춘
+        N_UF feasible/heuristic 후보를 만든다(첫 스텝이 낮아도 후보 영역을 충분히 덮음)."""
+        steps = forecast[: max(1, self.cfg.mpc.horizon_steps)]
+        if len(steps) <= 1:
+            return steps[0]
+
+        def peak(getter) -> Dict[str, float]:
+            keys: set[str] = set()
+            for s in steps:
+                keys |= set(getter(s).keys())
+            return {k: max(float(getter(s).get(k, 0.0)) for s in steps) for k in keys}
+
+        return DemandStep(
+            freeway_mainline=peak(lambda s: s.freeway_mainline),
+            urban_boundary=peak(lambda s: s.urban_boundary),
+            ramp_arrival=peak(lambda s: s.ramp_arrival),
+            incident_capacity_factor=min(
+                float(getattr(s, "incident_capacity_factor", 1.0)) for s in steps
+            ),
+        )
+
     def candidates(
         self,
         state: TrafficState,
         previous: Optional[ControlAction] = None,
         demand: Optional[DemandStep] = None,
+        forecast: Optional[list[DemandStep]] = None,
     ) -> List[LeaderAction]:
         leader = self.cfg.leader
+        # forecast가 주어지면 horizon 수요 요약으로 후보를 생성한다(진단 문서 §4). None이면
+        # 기존 first-demand 동작(하위 호환). boundary 비용은 건드리지 않는다 — 후보 생성만.
+        if forecast:
+            demand = self._forecast_demand_summary(list(forecast))
         count = max(3, self.cfg.mpc.leader_candidate_count)
         n_np = max(2, int(round(np.sqrt(count))))
         n_nuf = max(2, int(np.ceil(count / n_np)))
