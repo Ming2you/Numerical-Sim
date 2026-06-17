@@ -216,6 +216,10 @@ leader:
   N_P_feedback_flow_limit_veh_h: 800.0
   N_UF_feasible_margin: 0.95
   non_convergence_penalty: 500.0
+  non_convergence_objective_residual_scale: 1.0
+  non_convergence_control_residual_scale: 1.0
+  state_accumulation_exclude_boundary_legs: true
+  use_effective_lanes_for_density_penalty: true
   metering_congestion_weight: 0.45
   metering_queue_weight: 4.0
   vsl_activation_density_ratio: 0.95

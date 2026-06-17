@@ -369,6 +369,10 @@ class LeaderConfig:
     N_P_feedback_flow_limit_veh_h: float = 800.0
     N_UF_feasible_margin: float = 0.95
     non_convergence_penalty: float = 500.0
+    non_convergence_objective_residual_scale: float = 1.0
+    non_convergence_control_residual_scale: float = 1.0
+    state_accumulation_exclude_boundary_legs: bool = True
+    use_effective_lanes_for_density_penalty: bool = True
     metering_congestion_weight: float = 0.45
     metering_queue_weight: float = 4.0
     vsl_activation_density_ratio: float = 0.95
@@ -494,6 +498,10 @@ class ExperimentConfig:
             raise ValueError("leader.N_P_candidate_upper_factor must be >= lower factor.")
         if self.leader.N_UF_star_unit not in {"veh_per_hour", "veh_per_control_interval"}:
             raise ValueError("leader.N_UF_star_unit must be veh_per_hour or veh_per_control_interval.")
+        if self.leader.non_convergence_objective_residual_scale <= 0.0:
+            raise ValueError("leader.non_convergence_objective_residual_scale must be positive.")
+        if self.leader.non_convergence_control_residual_scale <= 0.0:
+            raise ValueError("leader.non_convergence_control_residual_scale must be positive.")
         if self.evaluation.eps_balance < 0.0:
             raise ValueError("evaluation.eps_balance must be non-negative.")
         if not 0.0 <= self.evaluation.boundary_degenerate_saturation_fraction <= 1.0:
@@ -641,6 +649,36 @@ class TrafficState:
             for link, capacity in net.urban_link_storage_veh.items():
                 total += max(0.0, capacity - self.urban_link_storage.get(link, capacity))
         return total
+
+    def boundary_leg_vehicles(self, net) -> float:
+        """Leader base에서 제외할 외부 boundary leg 점유[veh].
+
+        boundary_in/out movement queue와 boundary_out sink storage는 외부 네트워크 leg로 보며,
+        on-ramp/off-ramp 및 내부 grid link는 freeway-urban coupling 비용이므로 제외하지 않는다.
+        """
+        boundary_kinds = {"boundary_in", "boundary_out"}
+        total = 0.0
+        boundary_storage_links = set()
+        for movement, spec in net.urban_movements.items():
+            kind = str(spec.get("kind", ""))
+            if kind in boundary_kinds:
+                total += max(0.0, self.urban_movement_queue.get(movement, 0.0))
+            if kind == "boundary_out":
+                receiving = str(spec.get("receiving_link", ""))
+                if receiving:
+                    boundary_storage_links.add(receiving)
+        for link in boundary_storage_links:
+            capacity = net.urban_link_storage_veh.get(link)
+            if capacity is not None:
+                total += max(0.0, capacity - self.urban_link_storage.get(link, capacity))
+        return float(total)
+
+    def objective_urban_vehicles(self, net, exclude_boundary_legs: bool = True) -> float:
+        """Leader state-accumulation base용 urban 차량 수[veh]."""
+        total = self.total_urban_vehicles(net)
+        if exclude_boundary_legs:
+            total -= self.boundary_leg_vehicles(net)
+        return float(max(0.0, total))
 
     def protected_accumulation_veh(self, net) -> float:
         """보호영역 누적 N_P = 링크 in-transit 점유(cap−available) + 보호영역 내부 movement 대기열.

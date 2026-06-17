@@ -328,7 +328,18 @@ class ConstraintTests(unittest.TestCase):
         state = TrafficState.initial(cfg)
         for movement in state.urban_movement_queue:
             state.urban_movement_queue[movement] = 0.0
-        state.urban_movement_queue["A_N_to_S"] = 120.0
+        internal_movement = next(
+            movement
+            for movement, spec in cfg.network.urban_movements.items()
+            if spec.get("kind") == "internal"
+        )
+        boundary_movement = next(
+            movement
+            for movement, spec in cfg.network.urban_movements.items()
+            if spec.get("kind") == "boundary_in"
+        )
+        state.urban_movement_queue[internal_movement] = 120.0
+        state.urban_movement_queue[boundary_movement] = 77.0
         # 보호영역 누적(내부 link storage 점유)을 perimeter penalty 경로가 동작하도록 설정한다.
         grid_cap = cfg.network.urban_link_storage_veh["A_to_D"]
         state.urban_link_storage["A_to_D"] = grid_cap - 150.0
@@ -344,7 +355,7 @@ class ConstraintTests(unittest.TestCase):
         previous.N_P_star = 160.0
         previous.N_UF_star = 250.0
 
-        n_p = state.total_urban_vehicles(cfg.network)
+        n_p = state.objective_urban_vehicles(cfg.network)
         n_p_protected = state.protected_accumulation_veh(cfg.network)
         n_f = state.total_freeway_vehicles(cfg.network)
         density_excess = sum(
@@ -361,8 +372,75 @@ class ConstraintTests(unittest.TestCase):
             + 3.0 * density_excess
             + 0.5 * (abs(170.0 - 160.0) + abs(300.0 - 250.0))
         )
-        actual = Leader(cfg).objective([state], action, previous, follower_objective=9999.0, nash_converged=True)
+        leader = Leader(cfg)
+        terms = leader.objective_terms([state], action, previous, follower_objective=9999.0, nash_converged=True)
+        actual = leader.objective([state], action, previous, follower_objective=9999.0, nash_converged=True)
         self.assertAlmostEqual(actual, expected)
+        self.assertAlmostEqual(terms["leader_total_objective"], expected)
+        self.assertAlmostEqual(terms["leader_boundary_leg_excluded_veh"], 77.0)
+        self.assertAlmostEqual(terms["leader_target_penalty"], 2.0 * max(0.0, n_p_protected - 100.0))
+
+    def test_leader_non_convergence_penalty_uses_residuals(self):
+        cfg = ExperimentConfig.from_file(
+            "src/config/default.yaml",
+            {
+                "leader": {
+                    "non_convergence_penalty": 500.0,
+                    "non_convergence_objective_residual_scale": 0.5,
+                    "non_convergence_control_residual_scale": 0.25,
+                }
+            },
+        )
+        state = TrafficState.initial(cfg)
+        action = ControlAction.fixed(cfg)
+        terms = Leader(cfg).objective_terms(
+            [state],
+            action,
+            previous=None,
+            follower_objective=0.0,
+            nash_converged=False,
+            nash_residual_objective=0.2,
+            nash_residual_control=0.1,
+        )
+        expected_penalty = 500.0 * ((0.2 / 0.5) + (0.1 / 0.25))
+        self.assertAlmostEqual(terms["leader_nonconvergence_penalty"], expected_penalty)
+
+    def test_leader_density_penalty_uses_effective_lanes_only_when_changed(self):
+        cfg = ExperimentConfig.from_file(
+            "src/config/default.yaml",
+            {"leader": {"w_F": 1.0, "use_effective_lanes_for_density_penalty": True}},
+        )
+        state = TrafficState.initial(cfg)
+        for link in cfg.network.freeway_links:
+            state.freeway_density[link] = [
+                cfg.network.rho_crit + 2.0
+                for _ in state.freeway_density[link]
+            ]
+            state.freeway_effective_lanes[link] = [
+                float(cfg.network.freeway_lanes)
+                for _ in state.freeway_density[link]
+            ]
+        first_link = cfg.network.freeway_links[0]
+        state.freeway_effective_lanes[first_link][0] = cfg.network.freeway_lanes - 0.35
+
+        nominal_count = sum(len(values) for values in state.freeway_density.values())
+        expected_excess = (
+            cfg.network.freeway_segment_length_km
+            * (
+                (cfg.network.freeway_lanes - 0.35)
+                + (nominal_count - 1) * cfg.network.freeway_lanes
+            )
+            * 2.0
+        )
+        terms = Leader(cfg).objective_terms(
+            [state],
+            ControlAction.fixed(cfg),
+            previous=None,
+            follower_objective=0.0,
+            nash_converged=True,
+        )
+        self.assertAlmostEqual(terms["leader_density_excess"], expected_excess)
+        self.assertEqual(terms["leader_density_effective_lane_weight_count"], 1.0)
 
     def test_ramp_metering_bounds(self):
         cfg = short_config()

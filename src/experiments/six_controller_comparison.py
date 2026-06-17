@@ -114,6 +114,9 @@ class _ControllerAdapter:
                 "leader_candidate_count": candidates,
                 "leader_objective": float(result.leader_objective),
             }
+            for key, value in result.metadata.items():
+                if key.startswith("leader_") and isinstance(value, (int, float, bool)):
+                    diag[key] = float(value)
         diag.update({
             "relaxed_quantized_controls": float(self.cfg.mpc.relaxed_quantized_controls),
             "relaxed_fast_mode": float(self.cfg.mpc.relaxed_fast_mode),

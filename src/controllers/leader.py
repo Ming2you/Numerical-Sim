@@ -207,6 +207,118 @@ class Leader:
             for q in state.ramp_queue.values()
         ]))
 
+    def _state_accumulation_base(self, states: Iterable[TrafficState]) -> tuple[float, float]:
+        net = self.cfg.network
+        exclude_boundary = self.cfg.leader.state_accumulation_exclude_boundary_legs
+        base = 0.0
+        excluded = 0.0
+        for state in states:
+            base += state.total_freeway_vehicles(net)
+            base += state.objective_urban_vehicles(net, exclude_boundary)
+            if exclude_boundary:
+                excluded += state.boundary_leg_vehicles(net)
+        return float(base), float(excluded)
+
+    def _density_penalty(self, states: Iterable[TrafficState]) -> tuple[float, float]:
+        """Spec 4.2 freeway density 초과 penalty.
+
+        기본은 nominal lane 수를 쓰되, lane-drop으로 lambda_eff가 실제로 nominal과
+        달라진 segment에서만 effective lane weight를 사용한다.
+        """
+        net = self.cfg.network
+        use_effective = self.cfg.leader.use_effective_lanes_for_density_penalty
+        penalty = 0.0
+        effective_weight_count = 0.0
+        for state in states:
+            state.ensure_freeway_lane_profile(net)
+            for link, values in state.freeway_density.items():
+                effective_lanes = state.freeway_effective_lanes.get(link, [])
+                for idx, rho in enumerate(values):
+                    lane_weight = net.freeway_lanes
+                    if use_effective and idx < len(effective_lanes):
+                        candidate = float(effective_lanes[idx])
+                        if abs(candidate - net.freeway_lanes) > 1.0e-9:
+                            lane_weight = candidate
+                            effective_weight_count += 1.0
+                    penalty += (
+                        net.freeway_segment_length_km
+                        * lane_weight
+                        * max(0.0, rho - net.rho_crit)
+                    )
+        return float(penalty), float(effective_weight_count)
+
+    def _non_convergence_penalty(
+        self,
+        nash_converged: bool,
+        nash_residual_objective: float = 0.0,
+        nash_residual_control: float = 0.0,
+    ) -> tuple[float, float, float]:
+        if nash_converged:
+            return 0.0, 0.0, 0.0
+        lc = self.cfg.leader
+        obj_component = max(0.0, float(nash_residual_objective)) / max(
+            lc.non_convergence_objective_residual_scale,
+            1.0e-9,
+        )
+        control_component = max(0.0, float(nash_residual_control)) / max(
+            lc.non_convergence_control_residual_scale,
+            1.0e-9,
+        )
+        penalty = lc.non_convergence_penalty * (obj_component + control_component)
+        return float(penalty), float(obj_component), float(control_component)
+
+    def objective_terms(
+        self,
+        predicted_states: Iterable[TrafficState],
+        action: ControlAction,
+        previous: Optional[ControlAction],
+        follower_objective: float,
+        nash_converged: bool,
+        nash_residual_objective: float = 0.0,
+        nash_residual_control: float = 0.0,
+    ) -> Dict[str, float]:
+        net = self.cfg.network
+        lc = self.cfg.leader
+        states = list(predicted_states)
+        state_base, boundary_excluded = self._state_accumulation_base(states)
+        if lc.objective_mode == "follower_ttt":
+            base = float(follower_objective)
+        else:
+            base = state_base
+        target_penalty = 0.0
+        for s in states:
+            n_p = s.protected_accumulation_veh(net)
+            target_penalty += lc.w_P * max(0.0, n_p - lc.N_P_crit_veh)
+        density_excess, density_effective_count = self._density_penalty(states)
+        density_penalty = lc.w_F * density_excess
+        smooth = 0.0
+        if previous is not None:
+            smooth = lc.w_L * (
+                abs(action.N_P_star - previous.N_P_star)
+                + abs(action.N_UF_star - previous.N_UF_star)
+            )
+        conv, obj_component, control_component = self._non_convergence_penalty(
+            nash_converged,
+            nash_residual_objective,
+            nash_residual_control,
+        )
+        total = base + target_penalty + density_penalty + smooth + conv
+        return {
+            "leader_base_accumulation": float(base),
+            "leader_state_accumulation_base": float(state_base),
+            "leader_follower_ttt_base": float(follower_objective),
+            "leader_boundary_leg_excluded_veh": float(boundary_excluded),
+            "leader_target_penalty": float(target_penalty),
+            "leader_density_excess": float(density_excess),
+            "leader_density_penalty": float(density_penalty),
+            "leader_density_effective_lane_weight_count": float(density_effective_count),
+            "leader_smoothness_penalty": float(smooth),
+            "leader_nonconvergence_penalty": float(conv),
+            "leader_nonconvergence_obj_residual_component": float(obj_component),
+            "leader_nonconvergence_control_residual_component": float(control_component),
+            "leader_total_objective": float(total),
+        }
+
     def objective(
         self,
         predicted_states: Iterable[TrafficState],
@@ -214,32 +326,19 @@ class Leader:
         previous: Optional[ControlAction],
         follower_objective: float,
         nash_converged: bool,
+        nash_residual_objective: float = 0.0,
+        nash_residual_control: float = 0.0,
     ) -> float:
-        net = self.cfg.network
-        lc = self.cfg.leader
-        states = list(predicted_states)
-        if lc.objective_mode == "follower_ttt":
-            base = follower_objective
-        else:
-            base = sum(s.total_freeway_vehicles(net) + s.total_urban_vehicles(net) for s in states)
-        target_penalty = 0.0
-        density_penalty = 0.0
-        for s in states:
-            n_p = s.protected_accumulation_veh(net)
-            target_penalty += lc.w_P * max(0.0, n_p - lc.N_P_crit_veh)
-            density_penalty += lc.w_F * sum(
-                net.freeway_segment_length_km * net.freeway_lanes * max(0.0, rho - net.rho_crit)
-                for values in s.freeway_density.values()
-                for rho in values
-            )
-        smooth = 0.0
-        if previous is not None:
-            smooth = lc.w_L * (
-                abs(action.N_P_star - previous.N_P_star)
-                + abs(action.N_UF_star - previous.N_UF_star)
-            )
-        conv = 0.0 if nash_converged else lc.non_convergence_penalty
-        return float(base + target_penalty + density_penalty + smooth + conv)
+        terms = self.objective_terms(
+            predicted_states,
+            action,
+            previous,
+            follower_objective,
+            nash_converged,
+            nash_residual_objective,
+            nash_residual_control,
+        )
+        return float(terms["leader_total_objective"])
 
 
 def leader_metadata(actions: Iterable[LeaderAction]) -> Dict[str, float]:

@@ -70,13 +70,16 @@ class StackelbergMPCController:
         for action in candidates:
             nash = self.nash_solver.solve(state.copy(), action, forecast, previous)
             predicted_states, follower_ttt = self._predict(state, nash.control, forecast)
-            obj = self.leader.objective(
+            objective_terms = self.leader.objective_terms(
                 predicted_states,
                 nash.control,
                 previous,
                 follower_ttt,
                 nash.converged,
+                nash.residual_objective,
+                nash.residual_control,
             )
+            obj = objective_terms["leader_total_objective"]
             metadata = leader_metadata(candidates)
             metadata.update({
                 "N_P_crit": float(self.cfg.leader.N_P_crit_veh),
@@ -85,6 +88,7 @@ class StackelbergMPCController:
                 "nash_residual_control": nash.residual_control,
                 "nash_residual_objective": nash.residual_objective,
             })
+            metadata.update(objective_terms)
             result = DecisionResult(nash.control, obj, nash, metadata)
             if best is None or result.leader_objective < best.leader_objective:
                 best = result

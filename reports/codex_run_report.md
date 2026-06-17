@@ -849,3 +849,93 @@ C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\p
 - Proposed next modification:
   - Diagnose why the leader/allocation layer degrades the follower-only solution under relaxed-fast screening.
   - Revisit leader candidate objective/selection and allocation coupling before treating Stackelberg performance as valid.
+
+## 2026-06-17: Leader Objective Term Logging and Residual Penalty Patch
+
+### 구현 내용
+
+- `Leader.objective_terms()`를 추가하여 leader objective를 다음 term으로 분해해 로그에 남기도록 했다.
+  - `leader_base_accumulation`
+  - `leader_state_accumulation_base`
+  - `leader_follower_ttt_base`
+  - `leader_boundary_leg_excluded_veh`
+  - `leader_target_penalty`
+  - `leader_density_excess`
+  - `leader_density_penalty`
+  - `leader_density_effective_lane_weight_count`
+  - `leader_smoothness_penalty`
+  - `leader_nonconvergence_penalty`
+  - `leader_total_objective`
+- `state_accumulation` base에서 외부 `boundary_in`/`boundary_out` leg queue와 boundary-out sink storage를 제외하는 config를 추가했다.
+  - 기본값: `leader.state_accumulation_exclude_boundary_legs: true`
+  - 내부 grid, on-ramp, off-ramp 관련 queue/storage는 계속 objective base에 포함한다.
+- Nash non-convergence penalty를 고정 binary penalty에서 residual 기반 penalty로 바꿨다.
+  - `non_convergence_penalty * (objective_residual / objective_scale + control_residual / control_scale)`
+  - 기본 scale: 둘 다 `1.0`
+- freeway density penalty는 lane drop/effective lane이 실제 nominal lane과 달라진 segment에서만 `lambda_eff`를 weight로 사용한다.
+  - 기본값: `leader.use_effective_lanes_for_density_penalty: true`
+- throughput/terminal backlog penalty는 이번 요청대로 보류했다.
+
+### 변경 파일
+
+- `src/config/default.yaml`
+- `src/controllers/leader.py`
+- `src/controllers/stackelberg_mpc.py`
+- `src/experiments/six_controller_comparison.py`
+- `src/models/state.py`
+- `src/tests/test_constraints.py`
+- `reports/codex_run_report.md`
+
+### 실행 명령
+
+Baseline smoke command:
+
+```text
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m src.experiments.six_controller_comparison --scenario low_demand --T-total 360 --controllers PROPOSED-FOLLOWERS-ONLY,PROPOSED-STACKELBERG --relaxed-quantized-controls --relaxed-fast-mode --output outputs\leader_objective_term_smoke_pair
+```
+
+Proposed-controller smoke command:
+
+```text
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m src.experiments.six_controller_comparison --scenario low_demand --T-total 360 --controllers PROPOSED-STACKELBERG --relaxed-quantized-controls --relaxed-fast-mode --output outputs\leader_objective_term_smoke
+```
+
+Validation commands:
+
+```text
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m py_compile src\controllers\leader.py src\controllers\stackelberg_mpc.py src\models\state.py src\tests\test_constraints.py
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m py_compile src\experiments\six_controller_comparison.py
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest src.tests.test_constraints src.tests.test_six_controller_comparison -v
+```
+
+### Smoke 결과
+
+Output root: `outputs/leader_objective_term_smoke_pair`
+
+| Controller | Total TTT/TTS | Total Delay | Freeway TTT | Urban TTT | Throughput | Terminal Total | Solver Converged |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `PROPOSED-FOLLOWERS-ONLY` | 33.729 | 3.562 | 11.355 | 22.374 | 7252.1 | 406.3 | 0.5 |
+| `PROPOSED-STACKELBERG` | 36.293 | 6.126 | 9.754 | 26.540 | 6504.6 | 481.0 | 0.0 |
+
+Improvement rate against the follower-only smoke baseline:
+
+```text
+100 * (33.729 - 36.293) / 33.729 = -7.60%
+```
+
+Boundary queue balancing result: full acceptance evaluation was not run in this short smoke; authority check was `True` for both controllers.
+
+Control validation summary:
+
+- `py_compile`: PASS.
+- `src.tests.test_constraints + src.tests.test_six_controller_comparison`: PASS, `69 tests OK`.
+- Closed-loop smoke: PASS for execution/logging, but not a performance acceptance run.
+- New leader objective term columns were observed in both `decision_diagnostics.csv` and `control_timeseries.csv`.
+
+### 실패 기준 및 다음 수정
+
+- Full controller acceptance: FAIL / not claimed.
+- The short smoke still shows `PROPOSED-STACKELBERG` worse than `PROPOSED-FOLLOWERS-ONLY`; this patch is diagnostic/objective-alignment work, not a performance fix claim.
+- Next modification:
+  - Re-run a longer targeted scenario after inspecting the new term breakdown.
+  - Focus on why Stackelberg still shifts delay from freeway to urban when Nash convergence is poor.
