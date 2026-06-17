@@ -16,9 +16,13 @@ off-ramp 램프 큐(`OR_*_storage`)를 **urban → freeway로 재귀속**(plant 
   제어 목적함수에 안 들어간 게 핵심.**
 
 ## 2. 핵심 아이디어 (trigger 금지, emergence)
-off-ramp를 **물리적 위치로 분리**해 올바른 주체의 TTT에 귀속한다.
-- **off-ramp 램프(diverge~정지선, `OR_*_storage`)** → **freeway TTT/agent objective**.
-- **intersection leg(off-ramp이 합류하는 urban grid 링크·신호 큐)** → **urban TTT** (현행 유지).
+off-ramp를 **물리적 위치로 분리**해 올바른 주체의 TTT에 귀속한다. 물리 순서:
+`freeway → 램프(OR_storage) → leg(off_ramp movement 점큐, 정지선 대기) → urban grid`.
+- **off-ramp 램프(diverge 직후 버퍼, `OR_*_storage`)** → **freeway TTT/agent objective**.
+- **intersection leg(off_ramp movement 점큐, 정지선 신호 대기)** → **urban TTT** (현행 유지, N_P에 남김).
+
+spillback 순서: grid 막힘 → **leg(movement 점큐) 참** → 넘치면 **램프(OR_storage)로 backup** →
+램프 차면 **freeway 본선으로 backup**. 즉 leg는 신호(urban)가, 램프는 VSL(freeway)이 지킨다.
 
 ### emergence 인과 (trigger 없음)
 1. urban 신호가 leg를 못 빼줌 → leg 참 → off-ramp 배출 막힘(이미 `_drain_offramp_storage`가
@@ -47,12 +51,13 @@ capacity-drop→VSL 계열과 동일**하다. 따라서 proposed 전용 hack이 
   점유분을 **freeway_ttt에 가산**. (off-ramp storage는 `net.off_ramp_storage_link` 집합.)
 - 검증: 임의 상태에서 `freeway_ttt+urban_ttt` 합이 변경 전후 동일(보존).
 
-### 4.2 N_P 정의 (off-ramp segment 제외)
-- `src/models/state.py` `protected_accumulation_veh` (≈633행): `protected_kinds`에서 off_ramp
-  관련 제거 — off-ramp storage 점유·off_ramp movement 큐를 **N_P에서 뺀다.** off-ramp 차량은
-  신호를 통과해 urban grid 링크로 들어와야 N_P에 잡힌다.
-- `total_urban_vehicles`(≈639행)도 off-ramp storage 점유 제외(N_P/leader base 일관).
-- ⚠️ **N_P 정의가 바뀌므로 `N_P_crit_veh` 재calibration 필수**(현 556.081 무효화 → §6).
+### 4.2 N_P 정의 (램프 storage만 제외, leg는 유지)
+- `src/models/state.py` `protected_accumulation_veh` (≈633행): **off-ramp 램프 storage
+  (`OR_*_storage`) 점유만 N_P에서 뺀다**(링크 storage 합산 루프에서 제외). **off_ramp movement
+  점큐(leg)는 urban이므로 N_P에 유지**(protected_kinds의 off_ramp 유지).
+- `total_urban_vehicles`(≈639행)도 OR_*_storage 점유만 제외(N_P/leader base 일관).
+- 근거: 램프는 freeway로 옮기지만 leg(정지선 대기)는 물리적으로 urban 보호영역 안 → N_P에 남김.
+- ⚠️ **N_P 정의가 바뀌므로(램프 storage 빠짐) `N_P_crit_veh` 재calibration 필수**(현 556.081 무효화 → §6).
 
 ### 4.3 freeway agent local TTT에 off-ramp 큐 추가 (emergence의 핵심)
 - WU: `src/controllers/wu_distributed.py` `_solve_freeway_agent`의 local TTS
@@ -66,9 +71,9 @@ capacity-drop→VSL 계열과 동일**하다. 따라서 proposed 전용 hack이 
   분해 수정이 자동 반영(off-ramp가 freeway TTT로). VSL→off-ramp 결합이 plant 예측에 잡히는지 확인.
 
 ### 4.4 이중계상 방지
-- off-ramp storage 큐는 **freeway에만** 계상(urban TTT·N_P·urban agent objective에서 제거).
-- 직전 작업(B: urban green objective에 off-ramp leg)과 **상충 정리** — leg = urban grid 링크
-  (urban), 램프 storage = freeway. 둘은 다른 큐이므로 각자 한 곳에만.
+- **램프 storage(`OR_*_storage`) 큐 = freeway에만**(urban TTT·N_P·urban agent objective에서 제거).
+- **leg(off_ramp movement 점큐) = urban에만**(현행 유지, freeway에 넣지 않음).
+- 둘은 물리적으로 다른 큐(램프 vs 정지선)이므로 각자 한 곳에만 계상 — 합치면 보존 유지.
 
 ### 4.5 off-ramp 배출 gating (이미 존재 — 확인만)
 - `_drain_offramp_storage`(Wu식3)가 off-ramp→urban 배출을 urban 수용공간·green으로 gating →
@@ -110,8 +115,10 @@ capacity-drop→VSL 계열과 동일**하다. 따라서 proposed 전용 hack이 
 6. heavy-transfer 시나리오 마련 → G3 emergence 관찰.
 7. 코더 구현 → 리뷰어 독립검증 → 통과까지 반복.
 
-## 10. 미결 설계점 (구현 전 확정)
-- off_ramp **movement 점큐**(storage와 별개의 작은 점큐)의 귀속 — 램프 측(freeway)으로 둘지
-  leg 측(urban)으로 둘지. 물리적으로 "정지선 직전 대기"이므로 leg(urban)가 자연스러우나,
-  storage와의 이중계상·gating 경로 확인 후 확정.
-- heavy-transfer 시나리오의 split/수요 수치(off-ramp가 binding하되 과포화는 아닌 값).
+## 10. 설계 결정 (확정됨, 2026-06-17)
+- **[확정] off_ramp movement 점큐 = leg = urban.** 정지선 대기이므로 urban, N_P에 유지. 램프
+  storage(OR_*_storage)만 freeway로 귀속. spillback: grid→leg(urban)→램프(freeway)→본선.
+  (구현 시 leg 점큐가 넘쳐 램프 storage로 backup하는 경로가 plant에 실제로 작동하는지 확인.)
+- **[연기] heavy-transfer 시나리오 calibration**(split/수요)는 **나중에 별도**로. 초기 구현
+  (§4 재귀속)은 이것 없이 진행하고, emergence 관찰(G3)·n_crit 재calibration(G4) 시점에 맞춰
+  별도 calibration한다.
