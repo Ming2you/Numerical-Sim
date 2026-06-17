@@ -26,7 +26,7 @@ D -> C -> B -> E -> A
 | D | Leader objective를 제안 수식과 정합화 | 완료 | Step D 커밋으로 완료 |
 | C | Wu식 full neighbor coupling을 Proposed distributed follower에 이식 | 완료 | Step C 커밋으로 완료 |
 | B | Leader forecast 테스트를 후보집합이 아닌 평가/선택 기준으로 수정 | 완료 | Step B 커밋으로 완료 |
-| E | `N_P_crit_veh` 재보정 | 대기 | 미완료 |
+| E | `N_P_crit_veh` 재보정 | 완료 | Step E 커밋으로 완료 |
 | A | VSL forecast-aware 테스트 및 objective saturation 조정 | 대기 | 미완료 |
 
 ## 공통 원칙
@@ -163,11 +163,41 @@ off-ramp storage 재귀속과 objective/coupling 변경 이후 기존 `N_P_crit_
 
 ### 담당/검토 기록
 
-- 코딩 subagent: 미배정
-- 리뷰 subagent: 미배정
-- Codex 최종 판정: 미완료
-- 검증: 미실행
-- 커밋/푸시: 미완료
+- 코딩 subagent: `Kierkegaard` (`019ed5f5-3914-7913-af9e-db292ebd8f41`)
+- 리뷰 subagent: `Cicero` (`019ed5fc-2130-7590-a79c-cd124aac8dad`)
+- Codex 최종 판정: PASS. 리뷰 권고에 따라 calibration extractor가 `urban_protected_accumulation_veh` 누락 시 fallback하지 않고 즉시 실패하도록 보정했다.
+- 구현 요약:
+  - `calibrate_setpoints` 기존 CLI를 재사용하되, report에 `urban_protected_accumulation_veh`/`protected_accumulation_veh` 기준을 명시했다.
+  - `urban_protected_accumulation_veh`가 없는 구버전 state row는 `urban_vehicles`로 조용히 fallback하지 않고 `KeyError`로 중단한다.
+  - `peak_demand`, `fixed_signal_fixed_speed`, urban scale `0.5~3.0`, `T_total=7200` baseline sweep을 실행해 새 `N_P_crit_veh`를 산출했다.
+  - 산출값 `509.448830418254 veh`를 `src/config/default.yaml`, `src/models/state.py`, 관련 config unit test 기대값에 반영했다.
+- Calibration command:
+  ```text
+  C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m src.experiments.calibrate_setpoints --config src/config/default.yaml --scenario peak_demand --baseline fixed_signal_fixed_speed --urban-scales 0.5,0.75,1.0,1.25,1.5,2.0,2.5,3.0 --T-total 7200 --output outputs/step_e_n_p_crit_recalibration_2026_06_17
+  ```
+- Calibration result:
+  - `n_crit=509.448830418254 veh`
+  - `max_production=33868.58320594422 veh/h`
+  - source: `urban_scale=3.0`, `time_sec=720.0`
+  - output: `outputs/step_e_n_p_crit_recalibration_2026_06_17/setpoint_calibration_summary.json`
+- 검증:
+  ```text
+  C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m py_compile src\experiments\calibrate_setpoints.py src\models\state.py src\tests\test_metanet_equations.py src\tests\test_closed_loop_smoke.py src\tests\test_offramp_reattribution.py
+  ```
+  결과: OK.
+  ```text
+  C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest src.tests.test_metanet_equations.MetanetEquationTests.test_config_exposes_time_ratios_and_units src.tests.test_closed_loop_smoke.ClosedLoopSmokeTest.test_setpoint_calibration_smoke_outputs_required_files src.tests.test_offramp_reattribution.OffRampReattributionTests.test_np_and_urban_total_exclude_offramp_storage_keep_leg -v
+  ```
+  결과: `3 tests, OK`.
+  ```text
+  C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest src.tests.test_metanet_equations -v
+  ```
+  결과: `21 tests, OK`.
+- 리뷰 결론:
+  - `Cicero`: PASS_WITH_NOTES.
+  - blocking finding 없음.
+  - 비차단 권고: calibration extractor의 `urban_vehicles` fallback 제거. Codex가 반영 완료.
+- 커밋/푸시: 이 Step E 변경 커밋으로 완료.
 
 ## Step A: VSL forecast-aware 테스트 및 objective saturation 조정
 

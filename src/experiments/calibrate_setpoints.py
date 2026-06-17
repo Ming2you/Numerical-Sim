@@ -54,12 +54,17 @@ def _extract_mfd_points(
             )
         )
         production_veh_h = production_veh / max(cfg.simulation.T_c_h, 1.0e-9)
+        if "urban_protected_accumulation_veh" not in state_row:
+            raise KeyError(
+                "state_timeseries row must include urban_protected_accumulation_veh "
+                "for N_P_crit calibration."
+            )
         points.append({
             "scenario": scenario_name,
             "urban_scale": float(urban_scale),
             "step": int(run_row.get("step", state_row.get("step", 0))),
             "time_sec": float(run_row.get("time_sec", state_row.get("time_sec", 0.0))),
-            "urban_accumulation_veh": float(state_row.get("urban_protected_accumulation_veh", state_row.get("urban_vehicles", 0.0))),
+            "urban_accumulation_veh": float(state_row["urban_protected_accumulation_veh"]),
             "urban_production_veh_h": production_veh_h,
             "net_inflow_veh_h": float(run_row.get("net_inflow", 0.0)),
             "urban_total_departures_veh": production_veh,
@@ -102,7 +107,8 @@ def _write_report(path: Path, summary: Dict[str, Any]) -> None:
         "## 방법",
         "",
         "- 여러 urban demand scale에 대해 baseline closed-loop simulation을 실행했습니다.",
-        "- `state_timeseries.csv`에 해당하는 row에서 urban accumulation을 기록했습니다.",
+        "- `state_timeseries.csv`의 `urban_protected_accumulation_veh`를 urban accumulation으로 기록했습니다.",
+        "- 이 값은 `TrafficState.protected_accumulation_veh(net)`이며, off-ramp storage는 제외하고 보호영역 내부 storage와 movement queue를 포함합니다.",
         "- run diagnostics의 `urban_total_departures_veh / T_c_h`를 production으로 기록했습니다.",
         "- 관측 production이 최대인 지점의 accumulation을 1차 `n_crit` 추정치로 선택했습니다.",
         "",

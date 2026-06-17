@@ -362,7 +362,7 @@ class LeaderConfig:
     w_boundary_in: float = 1.0
     N_P_star_range: List[float] = field(default_factory=lambda: [0.0, 500.0])
     N_UF_star_range: List[float] = field(default_factory=lambda: [0.0, 6000.0])
-    N_P_crit_veh: float = 354.809
+    N_P_crit_veh: float = 509.448830418254
     N_P_candidate_lower_factor: float = 0.90
     N_P_candidate_upper_factor: float = 1.05
     N_P_star_unit: str = "veh"

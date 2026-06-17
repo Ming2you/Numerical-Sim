@@ -86,7 +86,7 @@ class MetanetEquationTests(unittest.TestCase):
         self.assertEqual(cfg.simulation.K_cu, 36)
         self.assertEqual(cfg.leader.objective_mode, "follower_ttt")
         self.assertEqual(cfg.leader.N_P_star_unit, "veh")
-        self.assertAlmostEqual(cfg.leader.N_P_crit_veh, 556.081)
+        self.assertAlmostEqual(cfg.leader.N_P_crit_veh, 509.448830418254)
         self.assertLessEqual(cfg.leader.N_P_candidate_lower_factor, cfg.leader.N_P_candidate_upper_factor)
         self.assertEqual(cfg.leader.N_UF_star_unit, "veh_per_hour")
         self.assertGreaterEqual(cfg.evaluation.eps_balance, 0.0)

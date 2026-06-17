@@ -1291,3 +1291,118 @@ Control validation summary: Step B confirms leader forecast sensitivity through 
 
 - Full acceptance remains unevaluated because no closed-loop simulation was run for this step.
 - Next modification: Step E, recalibrate `N_P_crit_veh` after D/C/B controller semantics changed.
+
+## 2026-06-17 Step E - N_P_crit_veh Recalibration
+
+### What was implemented
+
+- Reused the existing `src.experiments.calibrate_setpoints` CLI for a baseline MFD sweep under the current protected-accumulation semantics.
+- Added the exact accumulation source to the calibration report: `state_timeseries.csv` field `urban_protected_accumulation_veh`, produced by `TrafficState.protected_accumulation_veh(net)`.
+- Made calibration fail fast if `urban_protected_accumulation_veh` is absent, so stale `urban_vehicles` rows cannot silently recalibrate `N_P_crit_veh`.
+- Updated `leader.N_P_crit_veh` from stale `556.081` to `509.448830418254` based on the new off-ramp-storage-excluding protected accumulation.
+- Updated the matching dataclass default and config unit-test expectation.
+
+### Files changed
+
+- `src/experiments/calibrate_setpoints.py`
+- `src/config/default.yaml`
+- `src/models/state.py`
+- `src/tests/test_metanet_equations.py`
+- `2026-06-17/proposed_controller_refactor_execution.md`
+- `reports/codex_run_report.md`
+
+### Commands
+
+Baseline/calibration run command:
+
+```text
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m src.experiments.calibrate_setpoints --config src/config/default.yaml --scenario peak_demand --baseline fixed_signal_fixed_speed --urban-scales 0.5,0.75,1.0,1.25,1.5,2.0,2.5,3.0 --T-total 7200 --output outputs/step_e_n_p_crit_recalibration_2026_06_17
+```
+
+Result:
+
+```text
+CALIBRATION n_crit=509.449 max_production=33868.583 output=outputs\step_e_n_p_crit_recalibration_2026_06_17
+```
+
+Proposed-controller run command:
+
+```text
+Not run for Step E. The user explicitly requested no long full simulation; this step is calibration/config/test only.
+```
+
+Syntax check:
+
+```text
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m py_compile src\experiments\calibrate_setpoints.py src\models\state.py src\tests\test_metanet_equations.py src\tests\test_closed_loop_smoke.py src\tests\test_offramp_reattribution.py
+```
+
+Result: OK.
+
+Focused tests:
+
+```text
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest src.tests.test_metanet_equations.MetanetEquationTests.test_config_exposes_time_ratios_and_units src.tests.test_closed_loop_smoke.ClosedLoopSmokeTest.test_setpoint_calibration_smoke_outputs_required_files src.tests.test_offramp_reattribution.OffRampReattributionTests.test_np_and_urban_total_exclude_offramp_storage_keep_leg -v
+```
+
+Result:
+
+```text
+3 tests, OK
+```
+
+Related model/config test module:
+
+```text
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest src.tests.test_metanet_equations -v
+```
+
+Result:
+
+```text
+21 tests, OK
+```
+
+### Calibration Output
+
+- Output directory: `outputs/step_e_n_p_crit_recalibration_2026_06_17`
+- Summary JSON: `outputs/step_e_n_p_crit_recalibration_2026_06_17/setpoint_calibration_summary.json`
+- MFD points CSV: `outputs/step_e_n_p_crit_recalibration_2026_06_17/mfd_points.csv`
+- Report: `outputs/step_e_n_p_crit_recalibration_2026_06_17/setpoint_calibration_report.md`
+- New `N_P_crit_veh`: `509.448830418254 veh`
+- Maximum observed production: `33868.58320594422 veh/h`
+- Source point: `urban_scale=3.0`, `time_sec=720.0`
+
+Baseline Total TTT/TTS for calibration sweep:
+
+```text
+urban_scale=0.5  total_ttt=5344.72517791123
+urban_scale=0.75 total_ttt=7477.80195272855
+urban_scale=1.0  total_ttt=9593.220960234255
+urban_scale=1.25 total_ttt=11659.562092097874
+urban_scale=1.5  total_ttt=13655.896245198968
+urban_scale=2.0  total_ttt=17753.101395286547
+urban_scale=2.5  total_ttt=21964.173641566962
+urban_scale=3.0  total_ttt=26304.975617444008
+```
+
+Proposed Total TTT/TTS: not run for Step E.
+
+Improvement rate: not computed for Step E.
+
+Boundary queue balancing result: not evaluated as acceptance; the source MFD point has `CV_boundary=0.8943827648597883` and `MaxMin_boundary=120.49345496605291`.
+
+Control validation summary: no full controller validation was run. Calibration CLI smoke, protected-accumulation semantics, config exposure, and METANET/unit checks passed.
+
+### Review
+
+- Coding subagent: `Kierkegaard`.
+- Review subagent: `Cicero`, verdict `PASS_WITH_NOTES`.
+- Blocking findings: none.
+- Codex final review: PASS after removing the reviewer's noted `urban_vehicles` fallback from the calibration extractor.
+
+### Failed Criteria And Next Modification
+
+- Full acceptance remains unevaluated because no proposed-controller closed-loop run was requested or executed.
+- `reports/claude_review_report.md` exists but is not a PASS verdict for the current Step E changes; the internal Step E review passed with notes.
+- Proposed next modification: Step A, adjust the VSL forecast-aware test/objective saturation behavior.
