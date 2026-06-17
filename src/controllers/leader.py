@@ -214,6 +214,9 @@ class Leader:
         excluded = 0.0
         for state in states:
             base += state.total_freeway_vehicles(net)
+            # off-ramp 램프 storage 재귀속(design 2026-06-17): urban total에서 빠진 램프
+            # storage를 freeway 쪽 base에 더한다(전체 base 보존 + freeway 귀속 일관).
+            base += state.off_ramp_storage_occupancy_veh(net)
             base += state.objective_urban_vehicles(net, exclude_boundary)
             if exclude_boundary:
                 excluded += state.boundary_leg_vehicles(net)
@@ -286,9 +289,13 @@ class Leader:
         else:
             base = state_base
         target_penalty = 0.0
+        boundary_in_queue_penalty = 0.0
         for s in states:
             n_p = s.protected_accumulation_veh(net)
             target_penalty += lc.w_P * max(0.0, n_p - lc.N_P_crit_veh)
+            # boundary_in(유입 대기) 큐 비용. leader가 경계에 차를 쌓아 base를 낮추는
+            # gaming을 막는다(design 변경 2, 2026-06-17).
+            boundary_in_queue_penalty += lc.w_boundary_in * s.boundary_in_queue_vehicles(net)
         density_excess, density_effective_count = self._density_penalty(states)
         density_penalty = lc.w_F * density_excess
         smooth = 0.0
@@ -302,13 +309,14 @@ class Leader:
             nash_residual_objective,
             nash_residual_control,
         )
-        total = base + target_penalty + density_penalty + smooth + conv
+        total = base + target_penalty + boundary_in_queue_penalty + density_penalty + smooth + conv
         return {
             "leader_base_accumulation": float(base),
             "leader_state_accumulation_base": float(state_base),
             "leader_follower_ttt_base": float(follower_objective),
             "leader_boundary_leg_excluded_veh": float(boundary_excluded),
             "leader_target_penalty": float(target_penalty),
+            "leader_boundary_in_queue_penalty": float(boundary_in_queue_penalty),
             "leader_density_excess": float(density_excess),
             "leader_density_penalty": float(density_penalty),
             "leader_density_effective_lane_weight_count": float(density_effective_count),

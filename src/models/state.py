@@ -358,6 +358,9 @@ class LeaderConfig:
     w_P: float = 1.0
     w_F: float = 1.0
     w_L: float = 0.05
+    # boundary_in(유입 대기) 큐 비용 가중. leader가 경계에 차를 쌓아 base를 낮추는 gaming을
+    # 막기 위해 boundary_in 큐도 비용으로 계상한다(design 변경 2, 2026-06-17). base와 동일 단위.
+    w_boundary_in: float = 1.0
     N_P_star_range: List[float] = field(default_factory=lambda: [0.0, 500.0])
     N_UF_star_range: List[float] = field(default_factory=lambda: [0.0, 6000.0])
     N_P_crit_veh: float = 354.809
@@ -646,9 +649,40 @@ class TrafficState:
             float(sum(self.urban_queue.values()) + sum(self.boundary_queue.values()))
         )
         if net is not None:
+            # off-ramp 램프 storage(`OR_*_storage`)는 freeway로 재귀속(design 2026-06-17)하므로
+            # urban 총 차량에서 제외한다. leg(off_ramp movement 점큐)는 urban에 유지된다.
+            off_ramp_storage_links = set(net.off_ramp_storage_link.values())
             for link, capacity in net.urban_link_storage_veh.items():
+                if link in off_ramp_storage_links:
+                    continue
                 total += max(0.0, capacity - self.urban_link_storage.get(link, capacity))
         return total
+
+    def off_ramp_storage_occupancy_veh(self, net) -> float:
+        """off-ramp 램프 storage(`OR_*_storage`)의 in-transit 점유[veh] 합.
+
+        off-ramp 재귀속(design 2026-06-17)에 따라 이 점유는 urban이 아니라 freeway TTT/
+        agent/누적으로 귀속된다. 램프 storage link 집합은 `net.off_ramp_storage_link`의 값.
+        """
+        total = 0.0
+        for storage_link in set(net.off_ramp_storage_link.values()):
+            capacity = net.urban_link_storage_veh.get(storage_link)
+            if capacity is None:
+                continue
+            total += max(0.0, capacity - self.urban_link_storage.get(storage_link, capacity))
+        return float(total)
+
+    def boundary_in_queue_vehicles(self, net) -> float:
+        """boundary_in movement(유입 대기) 큐 점유[veh] 합.
+
+        leader가 경계에 차를 쌓아 base를 낮추는 gaming을 막기 위해 leader objective에서
+        비용으로 계상한다(design 변경 2, 2026-06-17).
+        """
+        total = 0.0
+        for movement, spec in net.urban_movements.items():
+            if str(spec.get("kind", "")) == "boundary_in":
+                total += max(0.0, self.urban_movement_queue.get(movement, 0.0))
+        return float(total)
 
     def boundary_leg_vehicles(self, net) -> float:
         """Leader base에서 제외할 외부 boundary leg 점유[veh].
@@ -685,9 +719,15 @@ class TrafficState:
 
         진입 대기열(boundary_in 게이트 큐)·on-ramp 접근 대기열(x_on)은 경계 미터링 큐이므로
         제외한다. 그리드 라우팅 도입으로 내부 교차로 대기열(internal/boundary_out/off_ramp
-        kind)이 생겼고, 이들은 물리적으로 보호영역 안에 있으므로 N_P에 포함한다."""
+        kind)이 생겼고, 이들은 물리적으로 보호영역 안에 있으므로 N_P에 포함한다.
+
+        단 off-ramp 램프 storage(`OR_*_storage`)는 freeway로 재귀속하므로 N_P에서 제외한다
+        (design 2026-06-17). off_ramp movement 점큐(leg)는 정지선 대기라 urban이므로 유지."""
         total = 0.0
+        off_ramp_storage_links = set(net.off_ramp_storage_link.values())
         for link, capacity in net.urban_link_storage_veh.items():
+            if link in off_ramp_storage_links:
+                continue
             total += max(0.0, capacity - self.urban_link_storage.get(link, capacity))
         protected_kinds = {"internal", "boundary_out", "off_ramp"}
         for movement, spec in net.urban_movements.items():

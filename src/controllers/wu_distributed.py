@@ -555,10 +555,24 @@ class WuDistributedController:
                         for ramp in net.ramps
                         if net.ramp_to_freeway.get(ramp) == link
                     )
-                    # Wu 순수 TTS: Σ L·λ_eff·ρ(=segment 차량수) + ramp 큐. 비-Wu
-                    # density_penalty 항은 제거 — storage-aware probe가 capacity-drop을
+                    # off-ramp 램프 storage 재귀속(design 2026-06-17): 이 freeway link에서
+                    # 갈라지는 off-ramp의 storage 점유를 자기 TTS에 가산한다. probe storage는
+                    # _update_probe_offramp_storage가 후보 VSL별로 예측하므로, VSL↓→off-ramp
+                    # 유입↓→storage 점유↓가 자기 비용에 반영돼 metering이 emergent하게 발현.
+                    link_offramp_storage = 0.0
+                    for off_ramp in net.off_ramps:
+                        if net.off_ramp_from_freeway.get(off_ramp) != link:
+                            continue
+                        storage_link = net.off_ramp_storage_link.get(off_ramp, "")
+                        capacity = float(net.urban_link_storage_veh.get(storage_link, 0.0))
+                        if capacity <= 0.0:
+                            continue
+                        avail = float(probe.urban_link_storage.get(storage_link, capacity))
+                        link_offramp_storage += max(0.0, capacity - avail)
+                    # Wu 순수 TTS: Σ L·λ_eff·ρ(=segment 차량수) + ramp 큐 + off-ramp 램프 storage.
+                    # 비-Wu density_penalty 항은 제거 — storage-aware probe가 capacity-drop을
                     # TTS에 내생화하므로 별도 패널티 없이 VSL이 혼잡 시 작동한다.
-                    cost += (link_vehicles + link_ramp_queue) * dt_h
+                    cost += (link_vehicles + link_ramp_queue + link_offramp_storage) * dt_h
             # smoothness: segment별 직전값 대비 변화량 합.
             cost += smooth_w * sum(abs(v - prev_vec[i]) for i, v in enumerate(vec))
             if leader is not None:
@@ -733,6 +747,9 @@ class WuDistributedController:
         for s in states:
             n_p = s.total_urban_vehicles(net)
             n_f = s.total_freeway_vehicles(net)
+            # off-ramp 램프 storage 재귀속(design 2026-06-17): urban에서 빠진 램프 storage를
+            # freeway 쪽 비용으로 계상(total objective 보존 + freeway 귀속, plant 공통).
+            n_f += s.off_ramp_storage_occupancy_veh(net)
             total += n_p + n_f
             total += lc.w_P * max(0.0, s.protected_accumulation_veh(net) - lc.N_P_crit_veh)
             total += lc.w_F * sum(

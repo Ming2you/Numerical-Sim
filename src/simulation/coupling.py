@@ -155,6 +155,7 @@ def run_coupled_interval(
 
     freeway_ttt = 0.0
     urban_ttt = 0.0
+    offramp_storage_ttt_moved = 0.0  # urban→freeway로 옮긴 램프 storage TTT 누적(보존 진단).
     freeway_rows: list[Dict[str, float]] = []
     urban_rows: list[Dict[str, float]] = []
     accepted_offramp = 0.0
@@ -185,6 +186,11 @@ def run_coupled_interval(
                 ramp_release_veh_h=ramp_release,
             )
             urban_ttt += ur_ttt
+            # off-ramp 램프 storage 재귀속(design 2026-06-17): urban_substep이 urban_ttt에서
+            # 제외한 램프 storage 점유 TTT를 freeway_ttt로 옮긴다(보존: 총합 불변, T_u_h 단위 일관).
+            moved = float(ur_diag.get("offramp_storage_ttt", 0.0))
+            freeway_ttt += moved
+            offramp_storage_ttt_moved += moved
             urban_rows.append(ur_diag)
             urban_rows_in_freeway_step.append(ur_diag)
         sync_onramp_queues_to_freeway(state, cfg)
@@ -231,6 +237,7 @@ def run_coupled_interval(
         "coupling_movement_urban_model": 1.0,
         "coupling_offramp_arrivals_accepted_veh": float(accepted_offramp),
         "coupling_offramp_arrivals_rejected_veh": float(rejected_offramp),
+        "coupling_offramp_storage_ttt_moved_to_freeway": float(offramp_storage_ttt_moved),
     }
     fw_diag = _aggregate_freeway_diagnostics(
         freeway_rows,

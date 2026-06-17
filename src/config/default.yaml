@@ -190,6 +190,9 @@ leader:
   w_P: 1.0
   w_F: 1.0
   w_L: 0.05
+  # boundary_in(유입 대기) 큐 비용 가중(design 변경 2, 2026-06-17). leader가 경계에 차를
+  # 쌓아 base를 낮추는 gaming을 막기 위해 boundary_in 큐도 비용으로 계상한다. base와 동일 단위.
+  w_boundary_in: 1.0
   N_P_star_range:
   - 0.0
   - 850.0

@@ -203,8 +203,12 @@ class CentralizedMPC:
             # Spec 16.6: Wu centralized objective는 coupled plant의 urban/freeway TTS와
             # green/VSL variation이다. Proposed leader threshold penalty를 섞지 않는다.
             if trajectory_ttt is None:
+                # off-ramp 램프 storage 재귀속(design 2026-06-17): WU도 plant 공통이라
+                # 램프 storage를 freeway로 느낀다(total objective 보존 + freeway 귀속).
                 total = self.cfg.simulation.T_c_h * sum(
-                    s.total_urban_vehicles(net) + s.total_freeway_vehicles(net)
+                    s.total_urban_vehicles(net)
+                    + s.total_freeway_vehicles(net)
+                    + s.off_ramp_storage_occupancy_veh(net)
                     for s in states
                 )
             else:
@@ -213,6 +217,9 @@ class CentralizedMPC:
             total = 0.0
             for s in states:
                 total += s.total_urban_vehicles(net) + s.total_freeway_vehicles(net)
+                # off-ramp 램프 storage 재귀속(design 2026-06-17): urban에서 빠진 램프
+                # storage를 freeway TTS로 계상(total objective 보존 + freeway 귀속).
+                total += s.off_ramp_storage_occupancy_veh(net)
                 total += lc.w_P * max(0.0, s.protected_accumulation_veh(net) - lc.N_P_crit_veh)
                 total += lc.w_F * sum(
                     net.freeway_segment_length_km * net.freeway_lanes * max(0.0, rho - net.rho_crit)

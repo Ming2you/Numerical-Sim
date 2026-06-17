@@ -557,9 +557,32 @@ def _sync_legacy_queues(state: TrafficState, cfg: ExperimentConfig) -> None:
 
 
 def _storage_occupancy(state: TrafficState, cfg: ExperimentConfig) -> float:
-    """링크 in-transit 점유(cap−available) 합계. movement 큐는 포함하지 않는다."""
+    """링크 in-transit 점유(cap−available) 합계. movement 큐는 포함하지 않는다.
+
+    off-ramp 램프 storage(`OR_*_storage`)는 freeway로 재귀속(design 2026-06-17)하므로
+    urban 점유 합에서 제외한다(그 점유는 `_offramp_storage_occupancy`로 별도 집계).
+    """
+    off_ramp_storage_links = set(cfg.network.off_ramp_storage_link.values())
     total = 0.0
     for link, capacity in cfg.network.urban_link_storage_veh.items():
+        if link in off_ramp_storage_links:
+            continue
+        total += max(0.0, capacity - state.urban_link_storage.get(link, capacity))
+    return float(total)
+
+
+def _offramp_storage_occupancy(state: TrafficState, cfg: ExperimentConfig) -> float:
+    """off-ramp 램프 storage(`OR_*_storage`) in-transit 점유[veh] 합.
+
+    이 점유의 TTT는 freeway_ttt로 귀속된다(design 2026-06-17). urban_ttt에서는 빠지고
+    coupling이 이 값을 받아 freeway_ttt에 더한다(보존: 같은 양이 한쪽에서 빠져 다른 쪽에 더해짐).
+    """
+    off_ramp_storage_links = set(cfg.network.off_ramp_storage_link.values())
+    total = 0.0
+    for link in off_ramp_storage_links:
+        capacity = cfg.network.urban_link_storage_veh.get(link)
+        if capacity is None:
+            continue
         total += max(0.0, capacity - state.urban_link_storage.get(link, capacity))
     return float(total)
 
@@ -884,6 +907,11 @@ def urban_substep(
                 projection_protected_veh += q - qmax
             state.urban_movement_queue[movement] = qmax
 
+    # off-ramp 램프 storage 점유는 freeway로 재귀속(design 2026-06-17). _storage_occupancy가
+    # 이미 제외하므로 urban_ttt에서 자동으로 빠진다. 그 양의 TTT는 진단으로 노출해 coupling이
+    # freeway_ttt에 더한다(보존: urban에서 빠진 양 = freeway에 더해지는 양, 같은 T_u_h 단위).
+    offramp_storage_occupancy = _offramp_storage_occupancy(state, cfg)
+    offramp_storage_ttt = offramp_storage_occupancy * sim.T_u_h
     urban_ttt = (
         sum(state.urban_movement_queue.values())
         + _storage_occupancy(state, cfg)
@@ -922,6 +950,9 @@ def urban_substep(
     diagnostics["movement_queue_projection_protected_veh"] = float(projection_protected_veh)
     diagnostics["urban_storage_occupancy"] = _storage_occupancy(state, cfg)
     diagnostics["urban_link_occupancy_veh"] = _storage_occupancy(state, cfg)
+    # off-ramp 램프 storage 재귀속(design 2026-06-17): freeway_ttt로 보낼 점유·TTT.
+    diagnostics["offramp_storage_occupancy_veh"] = float(offramp_storage_occupancy)
+    diagnostics["offramp_storage_ttt"] = float(offramp_storage_ttt)
     # 보존 회계(proposal §8): 유입(게이트 service + off_ramp 복귀 + 외생 ramp 수요)
     # = 이탈(boundary_out sink + on_ramp 전이) + Δ누적. off_ramp 복귀는 coupling에서 집계.
     diagnostics["urban_gate_inflow_veh"] = float(urban_gate_inflow_veh)

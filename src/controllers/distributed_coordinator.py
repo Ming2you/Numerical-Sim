@@ -408,7 +408,23 @@ class DistributedCoordinator:
         lanes_for_link = lane_profile.get(agent.link, [net.freeway_lanes])
         lane_idx = agent.segment_index if 0 <= agent.segment_index < len(lanes_for_link) else len(lanes_for_link) - 1
         lane_loss = max(0.0, net.freeway_lanes - lanes_for_link[lane_idx])
-        desired = self._agent_vsl(density_ratio, lane_loss, current.vsl.get(agent.link, max(self.cfg.freeway_follower.vsl_set)))
+        # off-ramp 램프 storage 재귀속(design 2026-06-17): 이 freeway link에서 갈라지는
+        # off-ramp storage 점유[veh]를 계산해 freeway agent 자기 비용(objective)에 가산한다.
+        offramp_storage_veh = 0.0
+        for off_ramp in net.off_ramps:
+            if net.off_ramp_from_freeway.get(off_ramp) != agent.link:
+                continue
+            storage_link = net.off_ramp_storage_link.get(off_ramp, "")
+            capacity = float(net.urban_link_storage_veh.get(storage_link, 0.0))
+            if capacity <= 0.0:
+                continue
+            avail = float(state.urban_link_storage.get(storage_link, capacity))
+            offramp_storage_veh += max(0.0, capacity - avail)
+        desired = self._agent_vsl(
+            density_ratio,
+            lane_loss,
+            current.vsl.get(agent.link, max(self.cfg.freeway_follower.vsl_set)),
+        )
         density_excess = sum(max(0.0, rho - net.rho_crit) for rho in rhos)
         # 잔차는 달성가능 목표(min(target, Σ물리상한)) 기준 — 수요 부족으로 덜 방출한 것을
         # "추적 실패"로 만들어 urban 쪽에 가짜 freeway 압력을 보내지 않게 한다.
@@ -417,12 +433,16 @@ class DistributedCoordinator:
             sum(max(0.0, rho) * net.freeway_segment_length_km * net.freeway_lanes for rho in rhos)
             + self.cfg.freeway_follower.density_penalty * density_excess
             + 0.01 * metering_error
+            # off-ramp 램프 storage 점유를 자기 비용에 가산(design 2026-06-17). off-ramp가
+            # backup하면 freeway agent가 자기 비용 증가를 보고 VSL metering으로 반응한다.
+            + offramp_storage_veh
         )
         diagnostics = {
             f"agent_{agent.id}_density_excess": float(density_excess),
             f"agent_{agent.id}_metering_error": float(metering_error),
             f"agent_{agent.id}_min_receiving_factor": float(min_receiving),
             f"agent_{agent.id}_lane_loss": float(lane_loss),
+            f"agent_{agent.id}_offramp_storage_veh": float(offramp_storage_veh),
         }
         diagnostics.update({f"agent_{agent.id}_{key}": value for key, value in lane_diag.items()})
         return AgentSolve(
@@ -482,7 +502,12 @@ class DistributedCoordinator:
                 best_cost, best_target = cost, release
         return float(best_target)
 
-    def _agent_vsl(self, density_ratio: float, lane_loss: float, previous_vsl: float) -> float:
+    def _agent_vsl(
+        self,
+        density_ratio: float,
+        lane_loss: float,
+        previous_vsl: float,
+    ) -> float:
         vsl_set = sorted(float(v) for v in self.cfg.freeway_follower.vsl_set)
         max_vsl = max(vsl_set)
         if lane_loss > 0.5 or density_ratio > 1.25:

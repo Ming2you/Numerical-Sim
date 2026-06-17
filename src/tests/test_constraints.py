@@ -400,10 +400,14 @@ class ConstraintTests(unittest.TestCase):
             for values in state.freeway_density.values()
             for rho in values
         )
+        # design 변경 2(2026-06-17): leader objective에 boundary_in 큐 비용 항이 추가됨
+        # (w_boundary_in 기본 1.0 × boundary_in 큐 77.0 = 77.0). 정의 변경으로 정당히 늘어난 항.
+        boundary_in_queue = state.boundary_in_queue_vehicles(cfg.network)
         expected = (
             n_p
             + n_f
             + 2.0 * max(0.0, n_p_protected - 100.0)
+            + 1.0 * boundary_in_queue
             + 3.0 * density_excess
             + 0.5 * (abs(170.0 - 160.0) + abs(300.0 - 250.0))
         )
@@ -414,6 +418,7 @@ class ConstraintTests(unittest.TestCase):
         self.assertAlmostEqual(terms["leader_total_objective"], expected)
         self.assertAlmostEqual(terms["leader_boundary_leg_excluded_veh"], 77.0)
         self.assertAlmostEqual(terms["leader_target_penalty"], 2.0 * max(0.0, n_p_protected - 100.0))
+        self.assertAlmostEqual(terms["leader_boundary_in_queue_penalty"], 1.0 * boundary_in_queue)
 
     def test_leader_non_convergence_penalty_uses_residuals(self):
         cfg = ExperimentConfig.from_file(
