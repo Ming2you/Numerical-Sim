@@ -59,6 +59,7 @@ class UrbanFollower:
                 "queue_pressure": 0.0,
                 "density_pressure": 0.0,
                 "receiving_pressure": 0.0,
+                "offramp_storage_pressure": 0.0,
                 "total_pressure": 0.0,
             }
         infeasibility = getattr(freeway_response, "infeasibility", {}) or {}
@@ -70,6 +71,10 @@ class UrbanFollower:
         queue_overflow = float(infeasibility.get("ramp_queue_overflow", 0.0))
         density_excess = float(infeasibility.get("density_excess", 0.0))
         receiving_factor = float(infeasibility.get("min_ramp_receiving_factor", 1.0))
+        offramp_storage_pressure = max(
+            [float(value) for key, value in infeasibility.items() if key.startswith("offramp_storage_pressure_")]
+            or [0.0]
+        )
         metering_pressure = metering_residual / max(step_capacity, self.cfg.network.freeway_capacity_veh_h, 1.0e-9)
         queue_pressure = queue_overflow / max(self.cfg.network.ramp_queue_max_veh, 1.0e-9)
         density_pressure = density_excess / max(
@@ -78,7 +83,11 @@ class UrbanFollower:
         )
         receiving_pressure = max(0.0, 1.0 - receiving_factor)
         total_pressure = float(np.clip(
-            metering_pressure + queue_pressure + density_pressure + receiving_pressure,
+            metering_pressure
+            + queue_pressure
+            + density_pressure
+            + receiving_pressure
+            + offramp_storage_pressure,
             0.0,
             1.0,
         ))
@@ -88,6 +97,7 @@ class UrbanFollower:
             "queue_pressure": float(queue_pressure),
             "density_pressure": float(density_pressure),
             "receiving_pressure": float(receiving_pressure),
+            "offramp_storage_pressure": float(offramp_storage_pressure),
             "total_pressure": total_pressure,
         }
 
@@ -95,6 +105,7 @@ class UrbanFollower:
         self,
         state: TrafficState,
         forecast: Optional[list[DemandStep]],
+        freeway_response: object | None = None,
     ) -> Dict[str, float]:
         """phase별 horizon 누적 예측 도착량[veh]을 반환한다(forecast-aware green pressure).
 
@@ -116,6 +127,7 @@ class UrbanFollower:
             split = net.off_ramp_split_ratio.get(off_ramp, 0.0)
             flows = state.freeway_flow.get(link, [])
             offramp_flow[off_ramp] = max(0.0, float(flows[-1]) if flows else 0.0) * split
+        response_infeasibility = getattr(freeway_response, "infeasibility", {}) or {}
         arrivals: Dict[str, float] = {}
         for movement, spec in specs.items():
             phase = str(spec.get("phase", ""))
@@ -132,6 +144,13 @@ class UrbanFollower:
                 per_step = sum(max(0.0, s.ramp_arrival.get(ramp, 0.0)) for s in steps)
             elif kind == "off_ramp":
                 off_ramp = str(spec.get("off_ramp", ""))
+                selected_key = f"offramp_predicted_arrival_{off_ramp}_veh"
+                if selected_key in response_infeasibility:
+                    arrivals[phase] = arrivals.get(phase, 0.0) + beta * max(
+                        0.0,
+                        float(response_infeasibility.get(selected_key, 0.0)),
+                    )
+                    continue
                 # off-ramp 도달 유량은 forecast 본선 수요 비율로 스케일.
                 base_main = max(1.0e-9, float(steps[0].freeway_mainline.get(
                     net.off_ramp_from_freeway.get(off_ramp, ""), 0.0)))
@@ -463,6 +482,7 @@ class UrbanFollower:
         previous_control: Optional[ControlAction] = None,
         allocation_plan: Optional[AllocationResult] = None,
         forecast: Optional[list[DemandStep]] = None,
+        phase_arrival_coupling: Optional[Mapping[str, float]] = None,
     ) -> UrbanFollowerResult:
         ensure_urban_state(state, self.cfg)
         self._repair_diagnostics = {}
@@ -470,12 +490,21 @@ class UrbanFollower:
         # forecast-aware green pressure(진단 문서 §4): forecast가 명시되면 phase별 미래
         # 도착을 현재 큐에 더한다. None이면 빈 dict — 현재 큐만 쓰는 기존 동작 유지(하위
         # 호환). distributed coordinator만 forecast를 넘기므로 다른 호출처는 불변이다.
-        phase_arrivals = self._phase_arrival_forecast(state, forecast)
+        phase_arrivals = self._phase_arrival_forecast(state, forecast, freeway_response)
+        phase_coupling_total = float(sum(max(0.0, v) for v in (phase_arrival_coupling or {}).values()))
+        for phase, vehicles in (phase_arrival_coupling or {}).items():
+            phase_arrivals[phase] = phase_arrivals.get(phase, 0.0) + max(0.0, float(vehicles))
         if leader is None:
             # P-FO(spec 16.7, 2026-06-13 재정의): allocation module을 호출하지 않는다 —
             # green 자유탐색 + offset만 결정하고 movement service는 plant 포화유율
             # fallback(빈 allocation)에 맡긴다. 숨은 전역 target 없음.
-            return self._solve_leaderless(state, pressure, previous_control, phase_arrivals)
+            return self._solve_leaderless(
+                state,
+                pressure,
+                previous_control,
+                phase_arrivals,
+                phase_coupling_total,
+            )
         plan = allocation_plan or self.allocation_module.solve(state, leader)
         green = self._green_times(state, previous_control, freeway_response, plan, phase_arrivals)
         offsets = self._offsets(state, previous_control, green)
@@ -503,7 +532,13 @@ class UrbanFollower:
             "freeway_queue_pressure": pressure["queue_pressure"],
             "freeway_density_pressure": pressure["density_pressure"],
             "freeway_receiving_pressure": pressure["receiving_pressure"],
+            "freeway_offramp_storage_pressure": pressure["offramp_storage_pressure"],
             "freeway_total_pressure": pressure["total_pressure"],
+            "urban_phase_coupling_arrivals_veh": phase_coupling_total,
+            "freeway_selected_offramp_arrival_used": float(any(
+                key.startswith("offramp_predicted_arrival_")
+                for key in (getattr(freeway_response, "infeasibility", {}) or {})
+            )),
             "urban_accumulation_veh": float(state.protected_accumulation_veh(self.cfg.network)),
             "urban_accumulation_target_veh": float(leader.N_P_star) if leader is not None else 0.0,
             "urban_accumulation_error_veh": (
@@ -540,6 +575,7 @@ class UrbanFollower:
         pressure: Mapping[str, float],
         previous_control: Optional[ControlAction],
         phase_arrivals: Optional[Mapping[str, float]] = None,
+        phase_coupling_total: float = 0.0,
     ) -> UrbanFollowerResult:
         """PROPOSED-FOLLOWERS-ONLY — green 자유탐색 + offset, allocation 비제어."""
         green, search_cost = self._search_green_times(
@@ -558,7 +594,9 @@ class UrbanFollower:
             "B_out": balance["B_out"],
             "allocation_module_active": 0.0,
             "freeway_response_used": pressure["used"],
+            "freeway_offramp_storage_pressure": pressure["offramp_storage_pressure"],
             "freeway_total_pressure": pressure["total_pressure"],
+            "urban_phase_coupling_arrivals_veh": float(max(0.0, phase_coupling_total)),
             "urban_accumulation_veh": float(state.protected_accumulation_veh(self.cfg.network)),
             "urban_accumulation_target_veh": 0.0,
             "urban_accumulation_error_veh": 0.0,

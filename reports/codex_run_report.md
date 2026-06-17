@@ -1110,3 +1110,97 @@ Control validation summary: Step D unit tests confirm that `leader_total_objecti
 
 - Full acceptance remains unevaluated because no closed-loop simulation was run for this step.
 - Next modification: Step C, port Wu-style neighbor coupling into the proposed distributed follower.
+
+## 2026-06-17 Step C — Wu-Style Neighbor Coupling For Proposed Distributed Follower
+
+### What was implemented
+
+- Ported Wu-style neighbor coupling into the proposed `DistributedCoordinator`.
+- `urban -> freeway`: `u_on_*` now uses ramp-space-cap-free on-ramp reservoir inflow from current green decisions.
+- `freeway(off-ramp) -> urban`: selected off-ramp predicted arrival and storage pressure are passed into urban phase pressure.
+- `urban -> urban`: upstream green release rate is converted into downstream phase arrival pressure using same-origin/same-phase beta sums.
+- `freeway -> freeway`: adjacent segment density, speed, flow, and lane-loss pressure are exposed through coupling and used in freeway agent VSL/metering decisions.
+- Added direction-aware coupling diagnostics for ablation interpretation.
+
+### Files changed
+
+- `src/controllers/distributed_coordinator.py`
+- `src/controllers/urban_follower.py`
+- `src/tests/test_forecast_awareness.py`
+- `src/tests/test_constraints.py`
+- `2026-06-17/proposed_controller_refactor_execution.md`
+
+### Commands
+
+Baseline run command:
+
+```text
+Not run for Step C. This was a controller-coupling/unit-test step.
+```
+
+Proposed-controller run command:
+
+```text
+Not run for Step C. This was a controller-coupling/unit-test step.
+```
+
+Syntax check:
+
+```text
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m py_compile src\controllers\distributed_coordinator.py src\controllers\urban_follower.py src\tests\test_forecast_awareness.py src\tests\test_constraints.py
+```
+
+Result: OK.
+
+Focused Step C test command:
+
+```text
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest src.tests.test_forecast_awareness.ForecastAwarenessTests.test_onramp_coupling_preserves_green_difference_when_ramp_full src.tests.test_forecast_awareness.ForecastAwarenessTests.test_upstream_green_release_enters_downstream_phase_coupling src.tests.test_forecast_awareness.ForecastAwarenessTests.test_urban_follower_uses_selected_offramp_arrival_response src.tests.test_constraints.ConstraintTests.test_distributed_freeway_agent_reports_neighbor_pressure src.tests.test_constraints.ConstraintTests.test_distributed_ablation_diagnostics_report_blocked_coupling -v
+```
+
+Result:
+
+```text
+5 tests, OK
+```
+
+Broader Step C test command:
+
+```text
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest src.tests.test_forecast_awareness src.tests.test_constraints -v
+```
+
+Result:
+
+```text
+52 tests, 50 OK, 2 failures
+```
+
+The two remaining failures are the already scheduled later steps:
+
+- `test_leader_candidates_reflect_forecast_summary`: Step B will replace candidate-set comparison with candidate evaluation/ranking/selection sensitivity.
+- `test_freeway_vsl_uses_future_offramp_inflow`: Step A will adjust the saturated VSL fixture/objective check.
+
+### Metrics
+
+Baseline Total TTT/TTS: not run.
+
+Proposed Total TTT/TTS: not run.
+
+Improvement rate: not computed for Step C.
+
+Boundary queue balancing result: not run.
+
+Control validation summary: focused Step C tests confirm urban->freeway, freeway->urban, urban->urban, freeway->freeway coupling paths and ablation diagnostics.
+
+### Review
+
+- Coding subagent: `Anscombe`.
+- Review subagent: `Meitner`, initial verdict `PASS_WITH_NOTES`.
+- Codex final review: PASS after addressing review notes.
+- Re-review verdict: `PASS_WITH_NOTES`; previous findings were substantially resolved. Remaining note is only that `LOCAL_ONLY_COUPLING_PLAYERS` is summarized globally rather than per-agent.
+
+### Failed criteria and next modification
+
+- Full acceptance remains unevaluated because no closed-loop simulation was run for this step.
+- Next modification: Step B, replace the leader forecast test with evaluation/ranking/selection sensitivity.

@@ -24,7 +24,7 @@ D -> C -> B -> E -> A
 | Step | 주제 | 상태 | 커밋/푸시 |
 |---|---|---|---|
 | D | Leader objective를 제안 수식과 정합화 | 완료 | Step D 커밋으로 완료 |
-| C | Wu식 full neighbor coupling을 Proposed distributed follower에 이식 | 대기 | 미완료 |
+| C | Wu식 full neighbor coupling을 Proposed distributed follower에 이식 | 완료 | Step C 커밋으로 완료 |
 | B | Leader forecast 테스트를 후보집합이 아닌 평가/선택 기준으로 수정 | 대기 | 미완료 |
 | E | `N_P_crit_veh` 재보정 | 대기 | 미완료 |
 | A | VSL forecast-aware 테스트 및 objective saturation 조정 | 대기 | 미완료 |
@@ -83,11 +83,35 @@ Wu controller의 neighbor-coupling 철학을 Proposed distributed follower에도
 
 ### 담당/검토 기록
 
-- 코딩 subagent: 미배정
-- 리뷰 subagent: 미배정
-- Codex 최종 판정: 미완료
-- 검증: 미실행
-- 커밋/푸시: 미완료
+- 코딩 subagent: `Anscombe` (`019ed5b4-50ac-78e3-950b-3b127b25e357`)
+- 리뷰 subagent: `Meitner` (`019ed5c3-9082-78c1-9eb0-48987be3b78a`)
+- Codex 최종 판정: PASS. 리뷰 지적을 반영해 beta 집계, lane-loss consumption, metering factor, ablation diagnostics, metric semantics를 보정했다.
+- 구현 요약:
+  - urban -> freeway: `u_on_*` coupling을 ramp-space cap 없는 `estimate_onramp_reservoir_inflow(..., interval_h=T_c_h)` 기반으로 변경했다.
+  - freeway(off-ramp) -> urban: freeway agent가 선택한 VSL의 off-ramp별 predicted arrival/storage pressure를 UrbanFollower phase forecast/pressure로 전달한다.
+  - urban -> urban: upstream green release rate를 downstream phase arrival pressure `arr_*`로 전달하되, 같은 origin/phase의 beta 합을 사용한다.
+  - freeway -> freeway: 인접 segment density/speed/flow/lane-loss를 coupling으로 내보내고, neighbor pressure를 VSL cost와 ramp metering upper에 약하게 반영한다.
+  - ablation diagnostic을 `distributed_u_to_f_coupling_active`, `distributed_f_to_u_coupling_active`, `distributed_u_to_u_coupling_active`, `distributed_f_to_f_coupling_active`로 분리했다.
+- 검증:
+  ```text
+  C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m py_compile src\controllers\distributed_coordinator.py src\controllers\urban_follower.py src\tests\test_forecast_awareness.py src\tests\test_constraints.py
+  ```
+  결과: OK.
+  ```text
+  C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest src.tests.test_forecast_awareness.ForecastAwarenessTests.test_onramp_coupling_preserves_green_difference_when_ramp_full src.tests.test_forecast_awareness.ForecastAwarenessTests.test_upstream_green_release_enters_downstream_phase_coupling src.tests.test_forecast_awareness.ForecastAwarenessTests.test_urban_follower_uses_selected_offramp_arrival_response src.tests.test_constraints.ConstraintTests.test_distributed_freeway_agent_reports_neighbor_pressure src.tests.test_constraints.ConstraintTests.test_distributed_ablation_diagnostics_report_blocked_coupling -v
+  ```
+  결과: `5 tests, OK`.
+  ```text
+  C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest src.tests.test_forecast_awareness src.tests.test_constraints -v
+  ```
+  결과: `52 tests, 50 OK, 2 expected pending failures`.
+  - `test_leader_candidates_reflect_forecast_summary`: Step B에서 후보집합이 아닌 평가/선택 기준으로 수정 예정.
+  - `test_freeway_vsl_uses_future_offramp_inflow`: Step A에서 VSL saturation fixture/objective 조정 예정.
+- 리뷰 결론:
+  - `Meitner`: 1차 PASS_WITH_NOTES.
+  - Codex 보정 후 재리뷰: PASS_WITH_NOTES. 이전 findings는 실질적으로 해소됨.
+  - 남은 note: `LOCAL_ONLY_COUPLING_PLAYERS` active flag는 전역 요약이며 per-agent 차단 상태까지 표현하지 않는다. Stage 3 정밀 진단이 필요하면 후속으로 per-agent flag를 추가한다.
+- 커밋/푸시: 이 Step C 변경 커밋으로 완료
 
 ## Step B: Leader forecast 테스트 수정
 

@@ -3,6 +3,7 @@ import copy
 import unittest
 
 from src.controllers.distributed_coordinator import DistributedCoordinator
+from src.controllers.freeway_follower import FreewayFollowerResult
 from src.controllers.leader import Leader, LeaderAction
 from src.controllers.urban_follower import UrbanFollower
 from src.models.demand import DemandProfile, DemandStep, ScenarioConfig
@@ -109,6 +110,81 @@ class ForecastAwarenessTests(unittest.TestCase):
         )
 
     # ---------- (c) leader 후보가 forecast 요약 반영 ----------
+    def test_onramp_coupling_preserves_green_difference_when_ramp_full(self):
+        """urban-to-freeway u_on coupling은 ramp space cap 때문에 green 차이를 잃지 않는다."""
+        coord = DistributedCoordinator(self.cfg)
+        state = TrafficState.initial(self.cfg)
+        demand = DemandProfile(self.cfg, ScenarioConfig("empty", ramp_scale=0.0)).at(0.0)
+        ramp = "R_D_W"
+        state.ramp_queue[ramp] = self.net.ramp_queue_max_veh
+        for movement in self.net.on_ramp_to_movement[ramp]:
+            state.urban_movement_queue[movement] = 0.0
+        state.urban_movement_queue["D_N_to_onW"] = 80.0
+
+        low = ControlAction.fixed(self.cfg)
+        high = ControlAction.fixed(self.cfg)
+        low.green_times["D_p1"] = self.net.green_min
+        low.green_times["D_p2"] = self.net.effective_green_total - low.green_times["D_p1"]
+        high.green_times["D_p1"] = self.net.green_max
+        high.green_times["D_p2"] = self.net.effective_green_total - high.green_times["D_p1"]
+        for movement in self.net.on_ramp_to_movement[ramp]:
+            low.inflow_outflow_allocation[movement] = self.net.movement_capacity_veh_h
+            high.inflow_outflow_allocation[movement] = self.net.movement_capacity_veh_h
+
+        low_coupling = coord._extract_coupling(state.copy(), low, demand)
+        high_coupling = coord._extract_coupling(state.copy(), high, demand)
+
+        self.assertGreater(high_coupling[f"u_on_{ramp}"], low_coupling[f"u_on_{ramp}"])
+        self.assertGreater(high_coupling[f"u_on_{ramp}"], 0.0)
+
+    def test_upstream_green_release_enters_downstream_phase_coupling(self):
+        """urban-to-urban arr_* coupling은 상류 green release를 하류 phase pressure로 보낸다."""
+        coord = DistributedCoordinator(self.cfg)
+        state = TrafficState.initial(self.cfg)
+        demand = DemandProfile(self.cfg, ScenarioConfig("empty", urban_scale=0.0, ramp_scale=0.0)).at(0.0)
+        d_p1_entries = coord._upstream_leaving_map["D_p1"]
+        self.assertIn(("A", "A_E_to_S", 1.0), d_p1_entries)
+
+        low = ControlAction.fixed(self.cfg)
+        high = ControlAction.fixed(self.cfg)
+        low.green_times["A_p2"] = self.net.green_min
+        low.green_times["A_p1"] = self.net.effective_green_total - low.green_times["A_p2"]
+        high.green_times["A_p2"] = self.net.green_max
+        high.green_times["A_p1"] = self.net.effective_green_total - high.green_times["A_p2"]
+
+        low_coupling = coord._extract_coupling(state.copy(), low, demand)
+        high_coupling = coord._extract_coupling(state.copy(), high, demand)
+
+        self.assertGreater(high_coupling["arr_D_p1"], low_coupling["arr_D_p1"])
+
+    def test_urban_follower_uses_selected_offramp_arrival_response(self):
+        """freeway-to-urban coupling은 선택된 off-ramp arrival를 phase forecast에 반영한다."""
+        state = TrafficState.initial(self.cfg)
+        follower = UrbanFollower(self.cfg)
+        previous = ControlAction.fixed(self.cfg)
+        freeway_response = FreewayFollowerResult(
+            ramp_metering={},
+            vsl={},
+            objective_value=0.0,
+            infeasibility={
+                "offramp_predicted_arrival_OR_D_W_veh": 500.0,
+                "offramp_storage_pressure_OR_D_W": 0.8,
+            },
+        )
+
+        result = follower.solve(
+            state.copy(),
+            self.leader,
+            self.forecast[0],
+            freeway_response,
+            previous,
+            forecast=_scale_future_demand(self.forecast, 0.1),
+        )
+
+        self.assertEqual(result.metrics["freeway_selected_offramp_arrival_used"], 1.0)
+        self.assertGreater(result.metrics["freeway_offramp_storage_pressure"], 0.0)
+        self.assertGreater(result.green_times["D_p1"], self.net.effective_green_total / 2.0)
+
     def test_leader_candidates_reflect_forecast_summary(self):
         """미래 ramp/boundary 수요가 큰 forecast는 first-demand만 쓸 때와 다른 후보를 만든다."""
         state = TrafficState.initial(self.cfg)

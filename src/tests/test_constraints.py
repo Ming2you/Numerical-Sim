@@ -212,6 +212,49 @@ class ConstraintTests(unittest.TestCase):
 
         self.assertLess(high_inflow_target, low_inflow_target)
 
+    def test_distributed_freeway_agent_reports_neighbor_pressure(self):
+        cfg = short_config()
+        coordinator = DistributedCoordinator(cfg)
+        state = TrafficState.initial(cfg)
+        demand = DemandProfile(cfg, ScenarioConfig("test")).at(0.0)
+        previous = ControlAction.fixed(cfg)
+        agent = next(item for item in coordinator.freeway_agents if item.id == "F_W1")
+        state.freeway_density["FW_W"][2] = cfg.network.rho_crit + 25.0
+        state.freeway_speed["FW_W"][2] = cfg.network.v_min
+        state.refresh_freeway_flow(cfg.network)
+        coupling = coordinator._extract_coupling(state, previous, demand)
+        coupling["lane_loss_FW_W_seg2"] = 1.0
+
+        solve = coordinator._solve_freeway_agent(
+            agent,
+            state,
+            LeaderAction(0.0, 1200.0),
+            [demand],
+            previous,
+            coupling,
+        )
+
+        self.assertGreater(solve.diagnostics["agent_F_W1_freeway_neighbor_pressure"], 0.0)
+        self.assertLess(solve.diagnostics["agent_F_W1_freeway_neighbor_metering_factor"], 1.0)
+
+    def test_distributed_ablation_diagnostics_report_blocked_coupling(self):
+        cfg = short_config()
+        state = TrafficState.initial(cfg)
+        demand = DemandProfile(cfg, ScenarioConfig("test")).at(0.0)
+        previous = ControlAction.fixed(cfg)
+        coordinator = DistributedCoordinator(cfg, ablation="NO_U_TO_F_INFO")
+
+        result = coordinator.solve(
+            state,
+            LeaderAction(0.0, 1200.0),
+            [demand],
+            previous,
+        )
+
+        self.assertEqual(result.diagnostics["distributed_u_to_f_coupling_active"], 0.0)
+        self.assertEqual(result.diagnostics["nash_freeway_used_coupled_prediction"], 0.0)
+        self.assertEqual(result.diagnostics["distributed_f_to_u_coupling_active"], 1.0)
+
     def test_leader_candidate_budget_covers_extremes_and_previous_action(self):
         cfg = short_config()
         state = TrafficState.initial(cfg)

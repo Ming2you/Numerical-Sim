@@ -19,8 +19,10 @@ from src.models.demand import DemandStep
 from src.models.metanet import effective_lane_profile
 from src.models.state import ControlAction, ExperimentConfig, TrafficState
 from src.models.urban_queue_model import (
+    _movement_capacity_flow,
+    _phase_green_fraction,
     ensure_urban_state,
-    estimate_onramp_green_release_flows,
+    estimate_onramp_reservoir_inflow,
     movement_specs,
 )
 
@@ -245,9 +247,61 @@ class DistributedCoordinator:
         self.urban_agents, self.freeway_agents = build_agent_specs(cfg)
         self.urban_follower = UrbanFollower(cfg)
         self._repair_diagnostics: Dict[str, float] = {}
+        self._specs = movement_specs(cfg)
+        self._phase_movements: Dict[str, Dict[str, list[str]]] = {}
+        for signal in cfg.network.signals:
+            self._phase_movements[signal] = {
+                phase_id: [
+                    movement
+                    for movement, spec in self._specs.items()
+                    if spec.get("phase") == f"{signal}_{phase_id}"
+                ]
+                for phase_id in ("p1", "p2")
+            }
+        self._upstream_leaving_map = self._build_upstream_leaving_map()
         # coupling player 식별(plan §9.2): ramp/off-ramp 결합을 가진 agent — topology에서 자동.
         self.coupling_urban_ids = {a.id for a in self.urban_agents if a.ramps or a.off_ramps}
         self.coupling_freeway_ids = {a.id for a in self.freeway_agents if a.ramps or a.off_ramps}
+
+    def _build_upstream_leaving_map(self) -> Dict[str, list[tuple[str, str, float]]]:
+        """Wu `_upstream_leaving_map`와 같은 urban-to-urban phase coupling 지도.
+
+        하류 phase pressure는 특정 internal movement 하나가 아니라 같은 incoming
+        approach에서 같은 phase에 서는 모든 turn split의 합을 본다. 그래야 상류 green
+        release가 downstream approach 전체 도착압으로 전달된다.
+        """
+        net = self.cfg.network
+        signal_set = set(net.signals)
+        producers_by_link: Dict[str, list[tuple[str, str]]] = {}
+        for up_movement, up_spec in self._specs.items():
+            dest = str(up_spec.get("destination", ""))
+            up_signal = str(up_spec.get("signal", ""))
+            if dest and up_signal in signal_set:
+                producers_by_link.setdefault(dest, []).append((up_signal, up_movement))
+
+        upstream_map: Dict[str, list[tuple[str, str, float]]] = {}
+        for signal in net.signals:
+            for phase_id, movements in self._phase_movements[signal].items():
+                entries: list[tuple[str, str, float]] = []
+                beta_by_origin: Dict[str, float] = {}
+                for movement in movements:
+                    spec = self._specs[movement]
+                    origin = str(spec.get("origin", ""))
+                    if not origin:
+                        continue
+                    beta_by_origin[origin] = beta_by_origin.get(origin, 0.0) + float(spec.get("beta", 0.0))
+                for origin, beta in beta_by_origin.items():
+                    for up_signal, up_movement in producers_by_link.get(origin, []):
+                        entries.append((up_signal, up_movement, beta))
+                upstream_map[f"{signal}_{phase_id}"] = entries
+        return upstream_map
+
+    def _signal_leaving_rate(self, movement: str, control: ControlAction) -> float:
+        """상류 movement green release rate[veh/h]를 downstream phase pressure로 보낸다."""
+        spec = self._specs[movement]
+        green_fraction = _phase_green_fraction(control, self.cfg, spec)
+        cap_flow = _movement_capacity_flow(control, self.cfg, movement, spec)
+        return float(green_fraction * cap_flow)
 
     def _block_u_to_f(self, agent: AgentSpec) -> bool:
         """이 freeway agent가 urban 예측 정보(u_on 등)를 보면 안 되는가."""
@@ -302,6 +356,74 @@ class DistributedCoordinator:
                 total += max(0.0, base_flow * scale * split) * dt_h
         return float(total)
 
+    def _forecast_offramp_arrivals_by_ramp(
+        self,
+        state: TrafficState,
+        forecast: list[DemandStep],
+        link: str,
+    ) -> Dict[str, float]:
+        """link 집계와 같은 회계로 off-ramp별 horizon arrival[veh]을 만든다."""
+        net = self.cfg.network
+        dt_h = self.cfg.simulation.T_c_h
+        horizon = max(1, self.cfg.mpc.horizon_steps)
+        steps = forecast[: horizon]
+        flows = state.freeway_flow.get(link, [])
+        base_flow = float(flows[-1]) if flows else 0.0
+        base_mainline = max(1.0e-9, float(forecast[0].freeway_mainline.get(link, 0.0)))
+        out: Dict[str, float] = {}
+        for off_ramp in net.off_ramps:
+            if net.off_ramp_from_freeway.get(off_ramp) != link:
+                continue
+            split = net.off_ramp_split_ratio.get(off_ramp, 0.0)
+            total = 0.0
+            for step in steps:
+                scale = max(0.0, float(step.freeway_mainline.get(link, 0.0))) / base_mainline
+                total += max(0.0, base_flow * scale * split) * dt_h
+            out[off_ramp] = float(total)
+        return out
+
+    def _freeway_neighbor_pressure(
+        self,
+        agent: AgentSpec,
+        state: TrafficState,
+        coupling: Mapping[str, float],
+        lane_profile: Mapping[str, list[float]],
+    ) -> float:
+        """인접 segment 상태를 VSL/metring 판단에 넣는 freeway-to-freeway coupling pressure."""
+        net = self.cfg.network
+        rhos = state.freeway_density.get(agent.link, [])
+        speeds = state.freeway_speed.get(agent.link, [])
+        flows = state.freeway_flow.get(agent.link, [])
+        lanes = lane_profile.get(agent.link, [net.freeway_lanes for _ in rhos])
+        if agent.segment_index < 0 or not rhos:
+            return 0.0
+        pressure = 0.0
+        for idx in (agent.segment_index - 1, agent.segment_index + 1):
+            if idx < 0 or idx >= len(rhos):
+                continue
+            rho = float(coupling.get(f"rho_{agent.link}_seg{idx}", rhos[idx]))
+            speed = float(coupling.get(
+                f"speed_{agent.link}_seg{idx}",
+                speeds[idx] if idx < len(speeds) else net.v_free,
+            ))
+            flow = float(coupling.get(
+                f"flow_{agent.link}_seg{idx}",
+                flows[idx] if idx < len(flows) else 0.0,
+            ))
+            lane_loss = max(
+                0.0,
+                float(coupling.get(
+                    f"lane_loss_{agent.link}_seg{idx}",
+                    net.freeway_lanes - float(lanes[idx] if idx < len(lanes) else net.freeway_lanes),
+                )),
+            )
+            density_pressure = max(0.0, rho - net.rho_crit)
+            speed_pressure = max(0.0, (net.v_free - speed) / max(net.v_free, 1.0e-9))
+            flow_pressure = max(0.0, flow / max(net.freeway_capacity_veh_h, 1.0e-9) - 1.0)
+            pressure += density_pressure + 0.25 * net.rho_crit * speed_pressure + 0.25 * net.rho_crit * flow_pressure
+            pressure += 0.5 * lane_loss
+        return float(max(0.0, pressure))
+
     def solve(
         self,
         state: TrafficState,
@@ -351,7 +473,16 @@ class DistributedCoordinator:
             freeway_response = self._freeway_response(freeway_solves)
             urban_solves = [
                 self._fixed_urban_solve(agent) if self._urban_player_fixed(agent)
-                else self._solve_urban_agent(agent, state, leader, forecast, freeway_response, current, allocation_plan)
+                else self._solve_urban_agent(
+                    agent,
+                    state,
+                    leader,
+                    forecast,
+                    freeway_response,
+                    current,
+                    allocation_plan,
+                    coupling,
+                )
                 for agent in self.urban_agents
             ]
             candidate = self._merge_agent_controls(
@@ -404,6 +535,13 @@ class DistributedCoordinator:
         net = self.cfg.network
         dt_h = self.cfg.simulation.T_f_h
         demand = forecast[0]
+        lane_profile, lane_diag = effective_lane_profile(state, self.cfg)
+        neighbor_pressure = self._freeway_neighbor_pressure(agent, state, coupling, lane_profile)
+        neighbor_metering_factor = 1.0 - 0.15 * float(np.clip(
+            neighbor_pressure / max(2.0 * net.rho_crit, 1.0e-9),
+            0.0,
+            1.0,
+        ))
         link_capacity = sum(net.ramp_capacity_veh_h[ramp] for ramp in agent.ramps)
         total_capacity = max(sum(net.ramp_capacity_veh_h.values()), 1.0e-9)
         upper: Dict[str, float] = {}
@@ -422,7 +560,11 @@ class DistributedCoordinator:
             # w_r만 사용(zero-order hold). 물리 차량 이동은 plant에서 그대로 일어난다.
             urban_release = 0.0 if self._block_u_to_f(agent) else max(0.0, coupling.get(f"u_on_{ramp}", 0.0))
             available = state.ramp_queue.get(ramp, 0.0) / max(dt_h, 1.0e-9) + urban_release
-            upper[ramp] = min(net.ramp_capacity_veh_h[ramp], available, net.freeway_capacity_veh_h * receiving)
+            upper[ramp] = min(
+                net.ramp_capacity_veh_h[ramp],
+                available,
+                net.freeway_capacity_veh_h * receiving * neighbor_metering_factor,
+            )
             weights[ramp] = state.ramp_queue.get(ramp, 0.0) + urban_release * self.cfg.simulation.T_c_h + 1.0
         if leader is not None:
             target = max(0.0, leader.N_UF_star) * link_capacity / total_capacity
@@ -431,7 +573,6 @@ class DistributedCoordinator:
             # 수준을 고른다 — 후보 분율을 1-구획 merge 밀도 예측으로 평가해 최소 비용 선택.
             target = self._leaderless_metering_target(agent, state, upper, demand)
         ramp_metering = _project_to_target(target, upper, weights)
-        lane_profile, lane_diag = effective_lane_profile(state, self.cfg)
         all_rhos = state.freeway_density.get(agent.link, [])
         rhos = [all_rhos[agent.segment_index]] if 0 <= agent.segment_index < len(all_rhos) else all_rhos
         max_density = max(rhos) if rhos else 0.0
@@ -443,6 +584,7 @@ class DistributedCoordinator:
         # off-ramp storage 점유[veh]를 계산해 freeway agent 자기 비용(objective)에 가산한다.
         offramp_storage_veh = 0.0
         offramp_capacity_veh = 0.0
+        offramp_storage_pressure: Dict[str, float] = {}
         for off_ramp in net.off_ramps:
             if net.off_ramp_from_freeway.get(off_ramp) != agent.link:
                 continue
@@ -451,16 +593,19 @@ class DistributedCoordinator:
             if capacity <= 0.0:
                 continue
             avail = float(state.urban_link_storage.get(storage_link, capacity))
-            offramp_storage_veh += max(0.0, capacity - avail)
+            occupied = max(0.0, capacity - avail)
+            offramp_storage_veh += occupied
             offramp_capacity_veh += capacity
+            offramp_storage_pressure[off_ramp] = float(occupied / max(capacity, 1.0e-9))
         # forecast horizon에 걸친 off-ramp 예측 유입[veh] — VSL이 낮을수록 diverge
         # 도달량이 줄어 off-ramp storage 유입이 줄어드는 emergence를 후보 평가에 반영한다.
-        offramp_forecast_veh = self._forecast_offramp_arrivals(state, forecast, agent.link)
+        offramp_forecast_by_ramp = self._forecast_offramp_arrivals_by_ramp(state, forecast, agent.link)
+        offramp_forecast_veh = sum(offramp_forecast_by_ramp.values())
         prev_vsl = current.vsl.get(agent.link, max(self.cfg.freeway_follower.vsl_set))
         desired, vsl_eval_count = self._search_agent_vsl(
             agent,
             rhos,
-            lane_loss,
+            lane_loss + 0.05 * neighbor_pressure,
             prev_vsl,
             offramp_storage_veh,
             offramp_forecast_veh,
@@ -482,28 +627,51 @@ class DistributedCoordinator:
             offramp_storage_veh,
             offramp_capacity_veh,
         )
+        vsl_fraction = self._offramp_release_fraction(desired)
+        selected_offramp_arrival = {
+            off_ramp: float(vehicles * vsl_fraction)
+            for off_ramp, vehicles in offramp_forecast_by_ramp.items()
+        }
+        horizon_h = self.cfg.simulation.T_c_h * max(1, len(forecast[: max(1, self.cfg.mpc.horizon_steps)]))
         diagnostics = {
             f"agent_{agent.id}_density_excess": float(density_excess),
             f"agent_{agent.id}_metering_error": float(metering_error),
             f"agent_{agent.id}_min_receiving_factor": float(min_receiving),
             f"agent_{agent.id}_lane_loss": float(lane_loss),
+            f"agent_{agent.id}_freeway_neighbor_pressure": float(neighbor_pressure),
+            f"agent_{agent.id}_freeway_neighbor_metering_factor": float(neighbor_metering_factor),
             f"agent_{agent.id}_offramp_storage_veh": float(offramp_storage_veh),
             f"agent_{agent.id}_offramp_forecast_veh": float(offramp_forecast_veh),
             f"agent_{agent.id}_vsl_candidates": float(vsl_eval_count),
             f"agent_{agent.id}_vsl_selected": float(desired),
         }
+        for off_ramp, vehicles in selected_offramp_arrival.items():
+            diagnostics[f"agent_{agent.id}_offramp_selected_arrival_{off_ramp}_veh"] = float(vehicles)
+            diagnostics[f"agent_{agent.id}_offramp_selected_flow_{off_ramp}"] = float(
+                vehicles / max(horizon_h, 1.0e-9)
+            )
+            diagnostics[f"agent_{agent.id}_offramp_storage_pressure_{off_ramp}"] = float(
+                offramp_storage_pressure.get(off_ramp, 0.0)
+            )
         diagnostics.update({f"agent_{agent.id}_{key}": value for key, value in lane_diag.items()})
+        infeasibility = {
+            "metering_tracking_residual": float(metering_error),
+            "density_excess": float(density_excess),
+            "min_ramp_receiving_factor": float(min_receiving),
+            "ramp_projection_first_step_capacity": float(sum(upper.values())),
+        }
+        for off_ramp, vehicles in selected_offramp_arrival.items():
+            infeasibility[f"offramp_predicted_arrival_{off_ramp}_veh"] = float(vehicles)
+            infeasibility[f"offramp_predicted_flow_{off_ramp}"] = float(vehicles / max(horizon_h, 1.0e-9))
+            infeasibility[f"offramp_storage_pressure_{off_ramp}"] = float(
+                offramp_storage_pressure.get(off_ramp, 0.0)
+            )
         return AgentSolve(
             agent_id=agent.id,
             objective=float(objective),
             ramp_metering=ramp_metering,
             vsl={agent.link: desired},
-            infeasibility={
-                "metering_tracking_residual": float(metering_error),
-                "density_excess": float(density_excess),
-                "min_ramp_receiving_factor": float(min_receiving),
-                "ramp_projection_first_step_capacity": float(sum(upper.values())),
-            },
+            infeasibility=infeasibility,
             diagnostics=diagnostics,
         )
 
@@ -671,6 +839,41 @@ class DistributedCoordinator:
                 best_cost, best_vsl = cost, float(vsl)
         return float(best_vsl), len(candidates)
 
+    def _phase_arrival_coupling(
+        self,
+        agent: AgentSpec,
+        coupling: Mapping[str, float],
+    ) -> Dict[str, float]:
+        """Wu식 arr_* flow[veh/h]를 UrbanFollower의 horizon arrival[veh]로 변환한다."""
+        dt_h = self.cfg.simulation.T_c_h
+        horizon = max(1, self.cfg.mpc.horizon_steps)
+        out: Dict[str, float] = {}
+        for phase_id in ("p1", "p2"):
+            phase = f"{agent.signal}_{phase_id}"
+            flow = max(0.0, float(coupling.get(f"arr_{phase}", 0.0)))
+            if flow > 0.0:
+                out[phase] = flow * dt_h * horizon
+        return out
+
+    def _coupling_active_flags(self) -> Dict[str, float]:
+        """ablation 설정을 반영한 direction별 strategic coupling 활성 플래그."""
+        u_to_f = 0.0 if self.ablation in {
+            "NO_U_TO_F_INFO",
+            "NO_CROSS_NETWORK_INFO",
+            "LOCAL_ONLY_COUPLING_PLAYERS",
+        } else 1.0
+        f_to_u = 0.0 if self.ablation in {
+            "NO_F_TO_U_INFO",
+            "NO_CROSS_NETWORK_INFO",
+            "LOCAL_ONLY_COUPLING_PLAYERS",
+        } else 1.0
+        return {
+            "distributed_u_to_f_coupling_active": u_to_f,
+            "distributed_f_to_u_coupling_active": f_to_u,
+            "distributed_u_to_u_coupling_active": 1.0,
+            "distributed_f_to_f_coupling_active": 1.0,
+        }
+
     def _solve_urban_agent(
         self,
         agent: AgentSpec,
@@ -680,14 +883,23 @@ class DistributedCoordinator:
         freeway_response: FreewayFollowerResult,
         current: ControlAction,
         allocation_plan: Optional[AllocationResult],
+        coupling: Mapping[str, float],
     ) -> AgentSolve:
         demand = forecast[0]
         # NO_F_TO_U/LOCAL_ONLY ablation: freeway 예측 압력 정보 차단 — urban은 측정된
         # 현재 off-ramp 도착(plant 경유)만 disturbance로 받는다.
         if self._block_f_to_u(agent):
             freeway_response = None
+        phase_arrival_coupling = self._phase_arrival_coupling(agent, coupling)
         result = self.urban_follower.solve(
-            state.copy(), leader, demand, freeway_response, current, allocation_plan, forecast=forecast,
+            state.copy(),
+            leader,
+            demand,
+            freeway_response,
+            current,
+            allocation_plan,
+            forecast=forecast,
+            phase_arrival_coupling=phase_arrival_coupling,
         )
         specs = movement_specs(self.cfg)
         green = {
@@ -743,6 +955,7 @@ class DistributedCoordinator:
         metering_residual = 0.0
         step_capacity = 0.0
         min_receiving = 1.0
+        coupling_payload: Dict[str, float] = {}
         for solve in solves:
             ramp_metering.update(solve.ramp_metering)
             objective += solve.objective
@@ -750,18 +963,25 @@ class DistributedCoordinator:
             metering_residual += solve.infeasibility.get("metering_tracking_residual", 0.0)
             step_capacity += solve.infeasibility.get("ramp_projection_first_step_capacity", 0.0)
             min_receiving = min(min_receiving, solve.infeasibility.get("min_ramp_receiving_factor", 1.0))
+            for key, value in solve.infeasibility.items():
+                if key.startswith(("offramp_predicted_arrival_", "offramp_predicted_flow_")):
+                    coupling_payload[key] = coupling_payload.get(key, 0.0) + float(value)
+                elif key.startswith("offramp_storage_pressure_"):
+                    coupling_payload[key] = max(coupling_payload.get(key, 0.0), float(value))
+        infeasibility = {
+            "density_excess": float(density_excess),
+            "metering_tracking_residual": float(metering_residual),
+            "ramp_projection_first_step_capacity": float(step_capacity),
+            "min_ramp_receiving_factor": float(min_receiving),
+            "freeway_follower_coupled_prediction": 0.0,
+            "freeway_follower_lightweight_prediction": 1.0,
+        }
+        infeasibility.update(coupling_payload)
         return FreewayFollowerResult(
             ramp_metering=ramp_metering,
             vsl=vsl,
             objective_value=float(objective),
-            infeasibility={
-                "density_excess": float(density_excess),
-                "metering_tracking_residual": float(metering_residual),
-                "ramp_projection_first_step_capacity": float(step_capacity),
-                "min_ramp_receiving_factor": float(min_receiving),
-                "freeway_follower_coupled_prediction": 0.0,
-                "freeway_follower_lightweight_prediction": 1.0,
-            },
+            infeasibility=infeasibility,
         )
 
     def _aggregate_link_vsl(self, solves: list[AgentSolve]) -> Dict[str, float]:
@@ -936,17 +1156,27 @@ class DistributedCoordinator:
     ) -> Dict[str, float]:
         ensure_urban_state(state, self.cfg)
         net = self.cfg.network
-        onramp = estimate_onramp_green_release_flows(
+        # Spec 3.4/Wu coupling: ramp queue 공간 cap을 빼고 green 후보가 만든 접근부
+        # reservoir inflow[veh/h]를 freeway agent에 전달한다.
+        onramp = estimate_onramp_reservoir_inflow(
             state.copy(),
             control,
             demand,
             self.cfg,
-            interval_h=self.cfg.simulation.T_f_h,
+            interval_h=self.cfg.simulation.T_c_h,
         )
         values: Dict[str, float] = {}
         for ramp, value in onramp.items():
             values[f"u_on_{ramp}"] = float(value)
             values[f"w_ramp_{ramp}"] = float(state.ramp_queue.get(ramp, 0.0))
+        # urban→urban coupling: 상류 green release rate를 하류 phase arrival pressure로 보낸다.
+        for signal in net.signals:
+            for phase_id in ("p1", "p2"):
+                phase = f"{signal}_{phase_id}"
+                arrival_flow = 0.0
+                for _up_signal, up_movement, beta in self._upstream_leaving_map.get(phase, []):
+                    arrival_flow += beta * self._signal_leaving_rate(up_movement, control)
+                values[f"arr_{phase}"] = float(max(0.0, arrival_flow))
         for off_ramp in net.off_ramps:
             link = net.off_ramp_from_freeway[off_ramp]
             split = net.off_ramp_split_ratio.get(off_ramp, 0.0)
@@ -955,8 +1185,16 @@ class DistributedCoordinator:
         for link in net.freeway_links:
             rhos = state.freeway_density.get(link, [])
             speeds = state.freeway_speed.get(link, [])
+            flows = state.freeway_flow.get(link, [])
+            lanes = state.freeway_effective_lanes.get(link, [net.freeway_lanes for _ in rhos])
             values[f"rho_boundary_{link}"] = float(rhos[-1] if rhos else 0.0)
             values[f"speed_boundary_{link}"] = float(speeds[-1] if speeds else 0.0)
+            for idx, rho in enumerate(rhos):
+                values[f"rho_{link}_seg{idx}"] = float(rho)
+                values[f"speed_{link}_seg{idx}"] = float(speeds[idx] if idx < len(speeds) else net.v_free)
+                values[f"flow_{link}_seg{idx}"] = float(flows[idx] if idx < len(flows) else 0.0)
+                lane_eff = float(lanes[idx] if idx < len(lanes) else net.freeway_lanes)
+                values[f"lane_loss_{link}_seg{idx}"] = float(max(0.0, net.freeway_lanes - lane_eff))
         for agent in self.urban_agents:
             values[f"n_{agent.id}"] = float(sum(
                 state.urban_movement_queue.get(movement, 0.0)
@@ -989,8 +1227,12 @@ class DistributedCoordinator:
             "distributed_iterations": float(iteration),
             "nash_mutual_response_active": 1.0,
             "nash_urban_used_freeway_response": 1.0,
-            "nash_freeway_used_coupled_prediction": 0.0,
         }
+        coupling_flags = self._coupling_active_flags()
+        out.update(coupling_flags)
+        out["nash_freeway_used_coupled_prediction"] = coupling_flags["distributed_u_to_f_coupling_active"]
+        out["nash_urban_used_freeway_response"] = coupling_flags["distributed_f_to_u_coupling_active"]
+        out["distributed_neighbor_coupling_active"] = float(max(coupling_flags.values()))
         for agent in self.urban_agents + self.freeway_agents:
             out[f"distributed_agent_{agent.id}_active"] = 1.0
         for solve in freeway_solves + urban_solves:
