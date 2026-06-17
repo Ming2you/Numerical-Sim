@@ -939,3 +939,102 @@ Control validation summary:
 - Next modification:
   - Re-run a longer targeted scenario after inspecting the new term breakdown.
   - Focus on why Stackelberg still shifts delay from freeway to urban when Nash convergence is poor.
+
+## 2026-06-17: Peak 7200s leader diagnosis, current code before demand-compatible ceiling implementation
+
+### What was implemented
+
+- No controller fix was applied in this attempt.
+- Ran a targeted 7200s `peak_demand` comparison to diagnose why the Stackelberg leader does not keep the protected-network accumulation near the critical target under peak demand.
+- Inspected leader targets, actual accumulation, freeway/urban TTT split, throughput, terminal vehicles, convergence, and allocation logs.
+
+### Files changed
+
+- `reports/codex_run_report.md`
+
+Generated output directory:
+
+```text
+outputs\peak_7200_leader_diagnosis_current
+```
+
+### Run commands
+
+Baseline follower-only command:
+
+```text
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m src.experiments.six_controller_comparison --scenario peak_demand --T-total 7200 --controllers PROPOSED-FOLLOWERS-ONLY,PROPOSED-STACKELBERG --relaxed-quantized-controls --relaxed-fast-mode --output outputs\peak_7200_leader_diagnosis_current
+```
+
+Proposed Stackelberg command:
+
+```text
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m src.experiments.six_controller_comparison --scenario peak_demand --T-total 7200 --controllers PROPOSED-FOLLOWERS-ONLY,PROPOSED-STACKELBERG --relaxed-quantized-controls --relaxed-fast-mode --output outputs\peak_7200_leader_diagnosis_current
+```
+
+### Metric comparison
+
+| Controller | Total TTT/TTS | Total Delay | Freeway TTT | Urban TTT | Throughput | Terminal Total | Solver Converged |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `PROPOSED-FOLLOWERS-ONLY` | 7172.074 | 6028.054 | 1579.712 | 5592.361 | 10839.8 | 7688.8 | 0.975 |
+| `PROPOSED-STACKELBERG` | 8638.964 | 7494.944 | 336.029 | 8302.935 | 10321.1 | 8726.2 | 0.0 |
+
+Improvement rate against follower-only:
+
+```text
+100 * (7172.074 - 8638.964) / 7172.074 = -20.45%
+```
+
+Delay improvement:
+
+```text
+100 * (6028.054 - 7494.944) / 6028.054 = -24.33%
+```
+
+Boundary queue / accumulation result:
+
+- `N_P_crit = 556.081`.
+- Follower-only `N_P` mean/final: `854.24 / 1593.33`.
+- Stackelberg `N_P` mean/final: `958.42 / 1633.88`.
+- Follower-only `N_P` excess area over critical: `770.24 veh*h`.
+- Stackelberg `N_P` excess area over critical: `948.67 veh*h`.
+- Result: FAIL. The leader path does not hold `N_P` at or near the critical value; it worsens protected-network over-critical exposure.
+
+Control validation summary:
+
+- Both controllers pass authority validation.
+- Stackelberg dramatically lowers freeway TTT (`1579.712 -> 336.029`) and ramp/on-ramp queues, but this is not a network benefit because urban TTT rises much more (`5592.361 -> 8302.935`), throughput falls, and terminal vehicles increase.
+- The Stackelberg run is also Nash-nonconverged over this run (`solver_converged_rate = 0.0`).
+
+### Main diagnostic finding
+
+The dominant current-code issue appears to be a hidden control-path asymmetry rather than only a leader objective-weight issue.
+
+- `ControlAction.uncontrolled()` leaves `inflow_outflow_allocation` empty, so follower-only plant simulation falls back to the physical movement saturation capacity.
+- `ControlAction.fixed()` initializes every urban movement allocation to `0.5 * movement_capacity_veh_h`.
+- The Stackelberg coordinator starts from `ControlAction.fixed()` when a leader is present.
+- The merge step starts from `current.inflow_outflow_allocation`, so movements not explicitly overwritten by the allocation module keep the fixed half-capacity values.
+- The allocation module controls boundary/ramp-related movements, but internal urban movements are not explicitly replanned; therefore internal urban movements stay capped at `700 veh/h` in the Stackelberg path while follower-only effectively uses `1400 veh/h` fallback capacity.
+
+Observed from `control_timeseries.csv`:
+
+- Follower-only internal movement allocation values are absent/zero in the log, matching empty allocation fallback behavior.
+- Stackelberg internal movement allocation values are exactly `700.0 veh/h` throughout.
+
+This explains the peak failure pattern: the leader protects freeway/ramp states and lowers freeway TTT, but the urban network is silently capacity-throttled internally, so protected-network accumulation cannot be regulated near critical and urban TTT/terminal backlog grow.
+
+### Failed criteria and next modification
+
+- Full acceptance: FAIL.
+- Total TTT/TTS improvement is negative.
+- Delay improvement is negative.
+- Throughput is lower.
+- Terminal total vehicles are higher.
+- `N_P` critical regulation is worse.
+- Nash convergence is poor.
+
+Proposed next modification:
+
+- Remove the hidden internal-movement half-capacity cap from the leader-enabled path before changing leader theory.
+- Use an uncontrolled/empty allocation fallback for non-controlled movements, or explicitly clear non-allocation-module/internal movement keys before plant simulation.
+- Re-run the same `peak_demand` 7200s follower-only vs Stackelberg comparison after that fix.
