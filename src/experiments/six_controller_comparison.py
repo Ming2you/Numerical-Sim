@@ -114,6 +114,16 @@ class _ControllerAdapter:
                 "leader_candidate_count": candidates,
                 "leader_objective": float(result.leader_objective),
             }
+        diag.update({
+            "relaxed_quantized_controls": float(self.cfg.mpc.relaxed_quantized_controls),
+            "relaxed_fast_mode": float(self.cfg.mpc.relaxed_fast_mode),
+            "relaxed_rounding_mode_floor": float(self.cfg.mpc.relaxed_rounding_mode == "floor"),
+            "relaxed_rounding_mode_nearest": float(self.cfg.mpc.relaxed_rounding_mode == "nearest"),
+            "green_quantization_residual_sec": float(control.diagnostics.get("green_quantization_residual_sec", 0.0)),
+            "vsl_quantization_residual_km_h": float(control.diagnostics.get("vsl_quantization_residual_km_h", 0.0)),
+            "green_repair_count": float(control.diagnostics.get("green_repair_count", 0.0)),
+            "vsl_repair_count": float(control.diagnostics.get("vsl_repair_count", 0.0)),
+        })
         diag["computation_time_sec"] = time.perf_counter() - start
         self.previous = control
         return control, diag
@@ -303,6 +313,19 @@ def main(argv: Optional[List[str]] = None) -> None:
     parser.add_argument("--controllers", default=",".join(PRIMARY_CONTROLLERS))
     parser.add_argument("--delay-eps", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument(
+        "--relaxed-quantized-controls",
+        action="store_true",
+        help="Enable spec 17 relaxed continuous targets with quantized feasible controls.",
+    )
+    parser.add_argument(
+        "--relaxed-fast-mode",
+        action="store_true",
+        help="Enable relaxed controls and apply the spec 17 screening solver budgets.",
+    )
+    parser.add_argument("--relaxed-rounding-mode", choices=["floor", "nearest"], default=None)
+    parser.add_argument("--relaxed-green-quantum-sec", type=float, default=None)
+    parser.add_argument("--relaxed-vsl-quantum-km-h", type=float, default=None)
     args = parser.parse_args(argv)
 
     overrides: Dict[str, Any] = {}
@@ -310,18 +333,49 @@ def main(argv: Optional[List[str]] = None) -> None:
         overrides["simulation"] = {"T_total": args.T_total}
     if args.seed is not None:
         overrides.setdefault("simulation", {})["random_seed"] = args.seed
-    cfg = ExperimentConfig.from_file(args.config, overrides)
-    scenario = load_scenarios(args.scenarios_config)[args.scenario]
+    if args.relaxed_quantized_controls or args.relaxed_fast_mode:
+        overrides.setdefault("mpc", {})["relaxed_quantized_controls"] = True
+    if args.relaxed_fast_mode:
+        # Spec 17.3 screening budget: make the computational shortcut explicit in the CLI
+        # rather than silently changing defaults whenever the config flag is present.
+        overrides.setdefault("mpc", {})["relaxed_fast_mode"] = True
+        overrides.setdefault("mpc", {})["leader_candidate_count"] = 5
+        overrides.setdefault("mpc", {})["max_nash_iter"] = 3
+        overrides.setdefault("mpc", {})["optimizer_maxiter"] = 16
+        overrides.setdefault("mpc", {})["optimizer_n_starts"] = 1
+        overrides.setdefault("freeway_follower", {})["freeway_prediction_horizon_steps"] = 3
+    if args.relaxed_rounding_mode is not None:
+        overrides.setdefault("mpc", {})["relaxed_rounding_mode"] = args.relaxed_rounding_mode
+    if args.relaxed_green_quantum_sec is not None:
+        overrides.setdefault("mpc", {})["relaxed_green_quantum_sec"] = args.relaxed_green_quantum_sec
+    if args.relaxed_vsl_quantum_km_h is not None:
+        overrides.setdefault("mpc", {})["relaxed_vsl_quantum_km_h"] = args.relaxed_vsl_quantum_km_h
+    base_cfg = ExperimentConfig.from_file(args.config, overrides)
+    scenarios = load_scenarios(args.scenarios_config)
+    if args.scenario == "all":
+        scenario_names = list(scenarios)
+    else:
+        scenario_names = [name.strip() for name in args.scenario.split(",") if name.strip()]
+    unknown = [name for name in scenario_names if name not in scenarios]
+    if unknown:
+        raise SystemExit(f"Unknown scenario(s): {', '.join(unknown)}. Available: {', '.join(sorted(scenarios))}")
     # 시나리오 한정 off-ramp split override를 cfg.network에 단일 주입(plant+모든 controller 공유).
-    cfg = apply_scenario_network_overrides(cfg, scenario)
     out = Path(args.output)
     out.mkdir(parents=True, exist_ok=True)
     requested = [c.strip() for c in args.controllers.split(",") if c.strip()]
+    if len(scenario_names) != 1:
+        raise SystemExit(
+            "This runner executes one scenario per invocation; run it once per scenario for all-scenario screening."
+        )
+    scenario_name = scenario_names[0]
+    scenario = scenarios[scenario_name]
+    # Scenario overrides are injected after config overrides so all controllers share the same plant.
+    cfg = apply_scenario_network_overrides(base_cfg.with_updates({}), scenario)
 
     # free-flow reference는 시나리오/seed당 1회 — 여섯 controller 공통(spec 16.11).
     reference = compute_free_flow_reference(cfg, scenario)
     _write_csv(out / "free_flow_reference.csv", [{
-        "scenario": args.scenario,
+        "scenario": scenario_name,
         "seed": cfg.simulation.random_seed,
         "total_ttt": reference.total_ttt,
         "urban_ttt": reference.urban_ttt,
@@ -330,7 +384,7 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     summaries: Dict[str, Dict[str, Any]] = {}
     for controller_id in requested:
-        result = run_controller(cfg, scenario, controller_id, out / "runs" / args.scenario / controller_id)
+        result = run_controller(cfg, scenario, controller_id, out / "runs" / scenario_name / controller_id)
         summaries[controller_id] = summarize_controller(cfg, controller_id, result, reference)
         print(f"{controller_id}: ttt={summaries[controller_id]['total_ttt']:.1f} "
               f"delay={summaries[controller_id]['total_delay']:.1f} "
@@ -350,10 +404,10 @@ def main(argv: Optional[List[str]] = None) -> None:
     if pair_rows:
         _write_csv(out / "paired_comparisons.csv", pair_rows)
     (out / "summary.json").write_text(
-        json.dumps({"scenario": args.scenario, "summaries": summaries}, indent=2, ensure_ascii=False),
+        json.dumps({"scenario": scenario_name, "summaries": summaries}, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
-    print(f"STAGE1 scenario={args.scenario} controllers={len(summaries)} output={out}")
+    print(f"STAGE1 scenario={scenario_name} controllers={len(summaries)} output={out}")
 
 
 if __name__ == "__main__":

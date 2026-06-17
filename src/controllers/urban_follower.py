@@ -5,6 +5,11 @@ from typing import Dict, Mapping, Optional
 
 import numpy as np
 
+from src.controllers.relaxed_quantization import (
+    accumulate_repair_diagnostics,
+    queue_pressure_green_target,
+    repair_green_pair,
+)
 from src.controllers.inflow_outflow_allocation import (
     AllocationResult,
     INFLOW_KINDS,
@@ -43,6 +48,7 @@ class UrbanFollower:
     def __init__(self, cfg: ExperimentConfig):
         self.cfg = cfg
         self.allocation_module = InflowOutflowAllocationModule(cfg)
+        self._repair_diagnostics: Dict[str, float] = {}
 
     def _freeway_pressure(self, freeway_response: object | None) -> Dict[str, float]:
         """Freeway follower 결과를 urban 신호/배분이 사용할 압력 지표로 바꾼다."""
@@ -133,6 +139,12 @@ class UrbanFollower:
                 p1 = total - p2
             if allocation_plan is not None:
                 p1, p2 = self._clamp_green_to_allocation_band(signal, p1, p2, phase_setpoints)
+            if self.cfg.mpc.relaxed_quantized_controls:
+                # Spec 17.5 proposed follower relaxed: allocation/pressure로 얻은 연속 green도
+                # plant 적용 전 동일한 quantized repair를 거친다.
+                repaired = repair_green_pair(p1, self.cfg)
+                accumulate_repair_diagnostics(self._repair_diagnostics, green=repaired)
+                p1, p2 = repaired.p1, repaired.p2
             green[f"{signal}_p1"] = float(p1)
             green[f"{signal}_p2"] = float(p2)
         return green
@@ -228,6 +240,26 @@ class UrbanFollower:
                 float(previous.green_times.get(f"{signal}_p1", total / 2.0))
                 if previous else total / 2.0
             )
+            if self.cfg.mpc.relaxed_quantized_controls:
+                # Spec 17.5 P-FO relaxed: grid search를 pressure split 하나로 대체하고
+                # 공통 repair가 cycle sum과 green bound를 보장한다.
+                repaired = repair_green_pair(
+                    queue_pressure_green_target(q0["p1"], q0["p2"], self.cfg),
+                    self.cfg,
+                )
+                accumulate_repair_diagnostics(self._repair_diagnostics, green=repaired)
+                q = dict(q0)
+                cost = 0.0
+                for _ in range(horizon):
+                    for pid, g in (("p1", repaired.p1), ("p2", repaired.p2)):
+                        service = (g / max(net.cycle_length, 1.0e-9)) * sat[pid] * dt_h
+                        q[pid] = max(0.0, q[pid] - service)
+                    cost += (q["p1"] + q["p2"]) * dt_h
+                cost += smooth_w * abs(repaired.p1 - prev_p1)
+                green[f"{signal}_p1"] = repaired.p1
+                green[f"{signal}_p2"] = repaired.p2
+                objective += cost
+                continue
             best_p1, best_cost = prev_p1, float("inf")
             for p1 in np.linspace(net.green_min, net.green_max, 7):
                 p2 = total - p1
@@ -375,6 +407,7 @@ class UrbanFollower:
         allocation_plan: Optional[AllocationResult] = None,
     ) -> UrbanFollowerResult:
         ensure_urban_state(state, self.cfg)
+        self._repair_diagnostics = {}
         pressure = self._freeway_pressure(freeway_response)
         if leader is None:
             # P-FO(spec 16.7, 2026-06-13 재정의): allocation module을 호출하지 않는다 —
@@ -419,6 +452,7 @@ class UrbanFollower:
         }
         metrics.update(allocation_metrics)
         metrics.update(balance)
+        metrics.update(self._repair_diagnostics)
         metrics.update(boundary_indices(state.boundary_queue.values(), self.cfg.network.boundary_queue_max_veh))
         smooth = 0.0
         if previous_control:
@@ -466,6 +500,7 @@ class UrbanFollower:
             "urban_net_inflow_target_veh_h": 0.0,
         }
         metrics.update(balance)
+        metrics.update(self._repair_diagnostics)
         metrics.update(boundary_indices(state.boundary_queue.values(), self.cfg.network.boundary_queue_max_veh))
         return UrbanFollowerResult(
             green_times=green,

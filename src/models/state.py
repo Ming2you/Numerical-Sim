@@ -344,6 +344,12 @@ class MPCConfig:
     urban_freeway_tts_weight_alpha: float = 1.0
     optimizer_maxiter: int = 40
     optimizer_n_starts: int = 2
+    relaxed_quantized_controls: bool = False
+    relaxed_fast_mode: bool = False
+    relaxed_green_quantum_sec: float = 1.0
+    relaxed_vsl_quantum_km_h: float = 10.0
+    relaxed_rounding_mode: str = "floor"
+    relaxed_wu_vsl_include_neutral: bool = True
 
 
 @dataclass
@@ -461,6 +467,12 @@ class ExperimentConfig:
             raise ValueError("mpc.follower_solver_mode must be two_block or distributed.")
         if self.mpc.distributed_coupling_tol <= 0.0:
             raise ValueError("mpc.distributed_coupling_tol must be positive.")
+        if self.mpc.relaxed_green_quantum_sec <= 0.0:
+            raise ValueError("mpc.relaxed_green_quantum_sec must be positive.")
+        if self.mpc.relaxed_vsl_quantum_km_h <= 0.0:
+            raise ValueError("mpc.relaxed_vsl_quantum_km_h must be positive.")
+        if self.mpc.relaxed_rounding_mode not in {"floor", "nearest"}:
+            raise ValueError("mpc.relaxed_rounding_mode must be floor or nearest.")
         cap_drop = self.freeway_offramp_capacity_drop
         if cap_drop.lane_reduction < 0.0:
             raise ValueError("freeway_offramp_capacity_drop.lane_reduction must be non-negative.")

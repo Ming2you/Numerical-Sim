@@ -86,6 +86,7 @@ class NashSolver:
                 infeasibility={**fw.infeasibility, **urban.infeasibility},
                 diagnostics={
                     **urban.metrics,
+                    **fw.diagnostics,
                     "freeway_follower_coupled_prediction": fw.infeasibility.get(
                         "freeway_follower_coupled_prediction",
                         0.0,
@@ -113,6 +114,8 @@ class NashSolver:
                     "freeway_follower_coupled_prediction",
                     0.0,
                 )),
+                **urban.metrics,
+                **fw.diagnostics,
             }
             if obj <= best_obj + 1.0e-12:
                 best_diagnostics = dict(diagnostics)

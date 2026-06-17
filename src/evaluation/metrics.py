@@ -221,8 +221,15 @@ def validate_controls(
     vsl_change_violations = 0
     for prev, cur in zip(controls, controls[1:]):
         for link in cfg.network.freeway_links:
-            if abs(cur.get(f"vsl_{link}", 0.0) - prev.get(f"vsl_{link}", 0.0)) > cfg.freeway_follower.max_vsl_step + 1e-9:
-                vsl_change_violations += 1
+            keys = [f"vsl_{link}"] + [
+                f"vsl_{link}_seg{i}"
+                for i in range(cfg.network.freeway_segments_per_link)
+            ]
+            for key in keys:
+                if key not in cur and key not in prev:
+                    continue
+                if abs(cur.get(key, 0.0) - prev.get(key, 0.0)) > cfg.freeway_follower.max_vsl_step + 1e-9:
+                    vsl_change_violations += 1
     cycle_errors = []
     green_min_v = 0
     green_max_v = 0

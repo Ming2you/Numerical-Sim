@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import product
 from typing import Dict, Iterable, Optional
 
 import numpy as np
 
 from src.controllers.leader import LeaderAction
+from src.controllers.relaxed_quantization import accumulate_repair_diagnostics, repair_vsl_value
 from src.models.demand import DemandStep
 from src.models.metanet import compute_ramp_release_flows, freeway_substep
 from src.models.state import ControlAction, ExperimentConfig, TrafficState, segment_vsl
@@ -23,6 +24,7 @@ class FreewayFollowerResult:
     vsl: Dict[str, float]
     objective_value: float
     infeasibility: Dict[str, float]
+    diagnostics: Dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
@@ -115,6 +117,7 @@ class FreewayFollower:
 
     def __init__(self, cfg: ExperimentConfig):
         self.cfg = cfg
+        self._repair_diagnostics: Dict[str, float] = {}
 
     def _as_forecast(self, demand: DemandStep | Iterable[DemandStep]) -> list[DemandStep]:
         if isinstance(demand, DemandStep):
@@ -272,6 +275,26 @@ class FreewayFollower:
             baseline[link] = float(min(prev_vec) if prev_vec else max(vsl_set))
             candidates: list[Dict[str, float]] = [baseline]
             seen = {tuple(round(prev_vec[i], 6) for i in range(n_segments))}
+
+            if self.cfg.mpc.relaxed_quantized_controls:
+                # Spec 17.5 proposed follower relaxed: 연속 density-pressure VSL target을 만들고
+                # 공통 repair로 vsl_set 및 max_vsl_step을 보장한다.
+                densities = state.freeway_density.get(link, [])
+                vec: list[float] = []
+                for i, prev_i in enumerate(prev_vec):
+                    rho = float(densities[i]) if i < len(densities) else self.cfg.network.rho_crit
+                    pressure = max(0.0, rho / max(self.cfg.network.rho_crit, 1.0e-9) - 0.9)
+                    target = max(vsl_set) - 25.0 * min(2.0, pressure)
+                    repaired = repair_vsl_value(target, prev_i, self.cfg)
+                    accumulate_repair_diagnostics(self._repair_diagnostics, vsl=repaired)
+                    vec.append(repaired.value)
+                key = tuple(round(v, 6) for v in vec)
+                if key not in seen:
+                    candidate = {f"{link}__seg{j}": float(vec[j]) for j in range(n_segments)}
+                    candidate[link] = float(min(vec))
+                    candidates.append(candidate)
+                out[link] = candidates
+                continue
 
             per_segment_options: list[list[float]] = []
             for i, prev_i in enumerate(prev_vec):
@@ -604,6 +627,7 @@ class FreewayFollower:
         previous_control: Optional[ControlAction] = None,
     ) -> FreewayFollowerResult:
         fc = self.cfg.freeway_follower
+        self._repair_diagnostics = {}
         forecast = self._as_forecast(demand)
         ramp_metering, vsl, evaluation, projection = self._choose_horizon_sequence(
             state,
@@ -638,4 +662,5 @@ class FreewayFollower:
                 "freeway_follower_coupled_prediction": 0.0,
                 "freeway_follower_lightweight_prediction": 1.0,
             },
+            diagnostics=dict(self._repair_diagnostics),
         )

@@ -711,3 +711,141 @@ C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\p
 
 - Full acceptance criteria are not evaluated in this pass because no closed-loop baseline/proposed simulation was run.
 - Remaining risk: total freeway length changed from `1.5 km` to `2.0 km`; future closed-loop comparisons should be regenerated under the new topology before interpreting TTT improvements.
+
+## 2026-06-17: relaxed-quantized fast controller mode implementation
+
+### 구현 내용
+
+- `docs/spec/17_relaxed_quantized_fast_mode.md` 기준으로 relaxed-quantized controller mode를 추가했습니다.
+- `mpc.relaxed_quantized_controls=false` 기본값에서는 기존 full/grid/enumeration 경로가 유지되도록 분기했습니다.
+- 명시 config/dataclass 필드 추가: `relaxed_quantized_controls`, `relaxed_fast_mode`, `relaxed_green_quantum_sec`, `relaxed_vsl_quantum_km_h`, `relaxed_rounding_mode`, `relaxed_wu_vsl_include_neutral`.
+- 공통 green/VSL quantization/repair helper를 추가했습니다.
+- WU-CD-F relaxed mode에서 urban green 7-point grid를 pressure split + repair로 대체하고, freeway segment-level VSL full Cartesian enumeration을 relaxed target vector 및 optional neutral max-VSL vector 평가로 축소했습니다.
+- proposed followers / Stackelberg distributed follower는 relaxed mode에서 green split과 heuristic VSL output을 공통 repair로 통과합니다.
+- centralized MPC는 relaxed mode에서 vector decode 후 green/VSL 공통 repair를 적용합니다.
+- `--relaxed-fast-mode` CLI는 relaxed mode를 켜고 screening budget(`leader_candidate_count=5`, `max_nash_iter=3`, `optimizer_maxiter=16`, `optimizer_n_starts=1`, `freeway_prediction_horizon_steps=3`)을 명시적으로 적용합니다.
+- six-controller decision diagnostics에 relaxed mode flag와 quantization/repair diagnostic columns를 추가했습니다.
+
+### 변경 파일
+
+- `src/config/default.yaml`
+- `src/controllers/centralized_mpc.py`
+- `src/controllers/distributed_coordinator.py`
+- `src/controllers/freeway_follower.py`
+- `src/controllers/relaxed_quantization.py`
+- `src/controllers/urban_follower.py`
+- `src/controllers/wu_distributed.py`
+- `src/experiments/six_controller_comparison.py`
+- `src/models/state.py`
+- `src/tests/test_constraints.py`
+- `reports/codex_run_report.md`
+
+### 실행 명령
+
+Baseline run command: not run in this implementation-only pass.
+
+Proposed-controller run command: not run in this implementation-only pass.
+
+Validation commands:
+
+```text
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m py_compile src\models\state.py src\controllers\relaxed_quantization.py src\controllers\wu_distributed.py src\controllers\urban_follower.py src\controllers\freeway_follower.py src\controllers\distributed_coordinator.py src\controllers\centralized_mpc.py src\experiments\six_controller_comparison.py src\tests\test_constraints.py
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest src.tests.test_constraints -v
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest src.tests.test_six_controller_comparison -v
+```
+
+### 지표
+
+- Baseline Total TTT/TTS: N/A, full 3600s baseline simulation was not run by this subagent.
+- Proposed Total TTT/TTS: N/A, full 3600s proposed simulation was not run by this subagent.
+- Improvement rate: N/A.
+- Boundary queue balancing result: N/A, no closed-loop acceptance comparison was run.
+- Control validation summary:
+  - `py_compile`: PASS.
+  - `src.tests.test_constraints`: `38 tests OK`.
+  - `src.tests.test_six_controller_comparison`: `29 tests OK`.
+
+### 실패 기준 및 다음 수정
+
+- Full acceptance is not claimed.
+- Full 3600s simulations were not run in this pass.
+- Remaining risk: relaxed-mode performance is only unit/smoke-wiring validated here; a 3600s primary four-controller run with explicit relaxed config is still needed before interpreting computation-time and TTT trade-offs.
+
+## 2026-06-17: relaxed-fast 4-controller 6-scenario 3600s screening
+
+### 구현 내용
+
+- Review subagent 지적사항을 반영했습니다.
+- `--relaxed-quantized-controls`, `--relaxed-fast-mode`, quantization 관련 CLI flag를 추가했습니다.
+- `--relaxed-fast-mode`가 screening budget을 실제 override하도록 수정했습니다.
+- green/VSL quantization residual과 repair count가 `ControlAction.diagnostics` 및 decision diagnostics에 기록되도록 연결했습니다.
+- `validate_controls`가 link aggregate VSL뿐 아니라 segment VSL step 변화도 검사하도록 확장했습니다.
+- 상세 결과 report를 `reports/relaxed_fast_4controllers_3600_report.md`에 작성했습니다.
+
+### 변경 파일
+
+- `src/config/default.yaml`
+- `src/models/state.py`
+- `src/controllers/relaxed_quantization.py`
+- `src/controllers/wu_distributed.py`
+- `src/controllers/urban_follower.py`
+- `src/controllers/freeway_follower.py`
+- `src/controllers/distributed_coordinator.py`
+- `src/controllers/centralized_mpc.py`
+- `src/controllers/nash_solver.py`
+- `src/experiments/six_controller_comparison.py`
+- `src/evaluation/metrics.py`
+- `src/tests/test_constraints.py`
+- `reports/codex_run_report.md`
+- `reports/relaxed_fast_4controllers_3600_report.md`
+
+### 실행 명령
+
+Baseline run command: pairwise Stage 1 comparison uses `WU-CD-F` / `PROPOSED-FOLLOWERS-ONLY` / `PROPOSED-STACKELBERG` / `PROPOSED-CENTRALIZED`; no separate no-control baseline was run in this screening.
+
+Proposed-controller run command pattern:
+
+```text
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m src.experiments.six_controller_comparison --scenario <scenario> --T-total 3600 --controllers WU-CD-F,PROPOSED-FOLLOWERS-ONLY,PROPOSED-STACKELBERG,PROPOSED-CENTRALIZED --relaxed-quantized-controls --relaxed-fast-mode --output outputs\relaxed_fast_4controllers_3600\<scenario>
+```
+
+Validation commands:
+
+```text
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m py_compile src\models\state.py src\controllers\relaxed_quantization.py src\controllers\wu_distributed.py src\controllers\urban_follower.py src\controllers\freeway_follower.py src\controllers\distributed_coordinator.py src\controllers\centralized_mpc.py src\controllers\nash_solver.py src\experiments\six_controller_comparison.py src\evaluation\metrics.py src\tests\test_constraints.py
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest src.tests.test_constraints src.tests.test_six_controller_comparison -v
+```
+
+### 지표
+
+- Output root: `outputs/relaxed_fast_4controllers_3600`
+- Combined summary: `outputs/relaxed_fast_4controllers_3600/combined_summary.csv`
+- Combined paired comparisons: `outputs/relaxed_fast_4controllers_3600/combined_paired_comparisons.csv`
+- Detailed report: `reports/relaxed_fast_4controllers_3600_report.md`
+- Wall-clock runtime for all 24 runs: `910.4 s`.
+- Sum of controller-reported computation time: `880.74 s`.
+- Baseline Total TTT/TTS: pairwise baseline depends on comparison; see detailed report.
+- Proposed Total TTT/TTS: see detailed report.
+- Improvement rate:
+  - Proposed followers-only improves over WU in `peak_demand` (`38.07%` delay), `oversaturated_demand` (`39.20%`), and `incident_or_capacity_drop` (`32.09%`).
+  - Proposed followers-only worsens against WU in `low_demand`, `medium_demand`, and `capacity_drop`.
+  - Proposed Stackelberg is worse than proposed followers-only in all six scenarios in this relaxed-fast run.
+- Boundary queue balancing result: not separately accepted in this Stage 1 screening; terminal state and throughput are reported in the detailed report.
+- Control validation summary:
+  - `py_compile`: PASS.
+  - `src.tests.test_constraints + src.tests.test_six_controller_comparison`: `67 tests OK`.
+  - Review subagent final verdict: PASS for relaxed 3600s four-controller/six-scenario screening, one scenario per invocation.
+  - `authority_ok=True` for all 24 controller/scenario runs.
+  - relaxed/fast flags recorded as active for all decision rows.
+
+### 실패 기준 및 다음 수정
+
+- Computation-cost screening: PASS.
+- Full controller acceptance: FAIL / not claimed.
+- Failure reasons:
+  - `PROPOSED-STACKELBERG` does not consistently improve over `WU-CD-F`.
+  - `PROPOSED-STACKELBERG` is worse than `PROPOSED-FOLLOWERS-ONLY` in all six scenarios under the relaxed-fast budget.
+  - Solver convergence rates remain low for `PROPOSED-STACKELBERG` and `PROPOSED-CENTRALIZED`.
+- Proposed next modification:
+  - Diagnose why the leader/allocation layer degrades the follower-only solution under relaxed-fast screening.
+  - Revisit leader candidate objective/selection and allocation coupling before treating Stackelberg performance as valid.

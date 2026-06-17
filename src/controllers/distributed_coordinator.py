@@ -9,6 +9,11 @@ from src.controllers.freeway_follower import FreewayFollowerResult
 from src.controllers.inflow_outflow_allocation import AllocationResult
 from src.controllers.leader import LeaderAction
 from src.controllers.nash_solver import NashResult, _relax_map
+from src.controllers.relaxed_quantization import (
+    accumulate_repair_diagnostics,
+    merge_repair_diagnostics,
+    repair_vsl_value,
+)
 from src.controllers.urban_follower import UrbanFollower
 from src.models.demand import DemandStep
 from src.models.metanet import effective_lane_profile
@@ -239,6 +244,7 @@ class DistributedCoordinator:
         self.ablation = ablation
         self.urban_agents, self.freeway_agents = build_agent_specs(cfg)
         self.urban_follower = UrbanFollower(cfg)
+        self._repair_diagnostics: Dict[str, float] = {}
         # coupling player 식별(plan §9.2): ramp/off-ramp 결합을 가진 agent — topology에서 자동.
         self.coupling_urban_ids = {a.id for a in self.urban_agents if a.ramps or a.off_ramps}
         self.coupling_freeway_ids = {a.id for a in self.freeway_agents if a.ramps or a.off_ramps}
@@ -280,6 +286,7 @@ class DistributedCoordinator:
         forecast = [demand] if isinstance(demand, DemandStep) else list(demand)
         if not forecast:
             raise ValueError("DistributedCoordinator requires at least one demand step.")
+        self._repair_diagnostics = {}
         first_demand = forecast[0]
         if previous_control is not None:
             reference_control = previous_control
@@ -490,6 +497,11 @@ class DistributedCoordinator:
         high = previous_vsl + self.cfg.freeway_follower.max_vsl_step
         feasible = [v for v in vsl_set if low - 1.0e-9 <= v <= high + 1.0e-9]
         feasible = feasible or vsl_set
+        if self.cfg.mpc.relaxed_quantized_controls:
+            # Spec 17.5 proposed relaxed: heuristic VSL target도 공통 repair로 step/quantization을 통일한다.
+            repaired = repair_vsl_value(float(target), float(previous_vsl), self.cfg)
+            accumulate_repair_diagnostics(self._repair_diagnostics, vsl=repaired)
+            return repaired.value
         return float(min(feasible, key=lambda value: (abs(value - target), value)))
 
     def _solve_urban_agent(
@@ -542,6 +554,7 @@ class DistributedCoordinator:
             f"agent_{agent.id}_freeway_pressure_used": float(result.metrics.get("freeway_response_used", 0.0)),
             f"agent_{agent.id}_allocation_module_used": float(result.metrics.get("allocation_module_active", 0.0)),
         }
+        merge_repair_diagnostics(diagnostics, result.metrics)
         return AgentSolve(
             agent_id=agent.id,
             objective=local_objective,
@@ -615,14 +628,23 @@ class DistributedCoordinator:
         for solve in freeway_solves:
             ramp_metering.update(solve.ramp_metering)
             infeasibility.update(solve.infeasibility)
-            diagnostics.update(solve.diagnostics)
+            merge_repair_diagnostics(diagnostics, solve.diagnostics)
+            diagnostics.update({
+                k: v for k, v in solve.diagnostics.items()
+                if k not in diagnostics or "quantization" not in k and "repair_count" not in k
+            })
         vsl.update(self._aggregate_link_vsl(freeway_solves))
         for solve in urban_solves:
             green_times.update(solve.green_times)
             offsets.update(solve.offsets)
             allocation.update(solve.allocation)
             infeasibility.update(solve.infeasibility)
-            diagnostics.update(solve.diagnostics)
+            merge_repair_diagnostics(diagnostics, solve.diagnostics)
+            diagnostics.update({
+                k: v for k, v in solve.diagnostics.items()
+                if k not in diagnostics or "quantization" not in k and "repair_count" not in k
+            })
+        merge_repair_diagnostics(diagnostics, self._repair_diagnostics)
         if leader is None:
             # P-FO(spec 16.7 재정의): allocation 비제어 — plant 포화유율 fallback.
             allocation = {}
@@ -711,7 +733,12 @@ class DistributedCoordinator:
                 v for v in vsl_set
                 if prev - fc.max_vsl_step - 1.0e-9 <= v <= prev + fc.max_vsl_step + 1.0e-9
             ] or vsl_set
-            out[link] = float(min(feasible, key=lambda v: (abs(v - value), v)))
+            if self.cfg.mpc.relaxed_quantized_controls:
+                repaired = repair_vsl_value(value, prev, self.cfg)
+                accumulate_repair_diagnostics(self._repair_diagnostics, vsl=repaired)
+                out[link] = repaired.value
+            else:
+                out[link] = float(min(feasible, key=lambda v: (abs(v - value), v)))
         return out
 
     def _legacy_boundary_allocations(self, allocation: Mapping[str, float]) -> Dict[str, float]:
@@ -798,5 +825,10 @@ class DistributedCoordinator:
             out[f"distributed_agent_{agent.id}_active"] = 1.0
         for solve in freeway_solves + urban_solves:
             out[f"agent_{solve.agent_id}_objective"] = float(solve.objective)
-            out.update(solve.diagnostics)
+            merge_repair_diagnostics(out, solve.diagnostics)
+            out.update({
+                k: v for k, v in solve.diagnostics.items()
+                if k not in out or "quantization" not in k and "repair_count" not in k
+            })
+        merge_repair_diagnostics(out, self._repair_diagnostics)
         return out

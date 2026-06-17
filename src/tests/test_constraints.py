@@ -4,8 +4,10 @@ from unittest.mock import patch
 from src.controllers.distributed_coordinator import AgentSolve, DistributedCoordinator, build_agent_specs
 from src.controllers.freeway_follower import FreewayFollower, FreewayFollowerResult
 from src.controllers.leader import Leader, LeaderAction
+from src.controllers.relaxed_quantization import repair_green_pair, repair_vsl_value
 from src.controllers.stackelberg_mpc import StackelbergMPCController
 from src.controllers.urban_follower import UrbanFollower
+from src.controllers.wu_distributed import WuDistributedController, _wu_fixed_control
 from src.evaluation.metrics import validate_controls
 from src.models.demand import DemandProfile, ScenarioConfig
 from src.models.metanet import effective_lane_profile
@@ -28,6 +30,72 @@ def short_config():
 
 
 class ConstraintTests(unittest.TestCase):
+    def test_relaxed_quantized_controls_are_off_by_default(self):
+        cfg = short_config()
+        self.assertFalse(cfg.mpc.relaxed_quantized_controls)
+        self.assertFalse(cfg.mpc.relaxed_fast_mode)
+        self.assertEqual(cfg.mpc.relaxed_rounding_mode, "floor")
+
+    def test_relaxed_green_repair_satisfies_cycle_and_bounds(self):
+        cfg = short_config().with_updates({"mpc": {"relaxed_quantized_controls": True}})
+        repaired = repair_green_pair(cfg.network.green_max + 37.0, cfg)
+        self.assertAlmostEqual(
+            repaired.p1 + repaired.p2 + cfg.network.lost_time,
+            cfg.network.cycle_length,
+        )
+        self.assertGreaterEqual(repaired.p1, cfg.network.green_min)
+        self.assertLessEqual(repaired.p1, cfg.network.green_max)
+        self.assertGreaterEqual(repaired.p2, cfg.network.green_min)
+        self.assertLessEqual(repaired.p2, cfg.network.green_max)
+
+    def test_relaxed_vsl_repair_is_discrete_and_step_limited(self):
+        cfg = short_config().with_updates({"mpc": {"relaxed_quantized_controls": True}})
+        previous = 100.0
+        repaired = repair_vsl_value(53.0, previous, cfg)
+        self.assertIn(repaired.value, {float(v) for v in cfg.freeway_follower.vsl_set})
+        self.assertLessEqual(abs(repaired.value - previous), cfg.freeway_follower.max_vsl_step + 1e-9)
+
+    def test_relaxed_urban_follower_green_is_feasible(self):
+        cfg = short_config().with_updates({"mpc": {"relaxed_quantized_controls": True}})
+        state = TrafficState.initial(cfg)
+        for movement, spec in cfg.network.urban_movements.items():
+            if spec.get("phase") == "A_p1":
+                state.urban_movement_queue[movement] = 250.0
+        demand = DemandProfile(cfg, ScenarioConfig("test")).at(0.0)
+        result = UrbanFollower(cfg).solve(state, None, demand)
+        self.assertGreater(result.green_times["A_p1"], cfg.network.effective_green_total / 2.0)
+        for signal in cfg.network.signals:
+            p1 = result.green_times[f"{signal}_p1"]
+            p2 = result.green_times[f"{signal}_p2"]
+            self.assertAlmostEqual(p1 + p2, cfg.network.effective_green_total)
+            self.assertGreaterEqual(p1, cfg.network.green_min)
+            self.assertGreaterEqual(p2, cfg.network.green_min)
+
+    def test_relaxed_wu_freeway_evaluates_fewer_vsl_candidates(self):
+        full_cfg = short_config()
+        relaxed_cfg = short_config().with_updates({"mpc": {"relaxed_quantized_controls": True}})
+        state = TrafficState.initial(full_cfg)
+        demand = DemandProfile(full_cfg, ScenarioConfig("test", freeway_scale=1.3)).at(0.0)
+        previous = _wu_fixed_control(full_cfg)
+        full_ctl = WuDistributedController(full_cfg)
+        relaxed_ctl = WuDistributedController(relaxed_cfg)
+        link = full_cfg.network.freeway_links[0]
+        full_count = len(full_ctl._freeway_segment_candidates(
+            link,
+            full_cfg.network.freeway_segments_per_link,
+            previous,
+        ))
+        coupling = full_ctl._coupling(state, previous, demand)
+        _, _, relaxed_evals = relaxed_ctl._solve_freeway_agent(
+            link,
+            state,
+            coupling,
+            demand,
+            _wu_fixed_control(relaxed_cfg),
+            None,
+        )
+        self.assertLess(relaxed_evals, full_count)
+
     def test_vsl_values_are_discrete(self):
         cfg = short_config()
         demand = DemandProfile(cfg, ScenarioConfig("test")).horizon(0.0, 2)

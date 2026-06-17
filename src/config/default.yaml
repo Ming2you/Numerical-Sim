@@ -179,6 +179,12 @@ mpc:
   urban_freeway_tts_weight_alpha: 1.0
   optimizer_maxiter: 40
   optimizer_n_starts: 2
+  relaxed_quantized_controls: false
+  relaxed_fast_mode: false
+  relaxed_green_quantum_sec: 1.0
+  relaxed_vsl_quantum_km_h: 10.0
+  relaxed_rounding_mode: floor
+  relaxed_wu_vsl_include_neutral: true
 leader:
   objective_mode: state_accumulation
   w_P: 1.0

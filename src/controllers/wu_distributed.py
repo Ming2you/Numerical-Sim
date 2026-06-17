@@ -8,7 +8,13 @@ from typing import Dict, Iterable, List, Mapping, Optional
 import numpy as np
 
 from src.models.demand import DemandStep
-from src.models.metanet import compute_ramp_release_flows, freeway_substep
+from src.controllers.relaxed_quantization import (
+    accumulate_repair_diagnostics,
+    queue_pressure_green_target,
+    repair_green_pair,
+    repair_vsl_value,
+)
+from src.models.metanet import compute_ramp_release_flows, effective_lane_profile, freeway_substep
 from src.models.state import ControlAction, ExperimentConfig, TrafficState, segment_vsl
 from src.models.urban_queue_model import (
     _movement_capacity_flow,
@@ -90,6 +96,7 @@ class WuDistributedController:
         self.cfg = cfg
         self.leader_enabled = leader_enabled
         self.previous_control: Optional[ControlAction] = None
+        self._repair_diagnostics: Dict[str, float] = {}
         self._specs = movement_specs(cfg)
         net = cfg.network
         # 신호별 phase 소속 movement와 포화유율 합(서비스율 = green비율 × Σ포화).
@@ -288,6 +295,29 @@ class WuDistributedController:
         prev_p1 = float(previous.green_times.get(f"{signal}_p1", total / 2.0))
         smooth_w = self.cfg.urban_follower.green_smoothness_weight
 
+        if self.cfg.mpc.relaxed_quantized_controls:
+            # Spec 17.5 WU urban relaxed: 7-point grid 대신 queue/arrival pressure의 연속 split을
+            # 계산하고 plant에 넣기 전 공통 green repair로 cycle equality와 min/max를 복구한다.
+            p1_pressure = q0["p1"] + arr["p1"] * dt_h * horizon
+            p2_pressure = q0["p2"] + arr["p2"] * dt_h * horizon
+            repaired = repair_green_pair(
+                queue_pressure_green_target(p1_pressure, p2_pressure, self.cfg),
+                self.cfg,
+            )
+            accumulate_repair_diagnostics(self._repair_diagnostics, green=repaired)
+            q = dict(q0)
+            cost = 0.0
+            for _ in range(horizon):
+                for pid, g in (("p1", repaired.p1), ("p2", repaired.p2)):
+                    service = (g / max(net.cycle_length, 1e-9)) * sat[pid] * dt_h
+                    q[pid] = max(0.0, q[pid] + arr[pid] * dt_h - service)
+                cost += (q["p1"] + q["p2"]) * dt_h
+            cost += smooth_w * abs(repaired.p1 - prev_p1)
+            if leader is not None:
+                n_pred = q["p1"] + q["p2"]
+                cost += self.cfg.leader.w_P * max(0.0, n_pred - self._omega_p[signal] * leader.n_p_star)
+            return repaired.p1, float(cost), 1
+
         candidates = np.linspace(net.green_min, net.green_max, 7)
         best_p1, best_obj = prev_p1, float("inf")
         evals = 0
@@ -361,6 +391,57 @@ class WuDistributedController:
             vectors = [vec + [v] for vec in vectors for v in opts]
         return vectors
 
+    def _relaxed_freeway_segment_candidates(
+        self,
+        link: str,
+        n_seg: int,
+        state: TrafficState,
+        coupling: Mapping[str, float],
+        previous: ControlAction,
+    ) -> list[list[float]]:
+        """Spec 17.5 WU relaxed VSL: Cartesian 열거 대신 pressure target 벡터만 만든다."""
+        net = self.cfg.network
+        ff = self.cfg.freeway_follower
+        vsl_max = float(max(ff.vsl_set))
+        vsl_min = float(min(ff.vsl_set))
+        densities = list(state.freeway_density.get(link, []))
+        profile, _ = effective_lane_profile(state, self.cfg)
+        lane_profile = profile.get(link, [net.freeway_lanes for _ in range(n_seg)])
+        bottleneck_idx = {
+            int(net.off_ramp_segment_index.get(o, n_seg - 1))
+            for o in net.off_ramps
+            if net.off_ramp_from_freeway.get(o) == link
+        } or {n_seg - 1}
+        downstream_pressure = max(0.0, float(coupling.get(f"p_down_{link}", 0.0)))
+        target_vec: list[float] = []
+        neutral_vec: list[float] = []
+        for i in range(n_seg):
+            prev_i = segment_vsl(previous, link, i, self.cfg)
+            rho = float(densities[i]) if i < len(densities) else net.rho_crit
+            density_pressure = max(0.0, rho / max(net.rho_crit, 1.0e-9) - 0.9)
+            lane_loss = max(0.0, net.freeway_lanes - float(lane_profile[i] if i < len(lane_profile) else net.freeway_lanes))
+            if i in bottleneck_idx:
+                # Wu mechanism 보존: 병목/off-ramp segment는 discharge 회복을 위해 기본적으로 max VSL을 유지한다.
+                continuous = vsl_max
+            else:
+                upstream_weight = max(0.0, 1.0 - (i / max(n_seg - 1, 1)))
+                pressure = density_pressure + downstream_pressure * upstream_weight + 0.5 * lane_loss
+                continuous = vsl_max - 25.0 * min(2.0, pressure)
+                continuous = 0.65 * continuous + 0.35 * prev_i
+                continuous = max(vsl_min, min(vsl_max, continuous))
+            target_repaired = repair_vsl_value(continuous, prev_i, self.cfg)
+            neutral_repaired = repair_vsl_value(vsl_max, prev_i, self.cfg)
+            accumulate_repair_diagnostics(self._repair_diagnostics, vsl=target_repaired)
+            accumulate_repair_diagnostics(self._repair_diagnostics, vsl=neutral_repaired)
+            target_vec.append(target_repaired.value)
+            neutral_vec.append(neutral_repaired.value)
+
+        vectors: list[list[float]] = []
+        for vec in (target_vec, neutral_vec if self.cfg.mpc.relaxed_wu_vsl_include_neutral else target_vec):
+            if not any(all(abs(a - b) <= 1.0e-9 for a, b in zip(vec, existing)) for existing in vectors):
+                vectors.append([float(v) for v in vec])
+        return vectors
+
     def _solve_freeway_agent(
         self,
         link: str,
@@ -390,7 +471,11 @@ class WuDistributedController:
         n_seg = len(state.freeway_density.get(link, [])) or net.freeway_segments_per_link
         prev_vec = [segment_vsl(previous, link, i, self.cfg) for i in range(n_seg)]
 
-        candidates = self._freeway_segment_candidates(link, n_seg, previous)
+        candidates = (
+            self._relaxed_freeway_segment_candidates(link, n_seg, state, coupling, previous)
+            if self.cfg.mpc.relaxed_quantized_controls
+            else self._freeway_segment_candidates(link, n_seg, previous)
+        )
         best_vec, best_obj = list(prev_vec), float("inf")
         best_offramp_flow: Dict[str, float] = {
             off_ramp: 0.0
@@ -566,6 +651,7 @@ class WuDistributedController:
         leader: Optional[WuLeaderAction],
     ) -> tuple[ControlAction, int, bool, float, int]:
         net = self.cfg.network
+        self._repair_diagnostics = {}
         control = _wu_fixed_control(self.cfg)
         control.green_times = dict(previous.green_times)
         control.vsl = dict(previous.vsl)
@@ -625,6 +711,7 @@ class WuDistributedController:
             if residual < self.cfg.mpc.distributed_coupling_tol:
                 converged = True
                 break
+        control.diagnostics.update(self._repair_diagnostics)
         return control, iteration, converged, float(residual), evals
 
     # ---------- leader 평가 (WU-MATCHED-STACKELBERG) ----------

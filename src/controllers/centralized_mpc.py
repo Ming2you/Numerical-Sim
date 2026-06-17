@@ -7,6 +7,11 @@ from typing import Dict, Iterable, List, Optional
 
 import numpy as np
 
+from src.controllers.relaxed_quantization import (
+    accumulate_repair_diagnostics,
+    repair_green_pair,
+    repair_vsl_value,
+)
 from src.models.demand import DemandStep
 from src.models.state import ControlAction, ExperimentConfig, TrafficState
 from src.models.urban_queue_model import movement_specs
@@ -114,7 +119,12 @@ class CentralizedMPC:
                     values.append(1.0)
         return np.asarray(values, dtype=float)
 
-    def _control_from_vector(self, vec: np.ndarray, names: list[str]) -> ControlAction:
+    def _control_from_vector(
+        self,
+        vec: np.ndarray,
+        names: list[str],
+        previous: Optional[ControlAction] = None,
+    ) -> ControlAction:
         net = self.cfg.network
         base = _wu_fixed_base(self.cfg)
         control = ControlAction(
@@ -137,11 +147,22 @@ class CentralizedMPC:
                 if p2 > net.green_max:
                     p2 = net.green_max
                     p1 = net.effective_green_total - p2
+                if self.cfg.mpc.relaxed_quantized_controls:
+                    # Spec 17.5 centralized relaxed: decoded continuous green을 공통 repair로 재투영한다.
+                    repaired = repair_green_pair(float(value), self.cfg)
+                    accumulate_repair_diagnostics(control.diagnostics, green=repaired)
+                    p1, p2 = repaired.p1, repaired.p2
                 control.green_times[f"{key}_p1"] = p1
                 control.green_times[f"{key}_p2"] = p2
             elif kind == "v":
                 # 이산 VSL 집합으로 스냅(plant 검증 게이트와 동일 제약).
-                control.vsl[key] = float(min(vsl_set, key=lambda v: abs(v - value)))
+                if self.cfg.mpc.relaxed_quantized_controls:
+                    prev = previous.vsl.get(key, max(vsl_set)) if previous else max(vsl_set)
+                    repaired = repair_vsl_value(float(value), float(prev), self.cfg)
+                    accumulate_repair_diagnostics(control.diagnostics, vsl=repaired)
+                    control.vsl[key] = repaired.value
+                else:
+                    control.vsl[key] = float(min(vsl_set, key=lambda v: abs(v - value)))
             elif kind == "o":
                 control.offsets[key] = float(value % net.cycle_length)
             elif kind == "m":
@@ -268,7 +289,7 @@ class CentralizedMPC:
         rng = np.random.default_rng(int(self.cfg.simulation.random_seed) + 7919 * time_index)
 
         def evaluate(vec: np.ndarray) -> tuple[float, ControlAction]:
-            control = self._control_from_vector(np.clip(vec, lower, upper), names)
+            control = self._control_from_vector(np.clip(vec, lower, upper), names, previous)
             states, trajectory_ttt = self._predict_with_ttt(state, control, forecast)
             return self._objective(states, control, previous, trajectory_ttt), control
 
