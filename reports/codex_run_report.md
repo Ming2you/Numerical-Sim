@@ -1406,3 +1406,102 @@ Control validation summary: no full controller validation was run. Calibration C
 - Full acceptance remains unevaluated because no proposed-controller closed-loop run was requested or executed.
 - `reports/claude_review_report.md` exists but is not a PASS verdict for the current Step E changes; the internal Step E review passed with notes.
 - Proposed next modification: Step A, adjust the VSL forecast-aware test/objective saturation behavior.
+
+## 2026-06-17 Step A - VSL Forecast-Aware Fixture Saturation Fix
+
+### What was implemented
+
+- `test_freeway_vsl_uses_future_offramp_inflow`의 off-ramp storage fixture를 98% 점유에서 30% 점유로 낮췄다.
+- 기존 fixture는 low/high future forecast가 모두 최저 허용 VSL 후보로 포화되어 forecast 사용 여부를 구분하지 못했다.
+- 컨트롤러 objective 수식은 변경하지 않았다. 이번 변경은 테스트 fixture saturation 해소에 한정했다.
+- 실패 메시지에 agent별 `offramp_forecast_veh`와 `vsl_selected` diagnostics를 포함했다.
+- high forecast가 더 큰 `offramp_forecast_veh`를 만들고, agent 내부 `vsl_selected`가 더 낮아지는지 직접 assertion으로 확인한다.
+
+### Files changed
+
+- `src/tests/test_forecast_awareness.py`
+- `2026-06-17/proposed_controller_refactor_execution.md`
+- `reports/codex_run_report.md`
+
+### Commands
+
+Baseline run command:
+
+```text
+Not run for Step A. This was a targeted unit-test fixture/saturation pass.
+```
+
+Proposed-controller run command:
+
+```text
+Not run for Step A. No closed-loop proposed simulation was requested.
+```
+
+Syntax check:
+
+```text
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m py_compile src\controllers\distributed_coordinator.py src\tests\test_forecast_awareness.py
+```
+
+Result: OK.
+
+Focused failing test:
+
+```text
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest src.tests.test_forecast_awareness.ForecastAwarenessTests.test_freeway_vsl_uses_future_offramp_inflow -v
+```
+
+Result:
+
+```text
+1 test, OK
+```
+
+Forecast-awareness suite:
+
+```text
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest src.tests.test_forecast_awareness -v
+```
+
+Result:
+
+```text
+8 tests, OK
+```
+
+Related constraints:
+
+```text
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest src.tests.test_constraints -v
+```
+
+Result:
+
+```text
+44 tests, OK
+```
+
+### Metrics
+
+Baseline Total TTT/TTS: not run.
+
+Proposed Total TTT/TTS: not run.
+
+Improvement rate: not computed for Step A.
+
+Boundary queue balancing result: not run.
+
+Control validation summary: compile passed; the targeted Step A test, full `src.tests.test_forecast_awareness`, and `src.tests.test_constraints` passed.
+
+### Review
+
+- Coding subagent: `Galileo`.
+- Review subagent: `Godel`, verdict `PASS_WITH_NOTES`.
+- Blocking findings: none.
+- Codex final review: PASS after adding the reviewer's suggested forecast/VSL-direction assertions.
+
+### Failed Criteria And Next Modification
+
+- Full acceptance remains unevaluated because no closed-loop baseline/proposed simulation was run.
+- `reports/claude_review_report.md` exists but is not a PASS verdict for the current Step A changes.
+- Proposed next modification: run a full same-scenario baseline/proposed comparison when ready; Step A itself only resolves the VSL forecast-awareness unit-test saturation issue.

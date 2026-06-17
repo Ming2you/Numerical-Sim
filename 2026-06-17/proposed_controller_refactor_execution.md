@@ -27,7 +27,7 @@ D -> C -> B -> E -> A
 | C | Wu식 full neighbor coupling을 Proposed distributed follower에 이식 | 완료 | Step C 커밋으로 완료 |
 | B | Leader forecast 테스트를 후보집합이 아닌 평가/선택 기준으로 수정 | 완료 | Step B 커밋으로 완료 |
 | E | `N_P_crit_veh` 재보정 | 완료 | Step E 커밋으로 완료 |
-| A | VSL forecast-aware 테스트 및 objective saturation 조정 | 대기 | 미완료 |
+| A | VSL forecast-aware 테스트 및 objective saturation 조정 | 완료 | Step A 커밋으로 완료 |
 
 ## 공통 원칙
 
@@ -211,8 +211,37 @@ off-ramp storage 재귀속과 objective/coupling 변경 이후 기존 `N_P_crit_
 
 ### 담당/검토 기록
 
-- 코딩 subagent: 미배정
-- 리뷰 subagent: 미배정
-- Codex 최종 판정: 미완료
-- 검증: 미실행
-- 커밋/푸시: 미완료
+- 코딩 subagent: `Galileo` (`019ed601-ec58-7610-9a27-6c6a6be24018`)
+- 리뷰 subagent: `Godel` (`019ed607-ffd8-7990-b448-ade9476c4a50`)
+- Codex 최종 판정: PASS. 리뷰 권고에 따라 high/low `offramp_forecast_veh` 방향성과 agent 내부 `vsl_selected` 방향성을 직접 assertion으로 추가했다. closed-loop 성능 acceptance는 실행하지 않았다.
+- 구현 요약:
+  - `test_freeway_vsl_uses_future_offramp_inflow`의 off-ramp storage fixture를 98% 점유에서 30% 점유로 조정했다.
+  - 기존 98% fixture는 low/high forecast 모두 최저 허용 VSL 후보로 포화되어 forecast 민감도를 관찰하지 못했다.
+  - 컨트롤러 objective 수식은 변경하지 않았다.
+  - assertion 실패 메시지에 agent별 forecast 유입량과 VSL 선택 diagnostics를 포함해 이후 실패 원인을 바로 볼 수 있게 했다.
+  - high forecast가 low forecast보다 큰 off-ramp 예측 유입을 만들고, agent 내부 선택 VSL이 더 낮아지는지 직접 검증한다.
+- 검증:
+  ```text
+  C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m py_compile src\controllers\distributed_coordinator.py src\tests\test_forecast_awareness.py
+  ```
+  결과: OK.
+  ```text
+  C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest src.tests.test_forecast_awareness.ForecastAwarenessTests.test_freeway_vsl_uses_future_offramp_inflow -v
+  ```
+  결과: `1 test, OK`.
+  ```text
+  C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest src.tests.test_forecast_awareness -v
+  ```
+  결과: `8 tests, OK`.
+  ```text
+  C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest src.tests.test_constraints -v
+  ```
+  결과: `44 tests, OK`.
+- 리뷰 결론:
+  - `Godel`: PASS_WITH_NOTES.
+  - blocking finding 없음.
+  - 비차단 권고: forecast diagnostics 방향성 assertion 추가. Codex가 반영 완료.
+- 남은 리스크:
+  - closed-loop baseline/proposed 비교는 실행하지 않았다.
+  - 이번 수정은 테스트 fixture saturation 해소이며, VSL objective 자체의 성능 개선을 주장하지 않는다.
+- 커밋/푸시: 이 Step A 변경 커밋으로 완료

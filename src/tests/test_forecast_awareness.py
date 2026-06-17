@@ -67,17 +67,33 @@ class ForecastAwarenessTests(unittest.TestCase):
     def test_freeway_vsl_uses_future_offramp_inflow(self):
         """off-ramp storage를 backup시키고 미래 본선 수요만 바꾸면 VSL이 변한다."""
         state = TrafficState.initial(self.cfg)
-        # off-ramp storage를 거의 가득 채워 spillback 압력을 만든다.
+        # 30% 점유의 중간 spillback 압력만 만든다. 98% 점유는 low/high가 모두 최저 후보로 포화된다.
         for storage_link in set(self.net.off_ramp_storage_link.values()):
             cap = float(self.net.urban_link_storage_veh[storage_link])
-            state.urban_link_storage[storage_link] = cap * 0.02
+            state.urban_link_storage[storage_link] = cap * 0.70
         coord = DistributedCoordinator(self.cfg)
         prev = ControlAction.fixed(self.cfg)
         low = coord.solve(state.copy(), self.leader, _scale_future_demand(self.forecast, 0.1), prev)
         high = coord.solve(state.copy(), self.leader, _scale_future_demand(self.forecast, 5.0), prev)
+        low_diag = {
+            key: value for key, value in low.diagnostics.items()
+            if key.endswith(("_offramp_forecast_veh", "_vsl_selected"))
+        }
+        high_diag = {
+            key: value for key, value in high.diagnostics.items()
+            if key.endswith(("_offramp_forecast_veh", "_vsl_selected"))
+        }
+        low_forecasts = [value for key, value in low_diag.items() if key.endswith("_offramp_forecast_veh")]
+        high_forecasts = [value for key, value in high_diag.items() if key.endswith("_offramp_forecast_veh")]
+        low_vsl_selected = [value for key, value in low_diag.items() if key.endswith("_vsl_selected")]
+        high_vsl_selected = [value for key, value in high_diag.items() if key.endswith("_vsl_selected")]
+        self.assertTrue(low_forecasts and high_forecasts)
+        self.assertGreater(max(high_forecasts), max(low_forecasts))
+        self.assertTrue(low_vsl_selected and high_vsl_selected)
+        self.assertLess(min(high_vsl_selected), max(low_vsl_selected))
         self.assertNotEqual(
             low.control.vsl, high.control.vsl,
-            "freeway VSL이 미래 off-ramp 예측 유입에 반응하지 않음",
+            f"freeway VSL이 미래 off-ramp 예측 유입에 반응하지 않음; low={low_diag}, high={high_diag}",
         )
 
     # ---------- (b) off-ramp backup 시 VSL이 objective 최소화로 낮아짐 ----------
