@@ -400,31 +400,73 @@ class ConstraintTests(unittest.TestCase):
             for values in state.freeway_density.values()
             for rho in values
         )
-        # design 변경 2(2026-06-17): leader objective에 boundary_in 큐 비용 항이 추가됨
-        # (w_boundary_in 기본 1.0 × boundary_in 큐 77.0 = 77.0). 정의 변경으로 정당히 늘어난 항.
+        # Step D: boundary_in 큐 비용은 진단으로만 남고 total objective에는 들어가지 않는다.
         boundary_in_queue = state.boundary_in_queue_vehicles(cfg.network)
         expected = (
             n_p
             + n_f
             + 2.0 * max(0.0, n_p_protected - 100.0)
-            + 1.0 * boundary_in_queue
             + 3.0 * density_excess
             + 0.5 * (abs(170.0 - 160.0) + abs(300.0 - 250.0))
         )
         leader = Leader(cfg)
-        terms = leader.objective_terms([state], action, previous, follower_objective=9999.0, nash_converged=True)
-        actual = leader.objective([state], action, previous, follower_objective=9999.0, nash_converged=True)
+        terms = leader.objective_terms(
+            [state], action, previous, follower_objective=9999.0, nash_converged=True
+        )
+        actual = leader.objective(
+            [state], action, previous, follower_objective=9999.0, nash_converged=True
+        )
         self.assertAlmostEqual(actual, expected)
         self.assertAlmostEqual(terms["leader_total_objective"], expected)
         self.assertAlmostEqual(terms["leader_boundary_leg_excluded_veh"], 77.0)
         self.assertAlmostEqual(terms["leader_target_penalty"], 2.0 * max(0.0, n_p_protected - 100.0))
         self.assertAlmostEqual(terms["leader_boundary_in_queue_penalty"], 1.0 * boundary_in_queue)
 
+    def test_default_leader_objective_uses_follower_ttt_base(self):
+        cfg = ExperimentConfig.from_file(
+            "src/config/default.yaml",
+            {
+                "leader": {
+                    "w_P": 0.0,
+                    "w_F": 0.0,
+                    "w_L": 0.0,
+                    "w_boundary_in": 5.0,
+                    "non_convergence_penalty": 500.0,
+                }
+            },
+        )
+        state = TrafficState.initial(cfg)
+        boundary_movement = next(
+            movement
+            for movement, spec in cfg.network.urban_movements.items()
+            if spec.get("kind") == "boundary_in"
+        )
+        state.urban_movement_queue[boundary_movement] = 40.0
+
+        terms = Leader(cfg).objective_terms(
+            [state],
+            ControlAction.fixed(cfg),
+            previous=None,
+            follower_objective=1234.0,
+            nash_converged=False,
+            nash_residual_objective=0.2,
+            nash_residual_control=0.1,
+        )
+
+        self.assertEqual(cfg.leader.objective_mode, "follower_ttt")
+        self.assertAlmostEqual(terms["leader_follower_ttt_base"], 1234.0)
+        self.assertAlmostEqual(terms["leader_objective_base"], 1234.0)
+        self.assertGreater(terms["leader_boundary_in_queue_penalty"], 0.0)
+        self.assertGreater(terms["leader_nonconvergence_penalty"], 0.0)
+        self.assertAlmostEqual(terms["leader_total_objective"], 1234.0)
+
     def test_leader_non_convergence_penalty_uses_residuals(self):
         cfg = ExperimentConfig.from_file(
             "src/config/default.yaml",
             {
                 "leader": {
+                    "w_P": 0.0,
+                    "w_F": 0.0,
                     "non_convergence_penalty": 500.0,
                     "non_convergence_objective_residual_scale": 0.5,
                     "non_convergence_control_residual_scale": 0.25,
@@ -437,13 +479,14 @@ class ConstraintTests(unittest.TestCase):
             [state],
             action,
             previous=None,
-            follower_objective=0.0,
+            follower_objective=77.0,
             nash_converged=False,
             nash_residual_objective=0.2,
             nash_residual_control=0.1,
         )
         expected_penalty = 500.0 * ((0.2 / 0.5) + (0.1 / 0.25))
         self.assertAlmostEqual(terms["leader_nonconvergence_penalty"], expected_penalty)
+        self.assertAlmostEqual(terms["leader_total_objective"], 77.0)
 
     def test_leader_density_penalty_uses_effective_lanes_only_when_changed(self):
         cfg = ExperimentConfig.from_file(

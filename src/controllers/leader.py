@@ -323,8 +323,7 @@ class Leader:
         for s in states:
             n_p = s.protected_accumulation_veh(net)
             target_penalty += lc.w_P * max(0.0, n_p - lc.N_P_crit_veh)
-            # boundary_in(유입 대기) 큐 비용. leader가 경계에 차를 쌓아 base를 낮추는
-            # gaming을 막는다(design 변경 2, 2026-06-17).
+            # Step D: boundary_in 큐 비용은 candidate 해석용 진단으로만 보존한다.
             boundary_in_queue_penalty += lc.w_boundary_in * s.boundary_in_queue_vehicles(net)
         density_excess, density_effective_count = self._density_penalty(states)
         density_penalty = lc.w_F * density_excess
@@ -339,9 +338,11 @@ class Leader:
             nash_residual_objective,
             nash_residual_control,
         )
-        total = base + target_penalty + boundary_in_queue_penalty + density_penalty + smooth + conv
+        # Spec 4.2 Step D: boundary/non-convergence 항은 진단으로만 남기고 총 objective에는 더하지 않는다.
+        total = base + target_penalty + density_penalty + smooth
         return {
-            "leader_base_accumulation": float(base),
+            "leader_base_accumulation": float(state_base),
+            "leader_objective_base": float(base),
             "leader_state_accumulation_base": float(state_base),
             "leader_follower_ttt_base": float(follower_objective),
             "leader_boundary_leg_excluded_veh": float(boundary_excluded),

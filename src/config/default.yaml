@@ -186,12 +186,11 @@ mpc:
   relaxed_rounding_mode: floor
   relaxed_wu_vsl_include_neutral: true
 leader:
-  objective_mode: state_accumulation
+  objective_mode: follower_ttt
   w_P: 1.0
   w_F: 1.0
   w_L: 0.05
-  # boundary_in(유입 대기) 큐 비용 가중(design 변경 2, 2026-06-17). leader가 경계에 차를
-  # 쌓아 base를 낮추는 gaming을 막기 위해 boundary_in 큐도 비용으로 계상한다. base와 동일 단위.
+  # Step D: boundary_in queue penalty는 진단으로만 보고하고 leader_total_objective에는 더하지 않는다.
   w_boundary_in: 1.0
   N_P_star_range:
   - 0.0
@@ -218,6 +217,7 @@ leader:
   N_P_feedback_horizon_h: 1.5
   N_P_feedback_flow_limit_veh_h: 800.0
   N_UF_feasible_margin: 0.95
+  # Step D: non-convergence penalty는 진단으로만 보고하고 leader_total_objective에는 더하지 않는다.
   non_convergence_penalty: 500.0
   non_convergence_objective_residual_scale: 1.0
   non_convergence_control_residual_scale: 1.0

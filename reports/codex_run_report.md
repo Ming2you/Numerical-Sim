@@ -1038,3 +1038,75 @@ Proposed next modification:
 - Remove the hidden internal-movement half-capacity cap from the leader-enabled path before changing leader theory.
 - Use an uncontrolled/empty allocation fallback for non-controlled movements, or explicitly clear non-allocation-module/internal movement keys before plant simulation.
 - Re-run the same `peak_demand` 7200s follower-only vs Stackelberg comparison after that fix.
+
+## 2026-06-17 Step D — Leader Objective Formula Alignment
+
+### What was implemented
+
+- Aligned the default proposed Stackelberg leader objective with the user's formula.
+- Changed the default leader base from `state_accumulation` to follower-response TTT/TTS (`follower_ttt`).
+- Removed `boundary_in_queue_penalty` from `leader_total_objective`; it remains diagnostic-only.
+- Removed `non_convergence_penalty` from `leader_total_objective`; it remains diagnostic-only.
+- Updated controller spec, configuration requirements, default config, and Step D unit tests.
+
+### Files changed
+
+- `src/controllers/leader.py`
+- `src/models/state.py`
+- `src/config/default.yaml`
+- `docs/spec/04_controller.md`
+- `docs/spec/07_auto_diagnosis.md`
+- `docs/spec/09_configuration_requirements.md`
+- `src/tests/test_constraints.py`
+- `src/tests/test_metanet_equations.py`
+- `src/tests/test_offramp_reattribution.py`
+- `2026-06-17/proposed_controller_refactor_execution.md`
+
+### Commands
+
+Baseline run command:
+
+```text
+Not run for Step D. This was a formula-alignment/unit-test step.
+```
+
+Proposed-controller run command:
+
+```text
+Not run for Step D. This was a formula-alignment/unit-test step.
+```
+
+Unit test command:
+
+```text
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest src.tests.test_constraints src.tests.test_metanet_equations src.tests.test_offramp_reattribution -v
+```
+
+Result:
+
+```text
+70 tests, OK
+```
+
+### Metrics
+
+Baseline Total TTT/TTS: not run.
+
+Proposed Total TTT/TTS: not run.
+
+Improvement rate: not computed for Step D.
+
+Boundary queue balancing result: not run.
+
+Control validation summary: Step D unit tests confirm that `leader_total_objective` now uses the follower TTT/TTS base by default, while boundary-in queue and non-convergence penalties remain logged diagnostics only.
+
+### Review
+
+- Coding subagent: `Ptolemy`.
+- Review subagent: `Hypatia`, verdict `PASS_WITH_NOTES`.
+- Codex final review: PASS after updating the stale `boundary_in_queue_vehicles()` comment and this report.
+
+### Failed criteria and next modification
+
+- Full acceptance remains unevaluated because no closed-loop simulation was run for this step.
+- Next modification: Step C, port Wu-style neighbor coupling into the proposed distributed follower.

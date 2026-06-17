@@ -354,12 +354,11 @@ class MPCConfig:
 
 @dataclass
 class LeaderConfig:
-    objective_mode: str = "state_accumulation"
+    objective_mode: str = "follower_ttt"
     w_P: float = 1.0
     w_F: float = 1.0
     w_L: float = 0.05
-    # boundary_in(유입 대기) 큐 비용 가중. leader가 경계에 차를 쌓아 base를 낮추는 gaming을
-    # 막기 위해 boundary_in 큐도 비용으로 계상한다(design 변경 2, 2026-06-17). base와 동일 단위.
+    # Step D: boundary_in 큐 비용은 진단용으로 계산하되 leader_total_objective에는 더하지 않는다.
     w_boundary_in: float = 1.0
     N_P_star_range: List[float] = field(default_factory=lambda: [0.0, 500.0])
     N_UF_star_range: List[float] = field(default_factory=lambda: [0.0, 6000.0])
@@ -371,6 +370,7 @@ class LeaderConfig:
     N_P_feedback_horizon_h: float = 0.5
     N_P_feedback_flow_limit_veh_h: float = 800.0
     N_UF_feasible_margin: float = 0.95
+    # Step D: non-convergence penalty도 진단용으로만 계산한다.
     non_convergence_penalty: float = 500.0
     non_convergence_objective_residual_scale: float = 1.0
     non_convergence_control_residual_scale: float = 1.0
@@ -675,8 +675,8 @@ class TrafficState:
     def boundary_in_queue_vehicles(self, net) -> float:
         """boundary_in movement(유입 대기) 큐 점유[veh] 합.
 
-        leader가 경계에 차를 쌓아 base를 낮추는 gaming을 막기 위해 leader objective에서
-        비용으로 계상한다(design 변경 2, 2026-06-17).
+        Step D 이후 leader objective에는 더하지 않고, 후보가 경계 대기를 얼마나
+        만드는지 해석하기 위한 diagnostic으로만 보고한다.
         """
         total = 0.0
         for movement, spec in net.urban_movements.items():

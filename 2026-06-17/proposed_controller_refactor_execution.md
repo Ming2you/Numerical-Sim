@@ -23,7 +23,7 @@ D -> C -> B -> E -> A
 
 | Step | 주제 | 상태 | 커밋/푸시 |
 |---|---|---|---|
-| D | Leader objective를 제안 수식과 정합화 | 대기 | 미완료 |
+| D | Leader objective를 제안 수식과 정합화 | 완료 | Step D 커밋으로 완료 |
 | C | Wu식 full neighbor coupling을 Proposed distributed follower에 이식 | 대기 | 미완료 |
 | B | Leader forecast 테스트를 후보집합이 아닌 평가/선택 기준으로 수정 | 대기 | 미완료 |
 | E | `N_P_crit_veh` 재보정 | 대기 | 미완료 |
@@ -51,11 +51,24 @@ D -> C -> B -> E -> A
 
 ### 담당/검토 기록
 
-- 코딩 subagent: 미배정
-- 리뷰 subagent: 미배정
-- Codex 최종 판정: 미완료
-- 검증: 미실행
-- 커밋/푸시: 미완료
+- 코딩 subagent: `Ptolemy` (`019ed5a4-fbdc-78e2-a256-f6f1aef36629`)
+- 리뷰 subagent: `Hypatia` (`019ed5ad-2842-71e1-815c-8d23a8a47f8a`)
+- Codex 최종 판정: PASS. 리뷰어가 지적한 `boundary_in_queue_vehicles()` 주석 불일치와 run report 누락을 보정했다.
+- 검증:
+  ```text
+  C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest src.tests.test_constraints src.tests.test_metanet_equations src.tests.test_offramp_reattribution -v
+  ```
+  결과: `70 tests, OK`.
+- 구현 요약:
+  - 기본 `leader.objective_mode`를 `follower_ttt`로 변경했다.
+  - `leader_total_objective`는 follower TTT/TTS base + `N_P` 초과 penalty + freeway density penalty + leader action smoothness만 포함한다.
+  - `leader_boundary_in_queue_penalty`와 `leader_nonconvergence_penalty`는 diagnostic으로 남기되 total objective에는 더하지 않는다.
+  - `docs/spec/04_controller.md`, `docs/spec/09_configuration_requirements.md`, `docs/spec/07_auto_diagnosis.md`, 관련 unit tests를 같은 의미로 갱신했다.
+- 리뷰 결론:
+  - `Hypatia`: PASS_WITH_NOTES.
+  - 지적 1: `boundary_in_queue_vehicles()` 주석이 이전 objective 비용 의미를 유지하고 있었음. Codex가 수정 완료.
+  - 지적 2: `reports/codex_run_report.md`에 Step D 기록 필요. Codex가 수정 완료.
+- 커밋/푸시: 이 Step D 변경 커밋으로 완료
 
 ## Step C: Proposed distributed coupling 정합화
 
@@ -127,4 +140,3 @@ off-ramp storage 재귀속과 objective/coupling 변경 이후 기존 `N_P_crit_
 - Codex 최종 판정: 미완료
 - 검증: 미실행
 - 커밋/푸시: 미완료
-

@@ -148,7 +148,7 @@ Actions:
 - add relaxation: response_new = alpha * response_new + (1-alpha) * response_old
 - decrease alpha from 1.0 to 0.7, then 0.5 if needed
 - increase max_nash_iter
-- add penalty for non-convergence in leader objective
+- report non-convergence penalty as a diagnostic without adding it to leader objective
 ```
 
 ### 7.4 Auto-tuning search strategy

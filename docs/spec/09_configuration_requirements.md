@@ -23,7 +23,7 @@ mpc:
   distributed_coupling_tol: 1.0e-3
 
 leader:
-  objective_mode: state_accumulation
+  objective_mode: follower_ttt
   w_P: 1.0
   w_F: 1.0
   w_L: 0.05

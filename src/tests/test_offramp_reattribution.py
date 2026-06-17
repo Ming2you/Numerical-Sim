@@ -165,12 +165,19 @@ class OffRampReattributionTests(unittest.TestCase):
         # 램프 storage가 차 있으면 freeway agent 자기 비용이 더 크다(metering 유인의 원천).
         self.assertGreater(obj_full, obj_empty)
 
-    # ---------- G3: leader boundary_in 큐 비용 ----------
-    def test_leader_boundary_in_cost_scales_with_queue(self):
-        """boundary_in 큐가 크면 leader objective의 boundary_in 비용 항도 그만큼 커진다."""
+    # ---------- G3: leader boundary_in 큐 진단 ----------
+    def test_leader_boundary_in_diagnostic_scales_without_total_objective_cost(self):
+        """boundary_in 큐 비용 항은 진단으로만 커지고 leader_total_objective에는 들어가지 않는다."""
         cfg = ExperimentConfig.from_file(
             "src/config/default.yaml",
-            {"leader": {"w_boundary_in": 2.0, "non_convergence_penalty": 0.0}},
+            {
+                "leader": {
+                    "w_P": 0.0,
+                    "w_F": 0.0,
+                    "w_boundary_in": 2.0,
+                    "non_convergence_penalty": 0.0,
+                }
+            },
         )
         net = cfg.network
         boundary_movement = next(
@@ -186,18 +193,17 @@ class OffRampReattributionTests(unittest.TestCase):
         leader = Leader(cfg)
         action = ControlAction.fixed(cfg)
         terms_low = leader.objective_terms(
-            [state_low], action, None, follower_objective=0.0, nash_converged=True
+            [state_low], action, None, follower_objective=50.0, nash_converged=True
         )
         terms_high = leader.objective_terms(
-            [state_high], action, None, follower_objective=0.0, nash_converged=True
+            [state_high], action, None, follower_objective=50.0, nash_converged=True
         )
 
         # w_boundary_in=2.0 × 100veh = 200 만큼 boundary_in 비용 증가.
         self.assertAlmostEqual(terms_low["leader_boundary_in_queue_penalty"], 0.0)
         self.assertAlmostEqual(terms_high["leader_boundary_in_queue_penalty"], 200.0)
-        self.assertGreater(
-            terms_high["leader_total_objective"], terms_low["leader_total_objective"]
-        )
+        self.assertAlmostEqual(terms_low["leader_total_objective"], 50.0)
+        self.assertAlmostEqual(terms_high["leader_total_objective"], 50.0)
 
 
 if __name__ == "__main__":

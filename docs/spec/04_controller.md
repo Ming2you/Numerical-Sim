@@ -31,15 +31,12 @@ At every control interval, it must:
 
 ### 4.2 Leader objective
 
-Implement the leader objective as configurable, with this default form:
+Implement the leader objective as configurable. The default base term is the follower-response TTT/TTS predicted under the candidate leader action:
 
 ```text
-J_L = sum_over_horizon[
-        n_P(t) + n_F(t)
-        + w_P * positive_part(n_P(t) - n_P_crit)
-        + w_F * sum_m sum_i L[m] * lanes[m] * positive_part(rho[m,i](t) - rho_crit[m])
-        + w_L * L1_norm(U_L(t) - U_L(t-1))
-      ]
+J_L = TTT_freeway + TTT_urban
+      + target_exceedance_penalties
+      + smoothness_penalty
 ```
 
 where:
@@ -47,20 +44,29 @@ where:
 ```text
 U_L(t) = [N_P_star(t), N_UF_star(t)]
 positive_part(x) = max(x, 0)
+target_exceedance_penalties =
+    sum_over_horizon[
+        w_P * positive_part(n_P(t) - n_P_crit)
+        + w_F * sum_m sum_i L[m] * lanes[m] * positive_part(rho[m,i](t) - rho_crit[m])
+    ]
+smoothness_penalty =
+    sum_over_horizon[w_L * L1_norm(U_L(t) - U_L(t-1))]
 ```
 
-The implementation must allow the leader to use follower-response TTT/TTS directly as the main term if configured:
+The legacy state-accumulation base remains available only when explicitly configured:
 
 ```yaml
 leader:
-  objective_mode: "state_accumulation"  # or "follower_ttt"
+  objective_mode: "follower_ttt"  # or "state_accumulation"
 ```
 
-If `objective_mode = follower_ttt`, then:
+If `objective_mode = state_accumulation`, then the base term is:
 
 ```text
-J_L = TTT_freeway + TTT_urban + target_exceedance_penalties + smoothness_penalty
+J_base = sum_over_horizon[n_P(t) + n_F(t)]
 ```
+
+`boundary_in_queue_penalty` and `non_convergence_penalty` may be reported as diagnostics, but they are not included in `leader_total_objective`.
 
 ### 4.3 Freeway follower
 
@@ -206,7 +212,7 @@ If convergence is not achieved:
 - return the best response found so far
 - set `nash_converged = false`
 - log the number of iterations and residual values
-- apply a penalty to the leader objective
+- report `non_convergence_penalty` as a diagnostic without adding it to `leader_total_objective`
 
 The follower layer can be selected by configuration:
 
