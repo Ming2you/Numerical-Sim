@@ -750,9 +750,13 @@ class ControlAction:
         for signal in net.signals:
             green[f"{signal}_p1"] = phase_green
             green[f"{signal}_p2"] = phase_green
+        # allocation은 perimeter(경계/램프) 제어 전용 신호다. 내부 movement는 사전충전하지
+        # 않는다(green×saturation으로만 제어; allocation으로 throttle되면 안 됨).
+        perimeter_kinds = {"boundary_in", "off_ramp", "boundary_out", "on_ramp"}
         allocation = {
             movement: net.movement_capacity_veh_h * 0.5
-            for movement in net.urban_movements
+            for movement, spec in net.urban_movements.items()
+            if spec.get("kind") in perimeter_kinds
         }
         # legacy link-level allocation은 movement-level 합과 일치시킨다(분산 coordinator 합산과 정합).
         for link in net.boundary_in_links:

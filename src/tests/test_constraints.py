@@ -231,6 +231,41 @@ class ConstraintTests(unittest.TestCase):
         self.assertIn((round(max(np_values), 6), round(max(nuf_values), 6)), pairs)
         self.assertIn((prev_np, 3333.0), pairs)
 
+    def test_internal_movement_not_throttled_by_allocation(self):
+        # 불변식: 내부(internal) movement는 inflow_outflow_allocation으로 cap되지 않는다.
+        # perimeter movement만 allocation cap이 적용된다(green×saturation은 내부 전용 제어).
+        from src.models.urban_queue_model import (
+            PERIMETER_MOVEMENT_KINDS,
+            _movement_capacity_flow,
+            movement_specs,
+        )
+
+        cfg = short_config()
+        net = cfg.network
+        specs = movement_specs(cfg)
+        internal = next(m for m, s in specs.items() if s.get("kind") == "internal")
+        perimeter = next(
+            m for m, s in specs.items() if s.get("kind") in PERIMETER_MOVEMENT_KINDS
+        )
+
+        control = ControlAction.fixed(cfg)
+        # fixed()는 내부 movement에 allocation을 사전충전하지 않는다.
+        self.assertNotIn(internal, control.inflow_outflow_allocation)
+
+        throttle = net.movement_capacity_veh_h * 0.5
+        control.inflow_outflow_allocation[internal] = throttle
+        control.inflow_outflow_allocation[perimeter] = throttle
+        # 내부 movement는 allocation 700이 들어 있어도 물리용량(1400)을 반환한다.
+        self.assertEqual(
+            _movement_capacity_flow(control, cfg, internal, specs[internal]),
+            net.movement_capacity_veh_h,
+        )
+        # perimeter movement는 allocation cap이 그대로 적용된다.
+        self.assertEqual(
+            _movement_capacity_flow(control, cfg, perimeter, specs[perimeter]),
+            throttle,
+        )
+
     def test_stackelberg_can_use_distributed_follower_solver(self):
         cfg = ExperimentConfig.from_file(
             "src/config/default.yaml",

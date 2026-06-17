@@ -9,6 +9,11 @@ from .demand import DemandStep
 from .state import ControlAction, ExperimentConfig, TrafficState
 
 
+# inflow_outflow_allocation은 perimeter(경계/램프) 제어 전용 신호다. 내부 urban
+# movement는 green×saturation으로만 제어돼야 하므로 allocation을 cap으로 적용하지 않는다.
+PERIMETER_MOVEMENT_KINDS = {"boundary_in", "off_ramp", "boundary_out", "on_ramp"}
+
+
 def safe_balance_index(values: Iterable[float], eps: float = 1.0e-9) -> float:
     arr = np.asarray(list(values), dtype=float)
     if arr.size == 0 or float(np.sum(np.abs(arr))) <= eps:
@@ -503,6 +508,11 @@ def _movement_capacity_flow(
     spec: Mapping[str, object],
 ) -> float:
     net = cfg.network
+    kind = str(spec.get("kind", ""))
+    # 내부(internal) movement는 allocation으로 throttle되지 않는다(불변식).
+    # allocation cap은 perimeter movement(boundary_in/boundary_out/on_ramp/off_ramp)에만 적용.
+    if kind not in PERIMETER_MOVEMENT_KINDS:
+        return float(net.movement_capacity_veh_h)
     origin = str(spec.get("origin", ""))
     destination = str(spec.get("destination", ""))
     return float(min(
