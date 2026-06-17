@@ -1204,3 +1204,90 @@ Control validation summary: focused Step C tests confirm urban->freeway, freeway
 
 - Full acceptance remains unevaluated because no closed-loop simulation was run for this step.
 - Next modification: Step B, replace the leader forecast test with evaluation/ranking/selection sensitivity.
+
+## 2026-06-17 Step B — Leader Forecast Evaluation Test
+
+### What was implemented
+
+- Replaced the leader forecast test assumption that forecast must change the candidate set.
+- Added compact candidate evaluation metadata to `StackelbergMPCController.decide_with_info()`.
+- The test now checks whether future forecast changes candidate evaluation, ranking, objective spread, or selected leader action even when candidate set summaries are identical.
+
+### Files changed
+
+- `src/controllers/stackelberg_mpc.py`
+- `src/tests/test_forecast_awareness.py`
+- `2026-06-17/proposed_controller_refactor_execution.md`
+
+### Commands
+
+Baseline run command:
+
+```text
+Not run for Step B. This was a diagnostic/test-design step.
+```
+
+Proposed-controller run command:
+
+```text
+Not run for Step B. This was a diagnostic/test-design step.
+```
+
+Syntax check:
+
+```text
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m py_compile src\controllers\stackelberg_mpc.py src\tests\test_forecast_awareness.py
+```
+
+Result: OK.
+
+Focused Step B test command:
+
+```text
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest src.tests.test_forecast_awareness.ForecastAwarenessTests.test_leader_candidates_reflect_forecast_summary -v
+```
+
+Result:
+
+```text
+1 test, OK
+```
+
+Forecast-awareness suite:
+
+```text
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest src.tests.test_forecast_awareness -v
+```
+
+Result:
+
+```text
+8 tests, 7 OK, 1 failure
+```
+
+The remaining failure is the scheduled Step A VSL saturation test:
+
+- `test_freeway_vsl_uses_future_offramp_inflow`
+
+### Metrics
+
+Baseline Total TTT/TTS: not run.
+
+Proposed Total TTT/TTS: not run.
+
+Improvement rate: not computed for Step B.
+
+Boundary queue balancing result: not run.
+
+Control validation summary: Step B confirms leader forecast sensitivity through candidate evaluation/ranking/selection metadata rather than requiring candidate-set changes.
+
+### Review
+
+- Coding subagent: `Erdos`.
+- Review subagent: `Harvey`, verdict `PASS_WITH_NOTES`.
+- Codex final review: PASS after adding the reviewer's recommended identical-candidate-set guard and separate previous-control objects for low/high forecast runs.
+
+### Failed criteria and next modification
+
+- Full acceptance remains unevaluated because no closed-loop simulation was run for this step.
+- Next modification: Step E, recalibrate `N_P_crit_veh` after D/C/B controller semantics changed.

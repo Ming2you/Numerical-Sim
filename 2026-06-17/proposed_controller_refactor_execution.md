@@ -25,7 +25,7 @@ D -> C -> B -> E -> A
 |---|---|---|---|
 | D | Leader objective를 제안 수식과 정합화 | 완료 | Step D 커밋으로 완료 |
 | C | Wu식 full neighbor coupling을 Proposed distributed follower에 이식 | 완료 | Step C 커밋으로 완료 |
-| B | Leader forecast 테스트를 후보집합이 아닌 평가/선택 기준으로 수정 | 대기 | 미완료 |
+| B | Leader forecast 테스트를 후보집합이 아닌 평가/선택 기준으로 수정 | 완료 | Step B 커밋으로 완료 |
 | E | `N_P_crit_veh` 재보정 | 대기 | 미완료 |
 | A | VSL forecast-aware 테스트 및 objective saturation 조정 | 대기 | 미완료 |
 
@@ -127,11 +127,33 @@ Wu controller의 neighbor-coupling 철학을 Proposed distributed follower에도
 
 ### 담당/검토 기록
 
-- 코딩 subagent: 미배정
-- 리뷰 subagent: 미배정
-- Codex 최종 판정: 미완료
-- 검증: 미실행
-- 커밋/푸시: 미완료
+- 코딩 subagent: `Erdos` (`019ed5e3-6399-7773-9cbf-731b2db2c16c`)
+- 리뷰 subagent: `Harvey` (`019ed5ec-8598-74c0-97c0-e4ae662e977f`)
+- Codex 최종 판정: PASS. 리뷰 권고에 따라 동일 candidate-set guard와 분리된 previous control 객체를 테스트에 추가했다.
+- 구현 요약:
+  - `StackelbergMPCController.decide_with_info()`가 compact candidate evaluation diagnostics를 metadata에 남긴다.
+  - 기록 항목: forecast demand summary, selected `N_P/N_UF`, best/second candidate index/action/objective, objective gap/spread.
+  - `test_leader_candidates_reflect_forecast_summary`를 후보 집합 차이 assertion에서 forecast별 evaluation/ranking/selection sensitivity assertion으로 변경했다.
+  - 테스트는 low/high future forecast의 candidate-set summary가 같아도 objective/ranking/selection signature가 달라지는지 확인한다.
+- 검증:
+  ```text
+  C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m py_compile src\controllers\stackelberg_mpc.py src\tests\test_forecast_awareness.py
+  ```
+  결과: OK.
+  ```text
+  C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest src.tests.test_forecast_awareness.ForecastAwarenessTests.test_leader_candidates_reflect_forecast_summary -v
+  ```
+  결과: `1 test, OK`.
+  ```text
+  C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest src.tests.test_forecast_awareness -v
+  ```
+  결과: `8 tests, 7 OK, 1 expected pending failure`.
+  - `test_freeway_vsl_uses_future_offramp_inflow`: Step A에서 VSL saturation fixture/objective 조정 예정.
+- 리뷰 결론:
+  - `Harvey`: PASS_WITH_NOTES.
+  - 권고 1: 동일 candidate-set guard 추가. Codex가 반영 완료.
+  - 권고 2: low/high call에 별도 `ControlAction.fixed(cfg)` 사용. Codex가 반영 완료.
+- 커밋/푸시: 이 Step B 변경 커밋으로 완료
 
 ## Step E: `N_P_crit_veh` 재보정
 

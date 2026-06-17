@@ -4,7 +4,8 @@ import unittest
 
 from src.controllers.distributed_coordinator import DistributedCoordinator
 from src.controllers.freeway_follower import FreewayFollowerResult
-from src.controllers.leader import Leader, LeaderAction
+from src.controllers.leader import LeaderAction
+from src.controllers.stackelberg_mpc import StackelbergMPCController
 from src.controllers.urban_follower import UrbanFollower
 from src.models.demand import DemandProfile, DemandStep, ScenarioConfig
 from src.models.state import ControlAction, ExperimentConfig, TrafficState
@@ -186,19 +187,101 @@ class ForecastAwarenessTests(unittest.TestCase):
         self.assertGreater(result.green_times["D_p1"], self.net.effective_green_total / 2.0)
 
     def test_leader_candidates_reflect_forecast_summary(self):
-        """미래 ramp/boundary 수요가 큰 forecast는 first-demand만 쓸 때와 다른 후보를 만든다."""
-        state = TrafficState.initial(self.cfg)
-        leader = Leader(self.cfg)
-        prev = ControlAction.fixed(self.cfg)
-        big_future = _scale_future_demand(self.forecast, 5.0)
-        # first-demand만(forecast 미전달) vs horizon 요약(forecast 전달).
-        first_only = leader.candidates(state.copy(), prev, self.forecast[0])
-        with_forecast = leader.candidates(state.copy(), prev, self.forecast[0], forecast=big_future)
-        first_nuf = sorted(a.N_UF_star for a in first_only)
-        forecast_nuf = sorted(a.N_UF_star for a in with_forecast)
+        """후보 집합 차이가 아니라 forecast별 후보 평가/선택 민감도를 검증한다."""
+        cfg = ExperimentConfig.from_file(
+            "src/config/default.yaml",
+            {
+                "simulation": {"T_total": 60.0, "control_interval": 30.0},
+                "mpc": {"horizon_steps": 2, "leader_candidate_count": 3, "max_nash_iter": 1},
+                "freeway_follower": {
+                    "horizon_beam_width": 1,
+                    "horizon_ramp_candidate_limit": 1,
+                    "horizon_vsl_candidate_limit_per_link": 1,
+                },
+            },
+        )
+        state = TrafficState.initial(cfg)
+        prev = ControlAction.fixed(cfg)
+        forecast = DemandProfile(
+            cfg,
+            ScenarioConfig(name="peak", urban_scale=2.0, freeway_scale=1.5, ramp_scale=1.5),
+        ).horizon(0.0, max(3, cfg.mpc.horizon_steps))
+        low_future = _scale_future_demand(forecast, 0.1)
+        high_future = _scale_future_demand(forecast, 5.0)
+        low_prev = ControlAction.fixed(cfg)
+        high_prev = ControlAction.fixed(cfg)
+
+        low = StackelbergMPCController(cfg).decide_with_info(state.copy(), low_future, low_prev)
+        high = StackelbergMPCController(cfg).decide_with_info(state.copy(), high_future, high_prev)
+
+        required_keys = [
+            "leader_forecast_total_future_mean_veh_h",
+            "leader_candidate_best_objective",
+            "leader_candidate_second_objective",
+            "leader_candidate_objective_spread",
+            "leader_selected_N_P_star",
+            "leader_selected_N_UF_star",
+        ]
+        for key in required_keys:
+            self.assertIn(key, low.metadata)
+            self.assertIn(key, high.metadata)
+
+        self.assertAlmostEqual(
+            low.metadata["leader_forecast_total_first_veh_h"],
+            high.metadata["leader_forecast_total_first_veh_h"],
+        )
+        self.assertGreater(
+            high.metadata["leader_forecast_total_future_mean_veh_h"],
+            low.metadata["leader_forecast_total_future_mean_veh_h"],
+        )
+        self.assertAlmostEqual(
+            low.metadata["leader_candidate_best_objective"],
+            low.leader_objective,
+        )
+        self.assertAlmostEqual(
+            high.metadata["leader_candidate_best_objective"],
+            high.leader_objective,
+        )
+        low_candidate_set = (
+            round(low.metadata["N_P_min"], 6),
+            round(low.metadata["N_P_max"], 6),
+            round(low.metadata["N_UF_min"], 6),
+            round(low.metadata["N_UF_max"], 6),
+            round(low.metadata["leader_candidate_count"], 6),
+        )
+        high_candidate_set = (
+            round(high.metadata["N_P_min"], 6),
+            round(high.metadata["N_P_max"], 6),
+            round(high.metadata["N_UF_min"], 6),
+            round(high.metadata["N_UF_max"], 6),
+            round(high.metadata["leader_candidate_count"], 6),
+        )
+        self.assertEqual(low_candidate_set, high_candidate_set)
+
+        # 후보 N_UF 집합이 같아도 평가값, top-2 ranking, selected action 중 하나가 달라지면
+        # leader가 forecast-sensitive 평가를 수행한다고 본다.
+        low_signature = (
+            round(low.metadata["leader_candidate_best_index"], 6),
+            round(low.metadata["leader_candidate_second_index"], 6),
+            round(low.metadata["leader_candidate_best_objective"], 6),
+            round(low.metadata["leader_candidate_second_objective"], 6),
+            round(low.metadata["leader_candidate_objective_spread"], 6),
+            round(low.metadata["leader_selected_N_P_star"], 6),
+            round(low.metadata["leader_selected_N_UF_star"], 6),
+        )
+        high_signature = (
+            round(high.metadata["leader_candidate_best_index"], 6),
+            round(high.metadata["leader_candidate_second_index"], 6),
+            round(high.metadata["leader_candidate_best_objective"], 6),
+            round(high.metadata["leader_candidate_second_objective"], 6),
+            round(high.metadata["leader_candidate_objective_spread"], 6),
+            round(high.metadata["leader_selected_N_P_star"], 6),
+            round(high.metadata["leader_selected_N_UF_star"], 6),
+        )
         self.assertNotEqual(
-            first_nuf, forecast_nuf,
-            "leader 후보 N_UF 집합이 forecast 요약을 반영하지 않음",
+            low_signature,
+            high_signature,
+            "leader 후보 평가/랭킹/선택/action objective가 미래 forecast 변화에 반응하지 않음",
         )
 
 
