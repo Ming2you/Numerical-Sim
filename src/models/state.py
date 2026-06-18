@@ -761,6 +761,20 @@ class ControlAction:
     infeasibility: Dict[str, float] = field(default_factory=dict)
     diagnostics: Dict[str, Any] = field(default_factory=dict)
 
+    def copy(self) -> "ControlAction":
+        """후보 평가 중 이전 control 객체가 오염되지 않도록 dict 필드를 복사한다."""
+        return ControlAction(
+            N_P_star=float(self.N_P_star),
+            N_UF_star=float(self.N_UF_star),
+            ramp_metering=dict(self.ramp_metering),
+            vsl=dict(self.vsl),
+            green_times=dict(self.green_times),
+            offsets=dict(self.offsets),
+            inflow_outflow_allocation=dict(self.inflow_outflow_allocation),
+            infeasibility=dict(self.infeasibility),
+            diagnostics=dict(self.diagnostics),
+        )
+
     @classmethod
     def uncontrolled(cls, cfg: ExperimentConfig) -> "ControlAction":
         """고정 신호와 자유 방출을 사용하는 물리적 no-control action을 만든다.

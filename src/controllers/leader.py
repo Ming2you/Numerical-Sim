@@ -316,22 +316,28 @@ class Leader:
         state_base, boundary_excluded = self._state_accumulation_base(states)
         if lc.objective_mode == "follower_ttt":
             base = float(follower_objective)
+            accumulation_penalty_scale = self.cfg.simulation.T_c_h
         else:
             base = state_base
+            accumulation_penalty_scale = 1.0
         target_penalty = 0.0
         boundary_in_queue_penalty = 0.0
         for s in states:
             n_p = s.protected_accumulation_veh(net)
-            target_penalty += lc.w_P * max(0.0, n_p - lc.N_P_crit_veh)
+            # follower_ttt 모드의 base는 veh*h이므로 accumulation 초과 항도 T_c_h로 맞춘다.
+            target_penalty += lc.w_P * max(0.0, n_p - lc.N_P_crit_veh) * accumulation_penalty_scale
             # Step D: boundary_in 큐 비용은 candidate 해석용 진단으로만 보존한다.
             boundary_in_queue_penalty += lc.w_boundary_in * s.boundary_in_queue_vehicles(net)
         density_excess, density_effective_count = self._density_penalty(states)
-        density_penalty = lc.w_F * density_excess
+        density_penalty = lc.w_F * density_excess * accumulation_penalty_scale
         smooth = 0.0
         if previous is not None:
+            nuf_delta = abs(action.N_UF_star - previous.N_UF_star)
+            if lc.N_UF_star_unit == "veh_per_hour":
+                nuf_delta *= self.cfg.simulation.T_c_h
             smooth = lc.w_L * (
                 abs(action.N_P_star - previous.N_P_star)
-                + abs(action.N_UF_star - previous.N_UF_star)
+                + nuf_delta
             )
         conv, obj_component, control_component = self._non_convergence_penalty(
             nash_converged,

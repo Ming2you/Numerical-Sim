@@ -19,8 +19,7 @@ At every control interval, it must:
    - solve freeway follower response
    - solve urban follower response
    - iterate follower responses until convergence or maximum Nash iterations
-   - simulate/predict state trajectory over horizon
-   - compute leader objective
+   - compute leader objective from the follower-response objective
 3. Select the candidate with minimum objective.
 4. Return first-step controls:
    - ramp metering rates
@@ -31,7 +30,7 @@ At every control interval, it must:
 
 ### 4.2 Leader objective
 
-Implement the leader objective as configurable. The default base term is the follower-response TTT/TTS predicted under the candidate leader action:
+Implement the leader objective as configurable. The default base term is the follower-response TTT/TTS reported by the Nash/follower response under the candidate leader action. Do not add a second full-system rollout TTT on top of the follower response in the default Stackelberg path:
 
 ```text
 J_L = TTT_freeway + TTT_urban
@@ -46,12 +45,25 @@ U_L(t) = [N_P_star(t), N_UF_star(t)]
 positive_part(x) = max(x, 0)
 target_exceedance_penalties =
     sum_over_horizon[
-        w_P * positive_part(n_P(t) - n_P_crit)
-        + w_F * sum_m sum_i L[m] * lanes[m] * positive_part(rho[m,i](t) - rho_crit[m])
+        T_c_h * (
+          w_P * positive_part(n_P(t) - n_P_crit)
+          + w_F * sum_m sum_i L[m] * lanes[m] * positive_part(rho[m,i](t) - rho_crit[m])
+        )
     ]
 smoothness_penalty =
     sum_over_horizon[w_L * L1_norm(U_L(t) - U_L(t-1))]
 ```
+
+If `N_UF_star` is configured as a flow (`veh_per_hour`), convert its
+increment to vehicles over the control interval before adding it to the
+smoothness L1 norm:
+
+```text
+|Delta U_L|_1 = |Delta N_P_star| + T_c_h * |Delta N_UF_star|
+```
+
+If `N_UF_star_unit = veh_per_control_interval`, use `|Delta N_UF_star|`
+directly.
 
 The legacy state-accumulation base remains available only when explicitly configured:
 
@@ -65,6 +77,21 @@ If `objective_mode = state_accumulation`, then the base term is:
 ```text
 J_base = sum_over_horizon[n_P(t) + n_F(t)]
 ```
+
+In `follower_ttt` mode, the target exceedance terms are multiplied by `T_c_h`
+so they are in the same vehicle-hour scale as the follower-response TTT/TTS base.
+The legacy `state_accumulation` mode keeps vehicle-sum scaling for backward
+compatibility with accumulation-form diagnostics and may use a predicted state
+trajectory because the state sum itself is the base objective.
+
+The distributed follower must return a `NashResult.objective_value` whose scale
+is compatible with the follower-response TTT/TTS term above. In the default
+distributed mode this is a lightweight conservation proxy, not a second full
+closed-loop rollout: current vehicles and forecast arrivals are combined with
+estimated controlled service, ramp release, boundary-out sinks, mainline exits,
+off-ramp storage flow, density exceedance, and terminal residual queues to
+produce a vehicle-hour response objective. Local agent proxy costs remain as
+diagnostics only and must not be used as the leader's follower-TTT base.
 
 `boundary_in_queue_penalty` and `non_convergence_penalty` may be reported as diagnostics, but they are not included in `leader_total_objective`.
 

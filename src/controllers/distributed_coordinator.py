@@ -22,6 +22,7 @@ from src.models.urban_queue_model import (
     _movement_capacity_flow,
     _phase_green_fraction,
     ensure_urban_state,
+    estimate_onramp_green_release_flows,
     estimate_onramp_reservoir_inflow,
     movement_specs,
 )
@@ -440,14 +441,14 @@ class DistributedCoordinator:
         self._repair_diagnostics = {}
         first_demand = forecast[0]
         if previous_control is not None:
-            reference_control = previous_control
+            reference_control = previous_control.copy()
         else:
             # leaderless 초기 기준은 물리적 no-control(allocation 비움) — fixed()의
             # 0.5cap allocation이 숨은 게이팅으로 남지 않게 한다.
             reference_control = (
                 ControlAction.uncontrolled(self.cfg) if leader is None else ControlAction.fixed(self.cfg)
             )
-        current = reference_control
+        current = reference_control.copy()
         current.N_P_star = leader.N_P_star if leader is not None else 0.0
         current.N_UF_star = leader.N_UF_star if leader is not None else 0.0
         allocation_plan = (
@@ -495,8 +496,16 @@ class DistributedCoordinator:
             candidate.vsl = self._clamp_vsl_to_reference(candidate.vsl, reference_control)
             new_coupling = self._extract_coupling(state, candidate, first_demand)
             residual = self._coupling_residual(coupling, new_coupling)
-            obj = sum(s.objective for s in freeway_solves) + sum(s.objective for s in urban_solves)
+            proxy_obj = sum(s.objective for s in freeway_solves) + sum(s.objective for s in urban_solves)
+            obj, response_diag = self._response_tts_objective(
+                state,
+                candidate,
+                forecast,
+                residual=residual,
+                proxy_objective=proxy_obj,
+            )
             diagnostics = self._diagnostics(freeway_solves, urban_solves, residual, iteration)
+            diagnostics.update(response_diag)
             if obj < best_obj:
                 best_obj = float(obj)
                 best_control = candidate
@@ -1210,6 +1219,312 @@ class DistributedCoordinator:
             b = float(new.get(key, 0.0))
             residual = max(residual, abs(a - b) / max(1.0, abs(a), abs(b)))
         return float(residual)
+
+    def _response_horizon_demand(self, forecast: list[DemandStep]) -> tuple[DemandStep, float, list[DemandStep]]:
+        steps = forecast[: max(1, self.cfg.mpc.horizon_steps)] or forecast[:1]
+        dt_h = self.cfg.simulation.T_c_h
+        horizon_h = max(dt_h * max(len(steps), 1), 1.0e-9)
+
+        def average(attr: str) -> Dict[str, float]:
+            totals: Dict[str, float] = {}
+            for step in steps:
+                for key, value in getattr(step, attr).items():
+                    totals[key] = totals.get(key, 0.0) + max(0.0, float(value)) * dt_h
+            return {key: value / horizon_h for key, value in totals.items()}
+
+        demand = DemandStep(
+            freeway_mainline=average("freeway_mainline"),
+            urban_boundary=average("urban_boundary"),
+            ramp_arrival=average("ramp_arrival"),
+            incident_capacity_factor=min(float(getattr(step, "incident_capacity_factor", 1.0)) for step in steps),
+        )
+        return demand, horizon_h, steps
+
+    def _movement_forecast_arrivals_veh(
+        self,
+        steps: list[DemandStep],
+    ) -> Dict[str, float]:
+        net = self.cfg.network
+        dt_h = self.cfg.simulation.T_c_h
+        arrivals: Dict[str, float] = {}
+        onramp_by_movement = {
+            movement: ramp
+            for ramp, movements in net.on_ramp_to_movement.items()
+            for movement in movements
+        }
+        for step in steps:
+            for movement, spec in self._specs.items():
+                kind = str(spec.get("kind", ""))
+                if kind == "boundary_in":
+                    origin = str(spec.get("origin", ""))
+                    beta = float(spec.get("beta", 1.0))
+                    arrivals[movement] = arrivals.get(movement, 0.0) + (
+                        max(0.0, step.urban_boundary.get(origin, 0.0)) * beta * dt_h
+                    )
+                elif kind == "on_ramp":
+                    ramp = onramp_by_movement.get(movement, "")
+                    if not ramp:
+                        continue
+                    movements = net.on_ramp_to_movement.get(ramp, [])
+                    share = 1.0 / max(len(movements), 1)
+                    arrivals[movement] = arrivals.get(movement, 0.0) + (
+                        max(0.0, step.ramp_arrival.get(ramp, 0.0)) * share * dt_h
+                    )
+        return arrivals
+
+    def _estimate_urban_service_veh(
+        self,
+        state: TrafficState,
+        control: ControlAction,
+        arrivals: Mapping[str, float],
+        horizon_h: float,
+    ) -> tuple[float, float]:
+        service_total = 0.0
+        boundary_out_sink = 0.0
+        for movement, spec in self._specs.items():
+            if str(spec.get("kind", "")) == "on_ramp":
+                continue
+            available = max(0.0, state.urban_movement_queue.get(movement, 0.0)) + max(
+                0.0,
+                arrivals.get(movement, 0.0),
+            )
+            cap_veh = horizon_h * _phase_green_fraction(control, self.cfg, spec) * _movement_capacity_flow(
+                control,
+                self.cfg,
+                movement,
+                spec,
+            )
+            served = min(available, max(0.0, cap_veh))
+            service_total += served
+            if str(spec.get("kind", "")) == "boundary_out":
+                boundary_out_sink += served
+        return float(service_total), float(boundary_out_sink)
+
+    def _estimate_offramp_storage_departure_veh(
+        self,
+        state: TrafficState,
+        control: ControlAction,
+        horizon_h: float,
+    ) -> float:
+        net = self.cfg.network
+        total = 0.0
+        for off_ramp in net.off_ramps:
+            storage_link = net.off_ramp_storage_link.get(off_ramp, "")
+            capacity = net.urban_link_storage_veh.get(storage_link, 0.0)
+            occupancy = max(0.0, capacity - state.urban_link_storage.get(storage_link, capacity))
+            if occupancy <= 0.0:
+                continue
+            requested = 0.0
+            for movement in net.off_ramp_to_movement.get(off_ramp, []):
+                spec = self._specs.get(movement)
+                if spec is None:
+                    continue
+                beta = max(0.0, float(spec.get("beta", 0.0)))
+                cap_veh = horizon_h * _phase_green_fraction(control, self.cfg, spec) * _movement_capacity_flow(
+                    control,
+                    self.cfg,
+                    movement,
+                    spec,
+                )
+                requested += min(beta * occupancy, max(0.0, cap_veh))
+            total += min(occupancy, requested)
+        return float(total)
+
+    def _estimate_ramp_release_veh(
+        self,
+        state: TrafficState,
+        control: ControlAction,
+        demand: DemandStep,
+        onramp_green_veh: Mapping[str, float],
+        horizon_h: float,
+    ) -> tuple[Dict[str, float], float]:
+        net = self.cfg.network
+        cap_factor = float(getattr(demand, "incident_capacity_factor", 1.0))
+        release: Dict[str, float] = {}
+        total = 0.0
+        for ramp in net.ramps:
+            link = net.ramp_to_freeway[ramp]
+            densities = state.freeway_density.get(link, [])
+            merge_idx = _configured_segment_index(
+                getattr(net, "ramp_merge_segment_index", {}),
+                ramp,
+                len(densities) // 2,
+                max(len(densities), 1),
+            )
+            rho_merge = densities[merge_idx] if densities else 0.0
+            receiving = float(np.clip(
+                (net.rho_max - rho_merge) / max(net.rho_max - net.rho_crit, 1.0e-9),
+                0.0,
+                1.0,
+            ))
+            available_veh = max(0.0, state.ramp_queue.get(ramp, 0.0)) + max(
+                0.0,
+                onramp_green_veh.get(ramp, 0.0),
+            )
+            requested_veh = max(0.0, control.ramp_metering.get(ramp, net.ramp_capacity_veh_h[ramp])) * horizon_h
+            capacity_veh = net.ramp_capacity_veh_h[ramp] * horizon_h
+            receiving_veh = net.freeway_capacity_veh_h * cap_factor * receiving * horizon_h
+            value = min(available_veh, requested_veh, capacity_veh, receiving_veh)
+            release[ramp] = float(max(0.0, value))
+            total += release[ramp]
+        return release, float(total)
+
+    def _estimate_mainline_exit_veh(
+        self,
+        state: TrafficState,
+        control: ControlAction,
+        demand: DemandStep,
+        ramp_release_by_link_veh: Mapping[str, float],
+        horizon_h: float,
+    ) -> float:
+        net = self.cfg.network
+        cap_factor = float(getattr(demand, "incident_capacity_factor", 1.0))
+        total = 0.0
+        for link in net.freeway_links:
+            current = sum(
+                max(0.0, rho) * net.freeway_segment_length_km * net.freeway_lanes
+                for rho in state.freeway_density.get(link, [])
+            )
+            arrivals = max(0.0, demand.freeway_mainline.get(link, 0.0)) * horizon_h
+            arrivals += max(0.0, ramp_release_by_link_veh.get(link, 0.0))
+            fallback_vsl = control.vsl.get(link, max(self.cfg.freeway_follower.vsl_set))
+            vsl_factor = min(1.0, max(self.cfg.network.v_min, fallback_vsl) / max(net.v_free, 1.0e-9))
+            exit_capacity = net.freeway_capacity_veh_h * cap_factor * vsl_factor * horizon_h
+            total += min(max(0.0, current + arrivals), max(0.0, exit_capacity))
+        return float(total)
+
+    def _estimate_offramp_inflow_veh(
+        self,
+        state: TrafficState,
+        control: ControlAction,
+        steps: list[DemandStep],
+    ) -> float:
+        total = 0.0
+        for link in self.cfg.network.freeway_links:
+            forecast_by_ramp = self._forecast_offramp_arrivals_by_ramp(state, steps, link)
+            fallback_vsl = control.vsl.get(link, max(self.cfg.freeway_follower.vsl_set))
+            fraction = self._offramp_release_fraction(fallback_vsl)
+            total += sum(max(0.0, vehicles) * fraction for vehicles in forecast_by_ramp.values())
+        return float(total)
+
+    def _response_tts_objective(
+        self,
+        state: TrafficState,
+        control: ControlAction,
+        forecast: list[DemandStep],
+        residual: float,
+        proxy_objective: float,
+    ) -> tuple[float, Dict[str, float]]:
+        """Return the follower response objective in vehicle-hour compatible units.
+
+        This is intentionally a lightweight response-cost proxy, not a second closed-loop
+        plant rollout. It uses conservation over the MPC horizon: current vehicles plus
+        forecast arrivals minus estimated sink departures, with controlled queue/ramp
+        service determining terminal residuals.
+        """
+        ensure_urban_state(state, self.cfg)
+        net = self.cfg.network
+        demand, horizon_h, steps = self._response_horizon_demand(forecast)
+        movement_arrivals = self._movement_forecast_arrivals_veh(steps)
+        urban_arrivals_veh = sum(max(0.0, value) for value in movement_arrivals.values())
+        freeway_mainline_arrivals_veh = sum(
+            max(0.0, step.freeway_mainline.get(link, 0.0)) * self.cfg.simulation.T_c_h
+            for step in steps
+            for link in net.freeway_links
+        )
+
+        urban_service_veh, boundary_out_sink_veh = self._estimate_urban_service_veh(
+            state,
+            control,
+            movement_arrivals,
+            horizon_h,
+        )
+        onramp_green_flows = estimate_onramp_green_release_flows(
+            state.copy(),
+            control,
+            demand,
+            self.cfg,
+            interval_h=horizon_h,
+        )
+        onramp_green_veh = {
+            ramp: max(0.0, flow) * horizon_h
+            for ramp, flow in onramp_green_flows.items()
+        }
+        onramp_green_total = sum(onramp_green_veh.values())
+        ramp_release_veh, ramp_release_total = self._estimate_ramp_release_veh(
+            state,
+            control,
+            demand,
+            onramp_green_veh,
+            horizon_h,
+        )
+        ramp_release_by_link: Dict[str, float] = {}
+        for ramp, vehicles in ramp_release_veh.items():
+            link = net.ramp_to_freeway.get(ramp, "")
+            ramp_release_by_link[link] = ramp_release_by_link.get(link, 0.0) + vehicles
+        mainline_exit_veh = self._estimate_mainline_exit_veh(
+            state,
+            control,
+            demand,
+            ramp_release_by_link,
+            horizon_h,
+        )
+        offramp_inflow_veh = self._estimate_offramp_inflow_veh(state, control, steps)
+        offramp_departure_veh = self._estimate_offramp_storage_departure_veh(state, control, horizon_h)
+
+        urban_start = state.total_urban_vehicles(net)
+        ramp_start = sum(max(0.0, value) for value in state.ramp_queue.values())
+        freeway_start = state.total_freeway_vehicles(net)
+        off_storage_start = state.off_ramp_storage_occupancy_veh(net)
+        origin_start = sum(max(0.0, value) for value in state.mainline_origin_queue.values())
+        current_total = urban_start + ramp_start + freeway_start + off_storage_start + origin_start
+
+        urban_terminal = max(
+            0.0,
+            urban_start + urban_arrivals_veh + offramp_departure_veh
+            - boundary_out_sink_veh - onramp_green_total,
+        )
+        ramp_terminal = max(0.0, ramp_start + onramp_green_total - ramp_release_total)
+        freeway_terminal = max(
+            0.0,
+            freeway_start + freeway_mainline_arrivals_veh + ramp_release_total
+            - mainline_exit_veh - offramp_inflow_veh,
+        )
+        off_storage_terminal = max(0.0, off_storage_start + offramp_inflow_veh - offramp_departure_veh)
+        origin_terminal = max(0.0, origin_start)
+        terminal_total = urban_terminal + ramp_terminal + freeway_terminal + off_storage_terminal + origin_terminal
+
+        density_excess_veh = sum(
+            net.freeway_segment_length_km
+            * net.freeway_lanes
+            * max(0.0, rho - net.rho_crit)
+            for values in state.freeway_density.values()
+            for rho in values
+        )
+        residual_penalty = max(0.0, residual if np.isfinite(residual) else 0.0) * current_total * horizon_h
+        objective = 0.5 * (current_total + terminal_total) * horizon_h
+        objective += self.cfg.freeway_follower.density_penalty * density_excess_veh * horizon_h
+        objective += residual_penalty
+
+        diagnostics = {
+            "distributed_response_objective_tts": float(objective),
+            "distributed_response_proxy_objective": float(proxy_objective),
+            "distributed_response_horizon_h": float(horizon_h),
+            "distributed_response_current_vehicles": float(current_total),
+            "distributed_response_terminal_proxy_vehicles": float(terminal_total),
+            "distributed_response_urban_service_veh": float(urban_service_veh + onramp_green_total),
+            "distributed_response_boundary_out_sink_veh": float(boundary_out_sink_veh),
+            "distributed_response_onramp_green_veh": float(onramp_green_total),
+            "distributed_response_ramp_release_veh": float(ramp_release_total),
+            "distributed_response_mainline_exit_veh": float(mainline_exit_veh),
+            "distributed_response_offramp_inflow_veh": float(offramp_inflow_veh),
+            "distributed_response_offramp_departure_veh": float(offramp_departure_veh),
+            "distributed_response_arrivals_veh": float(urban_arrivals_veh + freeway_mainline_arrivals_veh),
+            "distributed_response_residual_penalty": float(residual_penalty),
+            "distributed_response_density_excess_veh": float(density_excess_veh),
+            "distributed_response_ttt_compatible": 1.0,
+        }
+        return float(objective), diagnostics
 
     def _diagnostics(
         self,

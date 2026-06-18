@@ -174,6 +174,11 @@ class ConstraintTests(unittest.TestCase):
         self.assertEqual(result.control.diagnostics["distributed_freeway_agent_count"], 8.0)
         self.assertIn("agent_U_A_objective", result.control.diagnostics)
         self.assertIn("agent_F_W2_objective", result.control.diagnostics)
+        self.assertIn("distributed_response_objective_tts", result.control.diagnostics)
+        self.assertAlmostEqual(
+            result.objective_value,
+            result.control.diagnostics["distributed_response_objective_tts"],
+        )
         self.assertEqual(set(result.control.vsl), set(cfg.network.freeway_links))
         boundary_out_total = sum(
             result.control.inflow_outflow_allocation[movement]
@@ -211,6 +216,51 @@ class ConstraintTests(unittest.TestCase):
         high_inflow_target = coordinator._leaderless_metering_target(agent, state, upper, demand)
 
         self.assertLess(high_inflow_target, low_inflow_target)
+
+    def test_distributed_response_objective_rewards_ramp_service(self):
+        cfg = ExperimentConfig.from_file(
+            "src/config/default.yaml",
+            {
+                "simulation": {"T_total": 360.0},
+                "mpc": {"horizon_steps": 3, "max_nash_iter": 1},
+                "freeway_follower": {"density_penalty": 1.0},
+            },
+        )
+        coordinator = DistributedCoordinator(cfg)
+        state = TrafficState.initial(cfg)
+        for link in cfg.network.freeway_links:
+            state.freeway_density[link] = [0.25 * cfg.network.rho_crit for _ in state.freeway_density[link]]
+            state.freeway_speed[link] = [cfg.network.v_free for _ in state.freeway_speed[link]]
+        state.refresh_freeway_flow(cfg.network)
+        for ramp in cfg.network.ramps:
+            state.ramp_queue[ramp] = 300.0
+        forecast = DemandProfile(cfg, ScenarioConfig("test")).horizon(0.0, 3)
+
+        low = ControlAction.fixed(cfg)
+        low.N_UF_star = 0.0
+        low.ramp_metering = {ramp: 0.0 for ramp in cfg.network.ramps}
+        high = ControlAction.fixed(cfg)
+        high.N_UF_star = cfg.network.total_ramp_capacity
+        high.ramp_metering = dict(cfg.network.ramp_capacity_veh_h)
+
+        low_obj, low_diag = coordinator._response_tts_objective(
+            state,
+            low,
+            forecast,
+            residual=0.0,
+            proxy_objective=999.0,
+        )
+        high_obj, high_diag = coordinator._response_tts_objective(
+            state,
+            high,
+            forecast,
+            residual=0.0,
+            proxy_objective=999.0,
+        )
+
+        self.assertEqual(low_diag["distributed_response_ttt_compatible"], 1.0)
+        self.assertGreater(high_diag["distributed_response_ramp_release_veh"], low_diag["distributed_response_ramp_release_veh"])
+        self.assertLess(high_obj, low_obj)
 
     def test_distributed_freeway_agent_reports_neighbor_pressure(self):
         cfg = short_config()
@@ -450,7 +500,7 @@ class ConstraintTests(unittest.TestCase):
             + n_f
             + 2.0 * max(0.0, n_p_protected - 100.0)
             + 3.0 * density_excess
-            + 0.5 * (abs(170.0 - 160.0) + abs(300.0 - 250.0))
+            + 0.5 * (abs(170.0 - 160.0) + cfg.simulation.T_c_h * abs(300.0 - 250.0))
         )
         leader = Leader(cfg)
         terms = leader.objective_terms(
@@ -502,6 +552,59 @@ class ConstraintTests(unittest.TestCase):
         self.assertGreater(terms["leader_boundary_in_queue_penalty"], 0.0)
         self.assertGreater(terms["leader_nonconvergence_penalty"], 0.0)
         self.assertAlmostEqual(terms["leader_total_objective"], 1234.0)
+
+    def test_default_leader_accumulation_penalties_use_control_interval_hours(self):
+        cfg = ExperimentConfig.from_file(
+            "src/config/default.yaml",
+            {
+                "leader": {
+                    "w_P": 2.0,
+                    "w_F": 3.0,
+                    "w_L": 0.0,
+                    "N_P_crit_veh": 100.0,
+                }
+            },
+        )
+        state = TrafficState.initial(cfg)
+        for movement in state.urban_movement_queue:
+            state.urban_movement_queue[movement] = 0.0
+        grid_cap = cfg.network.urban_link_storage_veh["A_to_D"]
+        state.urban_link_storage["A_to_D"] = grid_cap - 150.0
+        for link in cfg.network.freeway_links:
+            state.freeway_density[link] = [
+                cfg.network.rho_crit + 2.0
+                for _ in state.freeway_density[link]
+            ]
+            state.freeway_speed[link] = [cfg.network.v_free for _ in state.freeway_speed[link]]
+        state.refresh_freeway_flow(cfg.network)
+
+        n_p_excess = max(0.0, state.protected_accumulation_veh(cfg.network) - 100.0)
+        density_excess = sum(
+            cfg.network.freeway_segment_length_km
+            * cfg.network.freeway_lanes
+            * max(0.0, rho - cfg.network.rho_crit)
+            for values in state.freeway_density.values()
+            for rho in values
+        )
+        dt_h = cfg.simulation.T_c_h
+        expected_target = 2.0 * n_p_excess * dt_h
+        expected_density = 3.0 * density_excess * dt_h
+
+        terms = Leader(cfg).objective_terms(
+            [state],
+            ControlAction.fixed(cfg),
+            previous=None,
+            follower_objective=1000.0,
+            nash_converged=True,
+        )
+
+        self.assertEqual(cfg.leader.objective_mode, "follower_ttt")
+        self.assertAlmostEqual(terms["leader_target_penalty"], expected_target)
+        self.assertAlmostEqual(terms["leader_density_penalty"], expected_density)
+        self.assertAlmostEqual(
+            terms["leader_total_objective"],
+            1000.0 + expected_target + expected_density,
+        )
 
     def test_leader_non_convergence_penalty_uses_residuals(self):
         cfg = ExperimentConfig.from_file(
@@ -566,6 +669,10 @@ class ConstraintTests(unittest.TestCase):
             nash_converged=True,
         )
         self.assertAlmostEqual(terms["leader_density_excess"], expected_excess)
+        self.assertAlmostEqual(
+            terms["leader_density_penalty"],
+            expected_excess * cfg.simulation.T_c_h,
+        )
         self.assertEqual(terms["leader_density_effective_lane_weight_count"], 1.0)
 
     def test_ramp_metering_bounds(self):
@@ -980,6 +1087,94 @@ class ConstraintTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertAlmostEqual(total_ttt, 4.0)
         self.assertAlmostEqual(states[0].time_sec, cfg.simulation.control_interval)
+
+    def test_stackelberg_default_objective_uses_follower_response_without_rollout(self):
+        cfg = ExperimentConfig.from_file(
+            "src/config/default.yaml",
+            {
+                "simulation": {"T_total": 360.0},
+                "mpc": {"horizon_steps": 2, "leader_candidate_count": 2, "max_nash_iter": 1},
+                "leader": {"objective_mode": "follower_ttt", "w_P": 0.0, "w_F": 0.0, "w_L": 0.0},
+                "freeway_follower": {
+                    "horizon_beam_width": 1,
+                    "horizon_ramp_candidate_limit": 1,
+                    "horizon_vsl_candidate_limit_per_link": 1,
+                },
+            },
+        )
+        controller = StackelbergMPCController(cfg)
+        state = TrafficState.initial(cfg)
+        demand = DemandProfile(cfg, ScenarioConfig("test")).horizon(0.0, 2)
+
+        with patch("src.simulation.coupling.run_coupled_interval") as coupled_step:
+            coupled_step.side_effect = AssertionError("default Stackelberg evaluation must not rollout")
+            result = controller.decide_with_info(state, demand, ControlAction.fixed(cfg))
+
+        self.assertEqual(coupled_step.call_count, 0)
+        self.assertAlmostEqual(result.metadata["leader_rollout_prediction_used"], 0.0)
+        self.assertAlmostEqual(result.metadata["leader_follower_response_objective_used"], 1.0)
+        self.assertAlmostEqual(
+            result.metadata["leader_follower_ttt_base"],
+            result.nash.objective_value,
+        )
+
+    def test_distributed_follower_does_not_mutate_previous_control(self):
+        cfg = ExperimentConfig.from_file(
+            "src/config/default.yaml",
+            {
+                "simulation": {"T_total": 360.0},
+                "mpc": {"horizon_steps": 1, "max_nash_iter": 1},
+                "freeway_follower": {
+                    "horizon_beam_width": 1,
+                    "horizon_ramp_candidate_limit": 1,
+                    "horizon_vsl_candidate_limit_per_link": 1,
+                },
+            },
+        )
+        coordinator = DistributedCoordinator(cfg)
+        state = TrafficState.initial(cfg)
+        demand = DemandProfile(cfg, ScenarioConfig("test")).horizon(0.0, 1)
+        previous = ControlAction.fixed(cfg)
+        previous.N_P_star = 111.0
+        previous.N_UF_star = 222.0
+        previous.green_times["A_p1"] = 12.0
+        before_vector = previous.control_vector(cfg)
+
+        coordinator.solve(state, LeaderAction(333.0, 4444.0), demand, previous)
+
+        self.assertEqual(previous.N_P_star, 111.0)
+        self.assertEqual(previous.N_UF_star, 222.0)
+        self.assertEqual(previous.green_times["A_p1"], 12.0)
+        self.assertEqual(previous.control_vector(cfg), before_vector)
+
+    def test_two_block_nash_solver_does_not_mutate_previous_control(self):
+        cfg = ExperimentConfig.from_file(
+            "src/config/default.yaml",
+            {
+                "simulation": {"T_total": 360.0},
+                "mpc": {"horizon_steps": 1, "max_nash_iter": 1},
+                "freeway_follower": {
+                    "horizon_beam_width": 1,
+                    "horizon_ramp_candidate_limit": 1,
+                    "horizon_vsl_candidate_limit_per_link": 1,
+                },
+            },
+        )
+        from src.controllers.nash_solver import NashSolver
+
+        solver = NashSolver(cfg)
+        state = TrafficState.initial(cfg)
+        demand = DemandProfile(cfg, ScenarioConfig("test")).horizon(0.0, 1)
+        previous = ControlAction.fixed(cfg)
+        previous.N_P_star = 111.0
+        previous.N_UF_star = 222.0
+        before_vector = previous.control_vector(cfg)
+
+        solver.solve(state, LeaderAction(333.0, 4444.0), demand, previous)
+
+        self.assertEqual(previous.N_P_star, 111.0)
+        self.assertEqual(previous.N_UF_star, 222.0)
+        self.assertEqual(previous.control_vector(cfg), before_vector)
 
     def test_freeway_follower_prediction_preserves_urban_control_context(self):
         cfg = ExperimentConfig.from_file(

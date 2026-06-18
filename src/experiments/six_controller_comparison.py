@@ -107,8 +107,13 @@ class _ControllerAdapter:
             )
             candidates = float(result.metadata.get("leader_candidate_count", 0.0))
             iters = float(result.control.diagnostics.get("nash_iterations", 0.0))
+            rollout_evals = (
+                self.cfg.mpc.horizon_steps
+                if float(result.metadata.get("leader_rollout_prediction_used", 0.0)) > 0.5
+                else 0
+            )
             diag = {
-                "solver_evaluations": candidates * (iters * n_agents + self.cfg.mpc.horizon_steps),
+                "solver_evaluations": candidates * (iters * n_agents + rollout_evals),
                 "solver_converged": float(result.control.diagnostics.get("nash_converged", 0.0)),
                 "coordination_iterations": iters,
                 "leader_candidate_count": candidates,
@@ -128,7 +133,7 @@ class _ControllerAdapter:
             "vsl_repair_count": float(control.diagnostics.get("vsl_repair_count", 0.0)),
         })
         diag["computation_time_sec"] = time.perf_counter() - start
-        self.previous = control
+        self.previous = control.copy()
         return control, diag
 
 

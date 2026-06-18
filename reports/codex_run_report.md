@@ -1505,3 +1505,593 @@ Control validation summary: compile passed; the targeted Step A test, full `src.
 - Full acceptance remains unevaluated because no closed-loop baseline/proposed simulation was run.
 - `reports/claude_review_report.md` exists but is not a PASS verdict for the current Step A changes.
 - Proposed next modification: run a full same-scenario baseline/proposed comparison when ready; Step A itself only resolves the VSL forecast-awareness unit-test saturation issue.
+
+## 2026-06-18 Peak 7200s Four-Controller Relaxed-Fast Run
+
+### What was run
+
+- Ran the primary four-controller Stage 1 comparison for `peak_demand`, `T_total=7200`.
+- Used explicit relaxed-fast mode, so this is a computational screening result, not a full-budget controller acceptance run.
+- Controllers:
+  - `WU-CD-F`
+  - `PROPOSED-FOLLOWERS-ONLY`
+  - `PROPOSED-STACKELBERG`
+  - `PROPOSED-CENTRALIZED`
+
+### Command
+
+```text
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m src.experiments.six_controller_comparison --config src/config/default.yaml --scenario peak_demand --T-total 7200 --controllers WU-CD-F,PROPOSED-FOLLOWERS-ONLY,PROPOSED-STACKELBERG,PROPOSED-CENTRALIZED --relaxed-fast-mode --output outputs/peak_7200_four_controller_relaxed_fast_2026_06_18_v1
+```
+
+Result:
+
+```text
+WU-CD-F: ttt=11645.9 delay=10501.9 authority_ok=True
+PROPOSED-FOLLOWERS-ONLY: ttt=7484.8 delay=6340.8 authority_ok=True
+PROPOSED-STACKELBERG: ttt=7607.5 delay=6463.5 authority_ok=True
+PROPOSED-CENTRALIZED: ttt=6369.1 delay=5225.1 authority_ok=True
+```
+
+### Output Files
+
+- `outputs/peak_7200_four_controller_relaxed_fast_2026_06_18_v1/six_controller_summary.csv`
+- `outputs/peak_7200_four_controller_relaxed_fast_2026_06_18_v1/paired_comparisons.csv`
+- `outputs/peak_7200_four_controller_relaxed_fast_2026_06_18_v1/summary.json`
+- Per-controller run logs under `outputs/peak_7200_four_controller_relaxed_fast_2026_06_18_v1/runs/peak_demand/`
+
+### Summary
+
+| controller | total TTT | total delay | throughput veh/h | terminal veh | comp sec | converge rate | TTT improvement vs WU-CD-F | delay improvement vs WU-CD-F |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `PROPOSED-CENTRALIZED` | 6369.101 | 5225.081 | 11304.3 | 6754.2 | 105.53 | 0.000 | 45.31% | 50.25% |
+| `PROPOSED-FOLLOWERS-ONLY` | 7484.779 | 6340.759 | 10762.6 | 7837.6 | 0.73 | 0.725 | 35.73% | 39.62% |
+| `PROPOSED-STACKELBERG` | 7607.514 | 6463.495 | 10263.7 | 8837.5 | 174.71 | 0.000 | 34.68% | 38.45% |
+| `WU-CD-F` | 11645.893 | 10501.874 | 7945.7 | 13467.4 | 12.94 | 0.075 | 0.00% | 0.00% |
+
+### Pairwise Interpretation
+
+- `PROPOSED-FOLLOWERS-ONLY` improves total delay vs `WU-CD-F` by `4161.115 veh*h` (`39.62%`).
+- `PROPOSED-STACKELBERG` improves total delay vs `WU-CD-F` by `4038.379 veh*h` (`38.45%`).
+- `PROPOSED-STACKELBERG` is worse than `PROPOSED-FOLLOWERS-ONLY` in this relaxed-fast run:
+  - total TTT increases by `122.735 veh*h`
+  - total delay increases by `122.736 veh*h`
+  - delay change = `-1.94%` relative to `PROPOSED-FOLLOWERS-ONLY`
+  - throughput decreases by `498.9 veh/h`
+  - terminal vehicles increase by `999.9 veh`
+- `PROPOSED-CENTRALIZED` is best by TTT and delay, but it is a budgeted centralized numerical reference, not a guaranteed global optimum.
+
+### Failed Criteria And Next Modification
+
+- This run does not establish final controller acceptance because it used `--relaxed-fast-mode`.
+- `PROPOSED-STACKELBERG` still does not outperform `PROPOSED-FOLLOWERS-ONLY` under peak 7200s relaxed-fast conditions.
+- The next diagnosis should focus on why the leader/allocation layer raises urban delay and terminal vehicles relative to follower-only despite reducing freeway delay.
+
+### Stackelberg vs Follower-Only Diagnosis
+
+The current code does include the follower-response TTT/TTS base in the leader objective:
+
+```text
+leader_total_objective = leader_follower_ttt_base + leader_target_penalty + leader_density_penalty + leader_smoothness_penalty
+```
+
+The poor peak result is therefore not because the follower TTT term is absent. The observed issue is that the target term and the follower response induced by the leader move delay from the freeway into urban/on-ramp storage.
+
+| diagnostic | `PROPOSED-FOLLOWERS-ONLY` | `PROPOSED-STACKELBERG` | interpretation |
+|---|---:|---:|---|
+| total TTT | 7484.779 | 7607.514 | Stackelberg is worse by 122.735 veh*h. |
+| urban TTT | 5911.423 | 7281.841 | Urban cost increases by 1370.418 veh*h. |
+| freeway TTT | 1573.356 | 325.674 | Freeway cost decreases by 1247.682 veh*h. |
+| throughput | 10762.6 veh/h | 10263.7 veh/h | Stackelberg serves 498.9 veh/h fewer vehicles. |
+| terminal total vehicles | 7837.6 | 8837.5 | Stackelberg leaves 999.9 more vehicles in the system. |
+| terminal urban vehicles | 6988.9 | 8725.1 | The extra residual queue is mostly urban. |
+| terminal freeway vehicles | 128.6 | 82.7 | Freeway residual improves slightly. |
+| mean protected accumulation `N_P` | 852.716 veh | 700.539 veh | Leader lowers protected accumulation. |
+| `N_P > N_P_crit` share | 62.5% | 55.0% | Leader reduces critical-point violations. |
+| `N_P` excess area | 820.104 veh*h | 576.905 veh*h | Critical excess falls by about 29.7%. |
+| mean total urban vehicles | 2862.739 veh | 3586.835 veh | Total urban storage grows despite lower protected `N_P`. |
+| urban departures over 7200s | 27916.813 veh | 25077.134 veh | Stackelberg discharges 2839.679 fewer urban vehicles. |
+| urban gate inflow over 7200s | 8798.022 veh | 8019.448 veh | Boundary/gate service is lower. |
+| on-ramp green releases over 7200s | 6646.932 veh | 5360.205 veh | On-ramp service is lower. |
+| mean leader follower-TTT base | n/a | 604.231 | Base term is active. |
+| mean leader target penalty | n/a | 934.083 | Target penalty is larger than the follower-TTT base. |
+
+Conclusion: the leader is doing the intended critical-point behavior in a narrow sense: it lowers `N_P` and freeway TTT. It fails at the network level because that improvement is smaller than the added urban TTT and throughput loss. In this run, the leader protects the freeway/protected core by pushing vehicles into urban/on-ramp storage instead of increasing completed throughput.
+
+This also shows Stackelberg is not worse in every dimension. It improves freeway TTT, freeway delay, terminal freeway vehicles, mean `N_P`, and `N_P` critical excess. It is worse in the network objective dimensions that dominate the comparison: total TTT, total delay, urban TTT, throughput, and terminal residual vehicles.
+
+Likely next modification: rebalance the leader objective so that the target term cannot dominate the follower-TTT base without also accounting for lost throughput/residual urban storage. A concrete scale issue is visible in the code: `_predict()` returns follower TTT as `freeway_ttt + urban_ttt`, where both plant terms already include `T_c_h`, but `leader_target_penalty` currently sums `max(N_P - N_P_crit, 0)` over predicted states without multiplying by `T_c_h`. If the intended mathematical term is TTT-style accumulation excess, this makes the target term about `1 / T_c_h = 20` times too large under the current 180 s control interval. Candidate fixes are (1) multiply target/density accumulation penalties by `T_c_h` or retune their weights into consistent units, (2) add a terminal residual/throughput loss term to the leader objective, or (3) require the leader candidate to beat or tie the follower-only predicted response before accepting a restrictive `N_P_star`/`N_UF_star` action.
+
+## 2026-06-18 Leader Objective Time-Scale Fix And Peak 7200s Rerun
+
+### What Was Implemented
+
+- `leader.objective_mode: follower_ttt`에서 `leader_target_penalty`와 `leader_density_penalty`에 `T_c_h`를 곱하도록 수정했다.
+- 이유: follower-response base는 plant TTT/TTS라 이미 veh*h인데, 기존 target/density accumulation penalty는 차량수 단위로 horizon 합만 더해져 target 항이 과대평가됐다.
+- Legacy `state_accumulation` 모드는 기존 vehicle-sum 스케일을 유지했다. 이 모드는 명시적으로 켤 때만 쓰는 진단/legacy 경로다.
+- `docs/spec/04_controller.md`에 `follower_ttt` 모드 target exceedance penalty는 `T_c_h`로 veh*h 스케일에 맞춘다고 명시했다.
+- `src/tests/test_constraints.py`에 기본 leader objective의 `T_c_h` scaling 단위 테스트를 추가했다.
+
+### Files Changed
+
+- `src/controllers/leader.py`
+- `src/tests/test_constraints.py`
+- `docs/spec/04_controller.md`
+- `reports/codex_run_report.md`
+
+### Tests
+
+```text
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m py_compile src\controllers\leader.py src\tests\test_constraints.py
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest src.tests.test_constraints
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest src.tests.test_forecast_awareness
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest src.tests.test_offramp_reattribution
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest discover -s src/tests
+```
+
+Result:
+
+```text
+src.tests.test_constraints: 45 tests, OK
+src.tests.test_forecast_awareness: 8 tests, OK
+src.tests.test_offramp_reattribution: 7 tests, OK
+unittest discover: 143 tests, OK
+```
+
+The full discover run prints an expected smoke-report line (`FAIL improvement=-1.99% ...`) while still ending with `OK`; that smoke path preserves a failed improvement report and is not a failing unittest assertion.
+
+### Baseline And Proposed Run Command
+
+The four-controller comparison uses the same `peak_demand` scenario, demand, horizon, config, and relaxed-fast screening mode for all controllers.
+
+```text
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m src.experiments.six_controller_comparison --config src/config/default.yaml --scenario peak_demand --T-total 7200 --controllers WU-CD-F,PROPOSED-FOLLOWERS-ONLY,PROPOSED-STACKELBERG,PROPOSED-CENTRALIZED --relaxed-fast-mode --output outputs/peak_7200_four_controller_relaxed_fast_time_scaled_objective_2026_06_18_v1
+```
+
+Output:
+
+```text
+WU-CD-F: ttt=11645.9 delay=10501.9 authority_ok=True
+PROPOSED-FOLLOWERS-ONLY: ttt=7484.8 delay=6340.8 authority_ok=True
+PROPOSED-STACKELBERG: ttt=6853.5 delay=5709.4 authority_ok=True
+PROPOSED-CENTRALIZED: ttt=6369.1 delay=5225.1 authority_ok=True
+```
+
+### Metrics
+
+| controller | total TTT | total delay | throughput veh/h | terminal veh | avg delay/completed h | comp sec | converge rate |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `WU-CD-F` | 11645.893 | 10501.874 | 7945.7 | 13467.4 | 0.660855 | 12.82 | 0.075 |
+| `PROPOSED-FOLLOWERS-ONLY` | 7484.779 | 6340.759 | 10762.6 | 7837.6 | 0.294574 | 0.73 | 0.725 |
+| `PROPOSED-STACKELBERG` | 6853.454 | 5709.434 | 11064.9 | 7233.9 | 0.257998 | 177.03 | 0.000 |
+| `PROPOSED-CENTRALIZED` | 6369.101 | 5225.081 | 11304.3 | 6754.2 | 0.231110 | 106.05 | 0.000 |
+
+Pairwise:
+
+- `PROPOSED-STACKELBERG` vs `PROPOSED-FOLLOWERS-ONLY`: total delay improves by `631.325 veh*h` (`9.96%`), throughput increases by `302.3 veh/h`, terminal vehicles decrease by `603.7 veh`.
+- `PROPOSED-STACKELBERG` vs `WU-CD-F`: total delay improves by `4792.440 veh*h` (`45.63%`), throughput increases by `3119.2 veh/h`, terminal vehicles decrease by `6233.5 veh`.
+- `PROPOSED-CENTRALIZED` remains best: it improves delay by another `484.353 veh*h` (`8.48%`) relative to `PROPOSED-STACKELBERG`.
+
+### Before/After Diagnosis
+
+| diagnostic | old unscaled Stackelberg | time-scaled Stackelberg | interpretation |
+|---|---:|---:|---|
+| total TTT | 7607.514 | 6853.454 | objective scale fix reduces TTT by 754.060 veh*h. |
+| total delay | 6463.495 | 5709.434 | delay improves by 754.061 veh*h. |
+| throughput | 10263.7 veh/h | 11064.9 veh/h | throughput recovers by 801.2 veh/h. |
+| terminal total vehicles | 8837.5 | 7233.9 | residual vehicles fall by 1603.6 veh. |
+| mean `leader_target_penalty` | 934.083 | 50.107 | target term no longer dominates the follower TTT base. |
+| mean `leader_follower_ttt_base` | 604.231 | 541.239 | candidate evaluation now prefers lower predicted follower TTT. |
+| mean `N_UF_star` | 4006.024 | 5505.570 | freeway inflow target becomes less restrictive. |
+| on-ramp green releases | 5360.205 veh | 6922.715 veh | on-ramp service recovers. |
+| ramp metering releases | 5330.466 veh | 6910.979 veh | actual freeway entry service recovers. |
+| mean `N_P` | 700.539 | 723.170 | protected accumulation is allowed slightly higher. |
+| `N_P > N_P_crit` share | 55.0% | 52.5% | critical exceedance frequency still improves vs follower-only. |
+
+The previous failure mode is therefore confirmed as an objective scaling bug: the leader was over-penalizing `N_P` exceedance relative to follower TTT and was too restrictive. After the fix, Stackelberg still protects the freeway/core relative to follower-only, but it no longer sacrifices as much throughput and urban discharge.
+
+### Boundary Queue Balancing And Control Validation
+
+| controller | mean `B_in` | mean `B_out` | mean abs net inflow tracking error | ramp metering shortfall | VSL repair count | green repair count | density exceedance count |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `WU-CD-F` | 0.064794 | 0.018733 | 2004.853 | 0.0 | 411.0 | 600.0 | 5000.0 |
+| `PROPOSED-FOLLOWERS-ONLY` | 0.069990 | 0.009558 | 729.866 | 0.0 | 0.0 | 1000.0 | 0.0 |
+| `PROPOSED-STACKELBERG` | 0.013992 | 0.003919 | 815.701 | 0.0 | 0.0 | 900.0 | 116.0 |
+| `PROPOSED-CENTRALIZED` | 0.125210 | 0.002036 | 622.763 | 0.0 | 0.0 | 0.0 | 0.0 |
+
+Boundary balancing is not degraded relative to follower-only: both `B_in` and `B_out` improve under the time-scaled Stackelberg run. Net inflow tracking is worse than follower-only but much better than `WU-CD-F`. Ramp metering shortfall is zero. The Stackelberg run still has nonzero density exceedance count and zero Nash convergence rate under relaxed-fast screening, so this is a strong improvement result but not final acceptance.
+
+### Failed Criteria And Next Modification
+
+- This remains a relaxed-fast screening run, not a full-budget final acceptance run.
+- `PROPOSED-STACKELBERG` now beats `PROPOSED-FOLLOWERS-ONLY` on total TTT, total delay, throughput, terminal total vehicles, average delay per completed vehicle, `B_in`, and `B_out`.
+- Remaining gap: `PROPOSED-CENTRALIZED` is still better, and Stackelberg convergence rate remains `0.000`.
+- Proposed next modification: diagnose the remaining centralized gap and non-convergence residuals now that the objective scale bug is removed.
+
+### Three-Axis Controller-Value Check
+
+This follow-up checks whether the time-scaled Stackelberg controller supports three research claims:
+
+1. computation-cost positioning vs centralized and follower-only,
+2. myopic follower-only problem mitigation, and
+3. boundary queue balance improvement.
+
+#### 1. Computation Cost
+
+| controller | computation time sec | solver evaluations | convergence rate |
+|---|---:|---:|---:|
+| `PROPOSED-FOLLOWERS-ONLY` | 0.73 | 1495 | 0.725 |
+| `PROPOSED-STACKELBERG` | 177.03 | 10080 | 0.000 |
+| `PROPOSED-CENTRALIZED` | 106.05 | 640 | 0.000 |
+
+Current verdict: FAIL for the "Stackelberg keeps computation cost moderate" claim in this relaxed-fast implementation. Stackelberg is `242.5x` slower than follower-only and `1.67x` slower than the current centralized reference. It also uses `15.75x` more solver evaluations than centralized. This does not prove Stackelberg is inherently more expensive than a full centralized MPC; this centralized controller is a budgeted relaxed-fast reference, not a full global optimizer. But with the current code and settings, the computation-cost advantage is not demonstrated.
+
+Likely cause: Stackelberg evaluates many leader candidates and runs a follower-response iteration/prediction for each candidate. The current centralized reference uses a smaller budgeted candidate/evaluation path.
+
+#### 2. Myopic Problem / Leader Necessity
+
+| diagnostic | `PROPOSED-FOLLOWERS-ONLY` | `PROPOSED-STACKELBERG` | relative change |
+|---|---:|---:|---:|
+| total TTT | 7484.779 | 6853.454 | 8.43% lower |
+| total delay | 6340.759 | 5709.434 | 9.96% lower |
+| throughput | 10762.6 veh/h | 11064.9 veh/h | 2.81% higher |
+| terminal total vehicles | 7837.6 | 7233.9 | 7.70% lower |
+| freeway TTT | 1573.356 | 355.334 | 77.42% lower |
+| urban TTT | 5911.423 | 6498.119 | 9.92% higher |
+| mean `N_P` | 852.716 | 723.170 | lower |
+| `N_P > N_P_crit` share | 62.5% | 52.5% | 10.0 percentage points lower |
+| `N_P` excess area | 820.104 veh*h | 621.127 veh*h | 24.26% lower |
+
+Current verdict: PASS as evidence that the leader mitigates a myopic follower-only failure. Follower-only has lower urban TTT, but it does so while allowing much larger freeway TTT and larger protected-accumulation excess. The Stackelberg leader lowers the network objective, raises throughput, and reduces terminal residual vehicles while reducing time-averaged `N_P` critical excess. This supports the claim that the leader adds value beyond local follower responses.
+
+Caveat: Stackelberg does not improve every subsystem. Urban TTT increases by `586.696 veh*h`, and terminal urban vehicles are slightly higher (`7069.9` vs `6988.9`). The net gain comes from reducing freeway/on-ramp congestion and residual vehicles more than the added urban cost.
+
+#### 3. Boundary Queue Balance / Leader Necessity
+
+| controller | mean `B_in` | mean `B_out` | load-weighted `B_in` | load-weighted `B_out` |
+|---|---:|---:|---:|---:|
+| `WU-CD-F` | 0.064794 | 0.018733 | 0.015587 | 0.009126 |
+| `PROPOSED-FOLLOWERS-ONLY` | 0.069990 | 0.009558 | 0.028254 | 0.005373 |
+| `PROPOSED-STACKELBERG` | 0.013992 | 0.003919 | 0.007034 | 0.002627 |
+| `PROPOSED-CENTRALIZED` | 0.125210 | 0.002036 | 0.100189 | 0.001670 |
+
+Current verdict: PASS for the boundary-balance leader-value claim. Relative to follower-only, time-scaled Stackelberg reduces load-weighted `B_in` by `75.11%` and load-weighted `B_out` by `51.12%`. It is also the best of the four controllers for `B_in`, while centralized is best for `B_out` but much worse for `B_in`.
+
+Important caveat: net inflow tracking error is worse than follower-only (`815.701` vs `729.866`) even though balance indices improve. Therefore the leader currently improves fairness/balance across boundary queues, but not the raw net-inflow tracking error. This distinction should be kept explicit in the paper/report.
+
+#### Overall Three-Axis Conclusion
+
+- Computation-cost claim: not supported by the current implementation. This needs further optimization or a fairer full-centralized benchmark before it can be claimed.
+- Myopic-problem claim: supported. Stackelberg beats follower-only on TTT, delay, throughput, terminal vehicles, freeway TTT, and `N_P` critical excess.
+- Boundary-balance claim: supported. Stackelberg materially improves both `B_in` and `B_out` relative to follower-only, especially under load-weighted evaluation.
+
+Next recommended modification: optimize Stackelberg candidate evaluation or cache/reuse follower responses so the controller is not slower than the current centralized relaxed-fast reference.
+
+## 2026-06-18 Stackelberg Follower-Response Objective Rerun
+
+### What Was Implemented
+
+- Changed the default `PROPOSED-STACKELBERG` leader evaluation path so `objective_mode: follower_ttt` uses `NashResult.objective_value` directly as the follower-response base.
+- Removed the extra full-system coupled plant rollout from the default Stackelberg candidate evaluation.
+- Kept the legacy rollout path only for `leader.objective_mode: state_accumulation`, where the state trajectory itself is the base objective.
+- Updated the Stage 1 solver-evaluation accounting: when the default follower-response path is used, Stackelberg no longer adds `horizon_steps` rollout evaluations to each leader candidate.
+- Added a unit test confirming that default Stackelberg candidate evaluation does not call `run_coupled_interval`.
+- Updated `docs/spec/04_controller.md` to state that the default Stackelberg objective uses the follower-response objective, not a second full-system rollout TTT.
+
+### Files Changed
+
+- `src/controllers/stackelberg_mpc.py`
+- `src/experiments/six_controller_comparison.py`
+- `src/tests/test_constraints.py`
+- `docs/spec/04_controller.md`
+- `reports/codex_run_report.md`
+
+### Tests
+
+```text
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m py_compile src\controllers\stackelberg_mpc.py src\experiments\six_controller_comparison.py src\tests\test_constraints.py
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest src.tests.test_constraints
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest src.tests.test_forecast_awareness
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest src.tests.test_six_controller_comparison
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest discover -s src/tests
+```
+
+Result:
+
+```text
+src.tests.test_constraints: 46 tests, OK
+src.tests.test_forecast_awareness: 8 tests, OK
+src.tests.test_six_controller_comparison: 29 tests, OK
+unittest discover: 144 tests, OK
+```
+
+The full discover run prints an expected smoke-report line (`FAIL improvement=-1.99% ...`) while still ending with `OK`; that line is produced by a smoke report path and is not a failing unittest assertion.
+
+### Four-Controller Run Command
+
+```text
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m src.experiments.six_controller_comparison --config src/config/default.yaml --scenario peak_demand --T-total 7200 --controllers WU-CD-F,PROPOSED-FOLLOWERS-ONLY,PROPOSED-STACKELBERG,PROPOSED-CENTRALIZED --relaxed-fast-mode --output outputs/peak_7200_four_controller_follower_response_objective_2026_06_18_v1
+```
+
+Output:
+
+```text
+WU-CD-F: ttt=11645.9 delay=10501.9 authority_ok=True
+PROPOSED-FOLLOWERS-ONLY: ttt=7484.8 delay=6340.8 authority_ok=True
+PROPOSED-STACKELBERG: ttt=10281.1 delay=9137.1 authority_ok=True
+PROPOSED-CENTRALIZED: ttt=6369.1 delay=5225.1 authority_ok=True
+```
+
+### Metrics
+
+| controller | total TTT | total delay | throughput veh/h | terminal veh | comp sec | solver eval |
+|---|---:|---:|---:|---:|---:|---:|
+| `WU-CD-F` | 11645.893 | 10501.874 | 7945.7 | 13467.4 | 12.79 | 1059 |
+| `PROPOSED-FOLLOWERS-ONLY` | 7484.779 | 6340.759 | 10762.6 | 7837.6 | 0.70 | 1495 |
+| `PROPOSED-STACKELBERG` | 10281.141 | 9137.122 | 9432.4 | 10499.0 | 136.09 | 9360 |
+| `PROPOSED-CENTRALIZED` | 6369.101 | 5225.081 | 11304.3 | 6754.2 | 106.91 | 640 |
+
+Pairwise:
+
+- `PROPOSED-STACKELBERG` is worse than `PROPOSED-FOLLOWERS-ONLY`: total delay increases by `2796.363 veh*h` (`-44.10%` leader value).
+- `PROPOSED-STACKELBERG` is still better than `WU-CD-F`: total delay improves by `1364.752 veh*h` (`13.00%`).
+- `PROPOSED-CENTRALIZED` is much better than `PROPOSED-STACKELBERG`: delay improves by `3912.041 veh*h` (`42.81%`).
+
+### Rollout Removal Diagnostics
+
+| diagnostic | previous time-scaled rollout Stackelberg | follower-response Stackelberg | interpretation |
+|---|---:|---:|---|
+| computation time | 177.03 s | 136.09 s | Removing rollout reduces cost by about 23.1%. |
+| solver evaluations | 10080 | 9360 | The `+ horizon_steps` rollout count was removed. |
+| `leader_rollout_prediction_used` | n/a | 0.0 | New path is active. |
+| `leader_follower_response_objective_used` | n/a | 1.0 | Leader uses `NashResult.objective_value`. |
+| mean follower-response base | 541.239 | 4959.008 | New base is follower objective, not plant rollout TTT. |
+| mean `N_UF_star` | 5505.570 | 3426.741 | Follower-response objective selects much more restrictive freeway inflow. |
+| urban departures | 27221.165 veh | 20371.157 veh | Urban discharge collapses. |
+| on-ramp green releases | 6922.715 veh | 4623.023 veh | On-ramp service collapses. |
+| ramp metering releases | 6910.979 veh | 4593.071 veh | Freeway entry service is strongly restricted. |
+| final urban vehicles | 7002.237 veh | 10373.625 veh | Residual urban storage rises sharply. |
+| final freeway vehicles | 164.024 veh | 112.629 veh | Freeway remains protected. |
+
+### Diagnosis
+
+The code now matches the requested Stackelberg structure more closely: the leader no longer adds a second full-system rollout TTT after receiving the follower response. However, performance degrades because the current distributed `NashResult.objective_value` is not yet a faithful network TTT/TTS objective. It is a sum of local/proxy follower objectives:
+
+- freeway agent terms include density, metering, VSL, and storage-aware proxy costs;
+- urban agent terms include local queue, balance, allocation residual, and smoothness terms;
+- the sum does not currently represent completed-throughput loss or terminal urban residual strongly enough.
+
+Therefore, when full rollout is removed, the leader optimizes the follower proxy objective and chooses restrictive `N_UF_star` values that protect freeway states but suppress urban/on-ramp service. This confirms the next required fix: align the follower-response objective itself with the intended follower TTT/TTS before relying on it as the leader base.
+
+### Failed Criteria And Next Modification
+
+- This run FAILS the proposed leader-value criterion relative to follower-only.
+- Computation cost improves but remains worse than the current centralized relaxed-fast reference (`136.09 s` vs `106.91 s`).
+- Next modification: redefine or augment `NashResult.objective_value` so the follower response objective is TTT/TTS-compatible. The correct target is not to reintroduce full Stackelberg rollout, but to make follower agents report a response objective that includes the same TTT/delay/throughput-relevant terms the leader is supposed to receive.
+
+## 2026-06-18 Previous-Control Mutation Bug And Follower Objective Diagnosis
+
+### What Was Found
+
+Two code-level issues explain why the follower-response Stackelberg run became worse than follower-only.
+
+1. `previous_control` mutation bug:
+   - `DistributedCoordinator.solve()` and the legacy `NashSolver.solve()` assigned `current = previous_control` and then overwrote `current.N_P_star` / `current.N_UF_star`.
+   - During Stackelberg candidate evaluation, this mutated the shared previous-control object across leader candidates.
+   - Consequences:
+     - candidate evaluations were not independent;
+     - the leader smoothness penalty was often accidentally zero;
+     - later candidates could start from a previous candidate's action rather than the true previous control.
+
+2. `NashResult.objective_value` is not yet follower TTT/TTS:
+   - In distributed mode, `NashResult.objective_value` is the sum of local/proxy agent objectives.
+   - Urban agent objective is mainly boundary balance, allocation residual, smoothness, and local queue proxy.
+   - Freeway agent objective is density/metering/VSL/off-ramp-storage proxy.
+   - This objective does not directly penalize lost throughput, terminal urban residual, or withholding ramp/on-ramp service strongly enough.
+
+Therefore, "best follower response" in the current code means "best under the distributed proxy objective," not "minimum follower TTT/TTS."
+
+### What Was Implemented
+
+- Added `ControlAction.copy()` to copy all dict fields.
+- Updated `DistributedCoordinator.solve()` to copy `previous_control` before mutating `N_P_star` / `N_UF_star`.
+- Updated the legacy `NashSolver.solve()` similarly.
+- Updated `StackelbergMPCController` to copy previous controls before candidate evaluation and before storing `self.previous_control`.
+- Updated the Stage 1 controller adapter to store a copy of returned controls.
+- Added regression tests:
+  - distributed follower does not mutate `previous_control`;
+  - two-block Nash solver does not mutate `previous_control`.
+
+### Tests
+
+```text
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m py_compile src\models\state.py src\controllers\distributed_coordinator.py src\controllers\nash_solver.py src\controllers\stackelberg_mpc.py src\experiments\six_controller_comparison.py src\tests\test_constraints.py
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest src.tests.test_constraints
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest src.tests.test_forecast_awareness
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest src.tests.test_six_controller_comparison
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest discover -s src/tests
+```
+
+Result:
+
+```text
+src.tests.test_constraints: 48 tests, OK
+src.tests.test_forecast_awareness: 8 tests, OK
+src.tests.test_six_controller_comparison: 29 tests, OK
+unittest discover: 146 tests, OK
+```
+
+The full discover run prints an expected smoke-report line (`FAIL improvement=-8.87% ...`) while still ending with `OK`; that line is generated by a smoke report path and is not a failing unittest assertion.
+
+### Four-Controller Run After Mutation Fix
+
+Command:
+
+```text
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m src.experiments.six_controller_comparison --config src/config/default.yaml --scenario peak_demand --T-total 7200 --controllers WU-CD-F,PROPOSED-FOLLOWERS-ONLY,PROPOSED-STACKELBERG,PROPOSED-CENTRALIZED --relaxed-fast-mode --output outputs/peak_7200_four_controller_follower_response_prevcopy_2026_06_18_v1
+```
+
+Output:
+
+```text
+WU-CD-F: ttt=11645.9 delay=10501.9 authority_ok=True
+PROPOSED-FOLLOWERS-ONLY: ttt=7484.8 delay=6340.8 authority_ok=True
+PROPOSED-STACKELBERG: ttt=15115.3 delay=13971.3 authority_ok=True
+PROPOSED-CENTRALIZED: ttt=6369.1 delay=5225.1 authority_ok=True
+```
+
+### Diagnostic Metrics
+
+| controller/run | total TTT | delay | throughput veh/h | terminal veh | mean `N_UF_star` | ramp releases | on-ramp green releases |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| follower-only | 7484.779 | 6340.759 | 10762.6 | 7837.6 | 0.0 | 5926.932 | 6646.932 |
+| follower-response Stackelberg before copy fix | 10281.141 | 9137.122 | 9432.4 | 10499.0 | 3426.741 | 4593.071 | 4623.023 |
+| follower-response Stackelberg after copy fix | 15115.284 | 13971.264 | 6984.2 | 15396.9 | 0.0 | 8.102 | 728.102 |
+
+After the copy fix, the hidden smoothness/objective behavior becomes explicit: `PROPOSED-STACKELBERG` selects `N_UF_star = 0` for the whole run. This nearly shuts off ramp metering releases and on-ramp service, causing a large urban/on-ramp backlog.
+
+### Candidate Ranking Evidence
+
+At an intermediate state around step 10, the follower-response objective ranks a no-freeway-inflow candidate first, even though a high-inflow candidate has lower actual rollout TTT:
+
+| candidate | `N_UF_star` | follower-response objective | diagnostic rollout TTT |
+|---|---:|---:|---:|
+| selected by current follower objective | 0.0 | 2684.006 | 443.475 |
+| best by diagnostic rollout TTT | 6000.0 | 2686.764 | 421.933 |
+
+This confirms the core issue: candidate selection is not using a follower TTT objective. It is using a proxy objective whose ranking can prefer withholding freeway/on-ramp inflow even when that worsens network TTT.
+
+### Conclusion
+
+The poor follower-response Stackelberg result is caused by code/objective mismatch, not by the Stackelberg idea itself. The previous-control mutation was a real coding bug and has been fixed. The remaining failure is that the follower objective returned to the leader is not yet the intended follower TTT/TTS. The next code change should redefine distributed follower `objective_value` so it reports a TTT/TTS-compatible response value, including served-flow/throughput and terminal residual costs, before the leader uses it as `leader_follower_ttt_base`.
+
+## 2026-06-18 Distributed Follower TTS-Compatible Response Objective
+
+### What Was Implemented
+
+The core failure diagnosed above was addressed without restoring the old full-system Stackelberg rollout path.
+
+- `DistributedCoordinator.solve()` now separates:
+  - local distributed agent proxy objective, retained as `distributed_response_proxy_objective`;
+  - returned `NashResult.objective_value`, now `distributed_response_objective_tts`.
+- The new response objective is a lightweight vehicle-hour conservation proxy:
+  - current urban/freeway/ramp/off-ramp/origin vehicles;
+  - horizon forecast arrivals;
+  - estimated green service and boundary-out sinks;
+  - estimated on-ramp green release and ramp metering release;
+  - estimated mainline exits;
+  - estimated off-ramp inflow/storage departure;
+  - freeway density-excess exposure;
+  - terminal residual vehicles and Nash residual penalty.
+- `Leader.objective_terms()` now converts `Delta N_UF_star` from veh/h to vehicles over one control interval before applying `w_L` smoothness.
+- `docs/spec/04_controller.md` now states that the distributed follower must return a TTT/TTS-compatible response objective and that local proxy costs are diagnostics only.
+- Added regression coverage:
+  - distributed `objective_value` equals logged `distributed_response_objective_tts`;
+  - high ramp service is preferred over zero metering when the freeway has receiving room;
+  - leader smoothness uses `T_c_h * Delta N_UF_star` when `N_UF_star_unit = veh_per_hour`.
+
+### Changed Files
+
+- `src/controllers/distributed_coordinator.py`
+- `src/controllers/leader.py`
+- `docs/spec/04_controller.md`
+- `src/tests/test_constraints.py`
+- Existing in-progress files from the previous step remain modified: `src/models/state.py`, `src/controllers/nash_solver.py`, `src/controllers/stackelberg_mpc.py`, `src/experiments/six_controller_comparison.py`.
+
+### Validation Commands
+
+```text
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m py_compile src/controllers/distributed_coordinator.py src/controllers/leader.py src/controllers/stackelberg_mpc.py src/models/state.py
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest src.tests.test_constraints.ConstraintTests.test_distributed_coordinator_returns_per_agent_diagnostics src.tests.test_constraints.ConstraintTests.test_distributed_response_objective_rewards_ramp_service src.tests.test_constraints.ConstraintTests.test_leader_objective_matches_spec_accumulation_form src.tests.test_constraints.ConstraintTests.test_default_leader_accumulation_penalties_use_control_interval_hours src.tests.test_constraints.ConstraintTests.test_stackelberg_default_objective_uses_follower_response_without_rollout -v
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest src.tests.test_constraints src.tests.test_forecast_awareness src.tests.test_six_controller_comparison -v
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest discover -s src/tests -v
+```
+
+Result:
+
+```text
+targeted tests: 5 tests, OK
+constraints + forecast + six-controller comparison: 86 tests, OK
+unittest discover: 147 tests, OK
+```
+
+The full discover command still prints a smoke-report line (`FAIL improvement=-1.99% ...`) before the unittest listing, but the unittest run itself ends with `OK`.
+
+### Peak 7200 s Four-Controller Run
+
+Command:
+
+```text
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m src.experiments.six_controller_comparison --config src/config/default.yaml --scenario peak_demand --T-total 7200 --controllers WU-CD-F,PROPOSED-FOLLOWERS-ONLY,PROPOSED-STACKELBERG,PROPOSED-CENTRALIZED --relaxed-fast-mode --output outputs/peak_7200_four_controller_response_tts_objective_2026_06_18_v1
+```
+
+Output:
+
+```text
+WU-CD-F: ttt=11645.9 delay=10501.9 authority_ok=True
+PROPOSED-FOLLOWERS-ONLY: ttt=7411.6 delay=6267.5 authority_ok=True
+PROPOSED-STACKELBERG: ttt=7208.0 delay=6063.9 authority_ok=True
+PROPOSED-CENTRALIZED: ttt=6369.1 delay=5225.1 authority_ok=True
+```
+
+### Metric Summary
+
+| controller | total TTT | total delay | throughput veh/h | terminal veh | computation s | solver evals |
+|---|---:|---:|---:|---:|---:|---:|
+| WU-CD-F | 11645.893 | 10501.874 | 7945.7 | 13467.4 | 12.85 | 1059 |
+| PROPOSED-FOLLOWERS-ONLY | 7411.565 | 6267.545 | 10790.0 | 7782.8 | 0.81 | 1495 |
+| PROPOSED-STACKELBERG | 7207.966 | 6063.946 | 10913.7 | 7537.2 | 137.42 | 9360 |
+| PROPOSED-CENTRALIZED | 6369.101 | 5225.081 | 11304.3 | 6754.2 | 107.60 | 640 |
+
+Relative to `PROPOSED-FOLLOWERS-ONLY`, the corrected Stackelberg run improves:
+
+- total TTT / delay by `203.599 veh*h` (`3.25%`);
+- throughput by `123.7 veh/h`;
+- terminal total vehicles by `245.6 veh`.
+
+Relative to `WU-CD-F`, the corrected Stackelberg run improves:
+
+- total TTT / delay by `4437.927 veh*h` (`42.26%`);
+- throughput by `2968.0 veh/h`;
+- terminal total vehicles by `5930.2 veh`.
+
+### Leader / Response Diagnostics
+
+For `PROPOSED-STACKELBERG`:
+
+| diagnostic | mean | min | max |
+|---|---:|---:|---:|
+| selected `N_UF_star` | 5612.322 | 3000.000 | 6000.000 |
+| selected `N_P_star` | 489.708 | 458.504 | 534.921 |
+| `leader_follower_ttt_base` | 622.733 | 117.926 | 1207.627 |
+| `leader_target_penalty` | 48.130 | 0.000 | 169.202 |
+| `leader_smoothness_penalty` | 2.264 | 0.000 | 30.425 |
+| `leader_total_objective` | 673.502 | 148.351 | 1376.829 |
+| `distributed_response_proxy_objective` | 3672.779 | 810.919 | 7217.758 |
+| `distributed_response_ramp_release_veh` | 440.039 | 287.419 | 597.974 |
+| `distributed_response_mainline_exit_veh` | 1186.857 | 1088.056 | 1200.000 |
+| `leader_rollout_prediction_used` | 0.000 | 0.000 | 0.000 |
+| `leader_follower_response_objective_used` | 1.000 | 1.000 | 1.000 |
+
+This confirms that the run did not restore the second full-system rollout. The leader is using `NashResult.objective_value`, and that value is now the TTS-compatible distributed response objective.
+
+### Boundary Queue Balancing Result
+
+The current output files do not expose the old boundary-balance scalar columns for this run. Relevant replacement diagnostics are present for leader boundary terms and distributed response terminal vehicles, but a direct `boundary_balance_index` comparison was not produced by the Stage 1 output schema. This remains a reporting gap rather than a controller infeasibility in this run.
+
+### Failed Criteria And Next Modification
+
+This patch fixes the specific objective mismatch: Stackelberg no longer collapses to `N_UF_star = 0`, and it now beats follower-only on TTT, delay, throughput, and terminal vehicles in the peak 7200 s relaxed-fast run.
+
+However, it still does not satisfy all completion criteria:
+
+- Stackelberg improvement over follower-only is `3.25%`, below the default `8%` threshold.
+- Stackelberg computation time is still worse than centralized relaxed-fast (`137.42 s` vs `107.60 s`), even though the conceptual goal is for Stackelberg to be cheaper than centralized.
+- Solver convergence rate for Stackelberg remains `0.0`, so the distributed response iteration is still relying on best-seen response selection rather than convergence.
+- Boundary balance needs an explicit output column restored or reintroduced for direct acceptance reporting.
+
+Proposed next modification:
+
+- Reduce Stackelberg leader evaluation cost by pruning dominated leader candidates or using a warm-start/local candidate set after the first few intervals.
+- Add a direct boundary balance metric to Stage 1 outputs.
+- Investigate distributed residual convergence under the new response objective, especially whether relaxation/termination criteria are too strict for the current coupling scale.

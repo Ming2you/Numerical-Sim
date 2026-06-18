@@ -24,8 +24,8 @@ class StackelbergMPCController:
     This implementation is intentionally self-contained under `src/` and does
     not import any root-level historical controller modules. Leader actions are
     enumerated, follower responses are solved by deterministic projection and
-    queue-balancing heuristics, and each candidate is evaluated by the same
-    closed-loop model used by the experiment runner.
+    queue-balancing heuristics, and the default leader base uses the follower
+    response objective rather than an additional full-system rollout.
     """
 
     def __init__(self, cfg: ExperimentConfig):
@@ -64,7 +64,13 @@ class StackelbergMPCController:
         forecast = list(demand_forecast)
         if not forecast:
             raise ValueError("StackelbergMPCController requires a non-empty demand forecast.")
-        previous = previous_control or self.previous_control or ControlAction.fixed(self.cfg)
+        previous = (
+            previous_control.copy()
+            if previous_control is not None
+            else self.previous_control.copy()
+            if self.previous_control is not None
+            else ControlAction.fixed(self.cfg)
+        )
         candidates = self.leader.candidates(state, previous, forecast[0], forecast=forecast)
         base_metadata = leader_metadata(candidates)
         base_metadata.update(self._forecast_demand_metadata(forecast))
@@ -72,7 +78,11 @@ class StackelbergMPCController:
         best: Optional[DecisionResult] = None
         for idx, action in enumerate(candidates):
             nash = self.nash_solver.solve(state.copy(), action, forecast, previous)
-            predicted_states, follower_ttt = self._predict(state, nash.control, forecast)
+            predicted_states, follower_ttt, rollout_used = self._leader_evaluation_base(
+                state,
+                nash,
+                forecast,
+            )
             objective_terms = self.leader.objective_terms(
                 predicted_states,
                 nash.control,
@@ -98,6 +108,9 @@ class StackelbergMPCController:
                 "nash_converged": 1.0 if nash.converged else 0.0,
                 "nash_residual_control": nash.residual_control,
                 "nash_residual_objective": nash.residual_objective,
+                "leader_rollout_prediction_used": 1.0 if rollout_used else 0.0,
+                "leader_follower_response_objective_used": 0.0 if rollout_used else 1.0,
+                "leader_response_proxy_state_count": float(len(predicted_states)),
             })
             metadata.update(objective_terms)
             result = DecisionResult(nash.control, obj, nash, metadata)
@@ -107,7 +120,7 @@ class StackelbergMPCController:
         best.metadata.update(self._candidate_evaluation_metadata(evaluations, best.control))
         best.control.diagnostics.update(best.metadata)
         best.control.diagnostics["leader_objective"] = best.leader_objective
-        self.previous_control = best.control
+        self.previous_control = best.control.copy()
         self.last_decision = best
         return best
 
@@ -181,6 +194,27 @@ class StackelbergMPCController:
             "leader_candidate_objective_gap": float(second["objective"] - best["objective"]),
             "leader_candidate_objective_spread": float(max(objectives) - min(objectives)),
         }
+
+    def _leader_evaluation_base(
+        self,
+        state: TrafficState,
+        nash: NashResult,
+        forecast: list[DemandStep],
+    ) -> tuple[list[TrafficState], float, bool]:
+        """Leader 기본 평가는 follower response objective를 그대로 사용한다.
+
+        사용자가 제시한 Stackelberg 구조에서는 follower equilibrium/response가 산출한
+        objective가 leader의 follower-TTT 항이다. 따라서 기본 `follower_ttt` 모드에서는
+        후보 control을 다시 full coupled plant로 rollout하지 않는다. Legacy
+        `state_accumulation` 모드는 state trajectory 자체가 base이므로 기존 rollout을 유지한다.
+        """
+        if self.cfg.leader.objective_mode == "state_accumulation":
+            states, rollout_ttt = self._predict(state, nash.control, forecast)
+            return states, rollout_ttt, True
+        horizon = max(1, len(forecast[: self.cfg.mpc.horizon_steps]))
+        # target/density penalty는 현재 response-state proxy 위에서 평가한다. follower objective
+        # 자체가 후보별 response 비용을 담고, full system rollout 비용은 의도적으로 배제한다.
+        return [state.copy() for _ in range(horizon)], float(nash.objective_value), False
 
     def _predict(
         self,

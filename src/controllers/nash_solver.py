@@ -46,7 +46,7 @@ class NashSolver:
             raise ValueError("NashSolver requires at least one demand step.")
         first_demand = forecast[0]
         alpha = float(np.clip(self.cfg.mpc.nash_relaxation_alpha, 0.0, 1.0))
-        current = previous_control or ControlAction.fixed(self.cfg)
+        current = (previous_control.copy() if previous_control is not None else ControlAction.fixed(self.cfg))
         current.N_P_star = leader.N_P_star
         current.N_UF_star = leader.N_UF_star
         prev_obj = np.inf
@@ -69,7 +69,7 @@ class NashSolver:
                 offsets=dict(current.offsets),
                 inflow_outflow_allocation=dict(current.inflow_outflow_allocation),
             )
-            urban_reference = previous_control or current
+            urban_reference = previous_control.copy() if previous_control is not None else current.copy()
             urban = self.urban.solve(state, leader, first_demand, fw, urban_reference)
             candidate = ControlAction(
                 N_P_star=leader.N_P_star,
