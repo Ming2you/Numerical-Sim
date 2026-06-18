@@ -1,9 +1,12 @@
 import unittest
 from unittest.mock import patch
 
+import numpy as np
+
 from src.controllers.distributed_coordinator import AgentSolve, DistributedCoordinator, build_agent_specs
 from src.controllers.freeway_follower import FreewayFollower, FreewayFollowerResult
 from src.controllers.leader import Leader, LeaderAction
+from src.controllers.inflow_outflow_allocation import InflowOutflowAllocationModule
 from src.controllers.relaxed_quantization import repair_green_pair, repair_vsl_value
 from src.controllers.stackelberg_mpc import StackelbergMPCController
 from src.controllers.urban_follower import UrbanFollower
@@ -33,8 +36,42 @@ class ConstraintTests(unittest.TestCase):
     def test_relaxed_quantized_controls_are_off_by_default(self):
         cfg = short_config()
         self.assertFalse(cfg.mpc.relaxed_quantized_controls)
-        self.assertFalse(cfg.mpc.relaxed_fast_mode)
         self.assertEqual(cfg.mpc.relaxed_rounding_mode, "floor")
+        self.assertIsInstance(UrbanFollower(cfg).allocation_module, InflowOutflowAllocationModule)
+
+    def test_allocation_batch_objective_matches_scalar_objective(self):
+        cfg = short_config()
+        module = InflowOutflowAllocationModule(cfg)
+        state = TrafficState.initial(cfg)
+        demand = DemandProfile(cfg, ScenarioConfig("test")).horizon(0.0, 2)
+        leader = LeaderAction(cfg.leader.N_P_crit_veh, 5000.0)
+        specs = {
+            movement: spec
+            for movement, spec in cfg.network.urban_movements.items()
+            if spec.get("kind") in {"boundary_in", "off_ramp", "boundary_out", "on_ramp"}
+        }
+        movements = list(specs)
+        kinds = [str(specs[movement].get("kind", "")) for movement in movements]
+        lower, upper = module._bounds(movements, specs, leader)
+        target = module._clip_target(
+            module.solve(state, leader, demand).target_net_inflow_veh_h,
+            lower,
+            upper,
+            kinds,
+        )
+        rows = lower + 0.37 * (upper - lower)
+        particles = rows[None, :] + np.asarray([0.0, 0.1, -0.1])[:, None] * (upper - lower)[None, :]
+        particles = particles.clip(lower, upper)
+
+        context = module._objective_context(state, movements, kinds)
+        batch = module._objective_many(context, kinds, particles, target)
+        scalar = [
+            module._objective(state, movements, kinds, row, target)
+            for row in particles
+        ]
+
+        for got, expected in zip(batch, scalar):
+            self.assertAlmostEqual(float(got), float(expected), places=12)
 
     def test_relaxed_green_repair_satisfies_cycle_and_bounds(self):
         cfg = short_config().with_updates({"mpc": {"relaxed_quantized_controls": True}})

@@ -180,7 +180,6 @@ mpc:
   optimizer_maxiter: 40
   optimizer_n_starts: 2
   relaxed_quantized_controls: false
-  relaxed_fast_mode: false
   relaxed_green_quantum_sec: 1.0
   relaxed_vsl_quantum_km_h: 10.0
   relaxed_rounding_mode: floor

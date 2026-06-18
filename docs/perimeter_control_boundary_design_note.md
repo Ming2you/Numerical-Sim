@@ -23,7 +23,6 @@ scenario: low_demand
 horizon: 360 s
 controllers: PROPOSED-FOLLOWERS-ONLY, PROPOSED-STACKELBERG
 relaxed_quantized_controls: true
-relaxed_fast_mode: true
 ```
 
 결과:

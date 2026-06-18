@@ -2095,3 +2095,835 @@ Proposed next modification:
 - Reduce Stackelberg leader evaluation cost by pruning dominated leader candidates or using a warm-start/local candidate set after the first few intervals.
 - Add a direct boundary balance metric to Stage 1 outputs.
 - Investigate distributed residual convergence under the new response objective, especially whether relaxation/termination criteria are too strict for the current coupling scale.
+
+## 2026-06-18 Relaxed-Fast Allocation Module Attempt
+
+### What Was Implemented
+
+- Added a separate `RelaxedFastAllocationModule` for `mpc.relaxed_fast_mode`.
+- The original `InflowOutflowAllocationModule` remains the default when fast mode is off.
+- The fast module keeps the same `AllocationResult` interface, but uses:
+  - warm-start particles keyed by `(N_P_star, N_UF_star, movement set)`;
+  - midpoint, previous response, perturbation, greedy-upper, and random particles;
+  - early stopping after a minimum PSO iteration count when objective improvement stalls.
+- Exposed allocation solver diagnostics into distributed controller and Stage 1 control logs.
+- Set the quality-preserving fast budget to:
+  - particles `36`;
+  - max iterations `32`;
+  - min iterations `16`;
+  - patience `8`;
+  - tolerance `1.0e-5`.
+
+### Changed Files
+
+- `src/controllers/relaxed_fast_allocation.py`
+- `src/controllers/urban_follower.py`
+- `src/controllers/distributed_coordinator.py`
+- `src/models/state.py`
+- `src/config/default.yaml`
+- `src/tests/test_constraints.py`
+- `docs/spec/17_relaxed_quantized_fast_mode.md`
+
+### Validation Commands
+
+```text
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m py_compile src\controllers\relaxed_fast_allocation.py src\controllers\urban_follower.py src\controllers\distributed_coordinator.py src\models\state.py
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest src.tests.test_constraints.ConstraintTests.test_relaxed_fast_uses_warm_started_allocation_module src.tests.test_constraints.ConstraintTests.test_relaxed_quantized_controls_are_off_by_default src.tests.test_constraints.ConstraintTests.test_distributed_coordinator_returns_per_agent_diagnostics src.tests.test_constraints.ConstraintTests.test_stackelberg_default_objective_uses_follower_response_without_rollout -v
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest src.tests.test_constraints src.tests.test_forecast_awareness src.tests.test_six_controller_comparison -v
+```
+
+Result:
+
+```text
+targeted tests: 4 tests, OK
+constraints + forecast + six-controller comparison: 87 tests, OK
+```
+
+### Baseline And Proposed Run Commands
+
+The Stage 1 command runs the baseline/reference controller (`WU-CD-F`) and the proposed controllers under the same `peak_demand`, seed/config, plant, demand, horizon, and free-flow delay reference:
+
+```text
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m src.experiments.six_controller_comparison --config src/config/default.yaml --scenario peak_demand --T-total 7200 --controllers WU-CD-F,PROPOSED-FOLLOWERS-ONLY,PROPOSED-STACKELBERG,PROPOSED-CENTRALIZED --relaxed-fast-mode --output outputs/peak_7200_four_controller_relaxed_fast_warmstart_allocation_2026_06_18_v3
+```
+
+### 7200 s Peak Result
+
+Output:
+
+```text
+WU-CD-F: ttt=11645.9 delay=10501.9 authority_ok=True
+PROPOSED-FOLLOWERS-ONLY: ttt=7411.6 delay=6267.5 authority_ok=True
+PROPOSED-STACKELBERG: ttt=11131.5 delay=9987.5 authority_ok=True
+PROPOSED-CENTRALIZED: ttt=6369.1 delay=5225.1 authority_ok=True
+```
+
+| controller | total TTT | total delay | throughput veh/h | terminal veh | computation s | solver evals |
+|---|---:|---:|---:|---:|---:|---:|
+| WU-CD-F | 11645.893 | 10501.874 | 7945.7 | 13467.4 | 16.39 | 1059 |
+| PROPOSED-FOLLOWERS-ONLY | 7411.565 | 6267.545 | 10790.0 | 7782.8 | 1.23 | 1495 |
+| PROPOSED-STACKELBERG | 11131.502 | 9987.482 | 8539.9 | 12283.9 | 77.91 | 9243 |
+| PROPOSED-CENTRALIZED | 6369.101 | 5225.081 | 11304.3 | 6754.2 | 139.87 | 640 |
+
+### Computation-Cost Comparison
+
+- `PROPOSED-STACKELBERG` improved computation time versus the previous full-allocation response-objective run: `137.42 s -> 77.91 s`.
+- In this fast-mode run, Stackelberg is cheaper than centralized: `77.91 s` vs `139.87 s`.
+- The cost reduction is not a success by itself because the TTT objective degraded severely.
+
+### TTT-Minimization Comparison
+
+- Relative to `WU-CD-F`, `PROPOSED-STACKELBERG` improves TTT by only `514.391 veh*h` (`4.90%`), below the default `8%` criterion.
+- Relative to `PROPOSED-FOLLOWERS-ONLY`, `PROPOSED-STACKELBERG` is worse by `3719.937 veh*h` (`-59.35%` delay improvement).
+- Relative to `PROPOSED-CENTRALIZED`, `PROPOSED-STACKELBERG` is worse by `4762.401 veh*h`.
+
+### Boundary Queue Balancing Result
+
+Mean values over the 7200 s run:
+
+| controller | B_in | B_out | overflow ratio | boundary-in load veh |
+|---|---:|---:|---:|---:|
+| WU-CD-F | 0.0648 | 0.0187 | 0.1232 | 987.6 |
+| PROPOSED-FOLLOWERS-ONLY | 0.0695 | 0.0103 | 0.1214 | 1012.8 |
+| PROPOSED-STACKELBERG | 0.0279 | 0.0073 | 0.2161 | 1697.7 |
+| PROPOSED-CENTRALIZED | 0.1252 | 0.0020 | 0.1429 | 1163.7 |
+
+The Stackelberg fast run improves the balance-index means, but it does so while increasing boundary load, overflow ratio, terminal vehicles, and total TTT. This is not an acceptable control result; it indicates that the allocation/balance proxy is being satisfied in a way that is misaligned with closed-loop throughput.
+
+### Failure Diagnosis
+
+Compared with the previous full allocation Stackelberg run:
+
+| diagnostic | full allocation mean | relaxed-fast v3 mean |
+|---|---:|---:|
+| selected `N_UF_star` | 5612.322 | 2795.454 |
+| `distributed_response_ramp_release_veh` | 440.039 | 235.628 |
+| `distributed_response_onramp_green_veh` | 427.220 | 218.989 |
+| `leader_follower_ttt_base` | 622.733 | 1590.420 |
+| `leader_density_penalty` | 0.375 | 61.214 |
+| `leader_total_objective` | 673.502 | 1714.152 |
+
+Closed-loop traces show that relaxed-fast starts by opening high ramp targets, then density penalty rises and the leader begins choosing much lower `N_UF_star` values, including one `0` target. The final effect is under-release to the freeway, reduced throughput, larger urban/on-ramp storage, and worse TTT.
+
+A first-step comparison also showed that disabling early stop while keeping the fast warm-start module (`36` particles, `48` iterations, no early stop) still selected the same first-step fast response. Therefore the failure is not only early stopping. The more likely issue is that the warm-started allocation response and current follower proxy can rank leader candidates differently from the old full allocation path, and the resulting closed-loop trajectory falls into a low-metering/high-urban-storage regime.
+
+### Failed Criteria And Next Modification
+
+Verdict: **FAIL for performance**, **PASS for unit/runtime correctness**.
+
+Failed criteria:
+
+- `PROPOSED-STACKELBERG` does not beat `PROPOSED-FOLLOWERS-ONLY`.
+- `PROPOSED-STACKELBERG` does not reach the default `8%` improvement threshold over `WU-CD-F`.
+- Boundary balance index improves, but boundary load/overflow and TTT degrade.
+
+Recommended next modification:
+
+- Do not use the current relaxed-fast allocation path as the final comparison controller.
+- Add a closed-loop aligned term to the allocation/follower response objective for on-ramp service and terminal residual queues, rather than relying mostly on balance plus net-flow residual.
+- Alternatively, keep fast mode only for screening and use the full allocation module for final Stackelberg comparison until the fast proxy is calibrated against full closed-loop behavior.
+
+## 2026-06-18 Relaxed-Fast Allocation Without Warm Start
+
+### What Was Implemented
+
+- Removed all previous-response warm-start behavior from `RelaxedFastAllocationModule`.
+- Removed the warm-start cache keyed by leader action and movement set.
+- Removed `relaxed_fast_allocation_warm_start_noise` from config/schema.
+- Kept only deterministic midpoint/greedy seeds plus random particles.
+- Kept early stopping with the same budget:
+  - particles `36`;
+  - max iterations `32`;
+  - min iterations `16`;
+  - patience `8`;
+  - tolerance `1.0e-5`.
+- Kept compatibility diagnostics, but `allocation_pso_previous_warm_start_used` and `allocation_pso_warm_start_seed_count` are now always `0.0`.
+
+### Changed Files
+
+- `src/controllers/relaxed_fast_allocation.py`
+- `src/models/state.py`
+- `src/config/default.yaml`
+- `src/tests/test_constraints.py`
+- `docs/spec/17_relaxed_quantized_fast_mode.md`
+- `reports/codex_run_report.md`
+
+### Validation Commands
+
+```text
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m py_compile src\controllers\relaxed_fast_allocation.py src\controllers\urban_follower.py src\models\state.py
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest src.tests.test_constraints.ConstraintTests.test_relaxed_fast_uses_early_stop_allocation_module_without_warm_start src.tests.test_constraints.ConstraintTests.test_relaxed_quantized_controls_are_off_by_default src.tests.test_constraints.ConstraintTests.test_distributed_coordinator_returns_per_agent_diagnostics -v
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest src.tests.test_constraints src.tests.test_forecast_awareness src.tests.test_six_controller_comparison -v
+```
+
+Result:
+
+```text
+targeted tests: 3 tests, OK
+constraints + forecast + six-controller comparison: 87 tests, OK
+```
+
+### 7200 s Peak Run Command
+
+```text
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m src.experiments.six_controller_comparison --config src/config/default.yaml --scenario peak_demand --T-total 7200 --controllers WU-CD-F,PROPOSED-FOLLOWERS-ONLY,PROPOSED-STACKELBERG,PROPOSED-CENTRALIZED --relaxed-fast-mode --output outputs/peak_7200_four_controller_relaxed_fast_earlystop_only_2026_06_18_v1
+```
+
+Output:
+
+```text
+WU-CD-F: ttt=11645.9 delay=10501.9 authority_ok=True
+PROPOSED-FOLLOWERS-ONLY: ttt=7411.6 delay=6267.5 authority_ok=True
+PROPOSED-STACKELBERG: ttt=8146.8 delay=7002.8 authority_ok=True
+PROPOSED-CENTRALIZED: ttt=6369.1 delay=5225.1 authority_ok=True
+```
+
+| controller | total TTT | total delay | throughput veh/h | terminal veh | computation s | solver evals |
+|---|---:|---:|---:|---:|---:|---:|
+| WU-CD-F | 11645.893 | 10501.874 | 7945.7 | 13467.4 | 13.04 | 1059 |
+| PROPOSED-FOLLOWERS-ONLY | 7411.565 | 6267.545 | 10790.0 | 7782.8 | 0.84 | 1495 |
+| PROPOSED-STACKELBERG | 8146.788 | 7002.768 | 9600.4 | 10164.6 | 65.73 | 9360 |
+| PROPOSED-CENTRALIZED | 6369.101 | 5225.081 | 11304.3 | 6754.2 | 110.35 | 640 |
+
+### Warm-Start Removal Effect
+
+| Stackelberg variant | total TTT | throughput veh/h | terminal veh | computation s | mean `N_UF_star` | mean ramp release veh | warm-start used |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Full allocation reference | 7207.966 | 10913.7 | 7537.2 | 137.42 | 5612.322 | 440.039 | NA |
+| Warm-start fast v3 | 11131.502 | 8539.9 | 12283.9 | 77.91 | 2795.454 | 235.628 | 0.700 |
+| Early-stop only | 8146.788 | 9600.4 | 10164.6 | 65.73 | 4118.968 | 320.858 | 0.000 |
+
+Removing warm-start clearly improves the fast Stackelberg result:
+
+- TTT improves by `2984.714 veh*h` versus warm-start fast.
+- Computation time improves from `77.91 s` to `65.73 s`.
+- Mean `N_UF_star` and ramp release recover substantially.
+- Diagnostics confirm `allocation_pso_previous_warm_start_used = 0.0` for all decisions.
+
+### Boundary Queue Balancing Result
+
+Mean values over the early-stop-only 7200 s run:
+
+| controller | B_in | B_out | overflow ratio | boundary-in load veh |
+|---|---:|---:|---:|---:|
+| WU-CD-F | 0.0648 | 0.0187 | 0.1232 | 987.6 |
+| PROPOSED-FOLLOWERS-ONLY | 0.0695 | 0.0103 | 0.1214 | 1012.8 |
+| PROPOSED-STACKELBERG | 0.0308 | 0.0049 | 0.1536 | 1342.6 |
+| PROPOSED-CENTRALIZED | 0.1252 | 0.0020 | 0.1429 | 1163.7 |
+
+Early-stop-only Stackelberg still improves `B_in/B_out` versus follower-only, but it worsens overflow ratio and boundary-in load. The balance proxy remains partially misaligned with closed-loop TTT.
+
+### Failed Criteria And Next Modification
+
+Verdict: **FAIL for final performance**, **PASS for runtime/test correctness**.
+
+Compared with warm-start fast, the early-stop-only modification is clearly better and suggests the warm-start cache was a real source of bad closed-loop behavior. However:
+
+- `PROPOSED-STACKELBERG` is still worse than `PROPOSED-FOLLOWERS-ONLY` by `735.223 veh*h`.
+- It remains worse than the full allocation Stackelberg reference by `938.822 veh*h`.
+- It improves over `WU-CD-F` by `3499.105 veh*h` (`33.32% delay improvement`) and is cheaper than centralized, but it does not satisfy the proposed-controller leader-value criterion.
+
+Recommended next modification:
+
+- Keep warm-start disabled.
+- Test whether early stopping alone should use a higher minimum iteration count or full `48` iterations with no warm-start.
+- More importantly, revise the allocation/follower response proxy so lower `B_in/B_out` cannot be achieved by creating larger terminal boundary load and lower freeway release.
+
+## 2026-06-18 Pure Early-Stop PSO Audit
+
+### Why Performance Changed
+
+The previous "early-stop only" implementation was not actually identical to the
+full allocation PSO before the stopping rule. It changed several PSO details:
+
+- max iterations changed from full `48` to fast `32`;
+- random seed changed from `seed` to `seed + 7919 * solve_count`;
+- deterministic midpoint/greedy particles were injected into the initial swarm;
+- initial velocity noise changed from `0.10 * span` to `0.08 * span`.
+
+Therefore its performance could change even without warm-start. This was a code
+issue in the experimental fast module, not evidence that early stopping itself
+is harmless.
+
+### Correction
+
+`RelaxedFastAllocationModule` was revised so that it now matches the full
+allocation PSO before the stop rule:
+
+- same `allocation_pso_particles`;
+- same `allocation_pso_iterations`;
+- same `np.random.default_rng(seed)`;
+- same random initial particle matrix;
+- same `0.10 * span` initial velocity scale;
+- no warm-start cache or previous-response seed.
+
+Only the stop rule remains different. The default stop guard was made more
+conservative:
+
+```text
+relaxed_fast_allocation_pso_min_iterations = 36
+relaxed_fast_allocation_pso_patience = 8
+relaxed_fast_allocation_pso_tol = 1.0e-6
+```
+
+### Evidence
+
+First-decision diagnostic:
+
+| variant | objective | selected `N_UF_star` | allocation iterations | ramp release veh |
+|---|---:|---:|---:|---:|
+| full module | 131.227 | 3000.0 | full module | 289.653 |
+| pure early-stop, old loose guard | 133.733 | 3000.0 | 18 | 269.611 |
+| pure early-stop, conservative guard | 131.205 | 3000.0 | 42 | 289.949 |
+| same module, stop disabled | 131.227 | 3000.0 | 48 | 289.653 |
+
+The stop-disabled relaxed module exactly reproduces the full module on the
+first decision. A 7200 s Stackelberg-only run with the relaxed module and stop
+disabled also exactly reproduced the full-allocation reference:
+
+```text
+PROPOSED-STACKELBERG no-stop same PSO:
+total_ttt = 7207.966
+total_delay = 6063.946
+throughput = 10913.7 veh/h
+terminal_total_vehicles = 7537.2
+computation_time_sec = 143.51
+```
+
+This confirms that the remaining performance change comes from the early-stop
+criterion itself, not from hidden plant/controller changes.
+
+### Conservative Pure Early-Stop 7200 s Run
+
+Command:
+
+```text
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m src.experiments.six_controller_comparison --config src/config/default.yaml --scenario peak_demand --T-total 7200 --controllers WU-CD-F,PROPOSED-FOLLOWERS-ONLY,PROPOSED-STACKELBERG,PROPOSED-CENTRALIZED --relaxed-fast-mode --output outputs/peak_7200_four_controller_relaxed_fast_earlystop_pure_conservative_2026_06_18_v1
+```
+
+Output:
+
+```text
+WU-CD-F: ttt=11645.9 delay=10501.9 authority_ok=True
+PROPOSED-FOLLOWERS-ONLY: ttt=7411.6 delay=6267.5 authority_ok=True
+PROPOSED-STACKELBERG: ttt=8608.1 delay=7464.0 authority_ok=True
+PROPOSED-CENTRALIZED: ttt=6369.1 delay=5225.1 authority_ok=True
+```
+
+| Stackelberg variant | total TTT | throughput veh/h | terminal veh | computation s | mean allocation iter |
+|---|---:|---:|---:|---:|---:|
+| full allocation reference | 7207.966 | 10913.7 | 7537.2 | 137.42 | 48 |
+| pure early-stop conservative | 8608.054 | 9422.5 | 10520.4 | 119.50 | 39.075 |
+| same relaxed module, stop disabled | 7207.966 | 10913.7 | 7537.2 | 143.51 | 48 |
+
+### Interpretation
+
+Even with identical PSO initialization and a conservative guard, the current
+early-stop rule still changes closed-loop performance because PSO often has
+late improvements after a temporary objective plateau. In the 7200 s run,
+`allocation_pso_early_stopped` was active in `92.5%` of Stackelberg decisions
+with a mean of `39.075 / 48` iterations. Those small follower-response
+differences changed leader candidate rankings, lowered mean selected
+`N_UF_star` (`5612.322 -> 3846.046`), and reduced mean ramp release
+(`440.039 -> 292.967`).
+
+Verdict: **Do not use early-stop allocation PSO as a performance-equivalent
+replacement yet.** It is computationally faster, but the stop criterion is not a
+safe convergence certificate for this PSO/follower response problem.
+
+Recommended next modification:
+
+- Treat allocation early-stop as an optional screening diagnostic only.
+- For final four-controller comparison, use the full allocation PSO or disable
+  early stop with `min_iterations = allocation_pso_iterations`.
+- If early-stop is still desired, require a stronger certificate, such as
+  checking objective stability plus particle-spread/control-vector stability
+  over multiple iterations, not objective stagnation alone.
+
+## 2026-06-18 Allocation Objective Vectorization
+
+### What Was Implemented
+
+The safe computation-cost reduction path was implemented first: keep the full
+allocation PSO search unchanged, but vectorize the objective evaluation over
+particles.
+
+Changes:
+
+- Added `_ObjectiveContext` in `src/controllers/inflow_outflow_allocation.py`.
+- Added `_objective_context()`, `_objective_many()`, and `_balance_index_many()`.
+- Updated `InflowOutflowAllocationModule._run_pso()` so that:
+  - particle count is unchanged;
+  - max iterations are unchanged;
+  - random seed is unchanged;
+  - particle initialization is unchanged;
+  - velocity initialization is unchanged;
+  - PSO update order is unchanged;
+  - only particle objective evaluation is batched.
+- Added a regression test comparing scalar `_objective()` and batch
+  `_objective_many()` to `1e-12` precision.
+
+This is not a solver approximation. It should return the same PSO trajectory
+and same selected allocation up to floating-point roundoff.
+
+### Changed Files
+
+- `src/controllers/inflow_outflow_allocation.py`
+- `src/tests/test_constraints.py`
+- `reports/codex_run_report.md`
+
+Existing uncommitted files from the previous early-stop experiment remain in the
+working tree, but the vectorized full-allocation result below uses
+`relaxed_fast_mode = false`.
+
+### Validation Commands
+
+```text
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m py_compile src\controllers\inflow_outflow_allocation.py src\controllers\relaxed_fast_allocation.py src\controllers\urban_follower.py src\tests\test_constraints.py
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest src.tests.test_constraints.ConstraintTests.test_allocation_batch_objective_matches_scalar_objective src.tests.test_constraints.ConstraintTests.test_relaxed_fast_uses_early_stop_allocation_module_without_warm_start -v
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest src.tests.test_constraints src.tests.test_forecast_awareness src.tests.test_six_controller_comparison -v
+```
+
+Result:
+
+```text
+targeted tests: 2 tests, OK
+constraints + forecast + six-controller comparison: 88 tests, OK
+```
+
+### Objective Micro-Benchmark
+
+Same state, same particle matrix, `36` particles, `1000` repeated evaluations:
+
+```text
+scalar objective loop: 11.0999 s
+batched objective:      0.0726 s
+speedup:              152.79x
+max_abs_diff:           1.28e-13
+```
+
+### Peak 7200 s Stackelberg-Only Check
+
+Run condition:
+
+- scenario: `peak_demand`
+- horizon: `7200 s`
+- controller: `PROPOSED-STACKELBERG`
+- `relaxed_fast_mode = false`
+- same reduced Stage 1 screening budget as the previous full-allocation
+  reference: `leader_candidate_count = 5`, `max_nash_iter = 3`,
+  `freeway_prediction_horizon_steps = 3`
+
+Result:
+
+| Stackelberg run | total TTT | delay | throughput veh/h | terminal veh | computation s |
+|---|---:|---:|---:|---:|---:|
+| pre-vectorization full allocation reference | 7207.966 | 6063.946 | 10913.7 | 7537.2 | 137.42 |
+| vectorized full allocation | 7207.966 | 6063.946 | 10913.7 | 7537.2 | 8.56 |
+
+The closed-loop metrics are identical to the reference, while Stackelberg
+controller computation dropped by about `93.8%`.
+
+### Peak 7200 s Four-Controller Run
+
+Output root:
+
+```text
+outputs/peak_7200_four_controller_vectorized_full_allocation_2026_06_18_v1
+```
+
+Run condition:
+
+- scenario: `peak_demand`
+- horizon: `7200 s`
+- controllers: `WU-CD-F`, `PROPOSED-FOLLOWERS-ONLY`,
+  `PROPOSED-STACKELBERG`, `PROPOSED-CENTRALIZED`
+- `relaxed_fast_mode = false`
+- same Stage 1 screening budget overrides as above.
+
+Output:
+
+```text
+WU-CD-F: ttt=11645.9 delay=10501.9 authority_ok=True comp=12.86
+PROPOSED-FOLLOWERS-ONLY: ttt=7411.6 delay=6267.5 authority_ok=True comp=0.82
+PROPOSED-STACKELBERG: ttt=7208.0 delay=6063.9 authority_ok=True comp=8.6
+PROPOSED-CENTRALIZED: ttt=6369.1 delay=5225.1 authority_ok=True comp=107.95
+```
+
+| controller | total TTT | total delay | throughput veh/h | terminal veh | computation s |
+|---|---:|---:|---:|---:|---:|
+| WU-CD-F | 11645.893 | 10501.874 | 7945.7 | 13467.4 | 12.86 |
+| PROPOSED-FOLLOWERS-ONLY | 7411.565 | 6267.545 | 10790.0 | 7782.8 | 0.82 |
+| PROPOSED-STACKELBERG | 7207.966 | 6063.946 | 10913.7 | 7537.2 | 8.60 |
+| PROPOSED-CENTRALIZED | 6369.101 | 5225.081 | 11304.3 | 6754.2 | 107.95 |
+
+### Interpretation
+
+This vectorization resolves the immediate computation-cost concern without
+damaging closed-loop performance:
+
+- Stackelberg is now far cheaper than centralized in wall-clock controller time:
+  `8.60 s` vs `107.95 s`.
+- Stackelberg remains slightly better than follower-only on TTT:
+  `7207.966` vs `7411.565`.
+- Stackelberg remains far better than `WU-CD-F` on TTT:
+  `7207.966` vs `11645.893`.
+
+Verdict: **PASS for the computation-cost reduction attempt**, while the broader
+research performance criterion remains as before: Stackelberg's leader value
+over follower-only is positive but still below the default `8%` improvement
+threshold.
+
+Next step:
+
+- Do not implement leader candidate screening yet. The vectorization speedup is
+  large enough that screening is not currently necessary, and screening would
+  introduce a new approximation that could affect leader candidate ranking.
+
+## 2026-06-18: Wu-CD-F Peak 7200 s No-Control Baseline and Implementation Diagnosis
+
+### Purpose
+
+The user suspected that `WU-CD-F` was performing too poorly because something
+was missing or incorrectly implemented. I checked the declared Wu authority,
+control traces, no-control baseline, and two higher-fidelity Wu sensitivity
+runs.
+
+### Files Changed
+
+- No controller code changed in this diagnostic pass.
+- New simulation outputs were written under:
+  - `outputs/peak_7200_no_control_vectorized_context_2026_06_18_v1`
+  - `outputs/wu_peak_7200_relaxed_default_2026_06_18_v1`
+  - `outputs/wu_peak_7200_full_enum_default_2026_06_18_v1`
+- This report was updated.
+
+### Commands / Conditions
+
+No-control baseline:
+
+```text
+custom baseline loop using baseline_control("no_control"),
+scenario=peak_demand, T_total=7200 s, same plant/demand/free-flow reference
+as outputs/peak_7200_four_controller_vectorized_full_allocation_2026_06_18_v1
+```
+
+Wu sensitivity runs:
+
+```text
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m src.experiments.six_controller_comparison --config src/config/default.yaml --scenario peak_demand --T-total 7200 --controllers WU-CD-F --relaxed-quantized-controls --output outputs/wu_peak_7200_relaxed_default_2026_06_18_v1
+
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m src.experiments.six_controller_comparison --config src/config/default.yaml --scenario peak_demand --T-total 7200 --controllers WU-CD-F --output outputs/wu_peak_7200_full_enum_default_2026_06_18_v1
+```
+
+The current four-controller comparison remains:
+
+```text
+outputs/peak_7200_four_controller_vectorized_full_allocation_2026_06_18_v1
+```
+
+### Main Results Versus No-Control
+
+| controller | TTT | TTT improvement vs no-control | delay | delay improvement vs no-control | throughput veh/h | terminal veh | comp s |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| NO-CONTROL | 11659.562 | 0.00% | 10515.542 | 0.00% | 7936.1 | 13488.0 | 0.00 |
+| WU-CD-F, current comparison budget | 11645.893 | 0.12% | 10501.874 | 0.13% | 7945.7 | 13467.4 | 12.86 |
+| WU-CD-F, relaxed default Smax/Np | 11633.970 | 0.22% | 10489.950 | 0.24% | 7949.1 | 13460.5 | 61.38 |
+| WU-CD-F, full enumeration default Smax/Np | 11513.726 | 1.25% | 10369.706 | 1.39% | 7986.6 | 13388.1 | 200.51 |
+| PROPOSED-FOLLOWERS-ONLY | 7411.565 | 36.43% | 6267.545 | 40.40% | 10790.0 | 7782.8 | 0.82 |
+| PROPOSED-STACKELBERG | 7207.966 | 38.18% | 6063.946 | 42.33% | 10913.7 | 7537.2 | 8.60 |
+| PROPOSED-CENTRALIZED | 6369.101 | 45.37% | 5225.081 | 50.31% | 11304.3 | 6754.2 | 107.95 |
+
+### Control Trace Diagnosis
+
+| controller | VSL active steps | min VSL | green changed steps | ramp metering changed | offset changed | allocation used |
+|---|---:|---:|---:|---:|---:|---:|
+| NO-CONTROL | 0/40 | 100 | 0/40 | 0/40 | 0/40 | 0/40 |
+| WU-CD-F, current comparison budget | 0/40 | 100 | 40/40 | 0/40 | 0/40 | 0/40 |
+| WU-CD-F, relaxed default Smax/Np | 0/40 | 100 | 40/40 | 0/40 | 0/40 | 0/40 |
+| WU-CD-F, full enumeration default Smax/Np | 36/40 | 50 | 23/40 | 0/40 | 0/40 | 0/40 |
+
+Authority check:
+
+- This is consistent with `docs/spec/16_six_controller_comparison.md` and
+  `src/analysis/authority.py`: Wu group is allowed to change only green and
+  VSL. Ramp metering is fixed at capacity, offset is fixed at zero, and
+  inflow/outflow allocation is unused.
+- The current comparison-budget `WU-CD-F` was not doing ramp metering or offset
+  control because those controls are intentionally outside Wu authority, not
+  because they were silently broken.
+- The full-enumeration Wu run does activate segment-level VSL in 36 of 40
+  intervals, so VSL is not fundamentally unimplemented. However, even with VSL
+  active, the improvement over no-control is only `1.25%` TTT.
+
+### Boundary Queue Balancing
+
+| controller | mean boundary-in q | final boundary-in q | max boundary-in q | mean boundary-out q | final boundary-out q | max boundary-out q |
+|---|---:|---:|---:|---:|---:|---:|
+| NO-CONTROL | 978.1 | 3231.7 | 3231.7 | 30.1 | 14.9 | 56.6 |
+| WU-CD-F, current comparison budget | 987.6 | 3212.1 | 3212.1 | 32.4 | 16.0 | 57.0 |
+| WU-CD-F, full enumeration default Smax/Np | 942.8 | 3160.3 | 3160.3 | 28.5 | 16.9 | 55.2 |
+| PROPOSED-FOLLOWERS-ONLY | 1012.8 | 3157.9 | 3157.9 | 42.0 | 9.2 | 83.6 |
+| PROPOSED-STACKELBERG | 1613.5 | 4001.7 | 4001.7 | 26.3 | 15.4 | 51.8 |
+| PROPOSED-CENTRALIZED | 1163.7 | 3045.8 | 3045.8 | 33.4 | 72.4 | 72.4 |
+
+### Interpretation
+
+The large gap is not primarily a missing implementation in `WU-CD-F`. The
+dominant reason is authority/package difference:
+
+- Wu has no ramp metering. In this peak case, the proposed controllers gain most
+  of their system benefit by regulating freeway entry and preventing freeway
+  accumulation/terminal vehicles from exploding.
+- Wu has no offset control and no inflow/outflow allocation, so urban signal
+  coordination is limited to phase green split.
+- Current comparison-budget Wu uses a relaxed VSL shortcut and a reduced
+  Smax/Np, which weakens it slightly. Restoring default Smax/Np and full
+  enumeration improves TTT from `11645.893` to `11513.726`, but that is still
+  only `1.25%` better than no-control.
+- Full-enumeration Wu activates VSL, but VSL alone is too weak in this scenario:
+  it can slightly reduce terminal accumulation, yet without ramp metering it
+  cannot sufficiently control on-ramp/freeway inflow.
+
+### Failed Criteria / Next Modification
+
+- `WU-CD-F` does not meet the default `8%` improvement threshold versus
+  no-control in peak 7200 s, even under full enumeration.
+- No code correction is recommended solely from this diagnostic result.
+- If a stronger Wu reference is desired, the fair next experiment is to run
+  `WU-CC-F` or a separate "Wu + ramp metering" ablation, but that would no
+  longer be the declared Wu authority in spec 16.
+
+## 2026-06-18: All-Scenario 7200 s Four-Controller Relaxed-Fast Run
+
+### Purpose
+
+The user asked to rerun all six scenarios for the four primary controllers
+using `relaxed_fast_mode=true`, then interpret controller behavior with
+quantitative and visual activation evidence.
+
+Clarification:
+
+- `relaxed_fast_mode` is not a MILP solve.
+- It enables `relaxed_quantized_controls`, uses continuous/heuristic targets,
+  repairs them to feasible quantized controls, and applies smaller screening
+  budgets.
+- In this run: `leader_candidate_count=5`, `max_nash_iter=3`,
+  `optimizer_maxiter=16`, `optimizer_n_starts=1`,
+  `freeway_prediction_horizon_steps=3`.
+
+Detailed report:
+
+```text
+reports/relaxed_fast_all_scenarios_7200_control_method_report.md
+```
+
+Output root:
+
+```text
+outputs/all_scenarios_7200_four_controller_relaxed_fast_2026_06_18_v1
+```
+
+Generated evidence:
+
+```text
+outputs/all_scenarios_7200_four_controller_relaxed_fast_2026_06_18_v1/analysis/summary_with_no_control.csv
+outputs/all_scenarios_7200_four_controller_relaxed_fast_2026_06_18_v1/analysis/activation_summary.csv
+outputs/all_scenarios_7200_four_controller_relaxed_fast_2026_06_18_v1/analysis/representative_timeseries.csv
+outputs/all_scenarios_7200_four_controller_relaxed_fast_2026_06_18_v1/analysis/charts/*.svg
+```
+
+### Commands / Conditions
+
+The run used a custom Python loop calling `run_controller(...)` for each
+controller and `baseline_control("no_control")` for the no-control comparison,
+with the same scenario plant, demand, horizon, and free-flow reference per
+scenario.
+
+Controllers:
+
+- `WU-CD-F`
+- `PROPOSED-FOLLOWERS-ONLY`
+- `PROPOSED-STACKELBERG`
+- `PROPOSED-CENTRALIZED`
+
+Scenarios:
+
+- `low_demand`
+- `medium_demand`
+- `peak_demand`
+- `oversaturated_demand`
+- `incident_or_capacity_drop`
+- `capacity_drop`
+
+### Main Results
+
+Total TTT, veh-h:
+
+| scenario | no-control | WU | P-FO | P-Stack | P-Cent | best incl. no-control | best 4-controller |
+|---|---:|---:|---:|---:|---:|---|---|
+| low_demand | 695.7 | 709.1 | 1139.9 | 1285.8 | 871.5 | No control | WU |
+| medium_demand | 1944.0 | 1991.2 | 4042.8 | 3444.8 | 3633.2 | No control | WU |
+| peak_demand | 11659.6 | 11645.9 | 7411.6 | 8608.1 | 6369.1 | P-Cent | P-Cent |
+| oversaturated_demand | 19734.2 | 19739.1 | 13365.8 | 17978.8 | 15863.5 | P-FO | P-FO |
+| incident_or_capacity_drop | 10473.2 | 10447.0 | 7159.4 | 8412.6 | 5826.2 | P-Cent | P-Cent |
+| capacity_drop | 31794.5 | 33593.1 | 34867.8 | 40022.5 | 35096.9 | No control | WU |
+
+Improvement versus no-control:
+
+| scenario | WU | P-FO | P-Stack | P-Cent |
+|---|---:|---:|---:|---:|
+| low_demand | -1.92% | -63.85% | -84.81% | -25.27% |
+| medium_demand | -2.43% | -107.97% | -77.20% | -86.90% |
+| peak_demand | 0.12% | 36.43% | 26.17% | 45.37% |
+| oversaturated_demand | -0.03% | 32.27% | 8.89% | 19.61% |
+| incident_or_capacity_drop | 0.25% | 31.64% | 19.68% | 44.37% |
+| capacity_drop | -5.66% | -9.67% | -25.88% | -10.39% |
+
+### Activation Evidence
+
+Peak demand:
+
+- `WU-CD-F`: green active `100%`, ramp/VSL/offset/allocation `0%`;
+  TTT improvement only `0.12%`.
+- `PROPOSED-FOLLOWERS-ONLY`: ramp metering active `100%`, offset active `100%`,
+  VSL `0%`; mean applied metering flow `2976 veh/h` versus potential no-meter
+  flow `5956 veh/h`; density exceedance drops to `0`; TTT improvement `36.43%`.
+- `PROPOSED-CENTRALIZED`: allocation active `100%`, offset active `100%`,
+  green active `95%`, explicit ramp metering `0%`, VSL `0%`; freeway TTT drops
+  from `4900` to `338 veh-h`; total TTT improvement `45.37%`.
+
+Oversaturated demand:
+
+- `PROPOSED-FOLLOWERS-ONLY` is best: ramp active `100%`, restriction ratio
+  `0.5988`, throughput rises from `7431` to `10503 veh/h`, total TTT improves
+  `32.27%`.
+
+Capacity-drop:
+
+- All four active controllers are worse than no-control.
+- `PROPOSED-STACKELBERG` is the clearest over-control case: ramp active `100%`,
+  restriction ratio `0.8441`, VSL active `97.5%`, allocation active `100%`;
+  throughput falls to `7063 veh/h`, and total TTT worsens `25.88%`.
+
+### Interpretation
+
+- Low/medium/capacity-drop: active control is currently unnecessary or
+  over-aggressive in relaxed-fast mode. Wu is the best of the four active
+  controllers only because it is least invasive; no-control is still better.
+- Peak/incident/oversaturated: proposed authority matters. The gains come
+  mostly from ramp metering and coordinated allocation/offset/green behavior,
+  not from VSL in this relaxed-fast run.
+- VSL is not a dominant positive mechanism here. It remains neutral in peak and
+  becomes active mainly in capacity-drop or centralized oversaturated cases,
+  where it does not by itself guarantee total TTT improvement.
+- Stackelberg remains the concern: it activates the full proposed package but
+  often protects freeway states by transferring too much cost to the urban/ramp
+  side under the current relaxed-fast approximation.
+
+### Control Validation Summary
+
+- Authority checks in `all_controller_summary.csv` are `True` for all four
+  controllers and all scenarios.
+- No code changes were made for this run.
+- Unit tests were not rerun because this was a simulation/reporting pass only.
+
+### Proposed Next Modification
+
+Add or tune regime-aware activation gates for relaxed-fast mode:
+
+- avoid ramp metering when low/medium demand has no freeway receiving stress;
+- avoid leader/allocation over-restriction when urban/ramp queue cost dominates;
+- treat VSL as bottleneck-specific evidence, not a default remedy in deep
+  oversaturation or pure capacity-drop regimes.
+
+## 2026-06-18: removed relaxed-fast code path and kept relaxed-quantized mode
+
+### What Was Implemented
+
+- Removed the separate `relaxed_fast_mode` control path from active code.
+- Kept `relaxed_quantized_controls` as the supported computationally practical
+  mode.
+- Removed the dedicated relaxed-fast allocation module from the active
+  controller path.
+- Updated active specs so heuristic rules are treated as proposal generators and
+  final follower actions are expected to be selected by TTT/TTS-compatible
+  argmin.
+
+### Files Changed
+
+- `src/controllers/urban_follower.py`
+- `src/models/state.py`
+- `src/config/default.yaml`
+- `src/experiments/six_controller_comparison.py`
+- `src/tests/test_constraints.py`
+- `docs/spec/17_relaxed_quantized_fast_mode.md`
+- `docs/spec/18_follower_tts_objective_alignment.md`
+- `docs/perimeter_control_boundary_design_note.md`
+- `reports/codex_run_report.md`
+
+### Baseline Run Command
+
+Not run. This was a code cleanup/spec-alignment step only.
+
+### Proposed-Controller Run Command
+
+Not run. The next simulation should use `relaxed_quantized_controls=true`
+without a separate fast-mode shortcut.
+
+### Baseline Total TTT/TTS
+
+Not measured in this cleanup step.
+
+### Proposed Total TTT/TTS
+
+Not measured in this cleanup step.
+
+### Improvement Rate
+
+Not measured in this cleanup step.
+
+### Boundary Queue Balancing Result
+
+Not measured in this cleanup step.
+
+### Control Validation Summary
+
+Static compile and cleanup-focused tests passed.
+
+Commands:
+
+```text
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m py_compile src/controllers/urban_follower.py src/models/state.py src/experiments/six_controller_comparison.py src/tests/test_constraints.py src/controllers/inflow_outflow_allocation.py
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest src.tests.test_constraints.ConstraintTests.test_relaxed_quantized_controls_are_off_by_default src.tests.test_constraints.ConstraintTests.test_allocation_batch_objective_matches_scalar_objective
+C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe -B -m unittest src.tests.test_constraints
+```
+
+Results:
+
+```text
+py_compile: OK
+targeted cleanup tests: 2 tests, OK
+constraints suite: 50 tests, OK
+```
+
+Active code/spec references to `relaxed_fast_mode`,
+`RelaxedFastAllocationModule`, `relaxed_fast_allocation`, and
+`--relaxed-fast-mode` were removed. Historical run-report entries were kept as
+provenance for previous failed fast-mode experiments.
+
+### Failed Criteria
+
+Full acceptance is not claimed. No closed-loop smoke test or full scenario run
+was executed for this cleanup step.
+
+### Proposed Next Modification
+
+Implement the follower objective alignment from
+`docs/spec/18_follower_tts_objective_alignment.md`:
+
+- joint ramp-metering/VSL local TTS candidate evaluation;
+- urban stage-2 green/offset TTS candidate evaluation;
+- default/no-control guard candidates in WU-CD-F and PROPOSED-FOLLOWERS-ONLY;
+- relaxed-quantized proposal-centered search instead of direct pressure-rule
+  selection.

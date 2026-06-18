@@ -345,7 +345,6 @@ class MPCConfig:
     optimizer_maxiter: int = 40
     optimizer_n_starts: int = 2
     relaxed_quantized_controls: bool = False
-    relaxed_fast_mode: bool = False
     relaxed_green_quantum_sec: float = 1.0
     relaxed_vsl_quantum_km_h: float = 10.0
     relaxed_rounding_mode: str = "floor"
@@ -505,6 +504,10 @@ class ExperimentConfig:
             raise ValueError("leader.non_convergence_objective_residual_scale must be positive.")
         if self.leader.non_convergence_control_residual_scale <= 0.0:
             raise ValueError("leader.non_convergence_control_residual_scale must be positive.")
+        if self.urban_follower.allocation_pso_particles <= 0:
+            raise ValueError("urban_follower.allocation_pso_particles must be positive.")
+        if self.urban_follower.allocation_pso_iterations <= 0:
+            raise ValueError("urban_follower.allocation_pso_iterations must be positive.")
         if self.evaluation.eps_balance < 0.0:
             raise ValueError("evaluation.eps_balance must be non-negative.")
         if not 0.0 <= self.evaluation.boundary_degenerate_saturation_fraction <= 1.0:

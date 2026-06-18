@@ -946,6 +946,11 @@ class DistributedCoordinator:
             f"agent_{agent.id}_allocation_module_used": float(result.metrics.get("allocation_module_active", 0.0)),
         }
         merge_repair_diagnostics(diagnostics, result.metrics)
+        diagnostics.update({
+            key: float(value)
+            for key, value in result.metrics.items()
+            if key.startswith("allocation_")
+        })
         return AgentSolve(
             agent_id=agent.id,
             objective=local_objective,

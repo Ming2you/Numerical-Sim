@@ -43,8 +43,8 @@ continuous or low-dimensional local proposal/search
 then feasible green/VSL quantization and repair
 ```
 
-It is separate from `relaxed_fast_mode = true`, which may reduce solver budgets
-or use screening shortcuts.
+Solver-budget changes should be explicit ordinary config overrides rather than
+a separate fast-mode flag.
 
 The observed performance issue is not simply caused by quantization. The larger
 issue is that some relaxed-quantized paths replace local TTS minimization with a
@@ -56,16 +56,16 @@ For `peak_demand`, 7200 s:
 
 | Run mode | P-FO Total TTT | P-Stack Total TTT | Interpretation |
 |---|---:|---:|---|
-| vectorized full allocation, `relaxed_fast_mode=false` | 7411.565 | 7207.966 | P-Stack improves over P-FO |
-| relaxed-fast allocation, `relaxed_fast_mode=true` | 7411.565 | 8608.054 | P-Stack worsens due to the fast allocation/follower-response approximation |
+| vectorized full allocation | 7411.565 | 7207.966 | P-Stack improves over P-FO |
+| former fast-allocation shortcut | 7411.565 | 8608.054 | P-Stack worsens due to the allocation/follower-response approximation |
 
 Therefore the statement "P-Stack has a problem" is mode-specific. The full or
-vectorized allocation path can still make P-Stack better than P-FO, while the
-relaxed-fast shortcut can distort the follower response.
+vectorized allocation path can still make P-Stack better than P-FO, while a
+shortcut allocation path can distort the follower response.
 
 ### No-Control Degradation Pattern
 
-In the 7200 s all-scenario relaxed-fast run, WU-CD-F and
+In the 7200 s all-scenario shortcut-allocation run, WU-CD-F and
 PROPOSED-FOLLOWERS-ONLY are not uniformly better than no-control:
 
 - WU-CD-F is close to no-control and can be slightly worse in light or capacity
@@ -342,7 +342,7 @@ Recommended order:
    proposal-centered candidate search.
 5. Add default/no-control guards for WU-CD-F and PROPOSED-FOLLOWERS-ONLY.
 6. Re-run 7200 s all-scenario comparison with `relaxed_quantized_controls=true`
-   and `relaxed_fast_mode=false` before testing any fast shortcut.
+   and the full allocation module before testing any shortcut.
 
-Do not make `relaxed_fast_mode=true` the default until the full
-relaxed-quantized path passes the acceptance checks.
+Do not introduce a new shortcut allocation path until the full relaxed-quantized
+path passes the acceptance checks.

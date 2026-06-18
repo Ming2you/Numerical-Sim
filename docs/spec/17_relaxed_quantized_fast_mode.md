@@ -1,9 +1,10 @@
-# Relaxed-Quantized Fast Controller Mode
+# Relaxed-Quantized Controller Mode
 
 ## 17.1 Purpose
 
-This document defines a computationally practical controller variant for the
-primary four-controller comparison in `16_six_controller_comparison.md`.
+This document defines a computationally practical relaxed-quantized controller
+variant for the primary four-controller comparison in
+`16_six_controller_comparison.md`.
 
 The current 4-controller, 6-scenario 3600 sec experiment can become a
 computation-cost failure because several controllers repeatedly evaluate
@@ -15,8 +16,10 @@ not a formal MILP/MINLP integer solver. It is mainly:
 - nested leader-candidate and follower-response loops in `PROPOSED-STACKELBERG`
 - centralized random-search rollout budget in `PROPOSED-CENTRALIZED`
 
-The relaxed-quantized mode reduces candidate enumeration while preserving the
-same physical plant, topology, demand, metrics, and control authority groups.
+The relaxed-quantized mode may reduce candidate enumeration, but it must still
+select final local actions by a TTT/TTS-compatible objective. Heuristic pressure
+rules may generate proposal centers only; they must not replace objective-based
+selection.
 
 ## 17.2 Non-Goals
 
@@ -43,7 +46,6 @@ Recommended keys:
 ```yaml
 mpc:
   relaxed_quantized_controls: false
-  relaxed_fast_mode: false
   relaxed_green_quantum_sec: 1.0
   relaxed_vsl_quantum_km_h: 10.0
   relaxed_rounding_mode: floor      # floor, nearest
@@ -51,21 +53,10 @@ mpc:
 ```
 
 When `relaxed_quantized_controls = false`, existing behavior must be preserved.
-
-When `relaxed_fast_mode = true`, the experiment may additionally use smaller
-solver budgets for screening:
-
-```yaml
-mpc:
-  leader_candidate_count: 5
-  max_nash_iter: 3
-  optimizer_maxiter: 16
-  optimizer_n_starts: 1
-freeway_follower:
-  freeway_prediction_horizon_steps: 3
-```
-
-The final report must state whether the run used full budget or fast budget.
+Solver budgets such as `leader_candidate_count`, `max_nash_iter`,
+`optimizer_maxiter`, and `freeway_prediction_horizon_steps` remain explicit
+ordinary configuration values. They are not controlled by a separate fast-mode
+flag.
 
 ## 17.4 Quantization and Feasibility Repair
 
@@ -107,9 +98,10 @@ mode changes only the local optimizer.
 
 For urban agents:
 
-- replace the 7-point green grid with a continuous queue/arrival-pressure split
-- quantize and repair the result before returning the control
-- keep the same local objective accounting for diagnostics
+- use queue/arrival-pressure rules as proposal centers
+- include the default/previous green split as a candidate
+- evaluate a small feasible neighborhood with the local TTS objective
+- quantize and repair the selected result before returning the control
 
 For freeway agents:
 
@@ -136,7 +128,7 @@ The proposed follower-only controller keeps the same authority:
 
 Relaxed mode should:
 
-- use continuous green split plus quantized repair
+- use continuous proposal centers plus local TTS candidate search
 - keep offset and metering logic unchanged unless a feasibility bug is found
 - quantize any continuous or heuristic VSL output through the common VSL repair
 
@@ -148,8 +140,9 @@ The Stackelberg structure remains unchanged:
 - followers still respond through the distributed/two-block loop
 - only follower local solves become relaxed/quantized
 
-Fast mode may reduce `leader_candidate_count` and `max_nash_iter`, but the
-report must label this as a computational screening variant.
+Do not swap the allocation module based on relaxed quantization. The
+Stackelberg path should continue to use `InflowOutflowAllocationModule` unless a
+future spec introduces and validates a replacement against the full objective.
 
 ### PROPOSED-CENTRALIZED
 
@@ -157,7 +150,6 @@ The centralized controller already uses continuous decision vectors internally.
 Relaxed mode should focus on:
 
 - using the common green and VSL repair functions
-- reducing random-search rollout budget only when `relaxed_fast_mode = true`
 - reporting `solver_evaluations`, convergence rate, and computation time
 
 Do not describe the centralized result as a global optimum.
@@ -171,7 +163,6 @@ Required diagnostics:
 
 ```text
 relaxed_quantized_controls
-relaxed_fast_mode
 relaxed_rounding_mode
 green_quantization_residual_sec
 vsl_quantization_residual_km_h
@@ -180,6 +171,7 @@ vsl_repair_count
 solver_evaluations
 computation_time_sec
 solver_converged
+allocation_pso_objective_evaluations
 ```
 
 The 4-controller Stage 1 table must continue to include:
@@ -200,7 +192,7 @@ Add or update tests to verify:
 - relaxed VSL values belong to `vsl_set`
 - relaxed VSL changes respect `max_vsl_step`
 - relaxed green times satisfy min/max and cycle-sum constraints
-- WU relaxed freeway solve evaluates fewer VSL candidates than full enumeration
+- WU relaxed freeway solve evaluates bounded VSL candidates
 - primary four controllers can run a short smoke test with relaxed mode enabled
 
 ## 17.8 Experiment Procedure
@@ -234,4 +226,3 @@ The run is acceptable only if:
 
 Do not claim final controller acceptance solely from faster computation. The
 performance criteria in `experiment_acceptance_criteria.md` still apply.
-

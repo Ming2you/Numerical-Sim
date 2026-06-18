@@ -124,7 +124,6 @@ class _ControllerAdapter:
                     diag[key] = float(value)
         diag.update({
             "relaxed_quantized_controls": float(self.cfg.mpc.relaxed_quantized_controls),
-            "relaxed_fast_mode": float(self.cfg.mpc.relaxed_fast_mode),
             "relaxed_rounding_mode_floor": float(self.cfg.mpc.relaxed_rounding_mode == "floor"),
             "relaxed_rounding_mode_nearest": float(self.cfg.mpc.relaxed_rounding_mode == "nearest"),
             "green_quantization_residual_sec": float(control.diagnostics.get("green_quantization_residual_sec", 0.0)),
@@ -326,11 +325,6 @@ def main(argv: Optional[List[str]] = None) -> None:
         action="store_true",
         help="Enable spec 17 relaxed continuous targets with quantized feasible controls.",
     )
-    parser.add_argument(
-        "--relaxed-fast-mode",
-        action="store_true",
-        help="Enable relaxed controls and apply the spec 17 screening solver budgets.",
-    )
     parser.add_argument("--relaxed-rounding-mode", choices=["floor", "nearest"], default=None)
     parser.add_argument("--relaxed-green-quantum-sec", type=float, default=None)
     parser.add_argument("--relaxed-vsl-quantum-km-h", type=float, default=None)
@@ -341,17 +335,8 @@ def main(argv: Optional[List[str]] = None) -> None:
         overrides["simulation"] = {"T_total": args.T_total}
     if args.seed is not None:
         overrides.setdefault("simulation", {})["random_seed"] = args.seed
-    if args.relaxed_quantized_controls or args.relaxed_fast_mode:
+    if args.relaxed_quantized_controls:
         overrides.setdefault("mpc", {})["relaxed_quantized_controls"] = True
-    if args.relaxed_fast_mode:
-        # Spec 17.3 screening budget: make the computational shortcut explicit in the CLI
-        # rather than silently changing defaults whenever the config flag is present.
-        overrides.setdefault("mpc", {})["relaxed_fast_mode"] = True
-        overrides.setdefault("mpc", {})["leader_candidate_count"] = 5
-        overrides.setdefault("mpc", {})["max_nash_iter"] = 3
-        overrides.setdefault("mpc", {})["optimizer_maxiter"] = 16
-        overrides.setdefault("mpc", {})["optimizer_n_starts"] = 1
-        overrides.setdefault("freeway_follower", {})["freeway_prediction_horizon_steps"] = 3
     if args.relaxed_rounding_mode is not None:
         overrides.setdefault("mpc", {})["relaxed_rounding_mode"] = args.relaxed_rounding_mode
     if args.relaxed_green_quantum_sec is not None:

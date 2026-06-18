@@ -36,6 +36,18 @@ class AllocationResult:
     diagnostics: Dict[str, float] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class _ObjectiveContext:
+    """PSO particle batch objective를 같은 수식으로 빠르게 평가하기 위한 고정 항."""
+
+    queue: np.ndarray
+    signs: np.ndarray
+    inflow_groups: list[np.ndarray]
+    inflow_caps: np.ndarray
+    outflow_groups: list[np.ndarray]
+    outflow_caps: np.ndarray
+
+
 class InflowOutflowAllocationModule:
     """논문 §3.2 density-balancing inflow/outflow allocation module.
 
@@ -171,11 +183,9 @@ class InflowOutflowAllocationModule:
         span = np.maximum(upper - lower, 1.0e-9)
         pos = lower + rng.random((particles, len(movements))) * span
         vel = rng.normal(0.0, 0.10, size=pos.shape) * span
+        context = self._objective_context(state, movements, kinds)
         personal = pos.copy()
-        personal_score = np.asarray([
-            self._objective(state, movements, kinds, row, target)
-            for row in pos
-        ])
+        personal_score = self._objective_many(context, kinds, pos, target)
         best_idx = int(np.argmin(personal_score))
         global_best = personal[best_idx].copy()
         global_score = float(personal_score[best_idx])
@@ -185,10 +195,7 @@ class InflowOutflowAllocationModule:
             r2 = rng.random(pos.shape)
             vel = 0.55 * vel + 1.45 * r1 * (personal - pos) + 1.45 * r2 * (global_best - pos)
             pos = np.clip(pos + vel, lower, upper)
-            scores = np.asarray([
-                self._objective(state, movements, kinds, row, target)
-                for row in pos
-            ])
+            scores = self._objective_many(context, kinds, pos, target)
             improved = scores < personal_score
             personal[improved] = pos[improved]
             personal_score[improved] = scores[improved]
@@ -211,6 +218,89 @@ class InflowOutflowAllocationModule:
         balance = safe_balance_index(inflow_density) ** 2 + safe_balance_index(outflow_density) ** 2
         residual = self._net_flow(flows, kinds) - target
         return float(balance + 10.0 * (residual / max(self.cfg.network.movement_capacity_veh_h, 1.0)) ** 2)
+
+    def _objective_context(
+        self,
+        state: TrafficState,
+        movements: list[str],
+        kinds: list[str],
+    ) -> _ObjectiveContext:
+        """Spec 4.4의 balance objective에서 particle과 무관한 항을 한 번만 구성한다."""
+        specs = movement_specs(self.cfg)
+        queue = np.asarray([
+            max(0.0, state.urban_movement_queue.get(movement, 0.0))
+            for movement in movements
+        ], dtype=float)
+        signs = np.asarray([
+            1.0 if kind in INFLOW_KINDS else -1.0 if kind in OUTFLOW_KINDS else 0.0
+            for kind in kinds
+        ], dtype=float)
+
+        def groups_for(accepted_kinds: set[str]) -> tuple[list[np.ndarray], np.ndarray]:
+            grouped_indices: Dict[str, list[int]] = {}
+            grouped_caps: Dict[str, float] = {}
+            for idx, movement in enumerate(movements):
+                if kinds[idx] not in accepted_kinds:
+                    continue
+                key = boundary_group_key(specs.get(movement, {}))
+                grouped_indices.setdefault(key, []).append(idx)
+                grouped_caps[key] = grouped_caps.get(key, 0.0) + max(
+                    self._movement_storage_capacity(movement),
+                    1.0e-9,
+                )
+            keys = sorted(grouped_indices)
+            return (
+                [np.asarray(grouped_indices[key], dtype=int) for key in keys],
+                np.asarray([grouped_caps[key] for key in keys], dtype=float),
+            )
+
+        inflow_groups, inflow_caps = groups_for(BALANCE_INFLOW_KINDS)
+        outflow_groups, outflow_caps = groups_for(BALANCE_OUTFLOW_KINDS)
+        return _ObjectiveContext(
+            queue=queue,
+            signs=signs,
+            inflow_groups=inflow_groups,
+            inflow_caps=inflow_caps,
+            outflow_groups=outflow_groups,
+            outflow_caps=outflow_caps,
+        )
+
+    def _objective_many(
+        self,
+        context: _ObjectiveContext,
+        kinds: list[str],
+        flows: np.ndarray,
+        target: float,
+    ) -> np.ndarray:
+        """기존 scalar objective와 같은 값을 particle batch 단위로 계산한다."""
+        del kinds  # signs는 context에 고정되어 있어 난수/탐색 순서를 바꾸지 않는다.
+        rows = np.atleast_2d(flows.astype(float, copy=False))
+        dt_h = self.cfg.simulation.T_c_h
+        remaining = np.maximum(0.0, context.queue[None, :] - np.maximum(rows, 0.0) * dt_h)
+        b_in = self._balance_index_many(remaining, context.inflow_groups, context.inflow_caps)
+        b_out = self._balance_index_many(remaining, context.outflow_groups, context.outflow_caps)
+        residual = rows @ context.signs - target
+        scale = max(self.cfg.network.movement_capacity_veh_h, 1.0)
+        return b_in * b_in + b_out * b_out + 10.0 * (residual / scale) ** 2
+
+    @staticmethod
+    def _balance_index_many(
+        remaining: np.ndarray,
+        groups: list[np.ndarray],
+        caps: np.ndarray,
+        eps: float = 1.0e-9,
+    ) -> np.ndarray:
+        """safe_balance_index를 여러 particle에 대해 같은 정의로 평가한다."""
+        if not groups:
+            return np.zeros(remaining.shape[0], dtype=float)
+        values = np.column_stack([
+            np.sum(remaining[:, indices], axis=1) / caps[idx]
+            for idx, indices in enumerate(groups)
+        ])
+        l1 = np.sum(np.abs(values), axis=1)
+        l2_sq = np.sum(values * values, axis=1)
+        raw = l2_sq / np.maximum(l1 * l1, eps) - 1.0 / values.shape[1]
+        return np.where(l1 <= eps, 0.0, np.maximum(0.0, raw))
 
     def _densities_after_service(
         self,
