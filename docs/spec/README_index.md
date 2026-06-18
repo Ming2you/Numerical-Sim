@@ -24,6 +24,7 @@ This folder splits the implementation specification by top-level section so an L
 - `15_caveats.md`
 - `16_six_controller_comparison.md`
 - `17_relaxed_quantized_fast_mode.md`
+- `18_follower_tts_objective_alignment.md`
 
 ## Recommended use
 
@@ -35,5 +36,7 @@ This folder splits the implementation specification by top-level section so an L
    `16_six_controller_comparison.md` and `../literature_grounded_post_analysis_plan.md`.
 6. For computation-cost reduction of the four-controller benchmark, also provide
    `17_relaxed_quantized_fast_mode.md`.
+7. For follower objective repair work, also provide
+   `18_follower_tts_objective_alignment.md`.
 
 Do not give the entire full spec to the coding agent unless the task requires cross-section integration.
