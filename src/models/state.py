@@ -333,7 +333,11 @@ class CapacityDropConfig:
 @dataclass
 class MPCConfig:
     horizon_steps: int = 3
-    leader_candidate_count: int = 15
+    leader_candidate_count: int = 49
+    leader_refinement_candidate_count: int = 25
+    leader_global_refresh_sec: float = 1800.0
+    leader_local_np_radius_veh: float = 40.0
+    leader_local_nuf_radius_veh_h: float = 1500.0
     follower_solver_mode: str = "two_block"
     max_nash_iter: int = 10
     nash_obj_tol: float = 1.0e-3
@@ -349,6 +353,20 @@ class MPCConfig:
     relaxed_vsl_quantum_km_h: float = 10.0
     relaxed_rounding_mode: str = "floor"
     relaxed_wu_vsl_include_neutral: bool = True
+    grid_global_refresh_sec: float = 1800.0
+    grid_parallel_backend: str = "thread"
+    grid_parallel_max_workers: int = 8
+    grid_parallel_min_items: int = 2
+    grid_parallel_chunk_size: int = 8
+    grid_reuse_process_pool: bool = True
+    stackelberg_prefilter_top_k: int = 4
+    stackelberg_prefilter_local_top_k: int = 4
+    stackelberg_fallback_full_refresh_sec: float = 1800.0
+    stackelberg_fallback_use_cached_pfo: bool = True
+    stackelberg_leader_parallel_backend: str = "thread"
+    stackelberg_leader_parallel_max_workers: int = 4
+    stackelberg_inner_backend_when_outer_process: str = "thread"
+    stackelberg_reuse_process_pool: bool = True
 
 
 @dataclass
@@ -471,6 +489,16 @@ class ExperimentConfig:
         self.simulation.validate()
         if self.mpc.follower_solver_mode not in {"two_block", "distributed"}:
             raise ValueError("mpc.follower_solver_mode must be two_block or distributed.")
+        if self.mpc.leader_candidate_count <= 0:
+            raise ValueError("mpc.leader_candidate_count must be positive.")
+        if self.mpc.leader_refinement_candidate_count <= 0:
+            raise ValueError("mpc.leader_refinement_candidate_count must be positive.")
+        if self.mpc.leader_global_refresh_sec <= 0.0:
+            raise ValueError("mpc.leader_global_refresh_sec must be positive.")
+        if self.mpc.leader_local_np_radius_veh <= 0.0:
+            raise ValueError("mpc.leader_local_np_radius_veh must be positive.")
+        if self.mpc.leader_local_nuf_radius_veh_h <= 0.0:
+            raise ValueError("mpc.leader_local_nuf_radius_veh_h must be positive.")
         if self.mpc.distributed_coupling_tol <= 0.0:
             raise ValueError("mpc.distributed_coupling_tol must be positive.")
         if self.mpc.relaxed_green_quantum_sec <= 0.0:
@@ -479,6 +507,28 @@ class ExperimentConfig:
             raise ValueError("mpc.relaxed_vsl_quantum_km_h must be positive.")
         if self.mpc.relaxed_rounding_mode not in {"floor", "nearest"}:
             raise ValueError("mpc.relaxed_rounding_mode must be floor or nearest.")
+        if self.mpc.grid_global_refresh_sec <= 0.0:
+            raise ValueError("mpc.grid_global_refresh_sec must be positive.")
+        if self.mpc.grid_parallel_backend not in {"serial", "thread", "process"}:
+            raise ValueError("mpc.grid_parallel_backend must be serial, thread, or process.")
+        if self.mpc.grid_parallel_max_workers <= 0:
+            raise ValueError("mpc.grid_parallel_max_workers must be positive.")
+        if self.mpc.grid_parallel_min_items <= 0:
+            raise ValueError("mpc.grid_parallel_min_items must be positive.")
+        if self.mpc.grid_parallel_chunk_size <= 0:
+            raise ValueError("mpc.grid_parallel_chunk_size must be positive.")
+        if self.mpc.stackelberg_prefilter_top_k < 0:
+            raise ValueError("mpc.stackelberg_prefilter_top_k must be non-negative.")
+        if self.mpc.stackelberg_prefilter_local_top_k < 0:
+            raise ValueError("mpc.stackelberg_prefilter_local_top_k must be non-negative.")
+        if self.mpc.stackelberg_fallback_full_refresh_sec <= 0.0:
+            raise ValueError("mpc.stackelberg_fallback_full_refresh_sec must be positive.")
+        if self.mpc.stackelberg_leader_parallel_backend not in {"serial", "thread", "process"}:
+            raise ValueError("mpc.stackelberg_leader_parallel_backend must be serial, thread, or process.")
+        if self.mpc.stackelberg_leader_parallel_max_workers <= 0:
+            raise ValueError("mpc.stackelberg_leader_parallel_max_workers must be positive.")
+        if self.mpc.stackelberg_inner_backend_when_outer_process not in {"serial", "thread"}:
+            raise ValueError("mpc.stackelberg_inner_backend_when_outer_process must be serial or thread.")
         cap_drop = self.freeway_offramp_capacity_drop
         if cap_drop.lane_reduction < 0.0:
             raise ValueError("freeway_offramp_capacity_drop.lane_reduction must be non-negative.")
@@ -630,17 +680,15 @@ class TrafficState:
         }
 
     def total_freeway_vehicles(self, net: NetworkConfig) -> float:
-        self.ensure_freeway_lane_profile(net)
-        return float(sum(
-            sum(
-                max(0.0, rho) * net.freeway_segment_length_km * max(lane, 1.0e-9)
-                for rho, lane in zip(
-                    self.freeway_density.get(link, []),
-                    self.freeway_effective_lanes.get(link, []),
-                )
-            )
-            for link in net.freeway_links
-        ) + sum(self.ramp_queue.values()) + sum(self.mainline_origin_queue.values()))
+        return float(
+            self.freeway_segment_vehicles(net)
+            + sum(self.ramp_queue.values())
+            + sum(self.mainline_origin_queue.values())
+        )
+
+    def freeway_segment_vehicles(self, net: NetworkConfig) -> float:
+        """본선 segment 내부 차량 수[veh]. ramp/origin queue는 포함하지 않는다."""
+        return float(sum(sum(values) for values in self.freeway_vehicle_count_by_link(net).values()))
 
     def total_urban_vehicles(self, net=None) -> float:
         """urban 총 차량 수. net을 주면 링크 in-transit 점유까지 포함한다.
@@ -674,6 +722,46 @@ class TrafficState:
                 continue
             total += max(0.0, capacity - self.urban_link_storage.get(storage_link, capacity))
         return float(total)
+
+    def uncontrolled_node_movement_queue_veh(self, net) -> float:
+        """비통제 노드 stop-line movement queue 차량 수[veh]."""
+        nodes = {str(node) for node in getattr(net, "uncontrolled_nodes", [])}
+        if not nodes:
+            return 0.0
+        total = 0.0
+        for movement, spec in net.urban_movements.items():
+            if str(spec.get("intersection", "")) in nodes:
+                total += max(0.0, self.urban_movement_queue.get(movement, 0.0))
+        return float(total)
+
+    def uncontrolled_node_storage_occupancy_veh(self, net) -> float:
+        """비통제 노드에 접한 directed urban link 점유 차량 수[veh]."""
+        nodes = {str(node) for node in getattr(net, "uncontrolled_nodes", [])}
+        if not nodes:
+            return 0.0
+        links = set()
+        for node, legs in getattr(net, "grid_node_legs", {}).items():
+            node_id = str(node)
+            for leg in legs.values():
+                if leg.get("type") != "grid":
+                    continue
+                downstream = str(leg.get("node", ""))
+                if node_id in nodes or downstream in nodes:
+                    links.add(f"{node_id}_to_{downstream}")
+        total = 0.0
+        for link in links:
+            capacity = net.urban_link_storage_veh.get(link)
+            if capacity is None:
+                continue
+            total += max(0.0, capacity - self.urban_link_storage.get(link, capacity))
+        return float(total)
+
+    def uncontrolled_node_vehicles(self, net) -> float:
+        """비통제 내부 노드 주변 차량 수[veh] = 점큐 + 접속 link in-transit 점유."""
+        return float(
+            self.uncontrolled_node_movement_queue_veh(net)
+            + self.uncontrolled_node_storage_occupancy_veh(net)
+        )
 
     def boundary_in_queue_vehicles(self, net) -> float:
         """boundary_in movement(유입 대기) 큐 점유[veh] 합.

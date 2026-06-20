@@ -254,11 +254,16 @@ Suggested objective:
 ```text
 J_urban_stage2 =
     urban_movement_queue_TTS
+  + boundary_in_queue_TTS
   + x_on_or_onramp_approach_queue_TTS
   + off_ramp_storage_or_receiving_queue_TTS
   + green_smoothness_penalty
   + offset_smoothness_penalty
 ```
+
+Boundary-in queues are part of closed-loop Total TTT accounting. They must not
+be treated as hidden storage or diagnostic-only queues when a controller
+candidate can increase them.
 
 ### Proposed Followers Only
 

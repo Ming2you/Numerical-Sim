@@ -7,11 +7,19 @@ from typing import Dict, Iterable, List, Optional
 
 import numpy as np
 
+from src.controllers.grid_parallel import build_chunk_payloads, evaluate_grid_items
 from src.controllers.relaxed_quantization import (
     accumulate_repair_diagnostics,
     repair_green_pair,
     repair_vsl_value,
 )
+from src.controllers.structured_grid import (
+    GridControlCandidate,
+    sensitivity_direction_candidates,
+    sensitivity_probe_candidates,
+    structured_grid_candidates,
+)
+from src.controllers.spillback_constraints import assess_onramp_spillback, ramp_arrivals_over_horizon
 from src.models.demand import DemandStep
 from src.models.state import ControlAction, ExperimentConfig, TrafficState
 from src.models.urban_queue_model import movement_specs
@@ -24,6 +32,20 @@ class CentralizedDecisionInfo:
     solver_evaluations: int
     converged: bool
     computation_time_sec: float
+
+
+def _centralized_grid_process_chunk(payload: dict) -> list[tuple[GridControlCandidate, float, ControlAction]]:
+    controller = CentralizedMPC(payload["cfg"], mode=payload["mode"])
+    return [
+        controller._evaluate_grid_candidate(
+            payload["state"],
+            payload["forecast"],
+            payload["previous"],
+            candidate,
+            incumbent_obj=payload["incumbent_obj"],
+        )
+        for candidate in payload["items"]
+    ]
 
 
 def _wu_fixed_base(cfg: ExperimentConfig) -> ControlAction:
@@ -278,6 +300,246 @@ class CentralizedMPC:
             states.append(s.copy())
         return states, float(total_ttt)
 
+    def _grid_authority(self) -> str:
+        return "wu" if self.mode == "wu" else "proposed"
+
+    def _evaluate_grid_candidate(
+        self,
+        state: TrafficState,
+        forecast: List[DemandStep],
+        previous: ControlAction,
+        candidate: GridControlCandidate,
+        incumbent_obj: float = np.inf,
+    ) -> tuple[GridControlCandidate, float, ControlAction]:
+        from src.simulation.coupling import run_coupled_interval
+
+        control = candidate.control.copy()
+        s = state.copy()
+        states: List[TrafficState] = []
+        trajectory_ttt = 0.0
+        early_terminated = False
+        for demand in forecast[: self.cfg.mpc.horizon_steps]:
+            result = run_coupled_interval(s, control, demand, self.cfg)
+            trajectory_ttt += float(result.urban_ttt + result.freeway_ttt)
+            s.time_sec += self.cfg.simulation.control_interval
+            states.append(s.copy())
+            if np.isfinite(incumbent_obj) and trajectory_ttt > incumbent_obj + 1.0e-12:
+                early_terminated = True
+                break
+        obj = self._objective(states, control, previous, trajectory_ttt)
+        if early_terminated:
+            obj = float(max(obj, incumbent_obj + 1.0e-9))
+        control.diagnostics["centralized_grid_early_terminated"] = float(early_terminated)
+        return candidate, float(obj), control
+
+    def _grid_feasibility_precheck(
+        self,
+        state: TrafficState,
+        candidate: GridControlCandidate,
+        forecast: List[DemandStep],
+    ) -> tuple[bool, float]:
+        if self.mode != "proposed":
+            return True, 0.0
+        control = candidate.control
+        horizon_h = self.cfg.simulation.T_c_h * max(1, min(len(forecast), self.cfg.mpc.horizon_steps))
+        ramp_arrivals = ramp_arrivals_over_horizon(forecast[: self.cfg.mpc.horizon_steps], self.cfg, tuple(self.cfg.network.ramps))
+        violation = 0.0
+        for ramp in self.cfg.network.ramps:
+            release_veh = max(0.0, control.ramp_metering.get(ramp, self.cfg.network.ramp_capacity_veh_h[ramp])) * horizon_h
+            violation += assess_onramp_spillback(
+                state,
+                self.cfg,
+                ramp,
+                ramp_arrivals.get(ramp, 0.0),
+                release_veh,
+            ).violation_veh
+        return violation <= 1.0e-9, float(violation)
+
+    def _evaluate_grid_stage(
+        self,
+        state: TrafficState,
+        forecast: List[DemandStep],
+        previous: ControlAction,
+        candidates: list[GridControlCandidate],
+        incumbent_obj: float = np.inf,
+    ) -> list[tuple[GridControlCandidate, float, ControlAction]]:
+        if not candidates:
+            return []
+        prechecked = [
+            (candidate, *self._grid_feasibility_precheck(state, candidate, forecast))
+            for candidate in candidates
+        ]
+        feasible = [item for item in prechecked if item[1]]
+        selected = feasible if feasible else prechecked
+        violations = {item[0].label: float(item[2]) for item in prechecked}
+        feasibility = {item[0].label: float(item[1]) for item in prechecked}
+        guards = {"previous", "no_control", "center"}
+        guard_items = [item for item in selected if item[0].label in guards]
+        rest_items = [item for item in selected if item[0].label not in guards]
+        results: list[tuple[GridControlCandidate, float, ControlAction]] = []
+        stage_incumbent = incumbent_obj
+        for candidate, _feasible, _violation in guard_items:
+            result = self._evaluate_grid_candidate(state, forecast, previous, candidate, incumbent_obj=np.inf)
+            results.append(result)
+            stage_incumbent = min(stage_incumbent, result[1])
+        rest_eval_items = [candidate for candidate, _feasible, _violation in rest_items]
+
+        def evaluate_item(candidate: GridControlCandidate):
+            return self._evaluate_grid_candidate(
+                state,
+                forecast,
+                previous,
+                candidate,
+                incumbent_obj=stage_incumbent,
+            )
+
+        process_payloads = build_chunk_payloads(
+            rest_eval_items,
+            static={
+                "cfg": self.cfg,
+                "mode": self.mode,
+                "state": state,
+                "forecast": forecast,
+                "previous": previous,
+                "incumbent_obj": stage_incumbent,
+            },
+            chunk_size=int(self.cfg.mpc.grid_parallel_chunk_size),
+            max_workers=int(self.cfg.mpc.grid_parallel_max_workers),
+        )
+        parallel_run = evaluate_grid_items(
+            self.cfg,
+            rest_eval_items,
+            evaluate_item,
+            process_chunk_fn=_centralized_grid_process_chunk,
+            process_payloads=process_payloads,
+        )
+        results.extend(parallel_run.results)
+        parallel_diag = parallel_run.diagnostics("centralized_grid")
+        for candidate, _obj, control in results:
+            control.diagnostics["centralized_grid_precheck_feasible"] = feasibility.get(candidate.label, 0.0)
+            control.diagnostics["centralized_grid_precheck_spillback_violation_veh"] = violations.get(candidate.label, 0.0)
+            control.diagnostics["centralized_grid_precheck_filtered_candidates"] = float(len(prechecked) - len(selected))
+            control.diagnostics["centralized_grid_precheck_evaluated_candidates"] = float(len(selected))
+            control.diagnostics.update(parallel_diag)
+        return results
+
+    def _structured_grid_search(
+        self,
+        state: TrafficState,
+        forecast: List[DemandStep],
+        previous: ControlAction,
+    ) -> tuple[float, ControlAction, int, bool]:
+        authority = self._grid_authority()
+        center = previous.copy()
+        refresh_sec = 1800.0
+        interval = max(self.cfg.simulation.control_interval, 1.0e-9)
+        step_index = int(round(state.time_sec / interval))
+        refresh_steps = max(1, int(round(refresh_sec / interval)))
+        global_refresh = step_index == 0 or step_index % refresh_steps == 0
+        coarse_scope = "global" if global_refresh else "local"
+        coarse = structured_grid_candidates(
+            self.cfg,
+            previous,
+            center,
+            authority=authority,
+            stage="coarse",
+            scope=coarse_scope,
+        )
+        best_obj = np.inf
+        best_control = center.copy()
+        evals = 0
+        improved_in_fine = False
+        coarse_results = self._evaluate_grid_stage(state, forecast, previous, coarse, incumbent_obj=np.inf)
+        for _candidate, obj, control in coarse_results:
+            evals += 1
+            if obj < best_obj - 1.0e-9:
+                best_obj = float(obj)
+                best_control = control.copy()
+
+        probes = sensitivity_probe_candidates(self.cfg, previous, best_control, authority=authority)
+        probe_results = self._evaluate_grid_stage(state, forecast, previous, probes, incumbent_obj=np.inf)
+        probe_scores: list[tuple[GridControlCandidate, float]] = []
+        for candidate, obj, control in probe_results:
+            evals += 1
+            probe_scores.append((candidate, obj))
+            if obj < best_obj - 1.0e-9:
+                best_obj = float(obj)
+                best_control = control.copy()
+
+        directions = sensitivity_direction_candidates(
+            self.cfg,
+            previous,
+            best_control,
+            probe_scores,
+            authority=authority,
+            base_objective=best_obj,
+        )
+        direction_results = self._evaluate_grid_stage(
+            state,
+            forecast,
+            previous,
+            directions,
+            incumbent_obj=best_obj,
+        )
+        for _candidate, obj, control in direction_results:
+            evals += 1
+            if obj < best_obj - 1.0e-9:
+                best_obj = float(obj)
+                best_control = control.copy()
+
+        fine = structured_grid_candidates(
+            self.cfg,
+            previous,
+            best_control,
+            authority=authority,
+            stage="fine",
+            scope="local",
+        )
+        fine_results = self._evaluate_grid_stage(state, forecast, previous, fine, incumbent_obj=best_obj)
+        for _candidate, obj, control in fine_results:
+            evals += 1
+            if obj < best_obj - 1.0e-9:
+                best_obj = float(obj)
+                best_control = control.copy()
+                improved_in_fine = True
+
+        stage_results = [coarse_results, probe_results, direction_results, fine_results]
+
+        def stage_diag_sum(key: str) -> float:
+            return float(sum(
+                stage[0][2].diagnostics.get(key, 0.0)
+                for stage in stage_results
+                if stage
+            ))
+
+        best_control.diagnostics.update({
+            "centralized_grid_search_active": 1.0,
+            "centralized_grid_parallel_stages": 4.0,
+            "centralized_grid_stage1_candidates": float(len(coarse)),
+            "centralized_grid_stage2_candidates": float(len(fine)),
+            "centralized_grid_sensitivity_probe_candidates": float(len(probes)),
+            "centralized_grid_sensitivity_direction_candidates": float(len(directions)),
+            "centralized_grid_total_candidates": float(len(coarse) + len(probes) + len(directions) + len(fine)),
+            "centralized_grid_early_terminated_candidates": float(sum(
+                result[2].diagnostics.get("centralized_grid_early_terminated", 0.0)
+                for result in coarse_results + probe_results + direction_results + fine_results
+            )),
+            "centralized_grid_precheck_filtered_candidates": stage_diag_sum(
+                "centralized_grid_precheck_filtered_candidates"
+            ),
+            "centralized_grid_precheck_evaluated_candidates": stage_diag_sum(
+                "centralized_grid_precheck_evaluated_candidates"
+            ),
+            "centralized_grid_global_refresh": float(global_refresh),
+            "centralized_grid_scope_global": float(coarse_scope == "global"),
+            "centralized_grid_scope_local": float(coarse_scope == "local"),
+            "centralized_grid_refresh_interval_sec": float(refresh_sec),
+            "centralized_grid_authority_wu": float(authority == "wu"),
+            "centralized_grid_authority_proposed": float(authority == "proposed"),
+            "centralized_grid_fine_improved": float(improved_in_fine),
+        })
+        return float(best_obj), best_control, evals, improved_in_fine
+
     # ---------- decide ----------
 
     def decide_with_info(
@@ -289,6 +551,16 @@ class CentralizedMPC:
         start = time.perf_counter()
         forecast = list(demand_forecast)
         previous = previous_control or self.previous_control or _wu_fixed_base(self.cfg)
+        best_obj, best_control, evals, fine_improved = self._structured_grid_search(state, forecast, previous)
+        converged = not fine_improved
+        self.previous_control = best_control
+        return CentralizedDecisionInfo(
+            control=best_control,
+            objective=float(best_obj),
+            solver_evaluations=evals,
+            converged=bool(converged),
+            computation_time_sec=time.perf_counter() - start,
+        )
         lower, upper, names = self._vector_bounds(previous)
         span = np.maximum(upper - lower, 1e-9)
         budget = max(8, int(self.cfg.mpc.optimizer_maxiter) * max(1, int(self.cfg.mpc.optimizer_n_starts)))

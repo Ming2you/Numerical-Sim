@@ -945,6 +945,9 @@ def urban_substep(
     # freeway_ttt에 더한다(보존: urban에서 빠진 양 = freeway에 더해지는 양, 같은 T_u_h 단위).
     offramp_storage_occupancy = _offramp_storage_occupancy(state, cfg)
     offramp_storage_ttt = offramp_storage_occupancy * sim.T_u_h
+    uncontrolled_node_movement = state.uncontrolled_node_movement_queue_veh(net)
+    uncontrolled_node_storage = state.uncontrolled_node_storage_occupancy_veh(net)
+    uncontrolled_node_vehicles = uncontrolled_node_movement + uncontrolled_node_storage
     urban_ttt = (
         sum(state.urban_movement_queue.values())
         + _storage_occupancy(state, cfg)
@@ -983,6 +986,10 @@ def urban_substep(
     diagnostics["movement_queue_projection_protected_veh"] = float(projection_protected_veh)
     diagnostics["urban_storage_occupancy"] = _storage_occupancy(state, cfg)
     diagnostics["urban_link_occupancy_veh"] = _storage_occupancy(state, cfg)
+    diagnostics["urban_uncontrolled_node_movement_queue_veh"] = float(uncontrolled_node_movement)
+    diagnostics["urban_uncontrolled_node_storage_occupancy_veh"] = float(uncontrolled_node_storage)
+    diagnostics["urban_uncontrolled_node_vehicles_veh"] = float(uncontrolled_node_vehicles)
+    diagnostics["urban_uncontrolled_node_ttt"] = float(uncontrolled_node_vehicles * sim.T_u_h)
     # off-ramp 램프 storage 재귀속(design 2026-06-17): freeway_ttt로 보낼 점유·TTT.
     diagnostics["offramp_storage_occupancy_veh"] = float(offramp_storage_occupancy)
     diagnostics["offramp_storage_ttt"] = float(offramp_storage_ttt)
@@ -1066,6 +1073,7 @@ def aggregate_urban_diagnostics(
         "ramp_metering_releases_veh",
         "ramp_metering_release_shortfall_veh",
         "offramp_departures_veh",
+        "urban_uncontrolled_node_ttt",
     }
     for key in set().union(*(row.keys() for row in diagnostics_rows)):
         if (

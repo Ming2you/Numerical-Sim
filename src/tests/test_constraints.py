@@ -7,12 +7,20 @@ from src.controllers.distributed_coordinator import AgentSolve, DistributedCoord
 from src.controllers.freeway_follower import FreewayFollower, FreewayFollowerResult
 from src.controllers.leader import Leader, LeaderAction
 from src.controllers.inflow_outflow_allocation import InflowOutflowAllocationModule
+from src.controllers.nash_solver import NashResult
 from src.controllers.relaxed_quantization import repair_green_pair, repair_vsl_value
-from src.controllers.stackelberg_mpc import StackelbergMPCController
+from src.controllers.spillback_constraints import (
+    assess_offramp_spillback,
+    assess_onramp_spillback,
+    offramp_combined_capacity_veh,
+    onramp_combined_capacity_veh,
+)
+from src.controllers.stackelberg_mpc import StackelbergMPCController, _LeaderCandidateEvaluation
+from src.controllers.structured_grid import sensitivity_probe_candidates, structured_grid_candidates
 from src.controllers.urban_follower import UrbanFollower
 from src.controllers.wu_distributed import WuDistributedController, _wu_fixed_control
 from src.evaluation.metrics import validate_controls
-from src.models.demand import DemandProfile, ScenarioConfig
+from src.models.demand import DemandProfile, DemandStep, ScenarioConfig
 from src.models.metanet import effective_lane_profile
 from src.models.state import ControlAction, ExperimentConfig, TrafficState
 from src.models.urban_queue_model import (
@@ -133,6 +141,412 @@ class ConstraintTests(unittest.TestCase):
         )
         self.assertLess(relaxed_evals, full_count)
 
+    def test_freeway_ramp_candidates_include_default_and_previous_guard(self):
+        cfg = short_config().with_updates({
+            "freeway_follower": {"horizon_ramp_candidate_limit": 1},
+        })
+        state = TrafficState.initial(cfg)
+        for ramp in cfg.network.ramps:
+            state.ramp_queue[ramp] = 100.0
+        previous = ControlAction.uncontrolled(cfg)
+        previous.ramp_metering = {ramp: 0.0 for ramp in cfg.network.ramps}
+        demand = DemandProfile(cfg, ScenarioConfig("test")).at(0.0)
+        follower = FreewayFollower(cfg)
+
+        candidates, _ = follower._ramp_candidates(
+            state,
+            LeaderAction(0.0, cfg.network.total_ramp_capacity),
+            [demand],
+            previous,
+        )
+
+        totals = sorted(round(sum(candidate.values()), 6) for candidate in candidates)
+        self.assertIn(0.0, totals)
+        self.assertIn(round(cfg.network.total_ramp_capacity, 6), totals)
+
+    def test_relaxed_urban_stage2_evaluates_default_guard_and_neighborhood(self):
+        cfg = short_config().with_updates({"mpc": {"relaxed_quantized_controls": True}})
+        state = TrafficState.initial(cfg)
+        previous = ControlAction.uncontrolled(cfg)
+        previous.green_times["A_p1"] = cfg.network.green_min
+        previous.green_times["A_p2"] = cfg.network.effective_green_total - cfg.network.green_min
+        previous.offsets["A"] = cfg.urban_follower.max_offset_step
+        demand = DemandProfile(cfg, ScenarioConfig("test")).at(0.0)
+
+        result = UrbanFollower(cfg).solve(state, None, demand, previous_control=previous)
+
+        self.assertEqual(result.metrics["urban_stage2_default_guard_evaluated"], 1.0)
+        self.assertGreater(result.metrics["urban_stage2_candidate_evaluations"], len(cfg.network.signals))
+        for signal in cfg.network.signals:
+            p1 = result.green_times[f"{signal}_p1"]
+            p2 = result.green_times[f"{signal}_p2"]
+            self.assertAlmostEqual(p1 + p2, cfg.network.effective_green_total)
+            self.assertGreaterEqual(result.offsets[signal], 0.0)
+            self.assertLess(result.offsets[signal], cfg.network.cycle_length)
+
+    def test_distributed_freeway_agent_jointly_evaluates_metering_and_vsl_guards(self):
+        cfg = short_config().with_updates({
+            "mpc": {"relaxed_quantized_controls": True, "max_nash_iter": 1},
+        })
+        state = TrafficState.initial(cfg)
+        for ramp in cfg.network.ramps:
+            state.ramp_queue[ramp] = 60.0
+        demand = DemandProfile(cfg, ScenarioConfig("test", ramp_scale=1.2)).at(0.0)
+        controller = DistributedCoordinator(cfg)
+        agent = next(agent for agent in controller.freeway_agents if agent.ramps)
+        previous = ControlAction.uncontrolled(cfg)
+        coupling = {f"u_on_{ramp}": 900.0 for ramp in cfg.network.ramps}
+
+        solve = controller._solve_freeway_agent(agent, state, None, [demand], previous, coupling)
+
+        self.assertEqual(solve.diagnostics[f"agent_{agent.id}_default_metering_guard_evaluated"], 1.0)
+        self.assertGreaterEqual(solve.diagnostics[f"agent_{agent.id}_metering_candidates"], 2.0)
+        self.assertGreaterEqual(solve.diagnostics[f"agent_{agent.id}_vsl_candidates"], 2.0)
+        expected = (
+            solve.diagnostics[f"agent_{agent.id}_metering_candidates"]
+            * solve.diagnostics[f"agent_{agent.id}_vsl_candidates"]
+        )
+        self.assertEqual(solve.diagnostics[f"agent_{agent.id}_joint_candidate_evaluations"], expected)
+
+    def test_distributed_freeway_urban_queue_term_counts_only_spillback(self):
+        cfg = short_config()
+        state = TrafficState.initial(cfg)
+        controller = DistributedCoordinator(cfg)
+        agent = next(agent for agent in controller.freeway_agents if agent.ramps)
+        for ramp in agent.ramps:
+            for movement in cfg.network.on_ramp_to_movement.get(ramp, []):
+                state.urban_movement_queue[movement] = 100.0
+
+        upper_release = {ramp: cfg.network.ramp_capacity_veh_h[ramp] for ramp in agent.ramps}
+        _, no_spillback_tts = controller._agent_queue_tts_terms(
+            agent,
+            state,
+            upper_release,
+            {f"u_on_{ramp}": 0.0 for ramp in agent.ramps},
+            cfg.simulation.T_c_h,
+        )
+
+        self.assertEqual(no_spillback_tts, 0.0)
+
+    def test_distributed_freeway_candidates_include_ratio_one_guards(self):
+        cfg = short_config().with_updates({"mpc": {"relaxed_quantized_controls": True}})
+        controller = DistributedCoordinator(cfg)
+        agent = next(agent for agent in controller.freeway_agents if agent.ramps)
+        upper = {ramp: 0.5 * cfg.network.ramp_capacity_veh_h[ramp] for ramp in agent.ramps}
+        weights = {ramp: 1.0 for ramp in agent.ramps}
+        current = ControlAction.uncontrolled(cfg)
+
+        metering_candidates = controller._metering_candidates(agent, upper, weights, 0.5 * sum(upper.values()), current)
+        vsl_candidates = controller._vsl_candidates(max(cfg.freeway_follower.vsl_set), min(cfg.freeway_follower.vsl_set))
+
+        self.assertIn(round(sum(cfg.network.ramp_capacity_veh_h[ramp] for ramp in agent.ramps), 6), {
+            round(sum(candidate.values()), 6) for candidate in metering_candidates
+        })
+        self.assertIn(float(max(cfg.freeway_follower.vsl_set)), vsl_candidates)
+
+    def test_distributed_freeway_candidates_include_intermediate_upper_fractions(self):
+        cfg = short_config().with_updates({"mpc": {"relaxed_quantized_controls": True}})
+        controller = DistributedCoordinator(cfg)
+        agent = next(agent for agent in controller.freeway_agents if agent.ramps)
+        upper = {ramp: cfg.network.ramp_capacity_veh_h[ramp] for ramp in agent.ramps}
+        current = ControlAction.uncontrolled(cfg)
+
+        metering_candidates = controller._metering_candidates(
+            agent,
+            upper,
+            {ramp: 1.0 for ramp in agent.ramps},
+            0.5 * sum(upper.values()),
+            current,
+        )
+        totals = {round(sum(candidate.values()), 6) for candidate in metering_candidates}
+
+        self.assertIn(round(0.8 * sum(upper.values()), 6), totals)
+        self.assertIn(round(0.9 * sum(upper.values()), 6), totals)
+
+    def test_distributed_freeway_projection_prices_metering_density_relief(self):
+        cfg = short_config().with_updates({"mpc": {"horizon_steps": 2}})
+        controller = DistributedCoordinator(cfg)
+        agent = next(agent for agent in controller.freeway_agents if agent.ramps)
+        state = TrafficState.initial(cfg)
+        idx = agent.segment_index
+        state.freeway_density[agent.link][idx] = cfg.network.rho_crit - 2.0
+        state.freeway_speed[agent.link][idx] = 60.0
+        state.freeway_flow[agent.link][idx - 1] = 2500.0
+        lane_profile, _ = effective_lane_profile(state, cfg)
+        demand = DemandProfile(cfg, ScenarioConfig("test")).horizon(0.0, cfg.mpc.horizon_steps)
+        upper = {ramp: cfg.network.ramp_capacity_veh_h[ramp] for ramp in agent.ramps}
+        no_metering = {ramp: cfg.network.ramp_capacity_veh_h[ramp] for ramp in agent.ramps}
+        intermediate = {ramp: 0.8 * upper[ramp] for ramp in agent.ramps}
+
+        no_meter_terms = controller._candidate_freeway_tts_terms(
+            agent,
+            state,
+            no_metering,
+            upper,
+            demand,
+            lane_profile,
+        )
+        intermediate_terms = controller._candidate_freeway_tts_terms(
+            agent,
+            state,
+            intermediate,
+            upper,
+            demand,
+            lane_profile,
+        )
+
+        self.assertGreater(no_meter_terms[0], intermediate_terms[0])
+        self.assertGreater(no_meter_terms[3], intermediate_terms[3])
+
+    def test_distributed_freeway_candidates_include_spillback_min_release_boundary(self):
+        cfg = short_config().with_updates({"mpc": {"relaxed_quantized_controls": True}})
+        controller = DistributedCoordinator(cfg)
+        agent = next(agent for agent in controller.freeway_agents if agent.ramps)
+        state = TrafficState.initial(cfg)
+        ramp = agent.ramps[0]
+        for movement in cfg.network.on_ramp_to_movement[ramp]:
+            state.urban_movement_queue[movement] = onramp_combined_capacity_veh(cfg, ramp)
+        ramp_arrivals = {candidate_ramp: 0.0 for candidate_ramp in agent.ramps}
+        ramp_arrivals[ramp] = 90.0
+        min_release = controller._onramp_spillback_min_release_rates(
+            state,
+            agent,
+            ramp_arrivals,
+            cfg.simulation.T_c_h,
+        )
+        upper = {candidate_ramp: cfg.network.ramp_capacity_veh_h[candidate_ramp] for candidate_ramp in agent.ramps}
+        candidates = controller._metering_candidates(
+            agent,
+            upper,
+            {candidate_ramp: 1.0 for candidate_ramp in agent.ramps},
+            target=0.0,
+            current=ControlAction.uncontrolled(cfg),
+            spillback_min_release=min_release,
+        )
+
+        keys = {
+            tuple(round(candidate[candidate_ramp], 6) for candidate_ramp in agent.ramps)
+            for candidate in candidates
+        }
+        expected = tuple(
+            round(
+                max(
+                    min_release[candidate_ramp],
+                    cfg.freeway_follower.ramp_metering_rate_min * cfg.network.ramp_capacity_veh_h[candidate_ramp],
+                ),
+                6,
+            )
+            for candidate_ramp in agent.ramps
+        )
+        self.assertIn(expected, keys)
+        self.assertGreater(min_release[ramp], 0.0)
+
+    def test_spillback_assessment_uses_combined_ramp_and_intersection_capacity(self):
+        cfg = short_config()
+        state = TrafficState.initial(cfg)
+
+        ramp = cfg.network.ramps[0]
+        onramp_capacity = onramp_combined_capacity_veh(cfg, ramp)
+        state.ramp_queue[ramp] = cfg.network.ramp_queue_max_veh
+        for movement in cfg.network.on_ramp_to_movement[ramp]:
+            state.urban_movement_queue[movement] = onramp_capacity
+        no_release = assess_onramp_spillback(
+            state,
+            cfg,
+            ramp,
+            ramp_arrival_veh=120.0,
+            metering_release_veh=0.0,
+        )
+        released = assess_onramp_spillback(
+            state,
+            cfg,
+            ramp,
+            ramp_arrival_veh=120.0,
+            metering_release_veh=120.0,
+        )
+
+        self.assertGreater(no_release.violation_veh, 0.0)
+        self.assertGreater(no_release.violation_veh, released.violation_veh)
+
+        off_ramp = cfg.network.off_ramps[0]
+        offramp_capacity = offramp_combined_capacity_veh(cfg, off_ramp)
+        storage_link = cfg.network.off_ramp_storage_link[off_ramp]
+        state.urban_link_storage[storage_link] = 0.0
+        for movement in cfg.network.off_ramp_to_movement[off_ramp]:
+            state.urban_movement_queue[movement] = offramp_capacity
+        no_service = assess_offramp_spillback(
+            state,
+            cfg,
+            off_ramp,
+            offramp_inflow_veh=80.0,
+            service_veh=0.0,
+        )
+        serviced = assess_offramp_spillback(
+            state,
+            cfg,
+            off_ramp,
+            offramp_inflow_veh=80.0,
+            service_veh=80.0,
+        )
+
+        self.assertGreater(no_service.violation_veh, 0.0)
+        self.assertGreater(no_service.violation_veh, serviced.violation_veh)
+
+    def test_distributed_freeway_agent_reports_spillback_constraint_diagnostics(self):
+        cfg = short_config().with_updates({"mpc": {"relaxed_quantized_controls": True, "max_nash_iter": 1}})
+        controller = DistributedCoordinator(cfg)
+        state = TrafficState.initial(cfg)
+        agent = next(agent for agent in controller.freeway_agents if agent.ramps)
+
+        for ramp in agent.ramps:
+            state.ramp_queue[ramp] = cfg.network.ramp_queue_max_veh
+            cap = onramp_combined_capacity_veh(cfg, ramp)
+            for movement in cfg.network.on_ramp_to_movement[ramp]:
+                state.urban_movement_queue[movement] = cap
+        for off_ramp in cfg.network.off_ramps:
+            if cfg.network.off_ramp_from_freeway.get(off_ramp) != agent.link:
+                continue
+            storage_link = cfg.network.off_ramp_storage_link[off_ramp]
+            state.urban_link_storage[storage_link] = 0.0
+            cap = offramp_combined_capacity_veh(cfg, off_ramp)
+            for movement in cfg.network.off_ramp_to_movement[off_ramp]:
+                state.urban_movement_queue[movement] = cap
+
+        demand = DemandProfile(cfg, ScenarioConfig("test", freeway_scale=1.3, ramp_scale=1.5)).at(0.0)
+        solve = controller._solve_freeway_agent(
+            agent,
+            state,
+            None,
+            [demand],
+            ControlAction.uncontrolled(cfg),
+            {f"u_on_{ramp}": 0.0 for ramp in cfg.network.ramps},
+        )
+
+        prefix = f"agent_{agent.id}"
+        self.assertIn(f"{prefix}_spillback_feasible_evaluations", solve.diagnostics)
+        self.assertIn(f"{prefix}_spillback_constraint_feasible", solve.diagnostics)
+        self.assertIn(f"{prefix}_onramp_spillback_violation_veh", solve.diagnostics)
+        self.assertIn(f"{prefix}_offramp_spillback_violation_veh", solve.diagnostics)
+        self.assertIn("spillback_constraint_feasible", solve.infeasibility)
+        self.assertLessEqual(
+            solve.diagnostics[f"{prefix}_spillback_feasible_evaluations"],
+            solve.diagnostics[f"{prefix}_joint_candidate_evaluations"],
+        )
+
+    def test_urban_freeway_pressure_ignores_metering_tracking_residual(self):
+        cfg = short_config()
+        response = FreewayFollowerResult(
+            ramp_metering={},
+            vsl={},
+            objective_value=0.0,
+            infeasibility={
+                "metering_tracking_residual": cfg.network.freeway_capacity_veh_h,
+                "ramp_projection_first_step_capacity": cfg.network.freeway_capacity_veh_h,
+            },
+        )
+
+        pressure = UrbanFollower(cfg)._freeway_pressure(response)
+
+        self.assertGreater(pressure["metering_pressure"], 0.0)
+        self.assertEqual(pressure["total_pressure"], 0.0)
+
+    def test_distributed_freeway_response_deduplicates_offramp_forecasts(self):
+        cfg = short_config()
+        controller = DistributedCoordinator(cfg)
+        solves = [
+            AgentSolve(
+                agent_id=f"F_E{i}",
+                objective=0.0,
+                infeasibility={
+                    "offramp_predicted_arrival_OR_D_E_veh": 12.5,
+                    "offramp_predicted_flow_OR_D_E": 83.0,
+                },
+            )
+            for i in range(4)
+        ]
+
+        response = controller._freeway_response(solves)
+
+        self.assertEqual(response.infeasibility["offramp_predicted_arrival_OR_D_E_veh"], 12.5)
+        self.assertEqual(response.infeasibility["offramp_predicted_flow_OR_D_E"], 83.0)
+
+    def test_distributed_urban_arrival_coupling_is_queue_limited(self):
+        cfg = short_config()
+        controller = DistributedCoordinator(cfg)
+        state = TrafficState.initial(cfg)
+        for movement in state.urban_movement_queue:
+            state.urban_movement_queue[movement] = 0.0
+        control = ControlAction.uncontrolled(cfg)
+        zero_demand = DemandProfile(
+            cfg,
+            ScenarioConfig("zero", urban_scale=0.0, freeway_scale=0.0, ramp_scale=0.0),
+        ).at(0.0)
+
+        coupling = controller._extract_coupling(state, control, zero_demand)
+
+        self.assertTrue(all(
+            abs(value) <= 1.0e-9
+            for key, value in coupling.items()
+            if key.startswith("arr_")
+        ))
+
+    def test_relaxed_wu_urban_green_evaluates_neighborhood_candidates(self):
+        cfg = short_config().with_updates({"mpc": {"relaxed_quantized_controls": True}})
+        state = TrafficState.initial(cfg)
+        demand = DemandProfile(cfg, ScenarioConfig("test")).at(0.0)
+        controller = WuDistributedController(cfg)
+        previous = _wu_fixed_control(cfg)
+        coupling = controller._coupling(state, previous, demand)
+
+        p1, _, evals = controller._solve_urban_agent("A", state, coupling, previous, None)
+
+        self.assertGreater(evals, 1)
+        self.assertGreaterEqual(p1, cfg.network.green_min)
+        self.assertLessEqual(p1, cfg.network.green_max)
+
+    def test_wu_urban_arrival_coupling_is_queue_limited(self):
+        cfg = short_config()
+        controller = WuDistributedController(cfg)
+        state = TrafficState.initial(cfg)
+        for movement in state.urban_movement_queue:
+            state.urban_movement_queue[movement] = 0.0
+        for link in state.freeway_flow:
+            state.freeway_flow[link] = [0.0 for _ in state.freeway_flow[link]]
+        control = _wu_fixed_control(cfg)
+        zero_demand = DemandProfile(
+            cfg,
+            ScenarioConfig("zero", urban_scale=0.0, freeway_scale=0.0, ramp_scale=0.0),
+        ).at(0.0)
+
+        coupling = controller._coupling(state, control, zero_demand)
+
+        self.assertTrue(all(
+            abs(value) <= 1.0e-9
+            for key, value in coupling.items()
+            if key.startswith("arr_")
+        ))
+
+    def test_wu_upstream_map_uses_all_downstream_phase_movements(self):
+        cfg = short_config()
+        controller = WuDistributedController(cfg)
+        origin = "A_to_D"
+        phase = "D_p1"
+        expected_beta = sum(
+            float(spec.get("beta", 0.0))
+            for spec in cfg.network.urban_movements.values()
+            if spec.get("phase") == phase and spec.get("origin") == origin
+        )
+        actual_betas = [
+            beta
+            for _up_signal, up_movement, beta in controller._upstream_leaving_map[phase]
+            if cfg.network.urban_movements[up_movement].get("destination") == origin
+        ]
+
+        self.assertGreater(expected_beta, 0.0)
+        self.assertGreater(len(actual_betas), 0)
+        for beta in actual_betas:
+            self.assertAlmostEqual(beta, expected_beta)
+
     def test_vsl_values_are_discrete(self):
         cfg = short_config()
         demand = DemandProfile(cfg, ScenarioConfig("test")).horizon(0.0, 2)
@@ -162,6 +576,79 @@ class ConstraintTests(unittest.TestCase):
             set(d_agent.neighbors),
             {"F_W1", "F_W2", "F_E1", "F_E2"},
         )
+
+    def test_uncontrolled_E_vehicles_are_counted_in_ttt_coverage(self):
+        cfg = short_config()
+        state = TrafficState.initial(cfg)
+        net = cfg.network
+        base_total = state.total_urban_vehicles(net)
+        e_movement = next(
+            movement
+            for movement, spec in net.urban_movements.items()
+            if spec.get("intersection") == "E"
+        )
+        state.urban_movement_queue[e_movement] = 7.0
+        state.urban_link_storage["B_to_E"] = net.urban_link_storage_veh["B_to_E"] - 11.0
+        state.urban_link_storage["E_to_F"] = net.urban_link_storage_veh["E_to_F"] - 5.0
+
+        self.assertAlmostEqual(state.uncontrolled_node_movement_queue_veh(net), 7.0)
+        self.assertAlmostEqual(state.uncontrolled_node_storage_occupancy_veh(net), 16.0)
+        self.assertAlmostEqual(state.uncontrolled_node_vehicles(net), 23.0)
+        self.assertAlmostEqual(state.total_urban_vehicles(net) - base_total, 23.0)
+
+        plant_state = TrafficState.initial(cfg)
+        plant_state.urban_link_storage["B_to_E"] = net.urban_link_storage_veh["B_to_E"] - 13.0
+        plant_state.urban_link_storage["E_to_D"] = net.urban_link_storage_veh["E_to_D"] - 2.0
+        demand = DemandStep(
+            freeway_mainline={link: 0.0 for link in net.freeway_links},
+            urban_boundary={link: 0.0 for link in net.boundary_in_links},
+            ramp_arrival={ramp: 0.0 for ramp in net.ramps},
+        )
+        urban_ttt, diagnostics = urban_substep(
+            plant_state,
+            ControlAction.uncontrolled(cfg),
+            demand,
+            cfg,
+            urban_step_index=0,
+        )
+        self.assertGreaterEqual(diagnostics["urban_uncontrolled_node_storage_occupancy_veh"], 15.0)
+        self.assertGreaterEqual(diagnostics["urban_uncontrolled_node_vehicles_veh"], 15.0)
+        self.assertAlmostEqual(
+            diagnostics["urban_uncontrolled_node_ttt"],
+            diagnostics["urban_uncontrolled_node_vehicles_veh"] * cfg.simulation.T_u_h,
+        )
+        self.assertGreaterEqual(urban_ttt, diagnostics["urban_uncontrolled_node_ttt"])
+
+    def test_urban_follower_objective_covers_uncontrolled_E_vehicles(self):
+        cfg = short_config()
+        state = TrafficState.initial(cfg)
+        net = cfg.network
+        e_movement = next(
+            movement
+            for movement, spec in net.urban_movements.items()
+            if spec.get("intersection") == "E"
+        )
+        state.urban_movement_queue[e_movement] = 9.0
+        state.urban_link_storage["D_to_E"] = net.urban_link_storage_veh["D_to_E"] - 4.0
+        state.urban_link_storage["E_to_B"] = net.urban_link_storage_veh["E_to_B"] - 6.0
+        demand = DemandStep(
+            freeway_mainline={link: 0.0 for link in net.freeway_links},
+            urban_boundary={link: 0.0 for link in net.boundary_in_links},
+            ramp_arrival={ramp: 0.0 for ramp in net.ramps},
+        )
+
+        result = UrbanFollower(cfg).solve(
+            state,
+            None,
+            demand,
+            previous_control=ControlAction.uncontrolled(cfg),
+        )
+        expected_tts = 19.0 * cfg.simulation.T_c_h * cfg.mpc.horizon_steps
+
+        self.assertEqual(result.metrics["urban_uncontrolled_node_objective_covered"], 1.0)
+        self.assertAlmostEqual(result.metrics["urban_uncontrolled_node_vehicles_veh"], 19.0)
+        self.assertAlmostEqual(result.metrics["urban_uncontrolled_node_objective_tts"], expected_tts)
+        self.assertGreaterEqual(result.objective_value, expected_tts)
 
     def test_freeway_follower_vsl_candidates_are_segment_level(self):
         cfg = ExperimentConfig.from_file(
@@ -212,9 +699,18 @@ class ConstraintTests(unittest.TestCase):
         self.assertIn("agent_U_A_objective", result.control.diagnostics)
         self.assertIn("agent_F_W2_objective", result.control.diagnostics)
         self.assertIn("distributed_response_objective_tts", result.control.diagnostics)
+        self.assertIn("urban_uncontrolled_node_vehicles_veh", result.control.diagnostics)
+        self.assertIn("distributed_response_uncontrolled_node_urban_vehicles", result.control.diagnostics)
+        self.assertEqual(result.control.diagnostics["distributed_grid_search_active"], 1.0)
+        self.assertEqual(result.control.diagnostics["distributed_grid_parallel_stages"], 1.0)
+        self.assertEqual(result.control.diagnostics["distributed_grid_leader_conditioned"], 1.0)
+        self.assertEqual(result.control.diagnostics["distributed_grid_full_search_active"], 0.0)
+        self.assertIn("distributed_grid_sensitivity_probe_candidates", result.control.diagnostics)
+        self.assertIn("distributed_grid_sensitivity_direction_candidates", result.control.diagnostics)
+        self.assertIn("distributed_grid_rollout_objective", result.control.diagnostics)
         self.assertAlmostEqual(
             result.objective_value,
-            result.control.diagnostics["distributed_response_objective_tts"],
+            result.control.diagnostics["distributed_grid_rollout_objective"],
         )
         self.assertEqual(set(result.control.vsl), set(cfg.network.freeway_links))
         boundary_out_total = sum(
@@ -226,6 +722,44 @@ class ConstraintTests(unittest.TestCase):
             result.control.inflow_outflow_allocation["out_A_left"],
             boundary_out_total,
         )
+
+    def test_leader_conditioned_grid_projects_metering_target(self):
+        cfg = ExperimentConfig.from_file(
+            "src/config/default.yaml",
+            {
+                "simulation": {"T_total": 360.0},
+                "mpc": {
+                    "follower_solver_mode": "distributed",
+                    "max_nash_iter": 1,
+                },
+            },
+        )
+        coordinator = DistributedCoordinator(cfg)
+        state = TrafficState.initial(cfg)
+        forecast = DemandProfile(cfg, ScenarioConfig("test")).horizon(0.0, cfg.mpc.horizon_steps)
+        previous = ControlAction.fixed(cfg)
+        leader = LeaderAction(cfg.leader.N_P_crit_veh, 0.75 * cfg.network.total_ramp_capacity)
+        allocation_plan = coordinator.urban_follower.allocation_module.solve(state, leader, forecast)
+
+        candidates = coordinator._leader_conditioned_grid_candidates(
+            previous,
+            previous.copy(),
+            leader,
+            allocation_plan,
+        )
+
+        self.assertGreater(len(candidates), 0)
+        self.assertLess(len(candidates), 40)
+        for candidate in candidates:
+            total_metering = sum(
+                candidate.control.ramp_metering.get(ramp, 0.0)
+                for ramp in cfg.network.ramps
+            )
+            self.assertAlmostEqual(total_metering, leader.N_UF_star, places=6)
+            self.assertEqual(candidate.stage, "leader_conditioned")
+            self.assertEqual(candidate.scope, "local")
+            self.assertEqual(candidate.control.N_UF_star, leader.N_UF_star)
+            self.assertTrue(candidate.control.inflow_outflow_allocation)
 
     def test_distributed_link_vsl_consensus_is_order_independent(self):
         cfg = short_config()
@@ -299,6 +833,171 @@ class ConstraintTests(unittest.TestCase):
         self.assertGreater(high_diag["distributed_response_ramp_release_veh"], low_diag["distributed_response_ramp_release_veh"])
         self.assertLess(high_obj, low_obj)
 
+    def test_distributed_response_objective_uses_lightweight_proxy_without_rollout(self):
+        cfg = ExperimentConfig.from_file(
+            "src/config/default.yaml",
+            {
+                "simulation": {"T_total": 360.0},
+                "mpc": {"horizon_steps": 2, "max_nash_iter": 1},
+            },
+        )
+        coordinator = DistributedCoordinator(cfg)
+        state = TrafficState.initial(cfg)
+        control = ControlAction.fixed(cfg)
+        forecast = DemandProfile(cfg, ScenarioConfig("test")).horizon(0.0, 2)
+
+        with patch("src.simulation.coupling.run_coupled_interval") as coupled_step:
+            objective, diagnostics = coordinator._response_tts_objective(
+                state,
+                control,
+                forecast,
+                residual=0.0,
+                proxy_objective=123.0,
+            )
+
+        coupled_step.assert_not_called()
+        self.assertGreater(objective, 0.0)
+        self.assertAlmostEqual(diagnostics["distributed_response_objective_tts"], objective)
+        self.assertEqual(diagnostics["distributed_response_rollout_active"], 0.0)
+        self.assertEqual(diagnostics["distributed_response_rollout_ttt"], 0.0)
+        self.assertGreater(diagnostics["distributed_response_terminal_proxy_vehicles"], 0.0)
+        self.assertIn("distributed_response_total_spillback_violation_veh", diagnostics)
+
+    def test_distributed_response_objective_does_not_double_count_freeway_queues(self):
+        cfg = ExperimentConfig.from_file(
+            "src/config/default.yaml",
+            {
+                "simulation": {"T_total": 360.0},
+                "mpc": {"horizon_steps": 1, "max_nash_iter": 1},
+            },
+        )
+        coordinator = DistributedCoordinator(cfg)
+        state = TrafficState.initial(cfg)
+        for ramp in cfg.network.ramps:
+            state.ramp_queue[ramp] = 10.0
+        for link in cfg.network.freeway_links:
+            state.mainline_origin_queue[link] = 5.0
+        control = ControlAction.fixed(cfg)
+        forecast = DemandProfile(cfg, ScenarioConfig("test")).horizon(0.0, 1)
+
+        _, diagnostics = coordinator._response_tts_objective(
+            state,
+            control,
+            forecast,
+            residual=0.0,
+            proxy_objective=0.0,
+        )
+
+        ramp_queue = sum(state.ramp_queue.values())
+        origin_queue = sum(state.mainline_origin_queue.values())
+        segment_vehicles = state.freeway_segment_vehicles(cfg.network)
+        self.assertAlmostEqual(
+            state.total_freeway_vehicles(cfg.network),
+            segment_vehicles + ramp_queue + origin_queue,
+        )
+        expected_current = (
+            state.total_urban_vehicles(cfg.network)
+            + segment_vehicles
+            + ramp_queue
+            + state.off_ramp_storage_occupancy_veh(cfg.network)
+            + origin_queue
+        )
+        double_counted_current = (
+            state.total_urban_vehicles(cfg.network)
+            + state.total_freeway_vehicles(cfg.network)
+            + ramp_queue
+            + state.off_ramp_storage_occupancy_veh(cfg.network)
+            + origin_queue
+        )
+
+        self.assertAlmostEqual(diagnostics["distributed_response_current_vehicles"], expected_current)
+        self.assertNotAlmostEqual(
+            diagnostics["distributed_response_current_vehicles"],
+            double_counted_current,
+        )
+        self.assertAlmostEqual(
+            diagnostics["distributed_response_freeway_segment_vehicles"],
+            segment_vehicles,
+        )
+        self.assertAlmostEqual(diagnostics["distributed_response_ramp_queue_start_veh"], ramp_queue)
+        self.assertAlmostEqual(diagnostics["distributed_response_origin_queue_start_veh"], origin_queue)
+
+    def test_leaderless_distributed_evaluates_full_controller_guards(self):
+        cfg = ExperimentConfig.from_file(
+            "src/config/default.yaml",
+            {
+                "simulation": {"T_total": 360.0},
+                "mpc": {"horizon_steps": 1, "max_nash_iter": 1},
+                "freeway_follower": {
+                    "horizon_beam_width": 1,
+                    "horizon_ramp_candidate_limit": 1,
+                    "horizon_vsl_candidate_limit_per_link": 1,
+                },
+            },
+        )
+        coordinator = DistributedCoordinator(cfg)
+        previous = ControlAction.uncontrolled(cfg)
+        previous.green_times["A_p1"] = cfg.network.green_min
+        previous.green_times["A_p2"] = cfg.network.effective_green_total - cfg.network.green_min
+        previous.offsets["A"] = 12.0
+
+        guards = dict(coordinator._full_controller_guard_candidates(previous))
+        self.assertEqual(set(guards), {"previous", "no_control", "default"})
+        self.assertEqual(guards["default"].inflow_outflow_allocation, {})
+
+        result = coordinator.solve(
+            TrafficState.initial(cfg),
+            None,
+            DemandProfile(cfg, ScenarioConfig("test")).horizon(0.0, 1),
+            previous,
+        )
+        diagnostics = result.diagnostics
+
+        self.assertEqual(diagnostics["distributed_full_controller_guard_active"], 1.0)
+        self.assertEqual(diagnostics["distributed_previous_guard_evaluated"], 1.0)
+        self.assertEqual(diagnostics["distributed_no_control_guard_evaluated"], 1.0)
+        self.assertEqual(diagnostics["distributed_default_guard_evaluated"], 1.0)
+        self.assertIn("distributed_previous_guard_objective_tts", diagnostics)
+        self.assertIn("distributed_no_control_guard_objective_tts", diagnostics)
+        self.assertIn("distributed_default_guard_objective_tts", diagnostics)
+        selected_sum = (
+            diagnostics["distributed_guard_selected_previous"]
+            + diagnostics["distributed_guard_selected_no_control"]
+            + diagnostics["distributed_guard_selected_default"]
+        )
+        self.assertIn(selected_sum, {0.0, 1.0})
+
+    def test_leaderless_guard_selection_respects_spillback_constraint(self):
+        cfg = ExperimentConfig.from_file(
+            "src/config/default.yaml",
+            {
+                "simulation": {"T_total": 360.0},
+                "mpc": {"horizon_steps": 1, "max_nash_iter": 1},
+            },
+        )
+        coordinator = DistributedCoordinator(cfg)
+        state = TrafficState.initial(cfg)
+        ramp = cfg.network.ramps[0]
+        for movement in cfg.network.on_ramp_to_movement[ramp]:
+            state.urban_movement_queue[movement] = onramp_combined_capacity_veh(cfg, ramp)
+        previous = ControlAction.uncontrolled(cfg)
+        previous.ramp_metering = {candidate_ramp: 0.0 for candidate_ramp in cfg.network.ramps}
+
+        result = coordinator.solve(
+            state,
+            None,
+            DemandProfile(cfg, ScenarioConfig("test", ramp_scale=1.5)).horizon(0.0, 1),
+            previous,
+        )
+        diagnostics = result.diagnostics
+
+        self.assertGreater(diagnostics["distributed_previous_guard_spillback_violation_veh"], 0.0)
+        self.assertEqual(diagnostics["distributed_guard_selected_previous"], 0.0)
+        self.assertLess(
+            diagnostics["distributed_response_total_spillback_violation_veh"],
+            diagnostics["distributed_previous_guard_spillback_violation_veh"],
+        )
+
     def test_distributed_freeway_agent_reports_neighbor_pressure(self):
         cfg = short_config()
         coordinator = DistributedCoordinator(cfg)
@@ -342,6 +1041,112 @@ class ConstraintTests(unittest.TestCase):
         self.assertEqual(result.diagnostics["nash_freeway_used_coupled_prediction"], 0.0)
         self.assertEqual(result.diagnostics["distributed_f_to_u_coupling_active"], 1.0)
 
+    def test_green_vsl_only_ttt_mode_preserves_wu_authority(self):
+        cfg = short_config().with_updates({
+            "mpc": {"relaxed_quantized_controls": True, "max_nash_iter": 2}
+        })
+        state = TrafficState.initial(cfg)
+        for movement, spec in cfg.network.urban_movements.items():
+            if spec.get("phase") == "A_p1":
+                state.urban_movement_queue[movement] = 150.0
+        forecast = DemandProfile(
+            cfg,
+            ScenarioConfig("test", urban_scale=1.2, freeway_scale=1.2),
+        ).horizon(0.0, cfg.mpc.horizon_steps)
+        previous = ControlAction.fixed(cfg)
+        for ramp in cfg.network.ramps:
+            previous.ramp_metering[ramp] = 0.5 * cfg.network.ramp_capacity_veh_h[ramp]
+        previous.offsets = {signal: 12.0 for signal in cfg.network.signals}
+        previous.inflow_outflow_allocation = {
+            movement: 123.0 for movement in cfg.network.urban_movements
+        }
+
+        result = DistributedCoordinator(
+            cfg,
+            ablation="WU_GREEN_VSL_ONLY_TTT",
+        ).solve(state, None, forecast, previous)
+        control = result.control
+
+        self.assertEqual(control.diagnostics["wu_green_vsl_only_ttt_authority"], 1.0)
+        self.assertEqual(control.inflow_outflow_allocation, {})
+        for ramp in cfg.network.ramps:
+            self.assertAlmostEqual(
+                control.ramp_metering[ramp],
+                cfg.network.ramp_capacity_veh_h[ramp],
+            )
+        for signal in cfg.network.signals:
+            self.assertAlmostEqual(control.offsets[signal], 0.0)
+            p1 = control.green_times[f"{signal}_p1"]
+            p2 = control.green_times[f"{signal}_p2"]
+            self.assertAlmostEqual(p1 + p2, cfg.network.effective_green_total)
+            self.assertGreaterEqual(p1, cfg.network.green_min)
+            self.assertGreaterEqual(p2, cfg.network.green_min)
+        for link in cfg.network.freeway_links:
+            self.assertIn(control.vsl[link], {float(v) for v in cfg.freeway_follower.vsl_set})
+
+    def test_wu_cd_f_adapter_uses_green_vsl_only_ttt_coordinator(self):
+        from src.experiments.six_controller_comparison import _ControllerAdapter
+
+        cfg = short_config().with_updates({"mpc": {"max_nash_iter": 1}})
+        adapter = _ControllerAdapter(cfg, "WU-CD-F")
+        self.assertIsInstance(adapter._impl, DistributedCoordinator)
+        self.assertEqual(adapter._impl.ablation, "WU_GREEN_VSL_ONLY_TTT")
+
+        forecast = DemandProfile(cfg, ScenarioConfig("test")).horizon(0.0, cfg.mpc.horizon_steps)
+        control, diag = adapter.decide(TrafficState.initial(cfg), forecast)
+
+        self.assertEqual(control.diagnostics["wu_green_vsl_only_ttt_authority"], 1.0)
+        self.assertGreater(diag["solver_evaluations"], 0.0)
+        self.assertEqual(control.inflow_outflow_allocation, {})
+        for ramp in cfg.network.ramps:
+            self.assertAlmostEqual(
+                control.ramp_metering[ramp],
+                cfg.network.ramp_capacity_veh_h[ramp],
+            )
+        for signal in cfg.network.signals:
+            self.assertAlmostEqual(control.offsets[signal], 0.0)
+
+    def test_wu_structured_grid_exposes_only_green_and_vsl_authority(self):
+        cfg = short_config()
+        previous = ControlAction.fixed(cfg)
+        for ramp in cfg.network.ramps:
+            previous.ramp_metering[ramp] = 0.5 * cfg.network.ramp_capacity_veh_h[ramp]
+        previous.offsets = {signal: 17.0 for signal in cfg.network.signals}
+        previous.inflow_outflow_allocation = {
+            movement: 111.0 for movement in cfg.network.urban_movements
+        }
+        center = previous.copy()
+        for link in cfg.network.freeway_links:
+            center.vsl[link] = min(cfg.freeway_follower.vsl_set)
+
+        grid = structured_grid_candidates(
+            cfg,
+            previous,
+            center,
+            authority="wu",
+            stage="coarse",
+            scope="global",
+        )
+        probes = sensitivity_probe_candidates(cfg, previous, center, authority="wu")
+        candidates = grid + probes
+
+        self.assertGreater(len(candidates), 0)
+        self.assertTrue(any(c.label.startswith("green_") or c.axis.startswith("green") for c in candidates))
+        self.assertTrue(any(c.label.startswith("vsl_") or c.axis.startswith("vsl") for c in candidates))
+        self.assertFalse(any(c.label.startswith(("rm_", "offset_", "combo_rm")) for c in candidates))
+        self.assertFalse(any(c.axis.startswith(("rm", "offset")) for c in candidates if c.axis))
+        for candidate in candidates:
+            control = candidate.control
+            self.assertEqual(control.diagnostics["wu_green_vsl_only_ttt_authority"], 1.0)
+            self.assertEqual(control.inflow_outflow_allocation, {})
+            for ramp in cfg.network.ramps:
+                self.assertAlmostEqual(
+                    control.ramp_metering[ramp],
+                    cfg.network.ramp_capacity_veh_h[ramp],
+                )
+            for signal in cfg.network.signals:
+                self.assertAlmostEqual(control.offsets[signal], 0.0)
+
     def test_leader_candidate_budget_covers_extremes_and_previous_action(self):
         cfg = short_config()
         state = TrafficState.initial(cfg)
@@ -360,6 +1165,157 @@ class ConstraintTests(unittest.TestCase):
         self.assertIn((round(min(np_values), 6), round(min(nuf_values), 6)), pairs)
         self.assertIn((round(max(np_values), 6), round(max(nuf_values), 6)), pairs)
         self.assertIn((prev_np, 3333.0), pairs)
+
+    def test_leader_nuf_candidates_and_projection_respect_ramp_bounds(self):
+        cfg = short_config()
+        state = TrafficState.initial(cfg)
+        demand = DemandProfile(cfg, ScenarioConfig("test")).at(0.0)
+        previous = ControlAction.fixed(cfg)
+        min_total = sum(
+            cfg.freeway_follower.ramp_metering_rate_min * cfg.network.ramp_capacity_veh_h[ramp]
+            for ramp in cfg.network.ramps
+        )
+
+        candidates = Leader(cfg).candidates(state, previous, demand)
+        self.assertGreaterEqual(min(c.N_UF_star for c in candidates), min_total - 1.0e-6)
+
+        coordinator = DistributedCoordinator(cfg)
+        weights = {ramp: cfg.network.ramp_capacity_veh_h[ramp] for ramp in cfg.network.ramps}
+        projected = coordinator._leader_metering_projection(
+            LeaderAction(cfg.leader.N_P_crit_veh, 0.0),
+            weights,
+        )
+        self.assertAlmostEqual(sum(projected.values()), min_total)
+        for ramp, release in projected.items():
+            self.assertGreaterEqual(
+                release,
+                cfg.freeway_follower.ramp_metering_rate_min * cfg.network.ramp_capacity_veh_h[ramp] - 1.0e-6,
+            )
+
+    def test_stackelberg_normalizes_no_control_previous_nuf_reference(self):
+        cfg = short_config()
+        previous = ControlAction.fixed(cfg)
+        controller = StackelbergMPCController(cfg)
+
+        normalized = controller._normalize_previous_leader_reference(previous)
+
+        self.assertEqual(previous.N_UF_star, 0.0)
+        self.assertAlmostEqual(normalized.N_UF_star, cfg.network.total_ramp_capacity)
+
+    def test_stackelberg_fallback_guard_rejects_terminal_worse_leader(self):
+        cfg = short_config()
+        controller = StackelbergMPCController(cfg)
+
+        def evaluation(stage: str, objective: float, terminal: float, completed: float) -> _LeaderCandidateEvaluation:
+            control = ControlAction.fixed(cfg)
+            control.diagnostics.update({
+                "distributed_response_terminal_proxy_vehicles": terminal,
+                "distributed_response_mainline_exit_veh": 0.5 * completed,
+                "distributed_response_boundary_out_sink_veh": 0.5 * completed,
+            })
+            nash = NashResult(
+                control=control,
+                objective_value=objective,
+                iterations=1,
+                converged=True,
+                residual_objective=0.0,
+                residual_control=0.0,
+                diagnostics=dict(control.diagnostics),
+            )
+            return _LeaderCandidateEvaluation(
+                index=0,
+                action=LeaderAction(control.N_P_star, control.N_UF_star),
+                nash=nash,
+                objective=objective,
+                objective_terms={
+                    "leader_total_objective": objective,
+                    "leader_objective_base": objective,
+                    "leader_follower_ttt_base": objective,
+                },
+                metadata={},
+                rollout_used=False,
+                stage=stage,
+            )
+
+        leader = evaluation("refined", 80.0, terminal=5000.0, completed=20.0)
+        fallback = evaluation("fallback_pfo", 100.0, terminal=1000.0, completed=40.0)
+
+        best, meta = controller._select_with_fallback_guard([leader], [fallback])
+
+        self.assertEqual(best.stage, "fallback_pfo")
+        self.assertEqual(meta["leader_fallback_guard_selected"], 1.0)
+        self.assertEqual(meta["leader_fallback_guard_rejected_leader"], 1.0)
+        self.assertEqual(meta["leader_fallback_guard_terminal_severe"], 1.0)
+
+    def test_stackelberg_leader_evaluates_coarse_and_refined_grid(self):
+        cfg = ExperimentConfig.from_file(
+            "src/config/default.yaml",
+            {
+                "simulation": {"T_total": 360.0},
+                "mpc": {
+                    "follower_solver_mode": "distributed",
+                    "leader_candidate_count": 6,
+                    "leader_refinement_candidate_count": 9,
+                    "stackelberg_prefilter_top_k": 3,
+                    "max_nash_iter": 1,
+                    "stackelberg_leader_parallel_backend": "serial",
+                    "grid_parallel_backend": "serial",
+                },
+            },
+        )
+        result = StackelbergMPCController(cfg).decide_with_info(
+            TrafficState.initial(cfg),
+            DemandProfile(cfg, ScenarioConfig("test")).horizon(0.0, cfg.mpc.horizon_steps),
+            ControlAction.fixed(cfg),
+        )
+        meta = result.metadata
+
+        self.assertGreater(meta["leader_candidate_coarse_count"], 0.0)
+        self.assertGreater(meta["leader_candidate_refined_count"], 0.0)
+        self.assertEqual(meta["leader_candidate_refinement_active"], 1.0)
+        self.assertEqual(meta["leader_candidate_global_refresh"], 1.0)
+        self.assertEqual(meta["leader_candidate_prefilter_active"], 1.0)
+        self.assertEqual(meta["leader_candidate_prefilter_scope_global"], 1.0)
+        self.assertEqual(meta["leader_candidate_refined_prefilter_active"], 1.0)
+        self.assertEqual(meta["leader_candidate_refined_prefilter_scope_local"], 1.0)
+        self.assertAlmostEqual(
+            meta["leader_candidate_full_evaluated_count"],
+            meta["leader_candidate_coarse_evaluated_count"] + meta["leader_candidate_refined_evaluated_count"],
+        )
+        self.assertLess(meta["leader_candidate_full_evaluated_count"], meta["leader_candidate_count"])
+        self.assertEqual(meta["leader_fallback_incumbent_seed_active"], 1.0)
+        self.assertGreater(meta["leader_fallback_incumbent_objective"], 0.0)
+        self.assertEqual(meta["leader_candidate_incumbent_any_active"], 1.0)
+        self.assertGreaterEqual(
+            meta["leader_candidate_best_stage_coarse"]
+            + meta["leader_candidate_best_stage_refined"]
+            + meta["leader_candidate_best_stage_fallback"],
+            1.0,
+        )
+        self.assertEqual(meta["leader_fallback_guard_active"], 1.0)
+
+    def test_allocation_net_inflow_binding_uses_inflow_outflow_extremes(self):
+        cfg = short_config()
+        module = InflowOutflowAllocationModule(cfg)
+        specs = {
+            movement: spec
+            for movement, spec in cfg.network.urban_movements.items()
+            if spec.get("kind") in {"boundary_in", "off_ramp", "boundary_out", "on_ramp"}
+        }
+        movements = list(specs)
+        kinds = [str(specs[movement].get("kind", "")) for movement in movements]
+        lower, upper = module._bounds(
+            movements,
+            specs,
+            LeaderAction(cfg.leader.N_P_crit_veh, cfg.network.total_ramp_capacity),
+        )
+        inflow = np.asarray([kind in {"boundary_in", "off_ramp"} for kind in kinds], dtype=bool)
+        outflow = np.asarray([kind in {"boundary_out", "on_ramp"} for kind in kinds], dtype=bool)
+        expected_min = float(np.sum(lower[inflow]) - np.sum(upper[outflow]))
+        expected_max = float(np.sum(upper[inflow]) - np.sum(lower[outflow]))
+
+        self.assertAlmostEqual(module._clip_target(-1.0e9, lower, upper, kinds), expected_min)
+        self.assertAlmostEqual(module._clip_target(1.0e9, lower, upper, kinds), expected_max)
 
     def test_internal_movement_not_throttled_by_allocation(self):
         # 불변식: 내부(internal) movement는 inflow_outflow_allocation으로 cap되지 않는다.
@@ -530,12 +1486,13 @@ class ConstraintTests(unittest.TestCase):
             for values in state.freeway_density.values()
             for rho in values
         )
-        # Step D: boundary_in 큐 비용은 진단으로만 남고 total objective에는 들어가지 않는다.
+        # boundary_in queue is part of Total TTT coverage and enters the objective.
         boundary_in_queue = state.boundary_in_queue_vehicles(cfg.network)
         expected = (
             n_p
             + n_f
             + 2.0 * max(0.0, n_p_protected - 100.0)
+            + 1.0 * boundary_in_queue
             + 3.0 * density_excess
             + 0.5 * (abs(170.0 - 160.0) + cfg.simulation.T_c_h * abs(300.0 - 250.0))
         )
@@ -588,7 +1545,11 @@ class ConstraintTests(unittest.TestCase):
         self.assertAlmostEqual(terms["leader_objective_base"], 1234.0)
         self.assertGreater(terms["leader_boundary_in_queue_penalty"], 0.0)
         self.assertGreater(terms["leader_nonconvergence_penalty"], 0.0)
-        self.assertAlmostEqual(terms["leader_total_objective"], 1234.0)
+        expected_boundary = (
+            5.0 * state.boundary_in_queue_vehicles(cfg.network) * cfg.simulation.T_c_h
+        )
+        self.assertAlmostEqual(terms["leader_boundary_in_queue_penalty"], expected_boundary)
+        self.assertAlmostEqual(terms["leader_total_objective"], 1234.0 + expected_boundary)
 
     def test_default_leader_accumulation_penalties_use_control_interval_hours(self):
         cfg = ExperimentConfig.from_file(
@@ -668,8 +1629,13 @@ class ConstraintTests(unittest.TestCase):
             nash_residual_control=0.1,
         )
         expected_penalty = 500.0 * ((0.2 / 0.5) + (0.1 / 0.25))
+        expected_boundary = (
+            cfg.leader.w_boundary_in
+            * state.boundary_in_queue_vehicles(cfg.network)
+            * cfg.simulation.T_c_h
+        )
         self.assertAlmostEqual(terms["leader_nonconvergence_penalty"], expected_penalty)
-        self.assertAlmostEqual(terms["leader_total_objective"], 77.0)
+        self.assertAlmostEqual(terms["leader_total_objective"], 77.0 + expected_boundary)
 
     def test_leader_density_penalty_uses_effective_lanes_only_when_changed(self):
         cfg = ExperimentConfig.from_file(

@@ -6,6 +6,7 @@ from typing import Dict, Iterable, Mapping, Optional
 import numpy as np
 
 from src.controllers.freeway_follower import FreewayFollowerResult
+from src.controllers.grid_parallel import build_chunk_payloads, evaluate_grid_items
 from src.controllers.inflow_outflow_allocation import AllocationResult
 from src.controllers.leader import LeaderAction
 from src.controllers.nash_solver import NashResult, _relax_map
@@ -13,6 +14,17 @@ from src.controllers.relaxed_quantization import (
     accumulate_repair_diagnostics,
     merge_repair_diagnostics,
     repair_vsl_value,
+)
+from src.controllers.spillback_constraints import (
+    assess_offramp_spillback,
+    assess_onramp_spillback,
+    ramp_arrivals_over_horizon,
+)
+from src.controllers.structured_grid import (
+    GridControlCandidate,
+    sensitivity_direction_candidates,
+    sensitivity_probe_candidates,
+    structured_grid_candidates,
 )
 from src.controllers.urban_follower import UrbanFollower
 from src.models.demand import DemandStep
@@ -52,6 +64,21 @@ class AgentSolve:
     allocation: Dict[str, float] = field(default_factory=dict)
     infeasibility: Dict[str, float] = field(default_factory=dict)
     diagnostics: Dict[str, float] = field(default_factory=dict)
+
+
+def _distributed_grid_process_chunk(payload: dict) -> list[tuple[GridControlCandidate, float, ControlAction, Dict[str, float]]]:
+    coordinator = DistributedCoordinator(payload["cfg"], ablation=payload["ablation"])
+    return [
+        coordinator._rollout_grid_objective(
+            payload["state"],
+            candidate,
+            payload["forecast"],
+            payload["leader"],
+            incumbent_obj=payload["incumbent_obj"],
+            precheck_diag=precheck_diag,
+        )
+        for candidate, precheck_diag in payload["items"]
+    ]
 
 
 def _freeway_agent_id(link: str, segment_index: int | None = None) -> str:
@@ -217,6 +244,36 @@ def _project_to_target(target: float, upper: Mapping[str, float], weights: Mappi
     return {key: float(min(max(value, 0.0), upper[key])) for key, value in release.items()}
 
 
+def _project_to_bounded_target(
+    target: float,
+    lower: Mapping[str, float],
+    upper: Mapping[str, float],
+    weights: Mapping[str, float],
+) -> Dict[str, float]:
+    keys = tuple(upper)
+    bounded_lower = {
+        key: float(np.clip(lower.get(key, 0.0), 0.0, max(0.0, upper[key])))
+        for key in keys
+    }
+    bounded_upper = {key: float(max(bounded_lower[key], upper[key])) for key in keys}
+    total_lower = sum(bounded_lower.values())
+    total_upper = sum(bounded_upper.values())
+    clipped_target = float(np.clip(target, total_lower, total_upper))
+    residual_upper = {
+        key: max(0.0, bounded_upper[key] - bounded_lower[key])
+        for key in keys
+    }
+    residual = _project_to_target(
+        clipped_target - total_lower,
+        residual_upper,
+        weights,
+    )
+    return {
+        key: float(np.clip(bounded_lower[key] + residual.get(key, 0.0), bounded_lower[key], bounded_upper[key]))
+        for key in keys
+    }
+
+
 ABLATION_MODES = (
     "FULL_COUPLING",
     "NO_U_TO_F_INFO",
@@ -226,6 +283,7 @@ ABLATION_MODES = (
     "FIXED_URBAN_COUPLING_PLAYERS",
     "FIXED_FREEWAY_COUPLING_PLAYERS",
     "FIXED_ALL_COUPLING_PLAYERS",
+    "WU_GREEN_VSL_ONLY_TTT",
 )
 
 
@@ -264,6 +322,52 @@ class DistributedCoordinator:
         self.coupling_urban_ids = {a.id for a in self.urban_agents if a.ramps or a.off_ramps}
         self.coupling_freeway_ids = {a.id for a in self.freeway_agents if a.ramps or a.off_ramps}
 
+    def _green_vsl_only_ttt_mode(self) -> bool:
+        return self.ablation == "WU_GREEN_VSL_ONLY_TTT"
+
+    def _no_metering_control(self, ramps: Optional[Iterable[str]] = None) -> Dict[str, float]:
+        net = self.cfg.network
+        selected = net.ramps if ramps is None else tuple(ramps)
+        return {ramp: net.ramp_capacity_veh_h[ramp] for ramp in selected}
+
+    def _zero_offsets(self) -> Dict[str, float]:
+        return {signal: 0.0 for signal in self.cfg.network.signals}
+
+    def _apply_green_vsl_only_authority(self, control: ControlAction) -> ControlAction:
+        if not self._green_vsl_only_ttt_mode():
+            return control
+        control.N_P_star = 0.0
+        control.N_UF_star = 0.0
+        control.ramp_metering = self._no_metering_control()
+        control.offsets = self._zero_offsets()
+        control.inflow_outflow_allocation = {}
+        control.diagnostics["wu_green_vsl_only_ttt_authority"] = 1.0
+        return control
+
+    def _leaderless_default_control(self) -> ControlAction:
+        control = ControlAction.fixed(self.cfg)
+        control.N_P_star = 0.0
+        control.N_UF_star = 0.0
+        # PFO/WU guard candidates must not smuggle in allocation authority.
+        control.inflow_outflow_allocation = {}
+        return control
+
+    def _full_controller_guard_candidates(
+        self,
+        current: ControlAction,
+    ) -> list[tuple[str, ControlAction]]:
+        guards = [
+            ("previous", current.copy()),
+            ("no_control", ControlAction.uncontrolled(self.cfg)),
+            ("default", self._leaderless_default_control()),
+        ]
+        out: list[tuple[str, ControlAction]] = []
+        for label, control in guards:
+            control.N_P_star = 0.0
+            control.N_UF_star = 0.0
+            out.append((label, self._apply_green_vsl_only_authority(control)))
+        return out
+
     def _build_upstream_leaving_map(self) -> Dict[str, list[tuple[str, str, float]]]:
         """Wu `_upstream_leaving_map`와 같은 urban-to-urban phase coupling 지도.
 
@@ -297,12 +401,28 @@ class DistributedCoordinator:
                 upstream_map[f"{signal}_{phase_id}"] = entries
         return upstream_map
 
-    def _signal_leaving_rate(self, movement: str, control: ControlAction) -> float:
+    def _signal_leaving_rate(
+        self,
+        movement: str,
+        control: ControlAction,
+        state: TrafficState,
+        demand: DemandStep,
+    ) -> float:
         """상류 movement green release rate[veh/h]를 downstream phase pressure로 보낸다."""
         spec = self._specs[movement]
         green_fraction = _phase_green_fraction(control, self.cfg, spec)
         cap_flow = _movement_capacity_flow(control, self.cfg, movement, spec)
-        return float(green_fraction * cap_flow)
+        dt_h = max(self.cfg.simulation.T_c_h, 1.0e-9)
+        available_flow = max(0.0, state.urban_movement_queue.get(movement, 0.0)) / dt_h
+        kind = str(spec.get("kind", ""))
+        beta = float(spec.get("beta", 1.0))
+        if kind == "boundary_in":
+            origin = str(spec.get("origin", ""))
+            available_flow += max(0.0, demand.urban_boundary.get(origin, 0.0)) * beta
+        elif kind == "on_ramp":
+            ramp = str(spec.get("ramp", ""))
+            available_flow += max(0.0, demand.ramp_arrival.get(ramp, 0.0)) * beta
+        return float(min(green_fraction * cap_flow, available_flow))
 
     def _block_u_to_f(self, agent: AgentSpec) -> bool:
         """이 freeway agent가 urban 예측 정보(u_on 등)를 보면 안 되는가."""
@@ -425,12 +545,555 @@ class DistributedCoordinator:
             pressure += 0.5 * lane_loss
         return float(max(0.0, pressure))
 
+    def _response_is_better(
+        self,
+        candidate_obj: float,
+        candidate_diag: Mapping[str, float],
+        best_obj: float,
+        best_diag: Mapping[str, float],
+    ) -> bool:
+        if not best_diag and not np.isfinite(best_obj):
+            return True
+        candidate_violation = float(candidate_diag.get("distributed_response_total_spillback_violation_veh", 0.0))
+        best_violation = float(best_diag.get("distributed_response_total_spillback_violation_veh", 0.0))
+        candidate_feasible = candidate_violation <= 1.0e-9
+        best_feasible = best_violation <= 1.0e-9
+        if candidate_feasible and not best_feasible:
+            return True
+        if best_feasible and not candidate_feasible:
+            return False
+        if not candidate_feasible and not best_feasible:
+            if candidate_violation < best_violation - 1.0e-9:
+                return True
+            if candidate_violation > best_violation + 1.0e-9:
+                return False
+        return candidate_obj < best_obj - 1.0e-12
+
+    def _grid_authority(self) -> str:
+        return "wu" if self._green_vsl_only_ttt_mode() else "proposed"
+
+    def _prepare_grid_control(
+        self,
+        control: ControlAction,
+        leader: Optional[LeaderAction],
+    ) -> ControlAction:
+        out = control.copy()
+        out.N_P_star = float(leader.N_P_star) if leader is not None else 0.0
+        out.N_UF_star = float(leader.N_UF_star) if leader is not None else 0.0
+        return self._apply_green_vsl_only_authority(out)
+
+    def _rollout_grid_objective(
+        self,
+        state: TrafficState,
+        candidate: GridControlCandidate,
+        forecast: list[DemandStep],
+        leader: Optional[LeaderAction],
+        incumbent_obj: float = np.inf,
+        precheck_diag: Optional[Mapping[str, float]] = None,
+    ) -> tuple[GridControlCandidate, float, ControlAction, Dict[str, float]]:
+        from src.simulation.coupling import run_coupled_interval
+
+        control = self._prepare_grid_control(candidate.control, leader)
+        s = state.copy()
+        total_ttt = 0.0
+        freeway_ttt = 0.0
+        urban_ttt = 0.0
+        horizon = max(1, min(len(forecast), self.cfg.mpc.horizon_steps))
+        early_terminated = False
+        completed_steps = 0
+        for demand in forecast[:horizon]:
+            result = run_coupled_interval(s, control, demand, self.cfg)
+            urban_ttt += float(result.urban_ttt)
+            freeway_ttt += float(result.freeway_ttt)
+            total_ttt += float(result.urban_ttt + result.freeway_ttt)
+            s.time_sec += self.cfg.simulation.control_interval
+            completed_steps += 1
+            if np.isfinite(incumbent_obj) and total_ttt > incumbent_obj + 1.0e-12:
+                early_terminated = True
+                break
+
+        if precheck_diag is None:
+            proxy_obj, proxy_diag = self._response_tts_objective(
+                state,
+                control,
+                forecast,
+                residual=0.0,
+                proxy_objective=0.0,
+            )
+        else:
+            proxy_diag = dict(precheck_diag)
+            proxy_obj = float(proxy_diag.get("distributed_response_objective_tts", 0.0))
+        spillback_violation = float(proxy_diag.get("distributed_response_total_spillback_violation_veh", 0.0))
+        spillback_penalty = (
+            self.cfg.freeway_follower.ramp_queue_penalty
+            * spillback_violation
+            * self.cfg.simulation.T_c_h
+            * horizon
+        )
+        objective = float(total_ttt + spillback_penalty)
+        if early_terminated:
+            objective = float(max(objective, incumbent_obj + 1.0e-9))
+        diag = dict(proxy_diag)
+        diag.update({
+            "distributed_grid_search_active": 1.0,
+            "distributed_grid_rollout_objective": float(objective),
+            "distributed_grid_rollout_ttt": float(total_ttt),
+            "distributed_grid_rollout_freeway_ttt": float(freeway_ttt),
+            "distributed_grid_rollout_urban_ttt": float(urban_ttt),
+            "distributed_grid_rollout_horizon_steps": float(horizon),
+            "distributed_grid_rollout_completed_steps": float(completed_steps),
+            "distributed_grid_early_terminated": float(early_terminated),
+            "distributed_grid_proxy_objective_tts": float(proxy_obj),
+            "distributed_grid_selected_stage_coarse": float(candidate.stage == "coarse"),
+            "distributed_grid_selected_stage_fine": float(candidate.stage == "fine"),
+            "distributed_grid_selected_stage_sensitivity_probe": float(candidate.stage == "sensitivity_probe"),
+            "distributed_grid_selected_stage_sensitivity_direction": float(candidate.stage == "sensitivity_direction"),
+            "distributed_grid_candidate_label_hash": float(abs(hash(candidate.label)) % 1000000),
+            "distributed_response_rollout_active": 1.0,
+            "distributed_response_rollout_ttt": float(total_ttt),
+            "distributed_response_rollout_freeway_ttt": float(freeway_ttt),
+            "distributed_response_rollout_urban_ttt": float(urban_ttt),
+            "distributed_response_terminal_rollout_vehicles": float(
+                s.total_urban_vehicles(self.cfg.network) + s.total_freeway_vehicles(self.cfg.network)
+            ),
+        })
+        return candidate, objective, control, diag
+
+    def _grid_feasibility_precheck(
+        self,
+        state: TrafficState,
+        candidate: GridControlCandidate,
+        forecast: list[DemandStep],
+        leader: Optional[LeaderAction],
+    ) -> tuple[bool, Dict[str, float]]:
+        control = self._prepare_grid_control(candidate.control, leader)
+        _obj, diag = self._response_tts_objective(
+            state,
+            control,
+            forecast,
+            residual=0.0,
+            proxy_objective=0.0,
+        )
+        violation = float(diag.get("distributed_response_total_spillback_violation_veh", 0.0))
+        feasible = violation <= 1.0e-9
+        diag["distributed_grid_precheck_feasible"] = float(feasible)
+        diag["distributed_grid_precheck_spillback_violation_veh"] = violation
+        return feasible, diag
+
+    def _evaluate_grid_stage(
+        self,
+        state: TrafficState,
+        candidates: list[GridControlCandidate],
+        forecast: list[DemandStep],
+        leader: Optional[LeaderAction],
+        incumbent_obj: float = np.inf,
+    ) -> list[tuple[GridControlCandidate, float, ControlAction, Dict[str, float]]]:
+        if not candidates:
+            return []
+        prechecked = [
+            (candidate, *self._grid_feasibility_precheck(state, candidate, forecast, leader))
+            for candidate in candidates
+        ]
+        feasible_candidates = [item for item in prechecked if item[1]]
+        selected = feasible_candidates if feasible_candidates else prechecked
+        guards = {"previous", "no_control", "center"}
+        guard_items = [item for item in selected if item[0].label in guards]
+        rest_items = [item for item in selected if item[0].label not in guards]
+        results: list[tuple[GridControlCandidate, float, ControlAction, Dict[str, float]]] = []
+        stage_incumbent = incumbent_obj
+        for candidate, _feasible, precheck_diag in guard_items:
+            result = self._rollout_grid_objective(
+                state,
+                candidate,
+                forecast,
+                leader,
+                incumbent_obj=np.inf,
+                precheck_diag=precheck_diag,
+            )
+            results.append(result)
+            stage_incumbent = min(stage_incumbent, result[1])
+        rest_eval_items = [(candidate, precheck_diag) for candidate, _feasible, precheck_diag in rest_items]
+
+        def evaluate_item(item: tuple[GridControlCandidate, Mapping[str, float]]):
+            candidate, precheck_diag = item
+            return self._rollout_grid_objective(
+                state,
+                candidate,
+                forecast,
+                leader,
+                incumbent_obj=stage_incumbent,
+                precheck_diag=precheck_diag,
+            )
+
+        process_payloads = build_chunk_payloads(
+            rest_eval_items,
+            static={
+                "cfg": self.cfg,
+                "ablation": self.ablation,
+                "state": state,
+                "forecast": forecast,
+                "leader": leader,
+                "incumbent_obj": stage_incumbent,
+            },
+            chunk_size=int(self.cfg.mpc.grid_parallel_chunk_size),
+            max_workers=int(self.cfg.mpc.grid_parallel_max_workers),
+        )
+        parallel_run = evaluate_grid_items(
+            self.cfg,
+            rest_eval_items,
+            evaluate_item,
+            process_chunk_fn=_distributed_grid_process_chunk,
+            process_payloads=process_payloads,
+        )
+        results.extend(parallel_run.results)
+        parallel_diag = parallel_run.diagnostics("distributed_grid")
+        for result in results:
+            result[3]["distributed_grid_precheck_filtered_candidates"] = float(len(prechecked) - len(selected))
+            result[3]["distributed_grid_precheck_evaluated_candidates"] = float(len(selected))
+            result[3].update(parallel_diag)
+        return results
+
+    def _structured_grid_refinement(
+        self,
+        state: TrafficState,
+        forecast: list[DemandStep],
+        previous: ControlAction,
+        center: ControlAction,
+        leader: Optional[LeaderAction],
+    ) -> tuple[ControlAction, float, Dict[str, float]]:
+        authority = self._grid_authority()
+        refresh_sec = float(self.cfg.mpc.grid_global_refresh_sec)
+        interval = max(self.cfg.simulation.control_interval, 1.0e-9)
+        step_index = int(round(state.time_sec / interval))
+        refresh_steps = max(1, int(round(refresh_sec / interval)))
+        global_refresh = step_index == 0 or step_index % refresh_steps == 0
+        coarse_scope = "global" if global_refresh else "local"
+        coarse = structured_grid_candidates(
+            self.cfg,
+            previous,
+            center,
+            authority=authority,
+            stage="coarse",
+            scope=coarse_scope,
+        )
+        coarse_results = self._evaluate_grid_stage(state, coarse, forecast, leader, incumbent_obj=np.inf)
+        best_obj = np.inf
+        best_control = center.copy()
+        best_diag: Dict[str, float] = {}
+        for _candidate, obj, control, diag in coarse_results:
+            if self._response_is_better(obj, diag, best_obj, best_diag):
+                best_obj = float(obj)
+                best_control = control
+                best_diag = diag
+
+        probes = sensitivity_probe_candidates(
+            self.cfg,
+            previous,
+            best_control,
+            authority=authority,
+        )
+        probe_results = self._evaluate_grid_stage(state, probes, forecast, leader, incumbent_obj=np.inf)
+        probe_scores: list[tuple[GridControlCandidate, float]] = []
+        for candidate, obj, control, diag in probe_results:
+            probe_scores.append((candidate, obj))
+            if self._response_is_better(obj, diag, best_obj, best_diag):
+                best_obj = float(obj)
+                best_control = control
+                best_diag = diag
+
+        directions = sensitivity_direction_candidates(
+            self.cfg,
+            previous,
+            best_control,
+            probe_scores,
+            authority=authority,
+            base_objective=best_obj,
+        )
+        direction_results = self._evaluate_grid_stage(
+            state,
+            directions,
+            forecast,
+            leader,
+            incumbent_obj=best_obj,
+        )
+        for _candidate, obj, control, diag in direction_results:
+            if self._response_is_better(obj, diag, best_obj, best_diag):
+                best_obj = float(obj)
+                best_control = control
+                best_diag = diag
+
+        fine = structured_grid_candidates(
+            self.cfg,
+            previous,
+            best_control,
+            authority=authority,
+            stage="fine",
+            scope="local",
+        )
+        fine_results = self._evaluate_grid_stage(state, fine, forecast, leader, incumbent_obj=best_obj)
+        for _candidate, obj, control, diag in fine_results:
+            if self._response_is_better(obj, diag, best_obj, best_diag):
+                best_obj = float(obj)
+                best_control = control
+                best_diag = diag
+
+        if not np.isfinite(best_obj):
+            return center.copy(), np.inf, {}
+        stage_results = [coarse_results, probe_results, direction_results, fine_results]
+
+        def stage_diag_sum(key: str) -> float:
+            return float(sum(
+                stage[0][3].get(key, 0.0)
+                for stage in stage_results
+                if stage
+            ))
+
+        best_diag.update({
+            "distributed_grid_search_active": 1.0,
+            "distributed_grid_full_search_active": 1.0,
+            "distributed_grid_leader_conditioned": 0.0,
+            "distributed_grid_parallel_stages": 4.0,
+            "distributed_grid_stage1_candidates": float(len(coarse)),
+            "distributed_grid_stage2_candidates": float(len(fine)),
+            "distributed_grid_sensitivity_probe_candidates": float(len(probes)),
+            "distributed_grid_sensitivity_direction_candidates": float(len(directions)),
+            "distributed_grid_total_candidates": float(
+                len(coarse) + len(probes) + len(directions) + len(fine)
+            ),
+            "distributed_grid_early_terminated_candidates": float(sum(
+                result[3].get("distributed_grid_early_terminated", 0.0)
+                for result in coarse_results + probe_results + direction_results + fine_results
+            )),
+            "distributed_grid_precheck_filtered_candidates": stage_diag_sum(
+                "distributed_grid_precheck_filtered_candidates"
+            ),
+            "distributed_grid_precheck_evaluated_candidates": stage_diag_sum(
+                "distributed_grid_precheck_evaluated_candidates"
+            ),
+            "distributed_grid_global_refresh": float(global_refresh),
+            "distributed_grid_scope_global": float(coarse_scope == "global"),
+            "distributed_grid_scope_local": float(coarse_scope == "local"),
+            "distributed_grid_refresh_interval_sec": float(refresh_sec),
+            "distributed_grid_authority_wu": float(authority == "wu"),
+            "distributed_grid_authority_proposed": float(authority == "proposed"),
+        })
+        return best_control, float(best_obj), best_diag
+
+    def _allocation_green_phase_setpoints(
+        self,
+        allocation_plan: Optional[AllocationResult],
+    ) -> Dict[str, float]:
+        if allocation_plan is None:
+            return {}
+        specs = movement_specs(self.cfg)
+        by_phase: Dict[str, list[float]] = {}
+        for movement, green_sec in allocation_plan.movement_green_sec.items():
+            phase = str(specs.get(movement, {}).get("phase", ""))
+            if phase:
+                by_phase.setdefault(phase, []).append(float(green_sec))
+        return {
+            phase: float(np.mean(values))
+            for phase, values in by_phase.items()
+            if values
+        }
+
+    def _allocation_control_map(
+        self,
+        allocation_plan: Optional[AllocationResult],
+    ) -> Dict[str, float]:
+        if allocation_plan is None:
+            return {}
+        allocation = dict(allocation_plan.movement_flows)
+        for link in self.cfg.network.boundary_in_links:
+            allocation[link] = sum(
+                allocation.get(movement, 0.0)
+                for movement, spec in self.cfg.network.urban_movements.items()
+                if spec.get("origin") == link and spec.get("kind") == "boundary_in"
+            )
+        for link in self.cfg.network.boundary_out_links:
+            allocation[link] = sum(
+                allocation.get(movement, 0.0)
+                for movement, spec in self.cfg.network.urban_movements.items()
+                if spec.get("destination") == link and spec.get("kind") == "boundary_out"
+            )
+        return allocation
+
+    def _bounded_leader_green(self, signal: str, phase_setpoints: Mapping[str, float], fallback_p1: float) -> float:
+        net = self.cfg.network
+        total = net.effective_green_total
+        p1_target = phase_setpoints.get(f"{signal}_p1")
+        p2_target = phase_setpoints.get(f"{signal}_p2")
+        if p1_target is not None and p2_target is not None:
+            p1 = 0.5 * (float(p1_target) + (total - float(p2_target)))
+        elif p1_target is not None:
+            p1 = float(p1_target)
+        elif p2_target is not None:
+            p1 = total - float(p2_target)
+        else:
+            p1 = float(fallback_p1)
+        p1 = float(np.clip(p1, net.green_min, net.green_max))
+        p2 = total - p1
+        if p2 < net.green_min:
+            p2 = net.green_min
+            p1 = total - p2
+        if p2 > net.green_max:
+            p2 = net.green_max
+            p1 = total - p2
+        return float(p1)
+
+    def _set_leader_green(self, control: ControlAction, signal: str, p1: float) -> None:
+        p1 = self._bounded_leader_green(signal, {}, p1)
+        control.green_times[f"{signal}_p1"] = p1
+        control.green_times[f"{signal}_p2"] = float(self.cfg.network.effective_green_total - p1)
+
+    def _leader_metering_projection(
+        self,
+        leader: LeaderAction,
+        weights: Mapping[str, float],
+    ) -> Dict[str, float]:
+        upper = {ramp: float(self.cfg.network.ramp_capacity_veh_h[ramp]) for ramp in self.cfg.network.ramps}
+        min_ratio = float(self.cfg.freeway_follower.ramp_metering_rate_min)
+        lower = {ramp: min_ratio * upper[ramp] for ramp in self.cfg.network.ramps}
+        return _project_to_bounded_target(float(leader.N_UF_star), lower, upper, weights)
+
+    def _leader_conditioned_grid_candidates(
+        self,
+        previous: ControlAction,
+        center: ControlAction,
+        leader: LeaderAction,
+        allocation_plan: Optional[AllocationResult],
+    ) -> list[GridControlCandidate]:
+        net = self.cfg.network
+        phase_setpoints = self._allocation_green_phase_setpoints(allocation_plan)
+        allocation = self._allocation_control_map(allocation_plan)
+        target = max(0.0, float(leader.N_UF_star))
+        cap_weights = {ramp: float(net.ramp_capacity_veh_h[ramp]) for ramp in net.ramps}
+        queue_weights = {
+            ramp: max(1.0, float(center.ramp_metering.get(ramp, net.ramp_capacity_veh_h[ramp])))
+            for ramp in net.ramps
+        }
+        previous_weights = {
+            ramp: max(1.0, float(previous.ramp_metering.get(ramp, net.ramp_capacity_veh_h[ramp])))
+            for ramp in net.ramps
+        }
+        metering_sets = [
+            ("cap", self._leader_metering_projection(leader, cap_weights)),
+            ("previous_ratio", self._leader_metering_projection(leader, previous_weights)),
+            ("center_ratio", self._leader_metering_projection(leader, queue_weights)),
+        ]
+        green_center: Dict[str, float] = {}
+        for signal in net.signals:
+            fallback = center.green_times.get(f"{signal}_p1", net.effective_green_total / 2.0)
+            green_center[signal] = self._bounded_leader_green(signal, phase_setpoints, fallback)
+        base_offsets = {
+            signal: float(center.offsets.get(signal, previous.offsets.get(signal, 0.0))) % max(net.cycle_length, 1.0e-9)
+            for signal in net.signals
+        }
+
+        out: list[GridControlCandidate] = []
+        seen: set[tuple[float, ...]] = set()
+
+        def key(control: ControlAction) -> tuple[float, ...]:
+            return tuple(round(v, 4) for v in control.control_vector(self.cfg))
+
+        def base_control() -> ControlAction:
+            control = center.copy()
+            control.N_P_star = float(leader.N_P_star)
+            control.N_UF_star = float(leader.N_UF_star)
+            control.inflow_outflow_allocation = dict(allocation)
+            for signal, p1 in green_center.items():
+                self._set_leader_green(control, signal, p1)
+            control.offsets = dict(base_offsets)
+            return control
+
+        def add(label: str, control: ControlAction) -> None:
+            k = key(control)
+            if k in seen:
+                return
+            seen.add(k)
+            out.append(GridControlCandidate(label, control, "leader_conditioned", "local"))
+
+        for label, rates in metering_sets:
+            control = base_control()
+            control.ramp_metering = dict(rates)
+            add(f"leader_rm_{label}", control)
+
+        for signal in net.signals:
+            for delta in (-6.0, 6.0):
+                control = base_control()
+                control.ramp_metering = dict(metering_sets[0][1])
+                self._set_leader_green(control, signal, green_center[signal] + delta)
+                add(f"leader_green_{signal}_{delta:+.0f}", control)
+
+        max_step = float(self.cfg.urban_follower.max_offset_step)
+        cycle = max(float(net.cycle_length), 1.0e-9)
+        for signal in net.signals:
+            for delta in (-5.0, 5.0):
+                control = base_control()
+                control.ramp_metering = dict(metering_sets[0][1])
+                step = float(np.clip(delta, -max_step, max_step))
+                control.offsets[signal] = float((base_offsets[signal] + step) % cycle)
+                add(f"leader_offset_{signal}_{delta:+.0f}", control)
+
+        return out
+
+    def _leader_conditioned_grid_refinement(
+        self,
+        state: TrafficState,
+        forecast: list[DemandStep],
+        previous: ControlAction,
+        center: ControlAction,
+        leader: LeaderAction,
+        allocation_plan: Optional[AllocationResult],
+        incumbent_obj: float = np.inf,
+    ) -> tuple[ControlAction, float, Dict[str, float]]:
+        candidates = self._leader_conditioned_grid_candidates(previous, center, leader, allocation_plan)
+        results = self._evaluate_grid_stage(state, candidates, forecast, leader, incumbent_obj=incumbent_obj)
+        best_obj = np.inf
+        best_control = center.copy()
+        best_diag: Dict[str, float] = {}
+        for _candidate, obj, control, diag in results:
+            if self._response_is_better(obj, diag, best_obj, best_diag):
+                best_obj = float(obj)
+                best_control = control
+                best_diag = diag
+        if not np.isfinite(best_obj):
+            return center.copy(), np.inf, {}
+        target = max(0.0, float(leader.N_UF_star))
+        rm_sum = sum(best_control.ramp_metering.get(ramp, 0.0) for ramp in self.cfg.network.ramps)
+        best_diag.update({
+            "distributed_grid_search_active": 1.0,
+            "distributed_grid_leader_conditioned": 1.0,
+            "distributed_grid_full_search_active": 0.0,
+            "distributed_grid_parallel_stages": 1.0,
+            "distributed_grid_stage1_candidates": float(len(candidates)),
+            "distributed_grid_stage2_candidates": 0.0,
+            "distributed_grid_sensitivity_probe_candidates": 0.0,
+            "distributed_grid_sensitivity_direction_candidates": 0.0,
+            "distributed_grid_total_candidates": float(len(candidates)),
+            "distributed_grid_early_terminated_candidates": float(sum(
+                result[3].get("distributed_grid_early_terminated", 0.0)
+                for result in results
+            )),
+            "distributed_grid_leader_target_metering_veh_h": target,
+            "distributed_grid_leader_selected_metering_sum_veh_h": float(rm_sum),
+            "distributed_grid_leader_metering_sum_error_veh_h": float(rm_sum - target),
+            "distributed_grid_leader_incumbent_active": float(np.isfinite(incumbent_obj)),
+            "distributed_grid_leader_incumbent_objective": float(incumbent_obj if np.isfinite(incumbent_obj) else 0.0),
+            "distributed_grid_global_refresh": 0.0,
+            "distributed_grid_scope_global": 0.0,
+            "distributed_grid_scope_local": 1.0,
+            "distributed_grid_authority_proposed": 1.0,
+        })
+        return best_control, float(best_obj), best_diag
+
     def solve(
         self,
         state: TrafficState,
         leader: Optional[LeaderAction],
         demand: DemandStep | Iterable[DemandStep],
         previous_control: Optional[ControlAction] = None,
+        leader_incumbent_obj: float = np.inf,
     ) -> NashResult:
         """leader=None이면 PROPOSED-FOLLOWERS-ONLY(spec 16.7, 2026-06-13 재정의) —
         allocation module 미사용, urban agent는 green 자유탐색 + offset, freeway agent는
@@ -448,6 +1111,7 @@ class DistributedCoordinator:
             reference_control = (
                 ControlAction.uncontrolled(self.cfg) if leader is None else ControlAction.fixed(self.cfg)
             )
+        reference_control = self._apply_green_vsl_only_authority(reference_control)
         current = reference_control.copy()
         current.N_P_star = leader.N_P_star if leader is not None else 0.0
         current.N_UF_star = leader.N_UF_star if leader is not None else 0.0
@@ -456,12 +1120,83 @@ class DistributedCoordinator:
             else self.urban_follower.allocation_module.solve(state, leader, forecast)
         )
         coupling = self._extract_coupling(state, current, first_demand)
-        best_control = current
+        best_control = current.copy()
         best_obj = np.inf
         best_diag: Dict[str, float] = {}
+        last_solver_diag: Dict[str, float] = {}
         residual = np.inf
         converged = False
         iteration = 0
+        guard_flags: Dict[str, float] = {}
+        selected_guard_label = ""
+        if leader is None:
+            guard_candidates = self._full_controller_guard_candidates(current)
+            guard_flags["distributed_full_controller_guard_active"] = 1.0
+            guard_flags["distributed_guard_candidate_count"] = float(len(guard_candidates))
+            guard_flags["distributed_guard_selected"] = 0.0
+            for label, _guard in guard_candidates:
+                guard_flags[f"distributed_{label}_guard_evaluated"] = 0.0
+                guard_flags[f"distributed_guard_selected_{label}"] = 0.0
+            for label, guard in guard_candidates:
+                guard_obj, guard_diag = self._response_tts_objective(
+                    state,
+                    guard,
+                    forecast,
+                    residual=0.0,
+                    proxy_objective=0.0,
+                )
+                guard_flags[f"distributed_{label}_guard_evaluated"] = 1.0
+                guard_flags[f"distributed_{label}_guard_objective_tts"] = float(guard_obj)
+                guard_flags[f"distributed_{label}_guard_spillback_violation_veh"] = float(
+                    guard_diag.get("distributed_response_total_spillback_violation_veh", 0.0)
+                )
+                if self._response_is_better(guard_obj, guard_diag, best_obj, best_diag):
+                    selected_flags = dict(guard_flags)
+                    selected_flags["distributed_guard_selected"] = 1.0
+                    for candidate_label, _candidate_guard in guard_candidates:
+                        selected_flags[f"distributed_guard_selected_{candidate_label}"] = float(
+                            label == candidate_label
+                        )
+                    guard_diag.update(selected_flags)
+                    best_obj = float(guard_obj)
+                    best_control = guard.copy()
+                    best_diag = guard_diag
+                    selected_guard_label = label
+            if selected_guard_label:
+                selected_flags = dict(guard_flags)
+                selected_flags["distributed_guard_selected"] = 1.0
+                for candidate_label, _candidate_guard in guard_candidates:
+                    selected_flags[f"distributed_guard_selected_{candidate_label}"] = float(
+                        selected_guard_label == candidate_label
+                    )
+                best_diag.update(selected_flags)
+
+        if leader is None:
+            grid_control, grid_obj, grid_diag = self._structured_grid_refinement(
+                state,
+                forecast,
+                reference_control,
+                current,
+                leader,
+            )
+        else:
+            grid_control, grid_obj, grid_diag = self._leader_conditioned_grid_refinement(
+                state,
+                forecast,
+                reference_control,
+                current,
+                leader,
+                allocation_plan,
+                incumbent_obj=leader_incumbent_obj,
+            )
+        if grid_diag:
+            grid_diag.update(guard_flags)
+            if self._response_is_better(grid_obj, grid_diag, best_obj, best_diag):
+                best_obj = float(grid_obj)
+                best_control = grid_control.copy()
+                best_diag = dict(grid_diag)
+            current = grid_control.copy()
+            coupling = self._extract_coupling(state, current, first_demand)
 
         for iteration in range(1, self.cfg.mpc.max_nash_iter + 1):
             # FIXED_* ablation: coupling player의 strategic 결정을 고정 정책으로 대체.
@@ -494,6 +1229,7 @@ class DistributedCoordinator:
             )
             candidate.offsets = self._clamp_offsets_to_reference(candidate.offsets, reference_control)
             candidate.vsl = self._clamp_vsl_to_reference(candidate.vsl, reference_control)
+            candidate = self._apply_green_vsl_only_authority(candidate)
             new_coupling = self._extract_coupling(state, candidate, first_demand)
             residual = self._coupling_residual(coupling, new_coupling)
             proxy_obj = sum(s.objective for s in freeway_solves) + sum(s.objective for s in urban_solves)
@@ -506,7 +1242,9 @@ class DistributedCoordinator:
             )
             diagnostics = self._diagnostics(freeway_solves, urban_solves, residual, iteration)
             diagnostics.update(response_diag)
-            if obj < best_obj:
+            diagnostics.update(guard_flags)
+            last_solver_diag = diagnostics
+            if self._response_is_better(obj, diagnostics, best_obj, best_diag):
                 best_obj = float(obj)
                 best_control = candidate
                 best_diag = diagnostics
@@ -514,11 +1252,12 @@ class DistributedCoordinator:
             coupling = new_coupling
             if residual < self.cfg.mpc.distributed_coupling_tol:
                 converged = True
-                best_control = candidate
-                best_obj = float(obj)
-                best_diag = diagnostics
                 break
 
+        if last_solver_diag and "distributed_player_active" not in best_diag:
+            merged_diag = dict(last_solver_diag)
+            merged_diag.update(best_diag)
+            best_diag = merged_diag
         best_control.diagnostics.update(best_diag)
         best_control.diagnostics["nash_converged"] = converged
         best_control.diagnostics["nash_iterations"] = iteration
@@ -531,6 +1270,256 @@ class DistributedCoordinator:
             residual_control=float(residual if np.isfinite(residual) else 0.0),
             diagnostics=best_diag,
         )
+
+    def _append_metering_candidate(
+        self,
+        candidates: list[Dict[str, float]],
+        seen: set[tuple[float, ...]],
+        release: Mapping[str, float],
+        upper: Mapping[str, float],
+        ramps: Iterable[str],
+        clip_to_upper: bool = True,
+    ) -> bool:
+        """Spec 18.6/18.7: ramp metering guard/proposal 후보를 feasible flow로 보정해 추가한다."""
+        net = self.cfg.network
+        values = {
+            ramp: float(np.clip(
+                release.get(ramp, 0.0),
+                0.0,
+                upper.get(ramp, 0.0) if clip_to_upper else net.ramp_capacity_veh_h[ramp],
+            ))
+            for ramp in ramps
+        }
+        for ramp in ramps:
+            upper_bound = upper.get(ramp, 0.0) if clip_to_upper else net.ramp_capacity_veh_h[ramp]
+            if upper_bound <= 1.0e-9:
+                continue
+            lower_bound = self.cfg.freeway_follower.ramp_metering_rate_min * net.ramp_capacity_veh_h[ramp]
+            values[ramp] = float(max(values[ramp], min(lower_bound, upper_bound)))
+        key = tuple(round(values[ramp], 6) for ramp in ramps)
+        if key in seen:
+            return False
+        seen.add(key)
+        candidates.append(values)
+        return True
+
+    def _metering_candidates(
+        self,
+        agent: AgentSpec,
+        upper: Mapping[str, float],
+        weights: Mapping[str, float],
+        target: float,
+        current: ControlAction,
+        spillback_min_release: Optional[Mapping[str, float]] = None,
+    ) -> list[Dict[str, float]]:
+        """Spec 18.7: no-control, previous, target projection과 작은 주변 후보를 만든다."""
+        if not agent.ramps:
+            return [{}]
+        ramps = tuple(agent.ramps)
+        candidates: list[Dict[str, float]] = []
+        seen: set[tuple[float, ...]] = set()
+        self._append_metering_candidate(
+            candidates,
+            seen,
+            {r: self.cfg.network.ramp_capacity_veh_h[r] for r in ramps},
+            upper,
+            ramps,
+            clip_to_upper=False,
+        )
+        self._append_metering_candidate(
+            candidates,
+            seen,
+            {r: current.ramp_metering.get(r, self.cfg.network.ramp_capacity_veh_h[r]) for r in ramps},
+            upper,
+            ramps,
+            clip_to_upper=False,
+        )
+        projected = _project_to_target(target, upper, weights)
+        self._append_metering_candidate(candidates, seen, projected, upper, ramps)
+        if spillback_min_release and any(value > 1.0e-9 for value in spillback_min_release.values()):
+            self._append_metering_candidate(
+                candidates,
+                seen,
+                spillback_min_release,
+                upper,
+                ramps,
+                clip_to_upper=False,
+            )
+            self._append_metering_candidate(
+                candidates,
+                seen,
+                {
+                    ramp: max(projected.get(ramp, 0.0), spillback_min_release.get(ramp, 0.0))
+                    for ramp in ramps
+                },
+                upper,
+                ramps,
+                clip_to_upper=False,
+            )
+        # Keep explicit intermediate metering regimes in the final argmin set.
+        # The leaderless target can collapse toward 0.5 * upper, while medium
+        # demand needs rates around 0.7-0.9 * upper to avoid mainline breakdown.
+        for fraction in (0.65, 0.7, 0.75, 0.8, 0.85, 0.9):
+            self._append_metering_candidate(
+                candidates,
+                seen,
+                {ramp: fraction * upper.get(ramp, 0.0) for ramp in ramps},
+                upper,
+                ramps,
+            )
+        for factor in (0.85, 1.15):
+            self._append_metering_candidate(
+                candidates,
+                seen,
+                _project_to_target(target * factor, upper, weights),
+                upper,
+                ramps,
+            )
+        return candidates
+
+    def _onramp_spillback_min_release_rates(
+        self,
+        state: TrafficState,
+        agent: AgentSpec,
+        ramp_arrivals_veh: Mapping[str, float],
+        horizon_h: float,
+    ) -> Dict[str, float]:
+        rates: Dict[str, float] = {}
+        for ramp in agent.ramps:
+            zero_release = assess_onramp_spillback(
+                state,
+                self.cfg,
+                ramp,
+                ramp_arrivals_veh.get(ramp, 0.0),
+                0.0,
+            )
+            rates[ramp] = min(
+                self.cfg.network.ramp_capacity_veh_h[ramp],
+                zero_release.violation_veh / max(horizon_h, 1.0e-9),
+            )
+        return rates
+
+    def _agent_queue_tts_terms(
+        self,
+        agent: AgentSpec,
+        state: TrafficState,
+        ramp_metering: Mapping[str, float],
+        coupling: Mapping[str, float],
+        horizon_h: float,
+    ) -> tuple[float, float]:
+        """Ramp reservoir와 upstream urban queue의 후보별 TTS 근사[veh*h]."""
+        net = self.cfg.network
+        ramp_start = sum(max(0.0, state.ramp_queue.get(ramp, 0.0)) for ramp in agent.ramps)
+        incoming = sum(max(0.0, float(coupling.get(f"u_on_{ramp}", 0.0))) * horizon_h for ramp in agent.ramps)
+        release = sum(max(0.0, ramp_metering.get(ramp, 0.0)) * horizon_h for ramp in agent.ramps)
+        capacity = net.ramp_queue_max_veh * max(len(agent.ramps), 1)
+        ramp_terminal_unclipped = max(0.0, ramp_start + incoming - release)
+        ramp_terminal = min(capacity, ramp_terminal_unclipped)
+        blocked_to_urban = max(0.0, ramp_terminal_unclipped - capacity)
+        ramp_tts = 0.5 * (ramp_start + ramp_terminal) * horizon_h
+        # Existing urban on-ramp approach queues are already charged by the
+        # urban model. The freeway agent only prices additional upstream
+        # spillback caused by filling the ramp reservoir under this candidate.
+        urban_tts = 0.5 * blocked_to_urban * horizon_h
+        return float(ramp_tts), float(urban_tts)
+
+    def _candidate_freeway_tts_terms(
+        self,
+        agent: AgentSpec,
+        state: TrafficState,
+        ramp_metering: Mapping[str, float],
+        upper: Mapping[str, float],
+        forecast: list[DemandStep],
+        lane_profile: Mapping[str, list[float]],
+    ) -> tuple[float, float, float, float, float]:
+        """Approximate candidate-dependent freeway TTS from predicted merge rho."""
+        net = self.cfg.network
+        horizon_steps = forecast[: max(1, self.cfg.mpc.horizon_steps)]
+        horizon_h = self.cfg.simulation.T_c_h * max(1, len(horizon_steps))
+        all_rhos = list(state.freeway_density.get(agent.link, []))
+        if not all_rhos:
+            return 0.0, 0.0, 0.0, 0.0, 0.0
+        lanes_for_link = lane_profile.get(agent.link, [float(net.freeway_lanes) for _ in all_rhos])
+
+        if not agent.ramps:
+            vehicle_tts = 0.0
+            density_excess_tts = 0.0
+            peak_density = 0.0
+            if 0 <= agent.segment_index < len(all_rhos):
+                indices = [agent.segment_index]
+            else:
+                indices = list(range(len(all_rhos)))
+            for idx in indices:
+                rho = all_rhos[idx]
+                lane = float(lanes_for_link[idx] if idx < len(lanes_for_link) else net.freeway_lanes)
+                vehicle_tts += max(0.0, rho) * net.freeway_segment_length_km * max(lane, 1.0e-9) * horizon_h
+                density_excess_tts += max(0.0, rho - net.rho_crit) * horizon_h
+                peak_density = max(peak_density, float(rho))
+            return float(vehicle_tts), float(density_excess_tts), float(peak_density), float(peak_density), 0.0
+
+        idx = agent.segment_index if 0 <= agent.segment_index < len(all_rhos) else len(all_rhos) // 2
+        rho = max(0.0, float(all_rhos[idx]))
+        speed_values = state.freeway_speed.get(agent.link, [])
+        speed = max(net.v_min, float(speed_values[idx] if idx < len(speed_values) else net.v_free))
+        lane = max(1.0e-9, float(lanes_for_link[idx] if idx < len(lanes_for_link) else net.freeway_lanes))
+        segment_veh_per_density = net.freeway_segment_length_km * lane
+        release = sum(
+            min(
+                max(0.0, float(ramp_metering.get(ramp, 0.0))),
+                max(0.0, float(upper.get(ramp, ramp_metering.get(ramp, 0.0)))),
+            )
+            for ramp in agent.ramps
+        )
+        flows = state.freeway_flow.get(agent.link, [])
+        upstream_flow = (
+            max(0.0, float(flows[idx - 1]))
+            if idx > 0 and idx - 1 < len(flows)
+            else max(0.0, float(horizon_steps[0].freeway_mainline.get(agent.link, 0.0)))
+        )
+        dt_h = self.cfg.simulation.T_c_h
+        vehicle_tts = 0.0
+        density_excess_tts = 0.0
+        peak_density = rho
+        for step in horizon_steps:
+            q_upstream = upstream_flow if idx > 0 else max(0.0, float(step.freeway_mainline.get(agent.link, 0.0)))
+            q_out = rho * speed * lane
+            rho_next = max(
+                0.0,
+                min(
+                    net.rho_max,
+                    rho + (q_upstream + release - q_out) * dt_h / max(segment_veh_per_density, 1.0e-9),
+                ),
+            )
+            vehicle_tts += 0.5 * (rho + rho_next) * segment_veh_per_density * dt_h
+            density_excess_tts += 0.5 * (
+                max(0.0, rho - net.rho_crit) + max(0.0, rho_next - net.rho_crit)
+            ) * dt_h
+            rho = rho_next
+            peak_density = max(peak_density, rho)
+        return (
+            float(vehicle_tts),
+            float(density_excess_tts),
+            float(rho),
+            float(peak_density),
+            float(release),
+        )
+
+    def _vsl_pressure_proposal(
+        self,
+        rhos: list[float],
+        previous_vsl: float,
+        lane_loss: float,
+        neighbor_pressure: float,
+        offramp_storage_veh: float,
+        offramp_capacity_veh: float,
+    ) -> float:
+        """Pressure rule은 최종 선택이 아니라 relaxed VSL 후보 중심으로만 사용한다."""
+        vsl_set = sorted(float(v) for v in self.cfg.freeway_follower.vsl_set)
+        density_ratio = (max(rhos) / max(self.cfg.network.rho_crit, 1.0e-9)) if rhos else 0.0
+        storage_ratio = offramp_storage_veh / max(offramp_capacity_veh, 1.0e-9)
+        pressure = max(0.0, density_ratio - 0.9) + 0.02 * neighbor_pressure + 0.5 * lane_loss + storage_ratio
+        target = max(vsl_set) - 25.0 * min(2.0, pressure)
+        return float(0.65 * target + 0.35 * previous_vsl)
 
     def _solve_freeway_agent(
         self,
@@ -555,6 +1544,7 @@ class DistributedCoordinator:
         total_capacity = max(sum(net.ramp_capacity_veh_h.values()), 1.0e-9)
         upper: Dict[str, float] = {}
         weights: Dict[str, float] = {}
+        receiving_limit: Dict[str, float] = {}
         min_receiving = 1.0
         for ramp in agent.ramps:
             merge_idx = agent.segment_index if agent.segment_index >= 0 else len(state.freeway_density[agent.link]) // 2
@@ -569,10 +1559,14 @@ class DistributedCoordinator:
             # w_r만 사용(zero-order hold). 물리 차량 이동은 plant에서 그대로 일어난다.
             urban_release = 0.0 if self._block_u_to_f(agent) else max(0.0, coupling.get(f"u_on_{ramp}", 0.0))
             available = state.ramp_queue.get(ramp, 0.0) / max(dt_h, 1.0e-9) + urban_release
+            receiving_limit[ramp] = min(
+                net.ramp_capacity_veh_h[ramp],
+                net.freeway_capacity_veh_h * receiving * neighbor_metering_factor,
+            )
             upper[ramp] = min(
                 net.ramp_capacity_veh_h[ramp],
                 available,
-                net.freeway_capacity_veh_h * receiving * neighbor_metering_factor,
+                receiving_limit[ramp],
             )
             weights[ramp] = state.ramp_queue.get(ramp, 0.0) + urban_release * self.cfg.simulation.T_c_h + 1.0
         if leader is not None:
@@ -581,11 +1575,8 @@ class DistributedCoordinator:
             # leaderless(spec 16.7): 전역 N_UF 목표 없이 agent가 local objective로 방출
             # 수준을 고른다 — 후보 분율을 1-구획 merge 밀도 예측으로 평가해 최소 비용 선택.
             target = self._leaderless_metering_target(agent, state, upper, demand)
-        ramp_metering = _project_to_target(target, upper, weights)
         all_rhos = state.freeway_density.get(agent.link, [])
         rhos = [all_rhos[agent.segment_index]] if 0 <= agent.segment_index < len(all_rhos) else all_rhos
-        max_density = max(rhos) if rhos else 0.0
-        density_ratio = max_density / max(net.rho_crit, 1.0e-9)
         lanes_for_link = lane_profile.get(agent.link, [net.freeway_lanes])
         lane_idx = agent.segment_index if 0 <= agent.segment_index < len(lanes_for_link) else len(lanes_for_link) - 1
         lane_loss = max(0.0, net.freeway_lanes - lanes_for_link[lane_idx])
@@ -611,37 +1602,189 @@ class DistributedCoordinator:
         offramp_forecast_by_ramp = self._forecast_offramp_arrivals_by_ramp(state, forecast, agent.link)
         offramp_forecast_veh = sum(offramp_forecast_by_ramp.values())
         prev_vsl = current.vsl.get(agent.link, max(self.cfg.freeway_follower.vsl_set))
-        desired, vsl_eval_count = self._search_agent_vsl(
-            agent,
-            rhos,
-            lane_loss + 0.05 * neighbor_pressure,
-            prev_vsl,
-            offramp_storage_veh,
-            offramp_forecast_veh,
-            offramp_capacity_veh,
-            ramp_metering,
-        )
         density_excess = sum(max(0.0, rho - net.rho_crit) for rho in rhos)
         # 잔차는 달성가능 목표(min(target, Σ물리상한)) 기준 — 수요 부족으로 덜 방출한 것을
         # "추적 실패"로 만들어 urban 쪽에 가짜 freeway 압력을 보내지 않게 한다.
-        metering_error = abs(sum(ramp_metering.values()) - min(target, sum(upper.values())))
-        objective = self._freeway_agent_objective(
+        vsl_proposal = self._vsl_pressure_proposal(
             rhos,
-            density_excess,
-            metering_error,
-            ramp_metering,
-            desired,
             prev_vsl,
-            offramp_forecast_veh,
+            lane_loss,
+            neighbor_pressure,
             offramp_storage_veh,
             offramp_capacity_veh,
         )
+        horizon_steps = forecast[: max(1, self.cfg.mpc.horizon_steps)]
+        horizon_h = self.cfg.simulation.T_c_h * max(1, len(horizon_steps))
+        ramp_arrivals_veh = ramp_arrivals_over_horizon(horizon_steps, self.cfg, tuple(agent.ramps))
+        spillback_min_release = self._onramp_spillback_min_release_rates(
+            state,
+            agent,
+            ramp_arrivals_veh,
+            horizon_h,
+        )
+        metering_candidates = self._metering_candidates(
+            agent,
+            upper,
+            weights,
+            target,
+            current,
+            spillback_min_release,
+        )
+        if self._green_vsl_only_ttt_mode():
+            metering_candidates = [self._no_metering_control(agent.ramps)] if agent.ramps else [{}]
+        vsl_candidates = self._vsl_candidates(prev_vsl, vsl_proposal)
+        target_feasible = min(target, sum(upper.values()))
+        ramp_metering: Dict[str, float] = {}
+        desired = float(prev_vsl)
+        objective = float("inf")
+        best_constraint_feasible = False
+        best_spillback_violation = float("inf")
+        metering_error = 0.0
+        best_ramp_queue_tts = 0.0
+        best_urban_queue_tts = 0.0
+        best_onramp_spillback_violation = 0.0
+        best_onramp_combined_terminal = 0.0
+        best_onramp_combined_capacity = 0.0
+        best_offramp_spillback_violation = 0.0
+        best_offramp_combined_terminal = 0.0
+        best_offramp_combined_capacity = 0.0
+        best_projected_freeway_tts = 0.0
+        best_projected_density_excess_tts = 0.0
+        best_projected_terminal_density = max(rhos) if rhos else 0.0
+        best_projected_peak_density = max(rhos) if rhos else 0.0
+        best_projected_release_flow = 0.0
+        joint_evals = 0
+        feasible_evals = 0
+        for ramp_candidate in metering_candidates:
+            candidate_metering_error = abs(sum(ramp_candidate.values()) - target_feasible)
+            (
+                candidate_freeway_tts,
+                candidate_density_excess_tts,
+                candidate_terminal_density,
+                candidate_peak_density,
+                candidate_release_flow,
+            ) = self._candidate_freeway_tts_terms(
+                agent,
+                state,
+                ramp_candidate,
+                upper,
+                horizon_steps,
+                lane_profile,
+            )
+            ramp_queue_tts, urban_queue_tts = self._agent_queue_tts_terms(
+                agent,
+                state,
+                ramp_candidate,
+                coupling,
+                horizon_h,
+            )
+            onramp_assessments = [
+                assess_onramp_spillback(
+                    state,
+                    self.cfg,
+                    ramp,
+                    ramp_arrivals_veh.get(ramp, 0.0),
+                    min(
+                        max(0.0, ramp_candidate.get(ramp, 0.0)),
+                        max(0.0, upper.get(ramp, ramp_candidate.get(ramp, 0.0))),
+                    )
+                    * horizon_h,
+                )
+                for ramp in agent.ramps
+            ]
+            onramp_spillback_violation = sum(item.violation_veh for item in onramp_assessments)
+            onramp_combined_terminal = sum(item.terminal_veh for item in onramp_assessments)
+            onramp_combined_capacity = sum(item.capacity_veh for item in onramp_assessments)
+            metering_smooth = sum(
+                abs(ramp_candidate.get(r, 0.0) - current.ramp_metering.get(r, ramp_candidate.get(r, 0.0)))
+                for r in agent.ramps
+            )
+            receiving_overrequest = sum(
+                max(0.0, ramp_candidate.get(r, 0.0) - receiving_limit.get(r, 0.0))
+                for r in agent.ramps
+            )
+            for vsl_candidate in vsl_candidates:
+                vsl_fraction = self._offramp_release_fraction(vsl_candidate)
+                offramp_assessments = [
+                    assess_offramp_spillback(
+                        state,
+                        self.cfg,
+                        off_ramp,
+                        max(0.0, vehicles) * vsl_fraction,
+                    )
+                    for off_ramp, vehicles in offramp_forecast_by_ramp.items()
+                ]
+                offramp_spillback_violation = sum(item.violation_veh for item in offramp_assessments)
+                offramp_combined_terminal = sum(item.terminal_veh for item in offramp_assessments)
+                offramp_combined_capacity = sum(item.capacity_veh for item in offramp_assessments)
+                spillback_violation = onramp_spillback_violation + offramp_spillback_violation
+                constraint_feasible = spillback_violation <= 1.0e-9
+                if constraint_feasible:
+                    feasible_evals += 1
+                cost = self._freeway_agent_objective(
+                    rhos,
+                    density_excess,
+                    candidate_metering_error,
+                    ramp_candidate,
+                    vsl_candidate,
+                    prev_vsl,
+                    offramp_forecast_veh,
+                    offramp_storage_veh,
+                    offramp_capacity_veh,
+                    ramp_queue_tts=ramp_queue_tts,
+                    onramp_urban_queue_tts=urban_queue_tts,
+                    horizon_h=horizon_h,
+                    freeway_vehicle_tts=candidate_freeway_tts,
+                    density_excess_tts=candidate_density_excess_tts,
+                )
+                cost += self.cfg.freeway_follower.metering_smoothness_weight * metering_smooth
+                cost += self.cfg.freeway_follower.ramp_queue_penalty * receiving_overrequest * horizon_h
+                cost += self.cfg.freeway_follower.ramp_queue_penalty * spillback_violation * horizon_h
+                joint_evals += 1
+                should_select = (
+                    (constraint_feasible and not best_constraint_feasible)
+                    or (
+                        constraint_feasible
+                        and best_constraint_feasible
+                        and cost < objective - 1.0e-12
+                    )
+                    or (
+                        not constraint_feasible
+                        and not best_constraint_feasible
+                        and (
+                            spillback_violation < best_spillback_violation - 1.0e-9
+                            or (
+                                abs(spillback_violation - best_spillback_violation) <= 1.0e-9
+                                and cost < objective - 1.0e-12
+                            )
+                        )
+                    )
+                )
+                if should_select:
+                    objective = float(cost)
+                    best_constraint_feasible = bool(constraint_feasible)
+                    best_spillback_violation = float(spillback_violation)
+                    desired = float(vsl_candidate)
+                    ramp_metering = dict(ramp_candidate)
+                    metering_error = float(candidate_metering_error)
+                    best_ramp_queue_tts = float(ramp_queue_tts)
+                    best_urban_queue_tts = float(urban_queue_tts)
+                    best_onramp_spillback_violation = float(onramp_spillback_violation)
+                    best_onramp_combined_terminal = float(onramp_combined_terminal)
+                    best_onramp_combined_capacity = float(onramp_combined_capacity)
+                    best_offramp_spillback_violation = float(offramp_spillback_violation)
+                    best_offramp_combined_terminal = float(offramp_combined_terminal)
+                    best_offramp_combined_capacity = float(offramp_combined_capacity)
+                    best_projected_freeway_tts = float(candidate_freeway_tts)
+                    best_projected_density_excess_tts = float(candidate_density_excess_tts)
+                    best_projected_terminal_density = float(candidate_terminal_density)
+                    best_projected_peak_density = float(candidate_peak_density)
+                    best_projected_release_flow = float(candidate_release_flow)
         vsl_fraction = self._offramp_release_fraction(desired)
         selected_offramp_arrival = {
             off_ramp: float(vehicles * vsl_fraction)
             for off_ramp, vehicles in offramp_forecast_by_ramp.items()
         }
-        horizon_h = self.cfg.simulation.T_c_h * max(1, len(forecast[: max(1, self.cfg.mpc.horizon_steps)]))
         diagnostics = {
             f"agent_{agent.id}_density_excess": float(density_excess),
             f"agent_{agent.id}_metering_error": float(metering_error),
@@ -651,7 +1794,28 @@ class DistributedCoordinator:
             f"agent_{agent.id}_freeway_neighbor_metering_factor": float(neighbor_metering_factor),
             f"agent_{agent.id}_offramp_storage_veh": float(offramp_storage_veh),
             f"agent_{agent.id}_offramp_forecast_veh": float(offramp_forecast_veh),
-            f"agent_{agent.id}_vsl_candidates": float(vsl_eval_count),
+            f"agent_{agent.id}_metering_candidates": float(len(metering_candidates)),
+            f"agent_{agent.id}_vsl_candidates": float(len(vsl_candidates)),
+            f"agent_{agent.id}_joint_candidate_evaluations": float(joint_evals),
+            f"agent_{agent.id}_spillback_feasible_evaluations": float(feasible_evals),
+            f"agent_{agent.id}_spillback_constraint_feasible": float(best_constraint_feasible),
+            f"agent_{agent.id}_spillback_min_release_flow": float(sum(spillback_min_release.values())),
+            f"agent_{agent.id}_candidate_density_projection_active": 1.0,
+            f"agent_{agent.id}_projected_freeway_tts": float(best_projected_freeway_tts),
+            f"agent_{agent.id}_projected_density_excess_tts": float(best_projected_density_excess_tts),
+            f"agent_{agent.id}_projected_terminal_density": float(best_projected_terminal_density),
+            f"agent_{agent.id}_projected_peak_density": float(best_projected_peak_density),
+            f"agent_{agent.id}_projected_release_flow": float(best_projected_release_flow),
+            f"agent_{agent.id}_onramp_combined_capacity_veh": float(best_onramp_combined_capacity),
+            f"agent_{agent.id}_onramp_combined_terminal_veh": float(best_onramp_combined_terminal),
+            f"agent_{agent.id}_onramp_spillback_violation_veh": float(best_onramp_spillback_violation),
+            f"agent_{agent.id}_offramp_combined_capacity_veh": float(best_offramp_combined_capacity),
+            f"agent_{agent.id}_offramp_combined_terminal_veh": float(best_offramp_combined_terminal),
+            f"agent_{agent.id}_offramp_spillback_violation_veh": float(best_offramp_spillback_violation),
+            f"agent_{agent.id}_default_metering_guard_evaluated": 1.0,
+            f"agent_{agent.id}_green_vsl_only_no_metering": float(self._green_vsl_only_ttt_mode()),
+            f"agent_{agent.id}_ramp_queue_tts": float(best_ramp_queue_tts),
+            f"agent_{agent.id}_onramp_urban_queue_tts": float(best_urban_queue_tts),
             f"agent_{agent.id}_vsl_selected": float(desired),
         }
         for off_ramp, vehicles in selected_offramp_arrival.items():
@@ -668,6 +1832,12 @@ class DistributedCoordinator:
             "density_excess": float(density_excess),
             "min_ramp_receiving_factor": float(min_receiving),
             "ramp_projection_first_step_capacity": float(sum(upper.values())),
+            "spillback_constraint_feasible": float(best_constraint_feasible),
+            "onramp_spillback_violation_veh": float(best_onramp_spillback_violation),
+            "offramp_spillback_violation_veh": float(best_offramp_spillback_violation),
+            "total_spillback_violation_veh": float(
+                best_onramp_spillback_violation + best_offramp_spillback_violation
+            ),
         }
         for off_ramp, vehicles in selected_offramp_arrival.items():
             infeasibility[f"offramp_predicted_arrival_{off_ramp}_veh"] = float(vehicles)
@@ -738,7 +1908,7 @@ class DistributedCoordinator:
                 best_cost, best_target = cost, release
         return float(best_target)
 
-    def _vsl_candidates(self, previous_vsl: float) -> list[float]:
+    def _vsl_candidates(self, previous_vsl: float, proposal: Optional[float] = None) -> list[float]:
         """이 control interval에 freeway agent가 고를 수 있는 VSL 후보 집합[km/h].
 
         full 모드: vsl_set 중 직전 VSL ±max_vsl_step 안에 드는 discrete 값(보통 3~5개,
@@ -754,9 +1924,10 @@ class DistributedCoordinator:
             ]
             return feasible or vsl_set
         max_vsl = max(vsl_set)
-        step = max(1.0e-9, fc.max_vsl_step)
+        step = max(1.0e-9, self.cfg.mpc.relaxed_vsl_quantum_km_h)
         out: list[float] = []
-        for raw in (max_vsl, previous_vsl, previous_vsl - step, previous_vsl - 2.0 * step):
+        center = float(previous_vsl if proposal is None else proposal)
+        for raw in (max_vsl, previous_vsl, center, center - step, center + step):
             repaired = repair_vsl_value(float(raw), float(previous_vsl), self.cfg)
             if not any(abs(repaired.value - v) <= 1.0e-9 for v in out):
                 accumulate_repair_diagnostics(self._repair_diagnostics, vsl=repaired)
@@ -782,6 +1953,11 @@ class DistributedCoordinator:
         offramp_forecast_veh: float,
         offramp_storage_veh: float,
         offramp_capacity_veh: float = 0.0,
+        ramp_queue_tts: float = 0.0,
+        onramp_urban_queue_tts: float = 0.0,
+        horizon_h: float = 1.0,
+        freeway_vehicle_tts: Optional[float] = None,
+        density_excess_tts: Optional[float] = None,
     ) -> float:
         """freeway agent 자기 비용(horizon emergence). 본선 차량·density penalty·
         off-ramp 큐(현재 점유 + VSL이 통과시키는 예측 유입의 spillback 가중분)·본선 hold·
@@ -800,12 +1976,22 @@ class DistributedCoordinator:
         held_mainline = offramp_forecast_veh * (1.0 - fraction)
         # Δvsl smooth: 작은 off-ramp 압력에 과민하게 VSL을 흔들지 않도록 [km/h] 단위 그대로
         # 가격화한다. off-ramp 압력 이득이 smooth 비용을 넘어설 때만 VSL을 낮춘다(단조 emergence).
+        vehicle_tts = (
+            float(freeway_vehicle_tts)
+            if freeway_vehicle_tts is not None
+            else sum(max(0.0, rho) * net.freeway_segment_length_km * net.freeway_lanes for rho in rhos) * horizon_h
+        )
+        density_term = (
+            float(density_excess_tts)
+            if density_excess_tts is not None
+            else density_excess * horizon_h
+        )
         return float(
-            sum(max(0.0, rho) * net.freeway_segment_length_km * net.freeway_lanes for rho in rhos)
-            + fc.density_penalty * density_excess
-            + 0.01 * metering_error
-            + offramp_cost
-            + held_mainline
+            vehicle_tts
+            + ramp_queue_tts
+            + onramp_urban_queue_tts
+            + fc.density_penalty * density_term
+            + (offramp_cost + held_mainline) * horizon_h
             + fc.vsl_smoothness_weight * abs(vsl - previous_vsl)
         )
 
@@ -916,7 +2102,11 @@ class DistributedCoordinator:
             for key, value in result.green_times.items()
             if key.startswith(f"{agent.signal}_")
         }
-        offsets = {agent.signal: result.offsets.get(agent.signal, current.offsets.get(agent.signal, 0.0))}
+        offsets = (
+            {agent.signal: 0.0}
+            if self._green_vsl_only_ttt_mode()
+            else {agent.signal: result.offsets.get(agent.signal, current.offsets.get(agent.signal, 0.0))}
+        )
         # follower allocation에 없는 movement(internal 등)는 0이 아니라 "비제어"다 —
         # 0으로 머지하면 내부 그리드 이동이 동결돼 출구 보급이 끊긴다(그리드 라우팅 후 치명적).
         # leaderless(P-FO)는 allocation 자체가 비어 있으므로 아래 합산도 자연히 건너뛴다.
@@ -925,6 +2115,8 @@ class DistributedCoordinator:
             for movement in agent.movements
             if movement in result.inflow_outflow_allocation
         }
+        if self._green_vsl_only_ttt_mode():
+            allocation = {}
         for movement in agent.movements:
             if movement not in allocation:
                 continue
@@ -950,6 +2142,11 @@ class DistributedCoordinator:
             key: float(value)
             for key, value in result.metrics.items()
             if key.startswith("allocation_")
+        })
+        diagnostics.update({
+            key: float(value)
+            for key, value in result.metrics.items()
+            if key.startswith("urban_uncontrolled_node_")
         })
         return AgentSolve(
             agent_id=agent.id,
@@ -979,7 +2176,7 @@ class DistributedCoordinator:
             min_receiving = min(min_receiving, solve.infeasibility.get("min_ramp_receiving_factor", 1.0))
             for key, value in solve.infeasibility.items():
                 if key.startswith(("offramp_predicted_arrival_", "offramp_predicted_flow_")):
-                    coupling_payload[key] = coupling_payload.get(key, 0.0) + float(value)
+                    coupling_payload[key] = max(coupling_payload.get(key, 0.0), float(value))
                 elif key.startswith("offramp_storage_pressure_"):
                     coupling_payload[key] = max(coupling_payload.get(key, 0.0), float(value))
         infeasibility = {
@@ -1054,17 +2251,25 @@ class DistributedCoordinator:
             allocation = {}
         else:
             allocation.update(self._legacy_boundary_allocations(allocation))
+        ramp_out = _relax_map(current.ramp_metering, ramp_metering, alpha)
+        offset_out = _relax_map(current.offsets, offsets, alpha)
+        allocation_out = (
+            {} if leader is None
+            else _relax_map(current.inflow_outflow_allocation, allocation, alpha)
+        )
+        if self._green_vsl_only_ttt_mode():
+            ramp_out = self._no_metering_control()
+            offset_out = self._zero_offsets()
+            allocation_out = {}
+            diagnostics["wu_green_vsl_only_ttt_authority"] = 1.0
         return ControlAction(
             N_P_star=leader.N_P_star if leader is not None else 0.0,
             N_UF_star=leader.N_UF_star if leader is not None else 0.0,
-            ramp_metering=_relax_map(current.ramp_metering, ramp_metering, alpha),
+            ramp_metering=ramp_out,
             vsl=vsl,
             green_times=_relax_map(current.green_times, green_times, alpha),
-            offsets=_relax_map(current.offsets, offsets, alpha),
-            inflow_outflow_allocation=(
-                {} if leader is None
-                else _relax_map(current.inflow_outflow_allocation, allocation, alpha)
-            ),
+            offsets=offset_out,
+            inflow_outflow_allocation=allocation_out,
             infeasibility=infeasibility,
             diagnostics=diagnostics,
         )
@@ -1189,7 +2394,7 @@ class DistributedCoordinator:
                 phase = f"{signal}_{phase_id}"
                 arrival_flow = 0.0
                 for _up_signal, up_movement, beta in self._upstream_leaving_map.get(phase, []):
-                    arrival_flow += beta * self._signal_leaving_rate(up_movement, control)
+                    arrival_flow += beta * self._signal_leaving_rate(up_movement, control, state, demand)
                 values[f"arr_{phase}"] = float(max(0.0, arrival_flow))
         for off_ramp in net.off_ramps:
             link = net.off_ramp_from_freeway[off_ramp]
@@ -1311,13 +2516,22 @@ class DistributedCoordinator:
         control: ControlAction,
         horizon_h: float,
     ) -> float:
+        return float(sum(self._estimate_offramp_storage_departures_by_ramp(state, control, horizon_h).values()))
+
+    def _estimate_offramp_storage_departures_by_ramp(
+        self,
+        state: TrafficState,
+        control: ControlAction,
+        horizon_h: float,
+    ) -> Dict[str, float]:
         net = self.cfg.network
-        total = 0.0
+        out: Dict[str, float] = {}
         for off_ramp in net.off_ramps:
             storage_link = net.off_ramp_storage_link.get(off_ramp, "")
             capacity = net.urban_link_storage_veh.get(storage_link, 0.0)
             occupancy = max(0.0, capacity - state.urban_link_storage.get(storage_link, capacity))
             if occupancy <= 0.0:
+                out[off_ramp] = 0.0
                 continue
             requested = 0.0
             for movement in net.off_ramp_to_movement.get(off_ramp, []):
@@ -1332,8 +2546,8 @@ class DistributedCoordinator:
                     spec,
                 )
                 requested += min(beta * occupancy, max(0.0, cap_veh))
-            total += min(occupancy, requested)
-        return float(total)
+            out[off_ramp] = float(min(occupancy, requested))
+        return out
 
     def _estimate_ramp_release_veh(
         self,
@@ -1404,13 +2618,22 @@ class DistributedCoordinator:
         control: ControlAction,
         steps: list[DemandStep],
     ) -> float:
-        total = 0.0
+        return float(sum(self._estimate_offramp_inflow_by_ramp(state, control, steps).values()))
+
+    def _estimate_offramp_inflow_by_ramp(
+        self,
+        state: TrafficState,
+        control: ControlAction,
+        steps: list[DemandStep],
+    ) -> Dict[str, float]:
+        out: Dict[str, float] = {}
         for link in self.cfg.network.freeway_links:
             forecast_by_ramp = self._forecast_offramp_arrivals_by_ramp(state, steps, link)
             fallback_vsl = control.vsl.get(link, max(self.cfg.freeway_follower.vsl_set))
             fraction = self._offramp_release_fraction(fallback_vsl)
-            total += sum(max(0.0, vehicles) * fraction for vehicles in forecast_by_ramp.values())
-        return float(total)
+            for off_ramp, vehicles in forecast_by_ramp.items():
+                out[off_ramp] = out.get(off_ramp, 0.0) + max(0.0, vehicles) * fraction
+        return out
 
     def _response_tts_objective(
         self,
@@ -1420,13 +2643,7 @@ class DistributedCoordinator:
         residual: float,
         proxy_objective: float,
     ) -> tuple[float, Dict[str, float]]:
-        """Return the follower response objective in vehicle-hour compatible units.
-
-        This is intentionally a lightweight response-cost proxy, not a second closed-loop
-        plant rollout. It uses conservation over the MPC horizon: current vehicles plus
-        forecast arrivals minus estimated sink departures, with controlled queue/ramp
-        service determining terminal residuals.
-        """
+        """Return a lightweight follower response objective in vehicle-hour units."""
         ensure_urban_state(state, self.cfg)
         net = self.cfg.network
         demand, horizon_h, steps = self._response_horizon_demand(forecast)
@@ -1474,15 +2691,41 @@ class DistributedCoordinator:
             ramp_release_by_link,
             horizon_h,
         )
-        offramp_inflow_veh = self._estimate_offramp_inflow_veh(state, control, steps)
-        offramp_departure_veh = self._estimate_offramp_storage_departure_veh(state, control, horizon_h)
+        offramp_inflow_by_ramp = self._estimate_offramp_inflow_by_ramp(state, control, steps)
+        offramp_inflow_veh = sum(offramp_inflow_by_ramp.values())
+        offramp_departure_by_ramp = self._estimate_offramp_storage_departures_by_ramp(state, control, horizon_h)
+        offramp_departure_veh = sum(offramp_departure_by_ramp.values())
+        ramp_arrivals_veh = ramp_arrivals_over_horizon(steps, self.cfg, tuple(net.ramps))
+        onramp_spillback_violation = sum(
+            assess_onramp_spillback(
+                state,
+                self.cfg,
+                ramp,
+                ramp_arrivals_veh.get(ramp, 0.0),
+                ramp_release_veh.get(ramp, 0.0),
+            ).violation_veh
+            for ramp in net.ramps
+        )
+        offramp_spillback_violation = sum(
+            assess_offramp_spillback(
+                state,
+                self.cfg,
+                off_ramp,
+                offramp_inflow_by_ramp.get(off_ramp, 0.0),
+                offramp_departure_by_ramp.get(off_ramp, 0.0),
+            ).violation_veh
+            for off_ramp in net.off_ramps
+        )
+        total_spillback_violation = onramp_spillback_violation + offramp_spillback_violation
 
         urban_start = state.total_urban_vehicles(net)
+        uncontrolled_node_start = state.uncontrolled_node_vehicles(net)
         ramp_start = sum(max(0.0, value) for value in state.ramp_queue.values())
-        freeway_start = state.total_freeway_vehicles(net)
+        freeway_segment_start = state.freeway_segment_vehicles(net)
+        freeway_total_including_queues = state.total_freeway_vehicles(net)
         off_storage_start = state.off_ramp_storage_occupancy_veh(net)
         origin_start = sum(max(0.0, value) for value in state.mainline_origin_queue.values())
-        current_total = urban_start + ramp_start + freeway_start + off_storage_start + origin_start
+        current_total = urban_start + freeway_segment_start + ramp_start + off_storage_start + origin_start
 
         urban_terminal = max(
             0.0,
@@ -1492,7 +2735,7 @@ class DistributedCoordinator:
         ramp_terminal = max(0.0, ramp_start + onramp_green_total - ramp_release_total)
         freeway_terminal = max(
             0.0,
-            freeway_start + freeway_mainline_arrivals_veh + ramp_release_total
+            freeway_segment_start + freeway_mainline_arrivals_veh + ramp_release_total
             - mainline_exit_veh - offramp_inflow_veh,
         )
         off_storage_terminal = max(0.0, off_storage_start + offramp_inflow_veh - offramp_departure_veh)
@@ -1510,13 +2753,32 @@ class DistributedCoordinator:
         objective = 0.5 * (current_total + terminal_total) * horizon_h
         objective += self.cfg.freeway_follower.density_penalty * density_excess_veh * horizon_h
         objective += residual_penalty
+        spillback_penalty = self.cfg.freeway_follower.ramp_queue_penalty * total_spillback_violation * horizon_h
+        objective += spillback_penalty
 
         diagnostics = {
             "distributed_response_objective_tts": float(objective),
+            "distributed_response_rollout_active": 0.0,
+            "distributed_response_rollout_ttt": 0.0,
+            "distributed_response_rollout_freeway_ttt": 0.0,
+            "distributed_response_rollout_urban_ttt": 0.0,
             "distributed_response_proxy_objective": float(proxy_objective),
             "distributed_response_horizon_h": float(horizon_h),
             "distributed_response_current_vehicles": float(current_total),
+            "distributed_response_uncontrolled_node_urban_vehicles": float(uncontrolled_node_start),
+            "distributed_response_freeway_segment_vehicles": float(freeway_segment_start),
+            "distributed_response_freeway_total_vehicles_including_queues": float(
+                freeway_total_including_queues
+            ),
+            "distributed_response_ramp_queue_start_veh": float(ramp_start),
+            "distributed_response_origin_queue_start_veh": float(origin_start),
             "distributed_response_terminal_proxy_vehicles": float(terminal_total),
+            "distributed_response_terminal_rollout_vehicles": 0.0,
+            "distributed_response_terminal_urban_vehicles": float(urban_terminal),
+            "distributed_response_terminal_ramp_queue_veh": float(ramp_terminal),
+            "distributed_response_terminal_freeway_vehicles": float(freeway_terminal),
+            "distributed_response_terminal_offramp_storage_veh": float(off_storage_terminal),
+            "distributed_response_terminal_origin_queue_veh": float(origin_terminal),
             "distributed_response_urban_service_veh": float(urban_service_veh + onramp_green_total),
             "distributed_response_boundary_out_sink_veh": float(boundary_out_sink_veh),
             "distributed_response_onramp_green_veh": float(onramp_green_total),
@@ -1526,7 +2788,21 @@ class DistributedCoordinator:
             "distributed_response_offramp_departure_veh": float(offramp_departure_veh),
             "distributed_response_arrivals_veh": float(urban_arrivals_veh + freeway_mainline_arrivals_veh),
             "distributed_response_residual_penalty": float(residual_penalty),
+            "distributed_response_residual": float(residual if np.isfinite(residual) else 0.0),
             "distributed_response_density_excess_veh": float(density_excess_veh),
+            "distributed_response_spillback_penalty": float(spillback_penalty),
+            "distributed_response_onramp_spillback_violation_veh": float(onramp_spillback_violation),
+            "distributed_response_offramp_spillback_violation_veh": float(offramp_spillback_violation),
+            "distributed_response_total_spillback_violation_veh": float(total_spillback_violation),
+            "distributed_response_spillback_constraint_feasible": float(total_spillback_violation <= 1.0e-9),
+            "distributed_response_onramp_green_shortfall_veh": 0.0,
+            "distributed_response_ramp_release_shortfall_veh": 0.0,
+            "distributed_response_ramp_queue_overflow_count": float(
+                sum(1 for value in state.ramp_queue.values() if value > net.ramp_queue_max_veh)
+            ),
+            "distributed_response_movement_queue_projection_veh": float(
+                sum(max(0.0, value) for value in state.urban_movement_queue.values())
+            ),
             "distributed_response_ttt_compatible": 1.0,
         }
         return float(objective), diagnostics
@@ -1547,6 +2823,7 @@ class DistributedCoordinator:
             "distributed_iterations": float(iteration),
             "nash_mutual_response_active": 1.0,
             "nash_urban_used_freeway_response": 1.0,
+            "wu_green_vsl_only_ttt_authority": float(self._green_vsl_only_ttt_mode()),
         }
         coupling_flags = self._coupling_active_flags()
         out.update(coupling_flags)

@@ -168,7 +168,11 @@ freeway_offramp_capacity_drop:
   b: 2.0
 mpc:
   horizon_steps: 3
-  leader_candidate_count: 15
+  leader_candidate_count: 49
+  leader_refinement_candidate_count: 25
+  leader_global_refresh_sec: 1800.0
+  leader_local_np_radius_veh: 40.0
+  leader_local_nuf_radius_veh_h: 1500.0
   follower_solver_mode: two_block
   max_nash_iter: 10
   nash_obj_tol: 0.001
@@ -184,12 +188,26 @@ mpc:
   relaxed_vsl_quantum_km_h: 10.0
   relaxed_rounding_mode: floor
   relaxed_wu_vsl_include_neutral: true
+  grid_global_refresh_sec: 1800.0
+  grid_parallel_backend: thread
+  grid_parallel_max_workers: 8
+  grid_parallel_min_items: 2
+  grid_parallel_chunk_size: 8
+  grid_reuse_process_pool: true
+  stackelberg_prefilter_top_k: 4
+  stackelberg_prefilter_local_top_k: 4
+  stackelberg_fallback_full_refresh_sec: 1800.0
+  stackelberg_fallback_use_cached_pfo: true
+  stackelberg_leader_parallel_backend: thread
+  stackelberg_leader_parallel_max_workers: 4
+  stackelberg_inner_backend_when_outer_process: thread
+  stackelberg_reuse_process_pool: true
 leader:
   objective_mode: follower_ttt
   w_P: 1.0
   w_F: 1.0
   w_L: 0.05
-  # Step D: boundary_in queue penalty는 진단으로만 보고하고 leader_total_objective에는 더하지 않는다.
+  # boundary_in queue는 최종 Total TTT에 포함되므로 leader_total_objective에도 TTS 항으로 더한다.
   w_boundary_in: 1.0
   N_P_star_range:
   - 0.0

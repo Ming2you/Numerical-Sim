@@ -48,7 +48,7 @@ class _ControllerAdapter:
         self.controller_id = controller_id
         self.previous: Optional[ControlAction] = None
         if controller_id == "WU-CD-F":
-            self._impl = WuDistributedController(cfg, leader_enabled=False)
+            self._impl = DistributedCoordinator(cfg, ablation="WU_GREEN_VSL_ONLY_TTT")
         elif controller_id == "WU-MATCHED-STACKELBERG":
             self._impl = WuDistributedController(cfg, leader_enabled=True)
         elif controller_id == "WU-CC-F":
@@ -67,7 +67,7 @@ class _ControllerAdapter:
     def decide(self, state, forecast) -> tuple[ControlAction, Dict[str, float]]:
         start = time.perf_counter()
         diag: Dict[str, float] = {}
-        if self.controller_id in {"WU-CD-F", "WU-MATCHED-STACKELBERG"}:
+        if self.controller_id == "WU-MATCHED-STACKELBERG":
             info = self._impl.decide_with_info(state, forecast, self.previous)
             control = info.control
             diag = {
@@ -86,13 +86,14 @@ class _ControllerAdapter:
                 "solver_converged": float(info.converged),
                 "leader_candidate_count": 0.0,
             }
-        elif self.controller_id == "PROPOSED-FOLLOWERS-ONLY":
+        elif self.controller_id in {"WU-CD-F", "PROPOSED-FOLLOWERS-ONLY"}:
             # leaderless distributed: leader=None — 숨은 전역 목표 없음(spec 16.7).
             nash = self._impl.solve(state.copy(), None, forecast, self.previous)
             control = nash.control
             n_agents = len(self._impl.urban_agents) + len(self._impl.freeway_agents)
+            grid_evals = float(control.diagnostics.get("distributed_grid_total_candidates", 0.0))
             diag = {
-                "solver_evaluations": float(nash.iterations * n_agents),
+                "solver_evaluations": float(nash.iterations * n_agents) + grid_evals,
                 "solver_converged": float(nash.converged),
                 "coordination_iterations": float(nash.iterations),
                 "coupling_residual": float(nash.residual_control),
@@ -106,17 +107,20 @@ class _ControllerAdapter:
                 if hasattr(self._impl.nash_solver, "urban_agents") else 1
             )
             candidates = float(result.metadata.get("leader_candidate_count", 0.0))
+            evaluated_candidates = float(result.metadata.get("leader_candidate_full_evaluated_count", candidates))
             iters = float(result.control.diagnostics.get("nash_iterations", 0.0))
+            grid_evals = float(result.control.diagnostics.get("distributed_grid_total_candidates", 0.0))
             rollout_evals = (
                 self.cfg.mpc.horizon_steps
                 if float(result.metadata.get("leader_rollout_prediction_used", 0.0)) > 0.5
                 else 0
             )
             diag = {
-                "solver_evaluations": candidates * (iters * n_agents + rollout_evals),
+                "solver_evaluations": evaluated_candidates * (iters * n_agents + rollout_evals + grid_evals),
                 "solver_converged": float(result.control.diagnostics.get("nash_converged", 0.0)),
                 "coordination_iterations": iters,
                 "leader_candidate_count": candidates,
+                "leader_candidate_full_evaluated_count": evaluated_candidates,
                 "leader_objective": float(result.leader_objective),
             }
             for key, value in result.metadata.items():
@@ -130,6 +134,120 @@ class _ControllerAdapter:
             "vsl_quantization_residual_km_h": float(control.diagnostics.get("vsl_quantization_residual_km_h", 0.0)),
             "green_repair_count": float(control.diagnostics.get("green_repair_count", 0.0)),
             "vsl_repair_count": float(control.diagnostics.get("vsl_repair_count", 0.0)),
+            "wu_green_vsl_only_ttt_authority": float(
+                control.diagnostics.get("wu_green_vsl_only_ttt_authority", 0.0)
+            ),
+            "distributed_previous_guard_evaluated": float(
+                control.diagnostics.get("distributed_previous_guard_evaluated", 0.0)
+            ),
+            "distributed_no_control_guard_evaluated": float(
+                control.diagnostics.get("distributed_no_control_guard_evaluated", 0.0)
+            ),
+            "distributed_guard_selected": float(
+                control.diagnostics.get("distributed_guard_selected", 0.0)
+            ),
+            "distributed_guard_selected_no_control": float(
+                control.diagnostics.get("distributed_guard_selected_no_control", 0.0)
+            ),
+            "distributed_grid_search_active": float(
+                control.diagnostics.get("distributed_grid_search_active", 0.0)
+            ),
+            "distributed_grid_total_candidates": float(
+                control.diagnostics.get("distributed_grid_total_candidates", 0.0)
+            ),
+            "distributed_grid_full_search_active": float(
+                control.diagnostics.get("distributed_grid_full_search_active", 0.0)
+            ),
+            "distributed_grid_leader_conditioned": float(
+                control.diagnostics.get("distributed_grid_leader_conditioned", 0.0)
+            ),
+            "distributed_grid_leader_metering_sum_error_veh_h": float(
+                control.diagnostics.get("distributed_grid_leader_metering_sum_error_veh_h", 0.0)
+            ),
+            "distributed_grid_sensitivity_probe_candidates": float(
+                control.diagnostics.get("distributed_grid_sensitivity_probe_candidates", 0.0)
+            ),
+            "distributed_grid_sensitivity_direction_candidates": float(
+                control.diagnostics.get("distributed_grid_sensitivity_direction_candidates", 0.0)
+            ),
+            "distributed_grid_early_terminated_candidates": float(
+                control.diagnostics.get("distributed_grid_early_terminated_candidates", 0.0)
+            ),
+            "distributed_grid_precheck_filtered_candidates": float(
+                control.diagnostics.get("distributed_grid_precheck_filtered_candidates", 0.0)
+            ),
+            "distributed_grid_precheck_evaluated_candidates": float(
+                control.diagnostics.get("distributed_grid_precheck_evaluated_candidates", 0.0)
+            ),
+            "distributed_grid_global_refresh": float(
+                control.diagnostics.get("distributed_grid_global_refresh", 0.0)
+            ),
+            "distributed_grid_scope_global": float(
+                control.diagnostics.get("distributed_grid_scope_global", 0.0)
+            ),
+            "distributed_grid_parallel_backend_serial": float(
+                control.diagnostics.get("distributed_grid_parallel_backend_serial", 0.0)
+            ),
+            "distributed_grid_parallel_backend_thread": float(
+                control.diagnostics.get("distributed_grid_parallel_backend_thread", 0.0)
+            ),
+            "distributed_grid_parallel_backend_process": float(
+                control.diagnostics.get("distributed_grid_parallel_backend_process", 0.0)
+            ),
+            "distributed_grid_parallel_backend_fallback": float(
+                control.diagnostics.get("distributed_grid_parallel_backend_fallback", 0.0)
+            ),
+            "distributed_grid_parallel_workers": float(
+                control.diagnostics.get("distributed_grid_parallel_workers", 0.0)
+            ),
+            "distributed_grid_parallel_chunks": float(
+                control.diagnostics.get("distributed_grid_parallel_chunks", 0.0)
+            ),
+            "centralized_grid_search_active": float(
+                control.diagnostics.get("centralized_grid_search_active", 0.0)
+            ),
+            "centralized_grid_total_candidates": float(
+                control.diagnostics.get("centralized_grid_total_candidates", 0.0)
+            ),
+            "centralized_grid_sensitivity_probe_candidates": float(
+                control.diagnostics.get("centralized_grid_sensitivity_probe_candidates", 0.0)
+            ),
+            "centralized_grid_sensitivity_direction_candidates": float(
+                control.diagnostics.get("centralized_grid_sensitivity_direction_candidates", 0.0)
+            ),
+            "centralized_grid_early_terminated_candidates": float(
+                control.diagnostics.get("centralized_grid_early_terminated_candidates", 0.0)
+            ),
+            "centralized_grid_precheck_filtered_candidates": float(
+                control.diagnostics.get("centralized_grid_precheck_filtered_candidates", 0.0)
+            ),
+            "centralized_grid_precheck_evaluated_candidates": float(
+                control.diagnostics.get("centralized_grid_precheck_evaluated_candidates", 0.0)
+            ),
+            "centralized_grid_global_refresh": float(
+                control.diagnostics.get("centralized_grid_global_refresh", 0.0)
+            ),
+            "centralized_grid_scope_global": float(
+                control.diagnostics.get("centralized_grid_scope_global", 0.0)
+            ),
+            "centralized_grid_parallel_backend_serial": float(
+                control.diagnostics.get("centralized_grid_parallel_backend_serial", 0.0)
+            ),
+            "centralized_grid_parallel_backend_thread": float(
+                control.diagnostics.get("centralized_grid_parallel_backend_thread", 0.0)
+            ),
+            "centralized_grid_parallel_backend_process": float(
+                control.diagnostics.get("centralized_grid_parallel_backend_process", 0.0)
+            ),
+            "centralized_grid_parallel_backend_fallback": float(
+                control.diagnostics.get("centralized_grid_parallel_backend_fallback", 0.0)
+            ),
+            "centralized_grid_parallel_workers": float(
+                control.diagnostics.get("centralized_grid_parallel_workers", 0.0)
+            ),
+            "centralized_grid_parallel_chunks": float(
+                control.diagnostics.get("centralized_grid_parallel_chunks", 0.0)
+            ),
         })
         diag["computation_time_sec"] = time.perf_counter() - start
         self.previous = control.copy()
@@ -328,6 +446,19 @@ def main(argv: Optional[List[str]] = None) -> None:
     parser.add_argument("--relaxed-rounding-mode", choices=["floor", "nearest"], default=None)
     parser.add_argument("--relaxed-green-quantum-sec", type=float, default=None)
     parser.add_argument("--relaxed-vsl-quantum-km-h", type=float, default=None)
+    parser.add_argument("--grid-parallel-backend", choices=["serial", "thread", "process"], default=None)
+    parser.add_argument("--grid-parallel-max-workers", type=int, default=None)
+    parser.add_argument("--grid-parallel-chunk-size", type=int, default=None)
+    parser.add_argument("--grid-global-refresh-sec", type=float, default=None)
+    parser.add_argument("--disable-grid-process-pool-reuse", action="store_true")
+    parser.add_argument("--stackelberg-prefilter-top-k", type=int, default=None)
+    parser.add_argument("--stackelberg-prefilter-local-top-k", type=int, default=None)
+    parser.add_argument("--stackelberg-fallback-full-refresh-sec", type=float, default=None)
+    parser.add_argument("--disable-stackelberg-pfo-fallback-cache", action="store_true")
+    parser.add_argument("--disable-stackelberg-process-pool-reuse", action="store_true")
+    parser.add_argument("--stackelberg-leader-parallel-backend", choices=["serial", "thread", "process"], default=None)
+    parser.add_argument("--stackelberg-leader-parallel-max-workers", type=int, default=None)
+    parser.add_argument("--stackelberg-inner-backend-when-outer-process", choices=["serial", "thread"], default=None)
     args = parser.parse_args(argv)
 
     overrides: Dict[str, Any] = {}
@@ -343,6 +474,40 @@ def main(argv: Optional[List[str]] = None) -> None:
         overrides.setdefault("mpc", {})["relaxed_green_quantum_sec"] = args.relaxed_green_quantum_sec
     if args.relaxed_vsl_quantum_km_h is not None:
         overrides.setdefault("mpc", {})["relaxed_vsl_quantum_km_h"] = args.relaxed_vsl_quantum_km_h
+    if args.grid_parallel_backend is not None:
+        overrides.setdefault("mpc", {})["grid_parallel_backend"] = args.grid_parallel_backend
+    if args.grid_parallel_max_workers is not None:
+        overrides.setdefault("mpc", {})["grid_parallel_max_workers"] = args.grid_parallel_max_workers
+    if args.grid_parallel_chunk_size is not None:
+        overrides.setdefault("mpc", {})["grid_parallel_chunk_size"] = args.grid_parallel_chunk_size
+    if args.grid_global_refresh_sec is not None:
+        overrides.setdefault("mpc", {})["grid_global_refresh_sec"] = args.grid_global_refresh_sec
+    if args.disable_grid_process_pool_reuse:
+        overrides.setdefault("mpc", {})["grid_reuse_process_pool"] = False
+    if args.stackelberg_prefilter_top_k is not None:
+        overrides.setdefault("mpc", {})["stackelberg_prefilter_top_k"] = args.stackelberg_prefilter_top_k
+    if args.stackelberg_prefilter_local_top_k is not None:
+        overrides.setdefault("mpc", {})["stackelberg_prefilter_local_top_k"] = args.stackelberg_prefilter_local_top_k
+    if args.stackelberg_fallback_full_refresh_sec is not None:
+        overrides.setdefault("mpc", {})["stackelberg_fallback_full_refresh_sec"] = (
+            args.stackelberg_fallback_full_refresh_sec
+        )
+    if args.disable_stackelberg_pfo_fallback_cache:
+        overrides.setdefault("mpc", {})["stackelberg_fallback_use_cached_pfo"] = False
+    if args.disable_stackelberg_process_pool_reuse:
+        overrides.setdefault("mpc", {})["stackelberg_reuse_process_pool"] = False
+    if args.stackelberg_leader_parallel_backend is not None:
+        overrides.setdefault("mpc", {})["stackelberg_leader_parallel_backend"] = (
+            args.stackelberg_leader_parallel_backend
+        )
+    if args.stackelberg_leader_parallel_max_workers is not None:
+        overrides.setdefault("mpc", {})["stackelberg_leader_parallel_max_workers"] = (
+            args.stackelberg_leader_parallel_max_workers
+        )
+    if args.stackelberg_inner_backend_when_outer_process is not None:
+        overrides.setdefault("mpc", {})["stackelberg_inner_backend_when_outer_process"] = (
+            args.stackelberg_inner_backend_when_outer_process
+        )
     base_cfg = ExperimentConfig.from_file(args.config, overrides)
     scenarios = load_scenarios(args.scenarios_config)
     if args.scenario == "all":

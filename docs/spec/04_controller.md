@@ -34,6 +34,7 @@ Implement the leader objective as configurable. The default base term is the fol
 
 ```text
 J_L = TTT_freeway + TTT_urban
+      + boundary_in_queue_TTS
       + target_exceedance_penalties
       + smoothness_penalty
 ```
@@ -93,7 +94,11 @@ off-ramp storage flow, density exceedance, and terminal residual queues to
 produce a vehicle-hour response objective. Local agent proxy costs remain as
 diagnostics only and must not be used as the leader's follower-TTT base.
 
-`boundary_in_queue_penalty` and `non_convergence_penalty` may be reported as diagnostics, but they are not included in `leader_total_objective`.
+`boundary_in_queue_penalty` is included in `leader_total_objective` because
+closed-loop Total TTT counts boundary-in vehicles. In `follower_ttt` mode it
+must be converted to a vehicle-hour term with `T_c_h`, matching the scale of
+the follower-response TTT/TTS base. `non_convergence_penalty` may still be
+reported as a diagnostic without being included in `leader_total_objective`.
 
 ### 4.3 Freeway follower
 

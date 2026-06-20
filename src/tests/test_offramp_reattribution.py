@@ -165,9 +165,9 @@ class OffRampReattributionTests(unittest.TestCase):
         # 램프 storage가 차 있으면 freeway agent 자기 비용이 더 크다(metering 유인의 원천).
         self.assertGreater(obj_full, obj_empty)
 
-    # ---------- G3: leader boundary_in 큐 진단 ----------
-    def test_leader_boundary_in_diagnostic_scales_without_total_objective_cost(self):
-        """boundary_in 큐 비용 항은 진단으로만 커지고 leader_total_objective에는 들어가지 않는다."""
+    # ---------- G3: leader boundary_in 큐 비용 ----------
+    def test_leader_boundary_in_cost_enters_total_objective(self):
+        """boundary_in 큐 비용 항은 leader_total_objective에 들어간다."""
         cfg = ExperimentConfig.from_file(
             "src/config/default.yaml",
             {
@@ -199,11 +199,12 @@ class OffRampReattributionTests(unittest.TestCase):
             [state_high], action, None, follower_objective=50.0, nash_converged=True
         )
 
-        # w_boundary_in=2.0 × 100veh = 200 만큼 boundary_in 비용 증가.
+        # follower_ttt 모드에서는 T_c_h를 곱해 veh*h 비용으로 반영한다.
         self.assertAlmostEqual(terms_low["leader_boundary_in_queue_penalty"], 0.0)
-        self.assertAlmostEqual(terms_high["leader_boundary_in_queue_penalty"], 200.0)
+        expected_high = 2.0 * 100.0 * cfg.simulation.T_c_h
+        self.assertAlmostEqual(terms_high["leader_boundary_in_queue_penalty"], expected_high)
         self.assertAlmostEqual(terms_low["leader_total_objective"], 50.0)
-        self.assertAlmostEqual(terms_high["leader_total_objective"], 50.0)
+        self.assertAlmostEqual(terms_high["leader_total_objective"], 50.0 + expected_high)
 
 
 if __name__ == "__main__":

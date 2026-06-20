@@ -199,6 +199,28 @@ class FreewayFollower:
             active = active & ~capped
         return np.minimum(release, upper)
 
+    def _append_ramp_candidate(
+        self,
+        candidates: list[Dict[str, float]],
+        seen: set[tuple[float, ...]],
+        release: np.ndarray,
+        upper: np.ndarray,
+        clip_to_upper: bool = True,
+    ) -> bool:
+        """Spec 18.6: metering guard/proposal 후보를 feasibility projection 뒤 중복 없이 추가한다."""
+        net = self.cfg.network
+        limit = upper if clip_to_upper else np.asarray(
+            [net.ramp_capacity_veh_h[r] for r in net.ramps],
+            dtype=float,
+        )
+        clipped = np.minimum(np.maximum(release, 0.0), limit)
+        key = tuple(round(float(v), 6) for v in clipped)
+        if key in seen:
+            return False
+        seen.add(key)
+        candidates.append({r: float(clipped[i]) for i, r in enumerate(net.ramps)})
+        return True
+
     def _ramp_candidates(
         self,
         state: TrafficState,
@@ -234,15 +256,26 @@ class FreewayFollower:
 
         candidates: list[Dict[str, float]] = []
         seen: set[tuple[float, ...]] = set()
+        # Spec 18.6/18.7: no-metering과 previous-control guard는 solver budget보다
+        # 우선한다. active metering이 local TTS를 악화시키면 이 후보가 선택될 수 있다.
+        no_metering = np.asarray([net.ramp_capacity_veh_h[r] for r in net.ramps], dtype=float)
+        self._append_ramp_candidate(candidates, seen, no_metering, upper, clip_to_upper=False)
+        if previous_control is not None:
+            previous_release = np.asarray([
+                previous_control.ramp_metering.get(r, net.ramp_capacity_veh_h[r])
+                for i, r in enumerate(net.ramps)
+            ], dtype=float)
+            self._append_ramp_candidate(candidates, seen, previous_release, upper, clip_to_upper=False)
+
+        heuristic_limit = max(1, int(self.cfg.freeway_follower.horizon_ramp_candidate_limit))
         for weights in weight_sets:
             release = self._allocate_to_target(projected_total, upper, weights)
-            key = tuple(round(float(v), 6) for v in release)
-            if key in seen:
-                continue
-            seen.add(key)
-            candidates.append({r: float(release[i]) for i, r in enumerate(net.ramps)})
-            if len(candidates) >= max(1, int(self.cfg.freeway_follower.horizon_ramp_candidate_limit)):
+            self._append_ramp_candidate(candidates, seen, release, upper)
+            if len(candidates) >= heuristic_limit + 2:
                 break
+        for factor in (0.85, 1.15):
+            release = self._allocate_to_target(projected_total * factor, upper, future_queue_pressure + 1.0)
+            self._append_ramp_candidate(candidates, seen, release, upper)
 
         if not candidates:
             candidates.append({r: 0.0 for r in net.ramps})
@@ -275,24 +308,41 @@ class FreewayFollower:
             baseline[link] = float(min(prev_vec) if prev_vec else max(vsl_set))
             candidates: list[Dict[str, float]] = [baseline]
             seen = {tuple(round(prev_vec[i], 6) for i in range(n_segments))}
+            neutral_vec: list[float] = []
+            for prev_i in prev_vec:
+                if self.cfg.mpc.relaxed_quantized_controls:
+                    repaired = repair_vsl_value(max(vsl_set), prev_i, self.cfg)
+                    accumulate_repair_diagnostics(self._repair_diagnostics, vsl=repaired)
+                    neutral_vec.append(repaired.value)
+                else:
+                    feasible = [v for v in vsl_set if abs(v - prev_i) <= fc.max_vsl_step + 1.0e-9]
+                    neutral_vec.append(float(max(feasible or vsl_set)))
+            neutral_key = tuple(round(v, 6) for v in neutral_vec)
+            if neutral_key not in seen:
+                seen.add(neutral_key)
+                neutral = {f"{link}__seg{j}": float(neutral_vec[j]) for j in range(n_segments)}
+                neutral[link] = float(min(neutral_vec))
+                candidates.append(neutral)
 
             if self.cfg.mpc.relaxed_quantized_controls:
-                # Spec 17.5 proposed follower relaxed: 연속 density-pressure VSL target을 만들고
-                # 공통 repair로 vsl_set 및 max_vsl_step을 보장한다.
+                # Spec 17.5/18.9: relaxed mode도 pressure target 하나를 직접 고르지 않고,
+                # target 주변 feasible neighborhood를 만들어 아래 TTS objective에서 고른다.
                 densities = state.freeway_density.get(link, [])
-                vec: list[float] = []
-                for i, prev_i in enumerate(prev_vec):
-                    rho = float(densities[i]) if i < len(densities) else self.cfg.network.rho_crit
-                    pressure = max(0.0, rho / max(self.cfg.network.rho_crit, 1.0e-9) - 0.9)
-                    target = max(vsl_set) - 25.0 * min(2.0, pressure)
-                    repaired = repair_vsl_value(target, prev_i, self.cfg)
-                    accumulate_repair_diagnostics(self._repair_diagnostics, vsl=repaired)
-                    vec.append(repaired.value)
-                key = tuple(round(v, 6) for v in vec)
-                if key not in seen:
-                    candidate = {f"{link}__seg{j}": float(vec[j]) for j in range(n_segments)}
-                    candidate[link] = float(min(vec))
-                    candidates.append(candidate)
+                for delta in (0.0, -self.cfg.mpc.relaxed_vsl_quantum_km_h, self.cfg.mpc.relaxed_vsl_quantum_km_h):
+                    vec: list[float] = []
+                    for i, prev_i in enumerate(prev_vec):
+                        rho = float(densities[i]) if i < len(densities) else self.cfg.network.rho_crit
+                        pressure = max(0.0, rho / max(self.cfg.network.rho_crit, 1.0e-9) - 0.9)
+                        target = max(vsl_set) - 25.0 * min(2.0, pressure) + delta
+                        repaired = repair_vsl_value(target, prev_i, self.cfg)
+                        accumulate_repair_diagnostics(self._repair_diagnostics, vsl=repaired)
+                        vec.append(repaired.value)
+                    key = tuple(round(v, 6) for v in vec)
+                    if key not in seen:
+                        seen.add(key)
+                        candidate = {f"{link}__seg{j}": float(vec[j]) for j in range(n_segments)}
+                        candidate[link] = float(min(vec))
+                        candidates.append(candidate)
                 out[link] = candidates
                 continue
 
@@ -344,7 +394,7 @@ class FreewayFollower:
         state: TrafficState,
         control: ControlAction,
         demand: DemandStep,
-    ) -> Dict[str, float]:
+    ) -> tuple[Dict[str, float], float]:
         """고정된 urban control에서 x_on -> w_r boundary 유입을 한 T_f만큼 예측/반영한다."""
         ensure_urban_state(state, self.cfg)
         net = self.cfg.network
@@ -356,6 +406,7 @@ class FreewayFollower:
             self.cfg,
             interval_h=dt_h,
         )
+        spillback_tts = 0.0
         for ramp, movements in net.on_ramp_to_movement.items():
             if not movements:
                 continue
@@ -368,17 +419,18 @@ class FreewayFollower:
             available_x_on = sum(x_on_by_movement.values())
             ramp_before = max(0.0, state.ramp_queue.get(ramp, 0.0))
             ramp_space = max(0.0, net.ramp_queue_max_veh - ramp_before)
-            green_veh = min(
+            desired_green_veh = min(
                 max(0.0, green_flow.get(ramp, 0.0)) * dt_h,
                 available_x_on,
-                ramp_space,
             )
+            green_veh = min(desired_green_veh, ramp_space)
+            spillback_tts += max(0.0, desired_green_veh - green_veh) * dt_h
             # 경량 예측에서는 ramp 단위 green 방출을 movement별 잔량에 비례 배분한다.
             scale = green_veh / available_x_on if available_x_on > 1.0e-9 else 0.0
             for movement, x_on in x_on_by_movement.items():
                 state.urban_movement_queue[movement] = max(0.0, x_on * (1.0 - scale))
             state.ramp_queue[ramp] = min(net.ramp_queue_max_veh, ramp_before + green_veh)
-        return green_flow
+        return green_flow, float(spillback_tts)
 
     def _actual_metering_release(
         self,
@@ -450,10 +502,12 @@ class FreewayFollower:
         total_ttt = 0.0
         rows: list[Dict[str, float]] = []
         onramp_green_flow_total = 0.0
+        onramp_urban_spillback_tts = 0.0
 
         for _ in range(sim.K_cf):
-            green_flow = self._apply_onramp_boundary_forecast(probe, control, demand)
+            green_flow, spillback_tts = self._apply_onramp_boundary_forecast(probe, control, demand)
             onramp_green_flow_total += sum(green_flow.values())
+            onramp_urban_spillback_tts += spillback_tts
             actual_release, ramp_diag = self._actual_metering_release(probe, control, demand)
             offramp_capacity = off_ramp_capacity_by_freeway_link(
                 probe.copy(),
@@ -480,6 +534,7 @@ class FreewayFollower:
         diag["freeway_follower_coupled_prediction"] = 0.0
         diag["freeway_follower_boundary_forecast_active"] = 1.0
         diag["onramp_green_forecast_flow"] = float(onramp_green_flow_total / max(sim.K_cf, 1))
+        diag["onramp_urban_spillback_tts"] = float(onramp_urban_spillback_tts)
         return probe, float(total_ttt), diag
 
     def _transition_node(
@@ -513,6 +568,22 @@ class FreewayFollower:
             for values in probe.freeway_density.values()
             for rho in values
         )
+        ramp_queue_tts = sum(max(0.0, q) for q in probe.ramp_queue.values()) * self.cfg.simulation.T_c_h
+        onramp_urban_queue_tts = float(diag.get("onramp_urban_spillback_tts", 0.0))
+        cap_factor = getattr(demand, "incident_capacity_factor", 1.0)
+        downstream_cap = net.freeway_capacity_veh_h * cap_factor
+        receiving_overrequest = 0.0
+        for ramp in net.ramps:
+            link = net.ramp_to_freeway[ramp]
+            merge_idx = self._ramp_merge_index(ramp, len(node.state.freeway_density[link]))
+            rho_merge = node.state.freeway_density[link][merge_idx]
+            receiving = float(np.clip(
+                (net.rho_max - rho_merge) / max(net.rho_max - net.rho_crit, 1.0e-9),
+                0.0,
+                1.0,
+            ))
+            receiving_limit = min(net.ramp_capacity_veh_h[ramp], downstream_cap * receiving)
+            receiving_overrequest += max(0.0, ramp_metering.get(ramp, 0.0) - receiving_limit)
         smooth_ramp = sum(
             abs(ramp_metering[r] - node.last_control.ramp_metering.get(r, ramp_metering[r]))
             for r in net.ramps
@@ -525,11 +596,13 @@ class FreewayFollower:
         )
         increment = (
             fw_ttt
+            + ramp_queue_tts
+            + onramp_urban_queue_tts
+            + fc.ramp_queue_penalty * receiving_overrequest * self.cfg.simulation.T_c_h
             + fc.ramp_queue_penalty * queue_overflow * self.cfg.simulation.T_c_h
             + fc.density_penalty * density_excess * self.cfg.simulation.T_c_h
             + fc.metering_smoothness_weight * smooth_ramp
             + fc.vsl_smoothness_weight * smooth_vsl
-            + 0.01 * metering_error
         )
         return _SequenceNode(
             state=probe,

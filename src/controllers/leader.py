@@ -7,13 +7,31 @@ import numpy as np
 
 from src.models.demand import DemandStep
 from src.models.state import ControlAction, ExperimentConfig, TrafficState
-from src.models.urban_queue_model import estimate_onramp_green_release_flows
+from src.models.urban_queue_model import (
+    _forecast_offramp_inflow_veh_h,
+    estimate_onramp_green_release_flows,
+)
 
 
 @dataclass(frozen=True)
 class LeaderAction:
     N_P_star: float
     N_UF_star: float
+
+
+@dataclass(frozen=True)
+class LeaderCandidateBounds:
+    np_lower: float
+    np_upper: float
+    nuf_lower: float
+    nuf_upper: float
+    heuristic_nuf: float
+    movement_min_net_flow_veh_h: float
+    movement_max_net_flow_veh_h: float
+    movement_np_lower: float
+    movement_np_upper: float
+    movement_np_lower_active: bool
+    movement_np_upper_active: bool
 
 
 class Leader:
@@ -60,27 +78,36 @@ class Leader:
         count = max(3, self.cfg.mpc.leader_candidate_count)
         n_np = max(2, int(round(np.sqrt(count))))
         n_nuf = max(2, int(np.ceil(count / n_np)))
-        np_lower, np_upper = self._np_candidate_bounds(state)
+        bounds = self._candidate_bounds(state, previous, demand, forecast)
+        np_lower, np_upper = bounds.np_lower, bounds.np_upper
         np_values = set(float(v) for v in np.linspace(np_lower, np_upper, n_np))
         np_values.add(float(np.clip(leader.N_P_crit_veh, np_lower, np_upper)))
+        density_ratio = self._density_ratio(state)
         feasible_nuf = self._feasible_nuf_capacity(state, previous, demand)
         # 자유류(평균밀도 ≤ metering 활성화 임계)에서는 T_f 단위 feasible 추정이
         # metering을 강제하지 않도록 후보 상한을 ramp 총용량까지 열어둔다.
         # (feasible은 다음 T_f에 추적가능한 유량 추정이라 지속 수요를 과소평가 —
         # 이를 ceiling으로 쓰면 본선이 한가해도 w_r에 순수 대기손실이 쌓인다.)
-        if self._density_ratio(state) <= leader.metering_activation_density_ratio:
+        if density_ratio <= leader.metering_activation_density_ratio:
             feasible_nuf = max(feasible_nuf, self.cfg.network.total_ramp_capacity)
+        nuf_physical_lower = self._minimum_nuf_target()
+        nuf_lower = max(float(leader.N_UF_star_range[0]), nuf_physical_lower)
         nuf_upper = min(leader.N_UF_star_range[1], feasible_nuf)
-        nuf_upper = max(leader.N_UF_star_range[0], nuf_upper)
-        nuf_values = set(float(v) for v in np.linspace(leader.N_UF_star_range[0], nuf_upper, n_nuf))
+        nuf_upper = max(nuf_lower, nuf_upper)
         heuristic_nuf = min(self._heuristic_nuf_target(state, previous, demand), nuf_upper)
+        if density_ratio <= leader.metering_activation_density_ratio:
+            # In free-flow, the lower-corner N_UF=0 candidate is a pathological
+            # full ramp closure. Keep the leader grid broad, but center it on a
+            # feasible release target instead of forcing a zero-inflow corner.
+            nuf_lower = min(nuf_upper, max(nuf_lower, 0.75 * heuristic_nuf))
+        nuf_values = set(float(v) for v in np.linspace(bounds.nuf_lower, bounds.nuf_upper, n_nuf))
         # Include local candidates around a congestion-aware target so the
         # leader can find meaningful metering even when the coarse grid is weak.
         for scale in (0.75, 1.0, 1.25):
             nuf_values.add(float(np.clip(
-                heuristic_nuf * scale,
-                leader.N_UF_star_range[0],
-                nuf_upper,
+                bounds.heuristic_nuf * scale,
+                bounds.nuf_lower,
+                bounds.nuf_upper,
             )))
         nuf_values = sorted(nuf_values)
         np_values = sorted(np_values)
@@ -92,13 +119,14 @@ class Leader:
             LeaderAction(np_values[-1], nuf_values[-1]),
             LeaderAction(
                 float(np.clip(leader.N_P_crit_veh, np_lower, np_upper)),
-                float(min(nuf_values, key=lambda value: abs(value - heuristic_nuf))),
+                float(min(nuf_values, key=lambda value: abs(value - bounds.heuristic_nuf))),
             ),
         ]
         if previous is not None:
+            previous_nuf = self._previous_nuf_target(previous)
             required.append(LeaderAction(
                 float(np.clip(previous.N_P_star, np_lower, np_upper)),
-                float(np.clip(previous.N_UF_star, nuf_values[0], nuf_values[-1])),
+                float(np.clip(previous_nuf, nuf_values[0], nuf_values[-1])),
             ))
         # 단순 Cartesian 앞부분 절단은 낮은 N_P 후보만 남긴다. 필수 corner/직전
         # action을 먼저 보존하고, 남은 budget은 정규화된 (N_P,N_UF) 공간의
@@ -132,6 +160,221 @@ class Leader:
 
             add_unique(max(remaining, key=coverage_distance))
         return selected
+
+    def refined_candidates(
+        self,
+        state: TrafficState,
+        center: LeaderAction,
+        previous: Optional[ControlAction] = None,
+        demand: Optional[DemandStep] = None,
+        forecast: Optional[list[DemandStep]] = None,
+        count: Optional[int] = None,
+    ) -> List[LeaderAction]:
+        if forecast:
+            demand = self._forecast_demand_summary(list(forecast))
+        budget = max(5, int(count if count is not None else self.cfg.mpc.leader_refinement_candidate_count))
+        bounds = self._candidate_bounds(state, previous, demand, forecast)
+        n_np = max(3, int(round(np.sqrt(budget))))
+        n_nuf = max(3, int(np.ceil(budget / n_np)))
+        np_radius = max(
+            float(self.cfg.mpc.leader_local_np_radius_veh),
+            (bounds.np_upper - bounds.np_lower) / max(2.0 * (n_np - 1), 1.0),
+        )
+        nuf_radius = max(
+            float(self.cfg.mpc.leader_local_nuf_radius_veh_h),
+            (bounds.nuf_upper - bounds.nuf_lower) / max(2.0 * (n_nuf - 1), 1.0),
+        )
+        np_low = max(bounds.np_lower, center.N_P_star - np_radius)
+        np_high = min(bounds.np_upper, center.N_P_star + np_radius)
+        nuf_low = max(bounds.nuf_lower, center.N_UF_star - nuf_radius)
+        nuf_high = min(bounds.nuf_upper, center.N_UF_star + nuf_radius)
+        np_values = set(float(v) for v in np.linspace(np_low, np_high, n_np))
+        nuf_values = set(float(v) for v in np.linspace(nuf_low, nuf_high, n_nuf))
+        np_values.add(float(np.clip(center.N_P_star, bounds.np_lower, bounds.np_upper)))
+        nuf_values.add(float(np.clip(center.N_UF_star, bounds.nuf_lower, bounds.nuf_upper)))
+        nuf_values.add(float(np.clip(bounds.heuristic_nuf, bounds.nuf_lower, bounds.nuf_upper)))
+        if previous is not None:
+            np_values.add(float(np.clip(previous.N_P_star, bounds.np_lower, bounds.np_upper)))
+            nuf_values.add(float(np.clip(self._previous_nuf_target(previous), bounds.nuf_lower, bounds.nuf_upper)))
+        grid = [
+            LeaderAction(float(np_), float(nuf))
+            for np_ in sorted(np_values)
+            for nuf in sorted(nuf_values)
+        ]
+        selected: List[LeaderAction] = []
+        seen: set[LeaderAction] = set()
+
+        def add(action: LeaderAction) -> None:
+            if action in seen or len(selected) >= budget:
+                return
+            seen.add(action)
+            selected.append(action)
+
+        add(LeaderAction(
+            float(np.clip(center.N_P_star, bounds.np_lower, bounds.np_upper)),
+            float(np.clip(center.N_UF_star, bounds.nuf_lower, bounds.nuf_upper)),
+        ))
+        if previous is not None:
+            add(LeaderAction(
+                float(np.clip(previous.N_P_star, bounds.np_lower, bounds.np_upper)),
+                float(np.clip(self._previous_nuf_target(previous), bounds.nuf_lower, bounds.nuf_upper)),
+            ))
+        for action in grid:
+            add(action)
+        return selected
+
+    def candidate_bound_metadata(
+        self,
+        state: TrafficState,
+        previous: Optional[ControlAction] = None,
+        demand: Optional[DemandStep] = None,
+        forecast: Optional[list[DemandStep]] = None,
+    ) -> Dict[str, float]:
+        bounds = self._candidate_bounds(state, previous, demand, forecast)
+        return {
+            "leader_np_bound_lower": bounds.np_lower,
+            "leader_np_bound_upper": bounds.np_upper,
+            "leader_nuf_bound_lower": bounds.nuf_lower,
+            "leader_nuf_bound_upper": bounds.nuf_upper,
+            "leader_nuf_heuristic_target": bounds.heuristic_nuf,
+            "leader_np_movement_min_net_flow_veh_h": bounds.movement_min_net_flow_veh_h,
+            "leader_np_movement_max_net_flow_veh_h": bounds.movement_max_net_flow_veh_h,
+            "leader_np_movement_lower": bounds.movement_np_lower,
+            "leader_np_movement_upper": bounds.movement_np_upper,
+            "leader_np_movement_lower_active": float(bounds.movement_np_lower_active),
+            "leader_np_movement_upper_active": float(bounds.movement_np_upper_active),
+        }
+
+    def _candidate_bounds(
+        self,
+        state: TrafficState,
+        previous: Optional[ControlAction] = None,
+        demand: Optional[DemandStep] = None,
+        forecast: Optional[list[DemandStep]] = None,
+    ) -> LeaderCandidateBounds:
+        leader = self.cfg.leader
+        forecast_steps = list(forecast) if forecast else []
+        density_ratio = self._density_ratio(state)
+        feasible_nuf = self._feasible_nuf_capacity(state, previous, demand)
+        if density_ratio <= leader.metering_activation_density_ratio:
+            feasible_nuf = max(feasible_nuf, self.cfg.network.total_ramp_capacity)
+        nuf_lower = max(float(leader.N_UF_star_range[0]), self._minimum_nuf_target())
+        nuf_upper = min(leader.N_UF_star_range[1], feasible_nuf)
+        nuf_upper = max(nuf_lower, nuf_upper)
+        heuristic_nuf = min(self._heuristic_nuf_target(state, previous, demand), nuf_upper)
+        if density_ratio <= leader.metering_activation_density_ratio:
+            nuf_lower = min(nuf_upper, max(nuf_lower, 0.75 * heuristic_nuf))
+
+        base_np_lower, base_np_upper = self._np_candidate_bounds(state)
+        movement_np_lower, movement_np_upper, min_net, max_net = self._movement_np_bounds(
+            state,
+            forecast_steps,
+            nuf_upper,
+        )
+        np_lower = max(base_np_lower, movement_np_lower)
+        np_upper = min(base_np_upper, movement_np_upper)
+        if np_lower > np_upper:
+            if movement_np_upper < base_np_lower:
+                np_lower = np_upper = base_np_lower
+            elif movement_np_lower > base_np_upper:
+                np_lower = np_upper = base_np_upper
+            else:
+                midpoint = 0.5 * (base_np_lower + base_np_upper)
+                np_lower = np_upper = float(np.clip(midpoint, base_np_lower, base_np_upper))
+        return LeaderCandidateBounds(
+            np_lower=float(np_lower),
+            np_upper=float(np_upper),
+            nuf_lower=float(nuf_lower),
+            nuf_upper=float(nuf_upper),
+            heuristic_nuf=float(heuristic_nuf),
+            movement_min_net_flow_veh_h=float(min_net),
+            movement_max_net_flow_veh_h=float(max_net),
+            movement_np_lower=float(movement_np_lower),
+            movement_np_upper=float(movement_np_upper),
+            movement_np_lower_active=movement_np_lower > base_np_lower + 1.0e-9,
+            movement_np_upper_active=movement_np_upper < base_np_upper - 1.0e-9,
+        )
+
+    def _movement_np_bounds(
+        self,
+        state: TrafficState,
+        forecast: list[DemandStep],
+        nuf_upper: float,
+    ) -> tuple[float, float, float, float]:
+        min_net, max_net = self._movement_net_flow_bounds(nuf_upper)
+        limit = max(0.0, float(self.cfg.leader.N_P_feedback_flow_limit_veh_h))
+        flow_lower = max(min_net, -limit)
+        flow_upper = min(max_net, limit)
+        if flow_lower > flow_upper:
+            midpoint = 0.5 * (min_net + max_net)
+            flow_lower = flow_upper = float(np.clip(midpoint, -limit, limit))
+        forecast_offramp = (
+            _forecast_offramp_inflow_veh_h(state, self.cfg, forecast)
+            if forecast else 0.0
+        )
+        feedback_h = max(float(self.cfg.leader.N_P_feedback_horizon_h), 1.0e-9)
+        current = state.protected_accumulation_veh(self.cfg.network)
+        np_lower = current + feedback_h * (flow_lower + forecast_offramp)
+        np_upper = current + feedback_h * (flow_upper + forecast_offramp)
+        return float(np_lower), float(np_upper), float(min_net), float(max_net)
+
+    def _movement_net_flow_bounds(self, nuf_upper: float) -> tuple[float, float]:
+        net = self.cfg.network
+        flow_max = float(net.green_max) / max(float(net.cycle_length), 1.0e-9) * float(net.movement_capacity_veh_h)
+        ramp_counts: Dict[str, int] = {}
+        for spec in net.urban_movements.values():
+            if str(spec.get("kind", "")) != "on_ramp":
+                continue
+            ramp = str(spec.get("ramp", ""))
+            if ramp:
+                ramp_counts[ramp] = ramp_counts.get(ramp, 0) + 1
+        total_ramp_cap = max(float(net.total_ramp_capacity), 1.0e-9)
+        inflow_lower = inflow_upper = outflow_lower = outflow_upper = 0.0
+        for spec in net.urban_movements.values():
+            kind = str(spec.get("kind", ""))
+            if kind not in {"boundary_in", "off_ramp", "boundary_out", "on_ramp"}:
+                continue
+            lower = 0.0
+            upper = flow_max
+            if kind == "boundary_out":
+                lower = upper = flow_max
+            elif kind == "on_ramp":
+                ramp = str(spec.get("ramp", ""))
+                share = float(net.ramp_capacity_veh_h.get(ramp, 0.0)) / total_ramp_cap
+                upper = float(np.clip(
+                    nuf_upper * share / max(ramp_counts.get(ramp, 1), 1),
+                    0.0,
+                    flow_max,
+                ))
+            if kind in {"boundary_in", "off_ramp"}:
+                inflow_lower += lower
+                inflow_upper += upper
+            else:
+                outflow_lower += lower
+                outflow_upper += upper
+        return float(inflow_lower - outflow_upper), float(inflow_upper - outflow_lower)
+
+    def _previous_nuf_target(self, previous: ControlAction) -> float:
+        """Interpret no-control ramp metering as full N_UF release for leader grids."""
+        net = self.cfg.network
+        previous_target = float(previous.N_UF_star)
+        if previous_target > 1.0e-9:
+            return previous_target
+        release = sum(
+            float(previous.ramp_metering.get(ramp, 0.0))
+            for ramp in net.ramps
+        )
+        if release >= 0.95 * float(net.total_ramp_capacity):
+            return float(net.total_ramp_capacity)
+        return previous_target
+
+    def _minimum_nuf_target(self) -> float:
+        net = self.cfg.network
+        min_ratio = float(self.cfg.freeway_follower.ramp_metering_rate_min)
+        return float(sum(
+            max(0.0, min_ratio * float(net.ramp_capacity_veh_h[ramp]))
+            for ramp in net.ramps
+        ))
 
     def _np_candidate_bounds(self, state: TrafficState) -> tuple[float, float]:
         """Calibration된 n_P_crit 주변으로 leader의 도시 누적 목표 후보를 제한한다."""
@@ -321,18 +564,22 @@ class Leader:
             base = state_base
             accumulation_penalty_scale = 1.0
         target_penalty = 0.0
-        boundary_in_queue_penalty = 0.0
+        boundary_in_queue_veh = 0.0
         for s in states:
             n_p = s.protected_accumulation_veh(net)
             # follower_ttt 모드의 base는 veh*h이므로 accumulation 초과 항도 T_c_h로 맞춘다.
             target_penalty += lc.w_P * max(0.0, n_p - lc.N_P_crit_veh) * accumulation_penalty_scale
-            # Step D: boundary_in 큐 비용은 candidate 해석용 진단으로만 보존한다.
-            boundary_in_queue_penalty += lc.w_boundary_in * s.boundary_in_queue_vehicles(net)
+            # boundary_in 큐는 최종 Total TTT에 포함되므로 leader TTS 목적함수에도 반영한다.
+            boundary_in_queue_veh += s.boundary_in_queue_vehicles(net)
+        boundary_in_queue_penalty = (
+            lc.w_boundary_in * boundary_in_queue_veh * accumulation_penalty_scale
+        )
         density_excess, density_effective_count = self._density_penalty(states)
         density_penalty = lc.w_F * density_excess * accumulation_penalty_scale
         smooth = 0.0
         if previous is not None:
-            nuf_delta = abs(action.N_UF_star - previous.N_UF_star)
+            previous_nuf = self._previous_nuf_target(previous)
+            nuf_delta = abs(action.N_UF_star - previous_nuf)
             if lc.N_UF_star_unit == "veh_per_hour":
                 nuf_delta *= self.cfg.simulation.T_c_h
             smooth = lc.w_L * (
@@ -344,8 +591,9 @@ class Leader:
             nash_residual_objective,
             nash_residual_control,
         )
-        # Spec 4.2 Step D: boundary/non-convergence 항은 진단으로만 남기고 총 objective에는 더하지 않는다.
-        total = base + target_penalty + density_penalty + smooth
+        # Boundary-in queues are priced because final Total TTT counts them.
+        # Non-convergence remains diagnostic-only per Spec 4.6.
+        total = base + target_penalty + boundary_in_queue_penalty + density_penalty + smooth
         return {
             "leader_base_accumulation": float(state_base),
             "leader_objective_base": float(base),
@@ -353,6 +601,7 @@ class Leader:
             "leader_follower_ttt_base": float(follower_objective),
             "leader_boundary_leg_excluded_veh": float(boundary_excluded),
             "leader_target_penalty": float(target_penalty),
+            "leader_boundary_in_queue_veh": float(boundary_in_queue_veh),
             "leader_boundary_in_queue_penalty": float(boundary_in_queue_penalty),
             "leader_density_excess": float(density_excess),
             "leader_density_penalty": float(density_penalty),

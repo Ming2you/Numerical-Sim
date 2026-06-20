@@ -145,12 +145,14 @@ class WuDistributedController:
             for phase_id in ("p1", "p2"):
                 key = f"{signal}_{phase_id}"
                 entries: list[tuple[str, str, float]] = []
+                beta_by_origin: Dict[str, float] = {}
                 for movement in self._phase_movements[signal][phase_id]:
                     spec = specs[movement]
-                    if str(spec.get("kind", "")) != "internal":
-                        continue
                     origin = str(spec.get("origin", ""))
-                    beta = float(spec.get("beta", 0.0))
+                    if not origin:
+                        continue
+                    beta_by_origin[origin] = beta_by_origin.get(origin, 0.0) + float(spec.get("beta", 0.0))
+                for origin, beta in beta_by_origin.items():
                     for up_signal, up_mv in producers_by_link.get(origin, []):
                         entries.append((up_signal, up_mv, beta))
                 self._upstream_leaving_map[key] = entries
@@ -174,6 +176,8 @@ class WuDistributedController:
         up_signal: str,
         up_movement: str,
         control: ControlAction,
+        state: Optional[TrafficState] = None,
+        demand: Optional[DemandStep] = None,
     ) -> float:
         """상류 movement의 후보 green leaving rate[veh/h] = green_fraction×movement capacity.
 
@@ -181,7 +185,20 @@ class WuDistributedController:
         spec = self._specs[up_movement]
         green_fraction = _phase_green_fraction(control, self.cfg, spec)
         cap_flow = _movement_capacity_flow(control, self.cfg, up_movement, spec)
-        return float(green_fraction * cap_flow)
+        capacity_flow = float(green_fraction * cap_flow)
+        if state is None or demand is None:
+            return capacity_flow
+        dt_h = max(self.cfg.simulation.T_c_h, 1.0e-9)
+        available_flow = max(0.0, state.urban_movement_queue.get(up_movement, 0.0)) / dt_h
+        kind = str(spec.get("kind", ""))
+        beta = float(spec.get("beta", 1.0))
+        if kind == "boundary_in":
+            origin = str(spec.get("origin", ""))
+            available_flow += beta * max(0.0, demand.urban_boundary.get(origin, 0.0))
+        elif kind == "on_ramp":
+            ramp = str(spec.get("ramp", ""))
+            available_flow += beta * max(0.0, demand.ramp_arrival.get(ramp, 0.0))
+        return float(min(capacity_flow, available_flow))
 
     # ---------- 결합변수 y (Wu §IV-B) ----------
 
@@ -211,6 +228,9 @@ class WuDistributedController:
                     origin = str(spec.get("origin", ""))
                     if kind == "boundary_in":
                         arr[phase_id] += beta * max(0.0, demand.urban_boundary.get(origin, 0.0))
+                    elif kind == "on_ramp":
+                        ramp = str(spec.get("ramp", ""))
+                        arr[phase_id] += beta * max(0.0, demand.ramp_arrival.get(ramp, 0.0))
                     elif kind == "off_ramp":
                         # freeway→urban 결합: freeway agent 후보 VSL의 off-ramp 유출 재사용.
                         off_ramp = str(spec.get("off_ramp", ""))
@@ -222,7 +242,7 @@ class WuDistributedController:
                             base = state.freeway_flow.get(link, [0.0])[-1] if state.freeway_flow.get(link) else 0.0
                             off_inflow = _split_link_offramp_flow(self.cfg, link, off_ramp, base)
                         arr[phase_id] += beta * max(0.0, off_inflow)
-                    else:
+                    elif kind == "_legacy_occupancy_disabled":
                         # urban→urban: 상류 신호의 후보 green leaving rate(주채널) +
                         # 링크 점유 방출(보조, 가중<1).
                         cap = net.urban_link_storage_veh.get(origin, 0.0)
@@ -230,7 +250,13 @@ class WuDistributedController:
                         arr[phase_id] += occupancy_weight * beta * occupied / max(t_link_h, 1.0e-9) * 0.5
                 # 상류 후보 green leaving rate를 β로 분배해 더한다(후보 반응형 주채널).
                 for up_signal, up_movement, up_beta in self._upstream_leaving_map.get(key, []):
-                    arr[phase_id] += up_beta * self._signal_leaving_rate(up_signal, up_movement, control)
+                    arr[phase_id] += up_beta * self._signal_leaving_rate(
+                        up_signal,
+                        up_movement,
+                        control,
+                        state,
+                        demand,
+                    )
             y[f"arr_{signal}_p1"] = float(arr["p1"])
             y[f"arr_{signal}_p2"] = float(arr["p2"])
         # urban→freeway: ramp별 접근(x_on) no-metering 방출 추정 = min(대기+수요, green×포화).
@@ -294,31 +320,40 @@ class WuDistributedController:
         arr = {pid: float(coupling.get(f"arr_{signal}_{pid}", 0.0)) for pid in ("p1", "p2")}
         prev_p1 = float(previous.green_times.get(f"{signal}_p1", total / 2.0))
         smooth_w = self.cfg.urban_follower.green_smoothness_weight
-
+        p1_pressure = q0["p1"] + arr["p1"] * dt_h * horizon
+        p2_pressure = q0["p2"] + arr["p2"] * dt_h * horizon
+        pressure_center = queue_pressure_green_target(p1_pressure, p2_pressure, self.cfg)
+        raw_candidates = [total / 2.0, prev_p1, pressure_center]
         if self.cfg.mpc.relaxed_quantized_controls:
-            # Spec 17.5 WU urban relaxed: 7-point grid 대신 queue/arrival pressure의 연속 split을
-            # 계산하고 plant에 넣기 전 공통 green repair로 cycle equality와 min/max를 복구한다.
-            p1_pressure = q0["p1"] + arr["p1"] * dt_h * horizon
-            p2_pressure = q0["p2"] + arr["p2"] * dt_h * horizon
-            repaired = repair_green_pair(
-                queue_pressure_green_target(p1_pressure, p2_pressure, self.cfg),
-                self.cfg,
-            )
-            accumulate_repair_diagnostics(self._repair_diagnostics, green=repaired)
-            q = dict(q0)
-            cost = 0.0
-            for _ in range(horizon):
-                for pid, g in (("p1", repaired.p1), ("p2", repaired.p2)):
-                    service = (g / max(net.cycle_length, 1e-9)) * sat[pid] * dt_h
-                    q[pid] = max(0.0, q[pid] + arr[pid] * dt_h - service)
-                cost += (q["p1"] + q["p2"]) * dt_h
-            cost += smooth_w * abs(repaired.p1 - prev_p1)
-            if leader is not None:
-                n_pred = q["p1"] + q["p2"]
-                cost += self.cfg.leader.w_P * max(0.0, n_pred - self._omega_p[signal] * leader.n_p_star)
-            return repaired.p1, float(cost), 1
+            # Spec 17.5/18.9: pressure split은 후보 중심일 뿐이며, 주변 후보를 같은 TTS 비용으로 평가한다.
+            raw_candidates.extend([
+                pressure_center - 1.0,
+                pressure_center + 1.0,
+                pressure_center - 2.0,
+                pressure_center + 2.0,
+                pressure_center - 5.0,
+                pressure_center + 5.0,
+            ])
+        else:
+            raw_candidates.extend(float(v) for v in np.linspace(net.green_min, net.green_max, 7))
+        candidates: list[float] = []
+        for raw in raw_candidates:
+            if self.cfg.mpc.relaxed_quantized_controls:
+                repaired = repair_green_pair(float(raw), self.cfg)
+                accumulate_repair_diagnostics(self._repair_diagnostics, green=repaired)
+                p1_value = repaired.p1
+            else:
+                p1_value = float(np.clip(raw, net.green_min, net.green_max))
+                p2_value = total - p1_value
+                if p2_value < net.green_min:
+                    p2_value = net.green_min
+                    p1_value = total - p2_value
+                if p2_value > net.green_max:
+                    p2_value = net.green_max
+                    p1_value = total - p2_value
+            if not any(abs(p1_value - existing) <= 1.0e-9 for existing in candidates):
+                candidates.append(float(p1_value))
 
-        candidates = np.linspace(net.green_min, net.green_max, 7)
         best_p1, best_obj = prev_p1, float("inf")
         evals = 0
         for p1 in candidates:
@@ -437,7 +472,17 @@ class WuDistributedController:
             neutral_vec.append(neutral_repaired.value)
 
         vectors: list[list[float]] = []
-        for vec in (target_vec, neutral_vec if self.cfg.mpc.relaxed_wu_vsl_include_neutral else target_vec):
+        raw_vectors = [target_vec]
+        for delta in (-self.cfg.mpc.relaxed_vsl_quantum_km_h, self.cfg.mpc.relaxed_vsl_quantum_km_h):
+            neighbor: list[float] = []
+            for value, prev_i in zip(target_vec, [segment_vsl(previous, link, i, self.cfg) for i in range(n_seg)]):
+                repaired = repair_vsl_value(value + delta, prev_i, self.cfg)
+                accumulate_repair_diagnostics(self._repair_diagnostics, vsl=repaired)
+                neighbor.append(repaired.value)
+            raw_vectors.append(neighbor)
+        if self.cfg.mpc.relaxed_wu_vsl_include_neutral:
+            raw_vectors.append(neutral_vec)
+        for vec in raw_vectors:
             if not any(all(abs(a - b) <= 1.0e-9 for a, b in zip(vec, existing)) for existing in vectors):
                 vectors.append([float(v) for v in vec])
         return vectors
@@ -759,6 +804,19 @@ class WuDistributedController:
             )
         return float(total)
 
+    def _add_uncontrolled_node_diagnostics(self, control: ControlAction, state: TrafficState) -> None:
+        """WU 계열도 E 비통제 노드 TTT coverage를 같은 키로 노출한다."""
+        net = self.cfg.network
+        movement = state.uncontrolled_node_movement_queue_veh(net)
+        storage = state.uncontrolled_node_storage_occupancy_veh(net)
+        vehicles = movement + storage
+        horizon_h = self.cfg.simulation.T_c_h * max(1, self.cfg.mpc.horizon_steps)
+        control.diagnostics["urban_uncontrolled_node_movement_queue_veh"] = float(movement)
+        control.diagnostics["urban_uncontrolled_node_storage_occupancy_veh"] = float(storage)
+        control.diagnostics["urban_uncontrolled_node_vehicles_veh"] = float(vehicles)
+        control.diagnostics["urban_uncontrolled_node_objective_tts"] = float(vehicles * horizon_h)
+        control.diagnostics["urban_uncontrolled_node_objective_covered"] = 1.0
+
     def decide_with_info(
         self,
         state: TrafficState,
@@ -785,6 +843,7 @@ class WuDistributedController:
                 solver_evaluations=total_evals,
                 computation_time_sec=time.perf_counter() - start,
             )
+            self._add_uncontrolled_node_diagnostics(control, state)
             self.previous_control = control
             return info
 
@@ -819,5 +878,6 @@ class WuDistributedController:
             leader_selected=action,
             leader_objective=obj,
         )
+        self._add_uncontrolled_node_diagnostics(control, state)
         self.previous_control = control
         return info

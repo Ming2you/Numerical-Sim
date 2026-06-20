@@ -50,6 +50,14 @@ mpc:
   relaxed_vsl_quantum_km_h: 10.0
   relaxed_rounding_mode: floor      # floor, nearest
   relaxed_wu_vsl_include_neutral: true
+  grid_global_refresh_sec: 1800.0
+  grid_reuse_process_pool: true
+  stackelberg_prefilter_top_k: 4
+  stackelberg_prefilter_local_top_k: 4
+  stackelberg_fallback_full_refresh_sec: 1800.0
+  stackelberg_fallback_use_cached_pfo: true
+  stackelberg_leader_parallel_backend: thread
+  stackelberg_reuse_process_pool: true
 ```
 
 When `relaxed_quantized_controls = false`, existing behavior must be preserved.
@@ -57,6 +65,15 @@ Solver budgets such as `leader_candidate_count`, `max_nash_iter`,
 `optimizer_maxiter`, and `freeway_prediction_horizon_steps` remain explicit
 ordinary configuration values. They are not controlled by a separate fast-mode
 flag.
+
+Stackelberg runtime control should keep broad exploration periodic rather than
+removing it. The intended default is a full grid/global refresh every 1800 s and
+local search around the previous/cached solution between refreshes. The
+fallback PFO response may be evaluated before leader candidates so its objective
+can seed rollout early termination; between full refreshes, it should use the
+cached PFO fallback action as the local search center. Process-based grid and
+leader candidate evaluation may reuse worker pools when enabled, but this is a
+solver-runtime option only and must not change the candidate objective.
 
 ## 17.4 Quantization and Feasibility Repair
 
