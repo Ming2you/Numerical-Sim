@@ -82,6 +82,9 @@ class Leader:
         np_lower, np_upper = bounds.np_lower, bounds.np_upper
         np_values = set(float(v) for v in np.linspace(np_lower, np_upper, n_np))
         np_values.add(float(np.clip(leader.N_P_crit_veh, np_lower, np_upper)))
+        np_values.add(float(np.clip(state.protected_accumulation_veh(self.cfg.network), np_lower, np_upper)))
+        np_values.add(float(np.clip(bounds.movement_np_lower, np_lower, np_upper)))
+        np_values.add(float(np.clip(bounds.movement_np_upper, np_lower, np_upper)))
         density_ratio = self._density_ratio(state)
         feasible_nuf = self._feasible_nuf_capacity(state, previous, demand)
         # 자유류(평균밀도 ≤ metering 활성화 임계)에서는 T_f 단위 feasible 추정이
@@ -96,13 +99,11 @@ class Leader:
         nuf_upper = max(nuf_lower, nuf_upper)
         heuristic_nuf = min(self._heuristic_nuf_target(state, previous, demand), nuf_upper)
         if density_ratio <= leader.metering_activation_density_ratio:
-            # In free-flow, the lower-corner N_UF=0 candidate is a pathological
-            # full ramp closure. Keep the leader grid broad, but center it on a
-            # feasible release target instead of forcing a zero-inflow corner.
+            # 자유류에서는 N_UF=0 corner가 사실상 ramp 완전 폐쇄라 병적이다.
+            # 격자는 넓게 유지하되, 0 유입 corner 대신 feasible release 근처를 하한으로 둔다.
             nuf_lower = min(nuf_upper, max(nuf_lower, 0.75 * heuristic_nuf))
         nuf_values = set(float(v) for v in np.linspace(bounds.nuf_lower, bounds.nuf_upper, n_nuf))
-        # Include local candidates around a congestion-aware target so the
-        # leader can find meaningful metering even when the coarse grid is weak.
+        # coarse grid가 성기더라도 혼잡 인식 target 주변 metering 후보를 반드시 포함한다.
         for scale in (0.75, 1.0, 1.25):
             nuf_values.add(float(np.clip(
                 bounds.heuristic_nuf * scale,
@@ -191,6 +192,10 @@ class Leader:
         np_values = set(float(v) for v in np.linspace(np_low, np_high, n_np))
         nuf_values = set(float(v) for v in np.linspace(nuf_low, nuf_high, n_nuf))
         np_values.add(float(np.clip(center.N_P_star, bounds.np_lower, bounds.np_upper)))
+        np_values.add(float(np.clip(self.cfg.leader.N_P_crit_veh, bounds.np_lower, bounds.np_upper)))
+        np_values.add(float(np.clip(state.protected_accumulation_veh(self.cfg.network), bounds.np_lower, bounds.np_upper)))
+        np_values.add(float(np.clip(bounds.movement_np_lower, bounds.np_lower, bounds.np_upper)))
+        np_values.add(float(np.clip(bounds.movement_np_upper, bounds.np_lower, bounds.np_upper)))
         nuf_values.add(float(np.clip(center.N_UF_star, bounds.nuf_lower, bounds.nuf_upper)))
         nuf_values.add(float(np.clip(bounds.heuristic_nuf, bounds.nuf_lower, bounds.nuf_upper)))
         if previous is not None:
@@ -271,16 +276,10 @@ class Leader:
             forecast_steps,
             nuf_upper,
         )
-        np_lower = max(base_np_lower, movement_np_lower)
-        np_upper = min(base_np_upper, movement_np_upper)
-        if np_lower > np_upper:
-            if movement_np_upper < base_np_lower:
-                np_lower = np_upper = base_np_lower
-            elif movement_np_lower > base_np_upper:
-                np_lower = np_upper = base_np_upper
-            else:
-                midpoint = 0.5 * (base_np_lower + base_np_upper)
-                np_lower = np_upper = float(np.clip(midpoint, base_np_lower, base_np_upper))
+        # N_P_star는 보호영역 누적의 setpoint이지 한 step에서 반드시 도달 가능한 상태가 아니다.
+        # movement reachability는 진단/anchor로만 쓰고, PFO식 낮은 누적 운전점도 탐색한다.
+        np_lower = base_np_lower
+        np_upper = base_np_upper
         return LeaderCandidateBounds(
             np_lower=float(np_lower),
             np_upper=float(np_upper),
@@ -291,8 +290,8 @@ class Leader:
             movement_max_net_flow_veh_h=float(max_net),
             movement_np_lower=float(movement_np_lower),
             movement_np_upper=float(movement_np_upper),
-            movement_np_lower_active=movement_np_lower > base_np_lower + 1.0e-9,
-            movement_np_upper_active=movement_np_upper < base_np_upper - 1.0e-9,
+            movement_np_lower_active=False,
+            movement_np_upper_active=False,
         )
 
     def _movement_np_bounds(
@@ -380,10 +379,9 @@ class Leader:
         """Calibration된 n_P_crit 주변으로 leader의 도시 누적 목표 후보를 제한한다."""
         leader = self.cfg.leader
         crit = float(leader.N_P_crit_veh)
-        lower = crit * float(leader.N_P_candidate_lower_factor)
-        upper = crit * float(leader.N_P_candidate_upper_factor)
-        if state.protected_accumulation_veh(self.cfg.network) >= crit:
-            upper = crit
+        range_lower, range_upper = sorted(float(v) for v in leader.N_P_star_range[:2])
+        lower = max(range_lower, crit * float(leader.N_P_candidate_lower_factor))
+        upper = min(range_upper, crit * float(leader.N_P_candidate_upper_factor))
         lower = max(0.0, min(lower, upper))
         return float(lower), float(upper)
 

@@ -363,6 +363,7 @@ class MPCConfig:
     stackelberg_prefilter_local_top_k: int = 4
     stackelberg_fallback_full_refresh_sec: float = 1800.0
     stackelberg_fallback_use_cached_pfo: bool = True
+    stackelberg_enable_fallback: bool = True
     stackelberg_leader_parallel_backend: str = "thread"
     stackelberg_leader_parallel_max_workers: int = 4
     stackelberg_inner_backend_when_outer_process: str = "thread"
@@ -377,11 +378,11 @@ class LeaderConfig:
     w_L: float = 0.05
     # Step D: boundary_in 큐 비용은 진단용으로 계산하되 leader_total_objective에는 더하지 않는다.
     w_boundary_in: float = 1.0
-    N_P_star_range: List[float] = field(default_factory=lambda: [0.0, 500.0])
+    N_P_star_range: List[float] = field(default_factory=lambda: [0.0, 850.0])
     N_UF_star_range: List[float] = field(default_factory=lambda: [0.0, 6000.0])
     N_P_crit_veh: float = 509.448830418254
-    N_P_candidate_lower_factor: float = 0.90
-    N_P_candidate_upper_factor: float = 1.05
+    N_P_candidate_lower_factor: float = 0.40
+    N_P_candidate_upper_factor: float = 1.35
     N_P_star_unit: str = "veh"
     N_UF_star_unit: str = "veh_per_hour"
     N_P_feedback_horizon_h: float = 0.5

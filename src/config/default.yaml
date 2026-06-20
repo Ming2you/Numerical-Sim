@@ -198,6 +198,7 @@ mpc:
   stackelberg_prefilter_local_top_k: 4
   stackelberg_fallback_full_refresh_sec: 1800.0
   stackelberg_fallback_use_cached_pfo: true
+  stackelberg_enable_fallback: true
   stackelberg_leader_parallel_backend: thread
   stackelberg_leader_parallel_max_workers: 4
   stackelberg_inner_backend_when_outer_process: thread
@@ -226,8 +227,8 @@ leader:
   # MFD argmax: production 33868.583 veh/h @ N_P=509.449 veh
   # (urban_scale=3.0, t=720 s). 이전 556.081은 off-ramp storage 재귀속 전 값이라 폐기.
   N_P_crit_veh: 509.448830418254
-  N_P_candidate_lower_factor: 0.9
-  N_P_candidate_upper_factor: 1.05
+  N_P_candidate_lower_factor: 0.40
+  N_P_candidate_upper_factor: 1.35
   N_P_star_unit: veh
   N_UF_star_unit: veh_per_hour
   # cycle 위상 plant에서 N_P가 cycle 주기로 진동해 feedback/추적 창을 더 길게 둔다.

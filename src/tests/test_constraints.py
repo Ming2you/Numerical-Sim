@@ -702,10 +702,10 @@ class ConstraintTests(unittest.TestCase):
         self.assertIn("urban_uncontrolled_node_vehicles_veh", result.control.diagnostics)
         self.assertIn("distributed_response_uncontrolled_node_urban_vehicles", result.control.diagnostics)
         self.assertEqual(result.control.diagnostics["distributed_grid_search_active"], 1.0)
-        self.assertEqual(result.control.diagnostics["distributed_grid_parallel_stages"], 1.0)
+        self.assertEqual(result.control.diagnostics["distributed_grid_parallel_stages"], 4.0)
         self.assertEqual(result.control.diagnostics["distributed_grid_leader_conditioned"], 1.0)
-        self.assertEqual(result.control.diagnostics["distributed_grid_full_search_active"], 0.0)
-        self.assertIn("distributed_grid_sensitivity_probe_candidates", result.control.diagnostics)
+        self.assertEqual(result.control.diagnostics["distributed_grid_full_search_active"], 1.0)
+        self.assertGreater(result.control.diagnostics["distributed_grid_sensitivity_probe_candidates"], 0.0)
         self.assertIn("distributed_grid_sensitivity_direction_candidates", result.control.diagnostics)
         self.assertIn("distributed_grid_rollout_objective", result.control.diagnostics)
         self.assertAlmostEqual(
@@ -748,16 +748,18 @@ class ConstraintTests(unittest.TestCase):
             allocation_plan,
         )
 
-        self.assertGreater(len(candidates), 0)
-        self.assertLess(len(candidates), 40)
+        self.assertGreater(len(candidates), 40)
+        self.assertTrue(any(candidate.label.startswith("leader_coarse_global_green_") for candidate in candidates))
+        self.assertTrue(any(candidate.label.startswith("leader_coarse_global_vsl_") for candidate in candidates))
+        self.assertTrue(any("offset" in candidate.label for candidate in candidates))
         for candidate in candidates:
             total_metering = sum(
                 candidate.control.ramp_metering.get(ramp, 0.0)
                 for ramp in cfg.network.ramps
             )
             self.assertAlmostEqual(total_metering, leader.N_UF_star, places=6)
-            self.assertEqual(candidate.stage, "leader_conditioned")
-            self.assertEqual(candidate.scope, "local")
+            self.assertEqual(candidate.stage, "coarse")
+            self.assertEqual(candidate.scope, "global")
             self.assertEqual(candidate.control.N_UF_star, leader.N_UF_star)
             self.assertTrue(candidate.control.inflow_outflow_allocation)
 
@@ -1430,7 +1432,18 @@ class ConstraintTests(unittest.TestCase):
         # internal movement 큐는 보호영역 누적 N_P에 포함된다(그리드 라우팅 이후 정의).
         congested.urban_movement_queue["A_S_to_E"] = 220.0
         congested_actions = Leader(cfg).candidates(congested, previous, demand)
-        self.assertTrue(all(action.N_P_star <= 172.0 + 1.0e-9 for action in congested_actions))
+        self.assertTrue(all(action.N_P_star <= 1.05 * 172.0 + 1.0e-9 for action in congested_actions))
+        self.assertTrue(any(action.N_P_star > 172.0 + 1.0e-9 for action in congested_actions))
+
+    def test_default_leader_np_grid_covers_observed_pfo_band(self):
+        cfg = ExperimentConfig.from_file("src/config/default.yaml")
+        state = TrafficState.initial(cfg)
+        lower, upper = Leader(cfg)._np_candidate_bounds(state)
+
+        # Peak PFO 진단에서 관측된 protected accumulation 운전점(약 244~592 veh)을
+        # leader grid가 원천적으로 배제하지 않는지 확인한다.
+        self.assertLessEqual(lower, 244.0)
+        self.assertGreaterEqual(upper, 592.0)
 
     def test_leader_objective_matches_spec_accumulation_form(self):
         cfg = ExperimentConfig.from_file(
@@ -2091,7 +2104,7 @@ class ConstraintTests(unittest.TestCase):
         self.assertAlmostEqual(total_ttt, 4.0)
         self.assertAlmostEqual(states[0].time_sec, cfg.simulation.control_interval)
 
-    def test_stackelberg_default_objective_uses_follower_response_without_rollout(self):
+    def test_stackelberg_default_objective_uses_follower_response_with_future_penalty_states(self):
         cfg = ExperimentConfig.from_file(
             "src/config/default.yaml",
             {
@@ -2108,18 +2121,22 @@ class ConstraintTests(unittest.TestCase):
         controller = StackelbergMPCController(cfg)
         state = TrafficState.initial(cfg)
         demand = DemandProfile(cfg, ScenarioConfig("test")).horizon(0.0, 2)
-
-        with patch("src.simulation.coupling.run_coupled_interval") as coupled_step:
-            coupled_step.side_effect = AssertionError("default Stackelberg evaluation must not rollout")
-            result = controller.decide_with_info(state, demand, ControlAction.fixed(cfg))
-
-        self.assertEqual(coupled_step.call_count, 0)
-        self.assertAlmostEqual(result.metadata["leader_rollout_prediction_used"], 0.0)
-        self.assertAlmostEqual(result.metadata["leader_follower_response_objective_used"], 1.0)
-        self.assertAlmostEqual(
-            result.metadata["leader_follower_ttt_base"],
-            result.nash.objective_value,
+        nash = NashResult(
+            control=ControlAction.fixed(cfg),
+            objective_value=1234.0,
+            iterations=1,
+            converged=True,
+            residual_objective=0.0,
+            residual_control=0.0,
+            diagnostics={},
         )
+
+        states, follower_ttt, rollout_used = controller._leader_evaluation_base(state, nash, demand)
+
+        self.assertTrue(rollout_used)
+        self.assertEqual(len(states), 2)
+        self.assertGreater(states[-1].time_sec, state.time_sec)
+        self.assertAlmostEqual(follower_ttt, nash.objective_value)
 
     def test_distributed_follower_does_not_mutate_previous_control(self):
         cfg = ExperimentConfig.from_file(

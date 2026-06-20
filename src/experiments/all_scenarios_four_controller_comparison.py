@@ -160,6 +160,8 @@ def _parse_updates(args: argparse.Namespace) -> Dict[str, Any]:
         overrides["mpc"]["stackelberg_prefilter_local_top_k"] = args.stackelberg_prefilter_local_top_k
     if args.stackelberg_fallback_full_refresh_sec is not None:
         overrides["mpc"]["stackelberg_fallback_full_refresh_sec"] = args.stackelberg_fallback_full_refresh_sec
+    if args.disable_stackelberg_fallback:
+        overrides["mpc"]["stackelberg_enable_fallback"] = False
     if args.disable_stackelberg_pfo_fallback_cache:
         overrides["mpc"]["stackelberg_fallback_use_cached_pfo"] = False
     if args.disable_stackelberg_process_pool_reuse:
@@ -200,6 +202,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     parser.add_argument("--stackelberg-prefilter-top-k", type=int, default=None)
     parser.add_argument("--stackelberg-prefilter-local-top-k", type=int, default=None)
     parser.add_argument("--stackelberg-fallback-full-refresh-sec", type=float, default=None)
+    parser.add_argument("--disable-stackelberg-fallback", action="store_true")
     parser.add_argument("--disable-stackelberg-pfo-fallback-cache", action="store_true")
     parser.add_argument("--disable-stackelberg-process-pool-reuse", action="store_true")
     parser.add_argument("--stackelberg-leader-parallel-backend", choices=["serial", "thread", "process"], default=None)

@@ -7,7 +7,13 @@ import numpy as np
 
 from src.controllers.freeway_follower import FreewayFollowerResult
 from src.controllers.grid_parallel import build_chunk_payloads, evaluate_grid_items
-from src.controllers.inflow_outflow_allocation import AllocationResult
+from src.controllers.inflow_outflow_allocation import (
+    AllocationResult,
+    BALANCE_INFLOW_KINDS,
+    BALANCE_OUTFLOW_KINDS,
+    INFLOW_KINDS,
+    OUTFLOW_KINDS,
+)
 from src.controllers.leader import LeaderAction
 from src.controllers.nash_solver import NashResult, _relax_map
 from src.controllers.relaxed_quantization import (
@@ -33,10 +39,14 @@ from src.models.state import ControlAction, ExperimentConfig, TrafficState
 from src.models.urban_queue_model import (
     _movement_capacity_flow,
     _phase_green_fraction,
+    boundary_group_key,
     ensure_urban_state,
     estimate_onramp_green_release_flows,
     estimate_onramp_reservoir_inflow,
+    movement_storage_capacity,
     movement_specs,
+    safe_balance_index,
+    urban_accumulation_feedback_flow,
 )
 
 
@@ -554,8 +564,8 @@ class DistributedCoordinator:
     ) -> bool:
         if not best_diag and not np.isfinite(best_obj):
             return True
-        candidate_violation = float(candidate_diag.get("distributed_response_total_spillback_violation_veh", 0.0))
-        best_violation = float(best_diag.get("distributed_response_total_spillback_violation_veh", 0.0))
+        candidate_violation = self._candidate_constraint_violation(candidate_diag)
+        best_violation = self._candidate_constraint_violation(best_diag)
         candidate_feasible = candidate_violation <= 1.0e-9
         best_feasible = best_violation <= 1.0e-9
         if candidate_feasible and not best_feasible:
@@ -567,7 +577,40 @@ class DistributedCoordinator:
                 return True
             if candidate_violation > best_violation + 1.0e-9:
                 return False
+        if self._leader_balance_tiebreak_active(candidate_diag, best_diag):
+            tol = 1.0e-3 * max(abs(float(candidate_obj)), abs(float(best_obj)), 1.0)
+            if abs(float(candidate_obj) - float(best_obj)) <= tol:
+                candidate_balance = float(candidate_diag.get(
+                    "distributed_grid_leader_balance_tiebreak_score",
+                    np.inf,
+                ))
+                best_balance = float(best_diag.get(
+                    "distributed_grid_leader_balance_tiebreak_score",
+                    np.inf,
+                ))
+                if candidate_balance < best_balance - 1.0e-12:
+                    return True
+                if candidate_balance > best_balance + 1.0e-12:
+                    return False
         return candidate_obj < best_obj - 1.0e-12
+
+    def _candidate_constraint_violation(self, diagnostics: Mapping[str, float]) -> float:
+        spillback = float(diagnostics.get("distributed_response_total_spillback_violation_veh", 0.0))
+        leader_feasible = float(diagnostics.get(
+            "distributed_grid_leader_total_constraint_violation",
+            0.0,
+        ))
+        return float(max(0.0, spillback) + max(0.0, leader_feasible))
+
+    def _leader_balance_tiebreak_active(
+        self,
+        candidate_diag: Mapping[str, float],
+        best_diag: Mapping[str, float],
+    ) -> bool:
+        return bool(
+            candidate_diag.get("distributed_grid_leader_balance_tiebreak_active", 0.0)
+            or best_diag.get("distributed_grid_leader_balance_tiebreak_active", 0.0)
+        )
 
     def _grid_authority(self) -> str:
         return "wu" if self._green_vsl_only_ttt_mode() else "proposed"
@@ -659,6 +702,117 @@ class DistributedCoordinator:
         })
         return candidate, objective, control, diag
 
+    def _leader_direct_feasible_set_diagnostics(
+        self,
+        state: TrafficState,
+        control: ControlAction,
+        forecast: list[DemandStep],
+        leader: Optional[LeaderAction],
+    ) -> Dict[str, float]:
+        if leader is None:
+            return {}
+        ensure_urban_state(state, self.cfg)
+        net = self.cfg.network
+        _demand, horizon_h, steps = self._response_horizon_demand(forecast)
+        movement_arrivals = self._movement_forecast_arrivals_veh(steps)
+        service: Dict[str, float] = {}
+        available_by_movement: Dict[str, float] = {}
+        raw_onramp_by_ramp: Dict[str, float] = {}
+        onramp_by_movement = {
+            movement: ramp
+            for ramp, movements in net.on_ramp_to_movement.items()
+            for movement in movements
+        }
+
+        for movement, spec in self._specs.items():
+            available = max(0.0, state.urban_movement_queue.get(movement, 0.0)) + max(
+                0.0,
+                movement_arrivals.get(movement, 0.0),
+            )
+            cap_veh = horizon_h * _phase_green_fraction(control, self.cfg, spec) * _movement_capacity_flow(
+                control,
+                self.cfg,
+                movement,
+                spec,
+            )
+            served = min(available, max(0.0, cap_veh))
+            service[movement] = float(served)
+            available_by_movement[movement] = float(available)
+            if str(spec.get("kind", "")) == "on_ramp":
+                ramp = onramp_by_movement.get(movement, "")
+                if ramp:
+                    raw_onramp_by_ramp[ramp] = raw_onramp_by_ramp.get(ramp, 0.0) + served
+
+        for ramp, raw_total in raw_onramp_by_ramp.items():
+            if raw_total <= 1.0e-9:
+                continue
+            ramp_space = max(0.0, float(net.ramp_queue_max_veh) - max(0.0, state.ramp_queue.get(ramp, 0.0)))
+            scale = min(1.0, ramp_space / raw_total)
+            for movement in net.on_ramp_to_movement.get(ramp, []):
+                if movement in service:
+                    service[movement] *= scale
+
+        remaining: Dict[str, float] = {
+            movement: max(0.0, available_by_movement.get(movement, 0.0) - service.get(movement, 0.0))
+            for movement in self._specs
+        }
+        inflow_veh = sum(
+            service.get(movement, 0.0)
+            for movement, spec in self._specs.items()
+            if str(spec.get("kind", "")) in INFLOW_KINDS
+        )
+        outflow_veh = sum(
+            service.get(movement, 0.0)
+            for movement, spec in self._specs.items()
+            if str(spec.get("kind", "")) in OUTFLOW_KINDS
+        )
+        projected_net_flow = (inflow_veh - outflow_veh) / max(horizon_h, 1.0e-9)
+        target_net_flow = urban_accumulation_feedback_flow(state, self.cfg, leader.N_P_star, forecast)
+        residual = projected_net_flow - target_net_flow
+        net_violation = max(0.0, abs(residual) - float(self.cfg.urban_follower.eps_U))
+
+        def grouped_densities(kinds: set[str]) -> list[float]:
+            queues: Dict[str, float] = {}
+            caps: Dict[str, float] = {}
+            for movement, spec in self._specs.items():
+                if str(spec.get("kind", "")) not in kinds:
+                    continue
+                key = boundary_group_key(spec)
+                queues[key] = queues.get(key, 0.0) + remaining.get(movement, 0.0)
+                caps[key] = caps.get(key, 0.0) + max(
+                    movement_storage_capacity(self.cfg, movement, spec),
+                    1.0e-9,
+                )
+            return [queues[key] / max(caps[key], 1.0e-9) for key in sorted(queues)]
+
+        b_in = safe_balance_index(grouped_densities(BALANCE_INFLOW_KINDS))
+        b_out = safe_balance_index(grouped_densities(BALANCE_OUTFLOW_KINDS))
+        balance_score = b_in * b_in + b_out * b_out
+        storage_violation = 0.0
+        for movement, spec in self._specs.items():
+            cap = max(movement_storage_capacity(self.cfg, movement, spec), 1.0e-9)
+            current_violation = max(0.0, max(0.0, state.urban_movement_queue.get(movement, 0.0)) - cap)
+            projected_violation = max(0.0, remaining.get(movement, 0.0) - cap)
+            storage_violation += max(0.0, projected_violation - current_violation)
+        total_violation = net_violation + storage_violation
+        return {
+            "distributed_grid_leader_direct_feasible_set_active": 1.0,
+            "distributed_grid_leader_allocation_module_disabled": 1.0,
+            "distributed_grid_leader_net_inflow_target_veh_h": float(target_net_flow),
+            "distributed_grid_leader_projected_net_inflow_veh_h": float(projected_net_flow),
+            "distributed_grid_leader_net_inflow_residual_veh_h": float(residual),
+            "distributed_grid_leader_net_inflow_abs_residual_veh_h": float(abs(residual)),
+            "distributed_grid_leader_net_inflow_violation_veh_h": float(net_violation),
+            "distributed_grid_leader_storage_violation_veh": float(storage_violation),
+            "distributed_grid_leader_total_constraint_violation": float(total_violation),
+            "distributed_grid_leader_balance_B_in": float(b_in),
+            "distributed_grid_leader_balance_B_out": float(b_out),
+            "distributed_grid_leader_balance_tiebreak_score": float(balance_score),
+            "distributed_grid_leader_balance_tiebreak_active": 1.0,
+            "distributed_grid_leader_projected_inflow_veh": float(inflow_veh),
+            "distributed_grid_leader_projected_outflow_veh": float(outflow_veh),
+        }
+
     def _grid_feasibility_precheck(
         self,
         state: TrafficState,
@@ -675,9 +829,13 @@ class DistributedCoordinator:
             proxy_objective=0.0,
         )
         violation = float(diag.get("distributed_response_total_spillback_violation_veh", 0.0))
-        feasible = violation <= 1.0e-9
+        leader_diag = self._leader_direct_feasible_set_diagnostics(state, control, forecast, leader)
+        diag.update(leader_diag)
+        leader_violation = float(diag.get("distributed_grid_leader_total_constraint_violation", 0.0))
+        feasible = violation <= 1.0e-9 and leader_violation <= 1.0e-9
         diag["distributed_grid_precheck_feasible"] = float(feasible)
         diag["distributed_grid_precheck_spillback_violation_veh"] = violation
+        diag["distributed_grid_precheck_leader_constraint_violation"] = leader_violation
         return feasible, diag
 
     def _evaluate_grid_stage(
@@ -941,6 +1099,43 @@ class DistributedCoordinator:
             p1 = total - p2
         return float(p1)
 
+    def _leader_allocation_band_green(
+        self,
+        signal: str,
+        phase_setpoints: Mapping[str, float],
+        candidate_p1: float,
+    ) -> float:
+        """Leader allocation 기준 band 안에서 공통 grid의 green 변화를 보존한다."""
+        net = self.cfg.network
+        total = float(net.effective_green_total)
+        p1_target = phase_setpoints.get(f"{signal}_p1")
+        p2_target = phase_setpoints.get(f"{signal}_p2")
+        if p1_target is None and p2_target is None:
+            return self._bounded_leader_green(signal, {}, candidate_p1)
+
+        if p1_target is None:
+            p1_target = total - float(p2_target)
+        if p2_target is None:
+            p2_target = total - float(p1_target)
+        band = max(
+            0.0,
+            float(self.cfg.urban_follower.allocation_green_band_sec),
+            float(self.cfg.urban_follower.eps_g),
+        )
+        low = max(float(net.green_min), float(p1_target) - band, total - (float(p2_target) + band))
+        high = min(float(net.green_max), float(p1_target) + band, total - (float(p2_target) - band))
+        if low > high:
+            low, high = float(net.green_min), float(net.green_max)
+        p1 = float(np.clip(candidate_p1, low, high))
+        p2 = total - p1
+        if p2 < net.green_min:
+            p2 = float(net.green_min)
+            p1 = total - p2
+        if p2 > net.green_max:
+            p2 = float(net.green_max)
+            p1 = total - p2
+        return float(p1)
+
     def _set_leader_green(self, control: ControlAction, signal: str, p1: float) -> None:
         p1 = self._bounded_leader_green(signal, {}, p1)
         control.green_times[f"{signal}_p1"] = p1
@@ -956,86 +1151,97 @@ class DistributedCoordinator:
         lower = {ramp: min_ratio * upper[ramp] for ramp in self.cfg.network.ramps}
         return _project_to_bounded_target(float(leader.N_UF_star), lower, upper, weights)
 
-    def _leader_conditioned_grid_candidates(
+    def _project_control_to_leader_constraints(
         self,
-        previous: ControlAction,
-        center: ControlAction,
+        control: ControlAction,
         leader: LeaderAction,
         allocation_plan: Optional[AllocationResult],
-    ) -> list[GridControlCandidate]:
-        net = self.cfg.network
-        phase_setpoints = self._allocation_green_phase_setpoints(allocation_plan)
-        allocation = self._allocation_control_map(allocation_plan)
-        target = max(0.0, float(leader.N_UF_star))
-        cap_weights = {ramp: float(net.ramp_capacity_veh_h[ramp]) for ramp in net.ramps}
-        queue_weights = {
-            ramp: max(1.0, float(center.ramp_metering.get(ramp, net.ramp_capacity_veh_h[ramp])))
-            for ramp in net.ramps
-        }
-        previous_weights = {
-            ramp: max(1.0, float(previous.ramp_metering.get(ramp, net.ramp_capacity_veh_h[ramp])))
-            for ramp in net.ramps
-        }
-        metering_sets = [
-            ("cap", self._leader_metering_projection(leader, cap_weights)),
-            ("previous_ratio", self._leader_metering_projection(leader, previous_weights)),
-            ("center_ratio", self._leader_metering_projection(leader, queue_weights)),
-        ]
-        green_center: Dict[str, float] = {}
-        for signal in net.signals:
-            fallback = center.green_times.get(f"{signal}_p1", net.effective_green_total / 2.0)
-            green_center[signal] = self._bounded_leader_green(signal, phase_setpoints, fallback)
-        base_offsets = {
-            signal: float(center.offsets.get(signal, previous.offsets.get(signal, 0.0))) % max(net.cycle_length, 1.0e-9)
-            for signal in net.signals
-        }
+    ) -> ControlAction:
+        """공통 structured-grid 후보를 Stackelberg leader 제약으로 사영한다.
 
+        RM은 후보의 ramp별 비율을 최대한 보존하면서 `sum ~= N_UF_star`를 맞추고,
+        allocation은 `N_P_star`가 만든 allocation module 결과를 사용한다. Green은
+        allocation band 안에서만 clipping해서 grid/sensitivity 방향성을 남긴다.
+        """
+        net = self.cfg.network
+        phase_setpoints: Dict[str, float] = {}
+        allocation: Dict[str, float] = {}
+        out = control.copy()
+        out.N_P_star = float(leader.N_P_star)
+        out.N_UF_star = float(leader.N_UF_star)
+        out.inflow_outflow_allocation = dict(allocation)
+        weights = {
+            ramp: max(1.0, float(out.ramp_metering.get(ramp, net.ramp_capacity_veh_h[ramp])))
+            for ramp in net.ramps
+        }
+        out.ramp_metering = self._leader_metering_projection(leader, weights)
+        for signal in net.signals:
+            candidate_p1 = float(out.green_times.get(f"{signal}_p1", net.effective_green_total / 2.0))
+            p1 = self._leader_allocation_band_green(signal, phase_setpoints, candidate_p1)
+            out.green_times[f"{signal}_p1"] = p1
+            out.green_times[f"{signal}_p2"] = float(net.effective_green_total - p1)
+            out.offsets[signal] = float(out.offsets.get(signal, 0.0)) % max(float(net.cycle_length), 1.0e-9)
+        for link in net.freeway_links:
+            out.vsl[link] = float(out.vsl.get(link, max(self.cfg.freeway_follower.vsl_set)))
+        return self._apply_green_vsl_only_authority(out)
+
+    def _project_leader_conditioned_candidates(
+        self,
+        candidates: list[GridControlCandidate],
+        leader: LeaderAction,
+        allocation_plan: Optional[AllocationResult],
+        label_prefix: str,
+    ) -> list[GridControlCandidate]:
+        """공통 structured/sensitivity 후보들을 leader-conditioned feasible set으로 변환한다."""
         out: list[GridControlCandidate] = []
         seen: set[tuple[float, ...]] = set()
 
         def key(control: ControlAction) -> tuple[float, ...]:
             return tuple(round(v, 4) for v in control.control_vector(self.cfg))
 
-        def base_control() -> ControlAction:
-            control = center.copy()
-            control.N_P_star = float(leader.N_P_star)
-            control.N_UF_star = float(leader.N_UF_star)
-            control.inflow_outflow_allocation = dict(allocation)
-            for signal, p1 in green_center.items():
-                self._set_leader_green(control, signal, p1)
-            control.offsets = dict(base_offsets)
-            return control
-
-        def add(label: str, control: ControlAction) -> None:
+        for candidate in candidates:
+            control = self._project_control_to_leader_constraints(
+                candidate.control,
+                leader,
+                allocation_plan,
+            )
             k = key(control)
             if k in seen:
-                return
+                continue
             seen.add(k)
-            out.append(GridControlCandidate(label, control, "leader_conditioned", "local"))
-
-        for label, rates in metering_sets:
-            control = base_control()
-            control.ramp_metering = dict(rates)
-            add(f"leader_rm_{label}", control)
-
-        for signal in net.signals:
-            for delta in (-6.0, 6.0):
-                control = base_control()
-                control.ramp_metering = dict(metering_sets[0][1])
-                self._set_leader_green(control, signal, green_center[signal] + delta)
-                add(f"leader_green_{signal}_{delta:+.0f}", control)
-
-        max_step = float(self.cfg.urban_follower.max_offset_step)
-        cycle = max(float(net.cycle_length), 1.0e-9)
-        for signal in net.signals:
-            for delta in (-5.0, 5.0):
-                control = base_control()
-                control.ramp_metering = dict(metering_sets[0][1])
-                step = float(np.clip(delta, -max_step, max_step))
-                control.offsets[signal] = float((base_offsets[signal] + step) % cycle)
-                add(f"leader_offset_{signal}_{delta:+.0f}", control)
-
+            out.append(GridControlCandidate(
+                label=f"{label_prefix}_{candidate.label}",
+                control=control,
+                stage=candidate.stage,
+                scope=candidate.scope,
+                axis=candidate.axis,
+                delta=candidate.delta,
+            ))
         return out
+
+    def _leader_conditioned_grid_candidates(
+        self,
+        previous: ControlAction,
+        center: ControlAction,
+        leader: LeaderAction,
+        allocation_plan: Optional[AllocationResult],
+        stage: str = "coarse",
+        scope: str = "global",
+    ) -> list[GridControlCandidate]:
+        raw = structured_grid_candidates(
+            self.cfg,
+            previous,
+            center,
+            authority="proposed",
+            stage=stage,
+            scope=scope,
+        )
+        return self._project_leader_conditioned_candidates(
+            raw,
+            leader,
+            allocation_plan,
+            f"leader_{stage}_{scope}",
+        )
 
     def _leader_conditioned_grid_refinement(
         self,
@@ -1047,42 +1253,158 @@ class DistributedCoordinator:
         allocation_plan: Optional[AllocationResult],
         incumbent_obj: float = np.inf,
     ) -> tuple[ControlAction, float, Dict[str, float]]:
-        candidates = self._leader_conditioned_grid_candidates(previous, center, leader, allocation_plan)
-        results = self._evaluate_grid_stage(state, candidates, forecast, leader, incumbent_obj=incumbent_obj)
+        refresh_sec = float(self.cfg.mpc.grid_global_refresh_sec)
+        interval = max(self.cfg.simulation.control_interval, 1.0e-9)
+        step_index = int(round(state.time_sec / interval))
+        refresh_steps = max(1, int(round(refresh_sec / interval)))
+        global_refresh = step_index == 0 or step_index % refresh_steps == 0
+        coarse_scope = "global" if global_refresh else "local"
+        projected_center = self._project_control_to_leader_constraints(center, leader, allocation_plan)
+        projected_previous = self._project_control_to_leader_constraints(previous, leader, allocation_plan)
+
+        coarse = self._leader_conditioned_grid_candidates(
+            projected_previous,
+            projected_center,
+            leader,
+            allocation_plan,
+            stage="coarse",
+            scope=coarse_scope,
+        )
+        coarse_results = self._evaluate_grid_stage(
+            state,
+            coarse,
+            forecast,
+            leader,
+            incumbent_obj=incumbent_obj,
+        )
         best_obj = np.inf
-        best_control = center.copy()
+        best_control = projected_center.copy()
         best_diag: Dict[str, float] = {}
-        for _candidate, obj, control, diag in results:
+        for _candidate, obj, control, diag in coarse_results:
             if self._response_is_better(obj, diag, best_obj, best_diag):
                 best_obj = float(obj)
                 best_control = control
                 best_diag = diag
+
+        raw_probes = sensitivity_probe_candidates(
+            self.cfg,
+            projected_previous,
+            best_control,
+            authority="proposed",
+        )
+        probes = self._project_leader_conditioned_candidates(
+            raw_probes,
+            leader,
+            allocation_plan,
+            "leader_probe",
+        )
+        probe_results = self._evaluate_grid_stage(
+            state,
+            probes,
+            forecast,
+            leader,
+            incumbent_obj=incumbent_obj,
+        )
+        probe_scores: list[tuple[GridControlCandidate, float]] = []
+        for candidate, obj, control, diag in probe_results:
+            probe_scores.append((candidate, obj))
+            if self._response_is_better(obj, diag, best_obj, best_diag):
+                best_obj = float(obj)
+                best_control = control
+                best_diag = diag
+
+        raw_directions = sensitivity_direction_candidates(
+            self.cfg,
+            projected_previous,
+            best_control,
+            probe_scores,
+            authority="proposed",
+            base_objective=best_obj,
+        )
+        directions = self._project_leader_conditioned_candidates(
+            raw_directions,
+            leader,
+            allocation_plan,
+            "leader_direction",
+        )
+        direction_results = self._evaluate_grid_stage(
+            state,
+            directions,
+            forecast,
+            leader,
+            incumbent_obj=min(best_obj, incumbent_obj),
+        )
+        for _candidate, obj, control, diag in direction_results:
+            if self._response_is_better(obj, diag, best_obj, best_diag):
+                best_obj = float(obj)
+                best_control = control
+                best_diag = diag
+
+        fine = self._leader_conditioned_grid_candidates(
+            projected_previous,
+            best_control,
+            leader,
+            allocation_plan,
+            stage="fine",
+            scope="local",
+        )
+        fine_results = self._evaluate_grid_stage(
+            state,
+            fine,
+            forecast,
+            leader,
+            incumbent_obj=min(best_obj, incumbent_obj),
+        )
+        for _candidate, obj, control, diag in fine_results:
+            if self._response_is_better(obj, diag, best_obj, best_diag):
+                best_obj = float(obj)
+                best_control = control
+                best_diag = diag
+
         if not np.isfinite(best_obj):
-            return center.copy(), np.inf, {}
+            return projected_center.copy(), np.inf, {}
         target = max(0.0, float(leader.N_UF_star))
         rm_sum = sum(best_control.ramp_metering.get(ramp, 0.0) for ramp in self.cfg.network.ramps)
+        stage_results = [coarse_results, probe_results, direction_results, fine_results]
+
+        def stage_diag_sum(key: str) -> float:
+            return float(sum(
+                stage[0][3].get(key, 0.0)
+                for stage in stage_results
+                if stage
+            ))
+
         best_diag.update({
             "distributed_grid_search_active": 1.0,
             "distributed_grid_leader_conditioned": 1.0,
-            "distributed_grid_full_search_active": 0.0,
-            "distributed_grid_parallel_stages": 1.0,
-            "distributed_grid_stage1_candidates": float(len(candidates)),
-            "distributed_grid_stage2_candidates": 0.0,
-            "distributed_grid_sensitivity_probe_candidates": 0.0,
-            "distributed_grid_sensitivity_direction_candidates": 0.0,
-            "distributed_grid_total_candidates": float(len(candidates)),
+            "distributed_grid_full_search_active": 1.0,
+            "distributed_grid_parallel_stages": 4.0,
+            "distributed_grid_stage1_candidates": float(len(coarse)),
+            "distributed_grid_stage2_candidates": float(len(fine)),
+            "distributed_grid_sensitivity_probe_candidates": float(len(probes)),
+            "distributed_grid_sensitivity_direction_candidates": float(len(directions)),
+            "distributed_grid_total_candidates": float(
+                len(coarse) + len(probes) + len(directions) + len(fine)
+            ),
             "distributed_grid_early_terminated_candidates": float(sum(
                 result[3].get("distributed_grid_early_terminated", 0.0)
-                for result in results
+                for result in coarse_results + probe_results + direction_results + fine_results
             )),
+            "distributed_grid_precheck_filtered_candidates": stage_diag_sum(
+                "distributed_grid_precheck_filtered_candidates"
+            ),
+            "distributed_grid_precheck_evaluated_candidates": stage_diag_sum(
+                "distributed_grid_precheck_evaluated_candidates"
+            ),
             "distributed_grid_leader_target_metering_veh_h": target,
             "distributed_grid_leader_selected_metering_sum_veh_h": float(rm_sum),
             "distributed_grid_leader_metering_sum_error_veh_h": float(rm_sum - target),
             "distributed_grid_leader_incumbent_active": float(np.isfinite(incumbent_obj)),
             "distributed_grid_leader_incumbent_objective": float(incumbent_obj if np.isfinite(incumbent_obj) else 0.0),
-            "distributed_grid_global_refresh": 0.0,
-            "distributed_grid_scope_global": 0.0,
-            "distributed_grid_scope_local": 1.0,
+            "distributed_grid_global_refresh": float(global_refresh),
+            "distributed_grid_scope_global": float(coarse_scope == "global"),
+            "distributed_grid_scope_local": float(coarse_scope == "local"),
+            "distributed_grid_refresh_interval_sec": float(refresh_sec),
             "distributed_grid_authority_proposed": 1.0,
         })
         return best_control, float(best_obj), best_diag
@@ -1115,10 +1437,12 @@ class DistributedCoordinator:
         current = reference_control.copy()
         current.N_P_star = leader.N_P_star if leader is not None else 0.0
         current.N_UF_star = leader.N_UF_star if leader is not None else 0.0
-        allocation_plan = (
-            None if leader is None
-            else self.urban_follower.allocation_module.solve(state, leader, forecast)
-        )
+        # Stackelberg followers use direct controls constrained by leader targets.
+        # The allocation module is not a candidate generator in this path.
+        allocation_plan = None
+        if leader is not None:
+            reference_control.inflow_outflow_allocation = {}
+            current.inflow_outflow_allocation = {}
         coupling = self._extract_coupling(state, current, first_demand)
         best_control = current.copy()
         best_obj = np.inf
@@ -1233,14 +1557,41 @@ class DistributedCoordinator:
             new_coupling = self._extract_coupling(state, candidate, first_demand)
             residual = self._coupling_residual(coupling, new_coupling)
             proxy_obj = sum(s.objective for s in freeway_solves) + sum(s.objective for s in urban_solves)
-            obj, response_diag = self._response_tts_objective(
-                state,
-                candidate,
-                forecast,
-                residual=residual,
-                proxy_objective=proxy_obj,
-            )
             diagnostics = self._diagnostics(freeway_solves, urban_solves, residual, iteration)
+            if leader is None:
+                obj, response_diag = self._response_tts_objective(
+                    state,
+                    candidate,
+                    forecast,
+                    residual=residual,
+                    proxy_objective=proxy_obj,
+                )
+            else:
+                nash_candidate = GridControlCandidate(
+                    label=f"nash_iteration_{iteration}",
+                    control=candidate,
+                    stage="nash",
+                    scope="local",
+                )
+                _precheck_feasible, precheck_diag = self._grid_feasibility_precheck(
+                    state,
+                    nash_candidate,
+                    forecast,
+                    leader,
+                )
+                _candidate, obj, candidate, response_diag = self._rollout_grid_objective(
+                    state,
+                    nash_candidate,
+                    forecast,
+                    leader,
+                    incumbent_obj=best_obj,
+                    precheck_diag=precheck_diag,
+                )
+                response_diag.update({
+                    "distributed_nash_candidate_rollout_evaluated": 1.0,
+                    "distributed_nash_candidate_proxy_objective": float(proxy_obj),
+                    "distributed_nash_candidate_iteration": float(iteration),
+                })
             diagnostics.update(response_diag)
             diagnostics.update(guard_flags)
             last_solver_diag = diagnostics
@@ -1259,6 +1610,10 @@ class DistributedCoordinator:
             merged_diag.update(best_diag)
             best_diag = merged_diag
         best_control.diagnostics.update(best_diag)
+        if leader is not None:
+            best_control.inflow_outflow_allocation = {}
+            best_control.diagnostics["distributed_grid_leader_allocation_module_disabled"] = 1.0
+            best_control.diagnostics["distributed_stackelberg_direct_feasible_set_active"] = 1.0
         best_control.diagnostics["nash_converged"] = converged
         best_control.diagnostics["nash_iterations"] = iteration
         return NashResult(

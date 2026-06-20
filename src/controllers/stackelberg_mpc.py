@@ -131,11 +131,16 @@ class StackelbergMPCController:
             )
             coarse_stage = "coarse_local"
         fallback_start_index = len(coarse_candidates) + max(0, int(self.cfg.mpc.leader_refinement_candidate_count))
-        fallback_evaluations = self._evaluate_fallback_candidates(
-            state,
-            forecast,
-            previous,
-            start_index=fallback_start_index,
+        fallback_enabled = bool(self.cfg.mpc.stackelberg_enable_fallback)
+        fallback_evaluations = (
+            self._evaluate_fallback_candidates(
+                state,
+                forecast,
+                previous,
+                start_index=fallback_start_index,
+            )
+            if fallback_enabled
+            else []
         )
         fallback_incumbent_obj = min(
             (item.objective for item in fallback_evaluations),
@@ -207,6 +212,7 @@ class StackelbergMPCController:
             "leader_candidate_global_refresh": float(global_refresh),
             "leader_candidate_coarse_global": float(coarse_stage == "coarse_global"),
             "leader_candidate_coarse_local": float(coarse_stage == "coarse_local"),
+            "leader_fallback_enabled": float(fallback_enabled),
             "leader_fallback_incumbent_seed_active": float(fallback_incumbent_obj < float("inf")),
             "leader_fallback_incumbent_objective": float(
                 fallback_incumbent_obj if fallback_incumbent_obj < float("inf") else 0.0
@@ -263,7 +269,12 @@ class StackelbergMPCController:
             "nash_residual_control": best_eval.nash.residual_control,
             "nash_residual_objective": best_eval.nash.residual_objective,
             "leader_rollout_prediction_used": 1.0 if best_eval.rollout_used else 0.0,
-            "leader_follower_response_objective_used": 0.0 if best_eval.rollout_used else 1.0,
+            "leader_follower_response_objective_used": float(
+                self.cfg.leader.objective_mode == "follower_ttt"
+            ),
+            "leader_rollout_objective_base_used": float(
+                self.cfg.leader.objective_mode == "state_accumulation"
+            ),
             "leader_response_proxy_state_count": float(best_eval.metadata.get("leader_response_proxy_state_count", 0.0)),
             "leader_candidate_full_evaluated_count": float(len(full_evaluations)),
             "leader_fallback_evaluated_count": float(len(fallback_evaluations)),
@@ -944,13 +955,15 @@ class StackelbergMPCController:
         후보 control을 다시 full coupled plant로 rollout하지 않는다. Legacy
         `state_accumulation` 모드는 state trajectory 자체가 base이므로 기존 rollout을 유지한다.
         """
+        # In follower_ttt mode, keep the follower response as the base objective
+        # but evaluate leader penalties on future MPC rollout states.
+        states, rollout_ttt = self._predict(state, nash.control, forecast)
         if self.cfg.leader.objective_mode == "state_accumulation":
-            states, rollout_ttt = self._predict(state, nash.control, forecast)
             return states, rollout_ttt, True
-        horizon = max(1, len(forecast[: self.cfg.mpc.horizon_steps]))
+        return states, float(nash.objective_value), True
+
         # target/density penalty는 현재 response-state proxy 위에서 평가한다. follower objective
         # 자체가 후보별 response 비용을 담고, full system rollout 비용은 의도적으로 배제한다.
-        return [state.copy() for _ in range(horizon)], float(nash.objective_value), False
 
     def _predict(
         self,

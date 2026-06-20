@@ -24,6 +24,7 @@ from src.models.urban_queue_model import (
     ensure_urban_state,
     movement_balance_summary,
     movement_specs,
+    urban_accumulation_feedback_flow,
 )
 
 
@@ -730,6 +731,38 @@ class UrbanFollower:
                 previous_control,
                 phase_arrivals,
                 phase_coupling_total,
+            )
+        if allocation_plan is None:
+            direct = self._solve_leaderless(
+                state,
+                pressure,
+                previous_control,
+                phase_arrivals,
+                phase_coupling_total,
+            )
+            target_net_inflow = urban_accumulation_feedback_flow(
+                state,
+                self.cfg,
+                leader.N_P_star,
+                forecast,
+            )
+            metrics = dict(direct.metrics)
+            metrics.update({
+                "allocation_module_active": 0.0,
+                "leader_direct_feasible_set_active": 1.0,
+                "urban_accumulation_target_veh": float(leader.N_P_star),
+                "urban_accumulation_error_veh": float(
+                    state.protected_accumulation_veh(self.cfg.network) - leader.N_P_star
+                ),
+                "urban_net_inflow_target_veh_h": float(target_net_inflow),
+            })
+            return UrbanFollowerResult(
+                green_times=direct.green_times,
+                offsets=direct.offsets,
+                inflow_outflow_allocation={},
+                objective_value=float(direct.objective_value),
+                infeasibility={"net_inflow_residual": 0.0},
+                metrics=metrics,
             )
         plan = allocation_plan or self.allocation_module.solve(state, leader)
         green, offsets, stage2_cost, stage2_metrics = self._select_stage2_controls(

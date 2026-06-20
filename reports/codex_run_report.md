@@ -7173,3 +7173,925 @@ PFO fallback/grid refresh diagnostics:
   rejected leader candidates against the PFO fallback objective, terminal proxy,
   and boundary balance in the peak intervals where the leader has the strongest
   possible advantage.
+
+## 2026-06-20: Peak 7200 s Stackelberg Run With Fallback Disabled
+
+### Implementation
+
+- Added diagnostic-only runtime switch `mpc.stackelberg_enable_fallback`.
+- Added CLI flag `--disable-stackelberg-fallback` to both experiment drivers.
+- Default behavior remains unchanged: fallback is enabled unless the flag is
+  explicitly passed.
+
+Changed files:
+
+- `src/models/state.py`
+- `src/config/default.yaml`
+- `src/controllers/stackelberg_mpc.py`
+- `src/experiments/all_scenarios_four_controller_comparison.py`
+- `src/experiments/six_controller_comparison.py`
+
+Validation:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m py_compile src\controllers\stackelberg_mpc.py src\models\state.py src\experiments\all_scenarios_four_controller_comparison.py src\experiments\six_controller_comparison.py
+```
+
+Result: PASS.
+
+### Run Command
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.all_scenarios_four_controller_comparison --scenario peak_demand --controllers PROPOSED-STACKELBERG --T-total 7200 --output outputs\pstack_no_fallback_peak_7200_2026_06_20 --max-nash-iter 1 --freeway-prediction-horizon-steps 3 --grid-parallel-backend process --grid-parallel-max-workers 8 --grid-parallel-chunk-size 8 --disable-stackelberg-fallback
+```
+
+Output:
+
+```text
+outputs\pstack_no_fallback_peak_7200_2026_06_20
+```
+
+### Summary
+
+| Controller / Mode | Total TTT | Improvement vs no-control | Total delay | Urban TTT | Freeway TTT | Throughput veh/h | Terminal veh | Compute sec | Solver evals | Mean B sum |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| NO-CONTROL | 11659.562 | baseline | 10515.542 | 6759.336 | 4900.226 | 7936.1 | 13488.0 | 0.00 | 0 | 0.082207 |
+| Previous PFO | 3773.909 | 67.632% | 2629.889 | 2463.602 | 1310.307 | 12894.7 | 3565.7 | 380.20 | 10570 | 0.159081 |
+| Previous guarded P-Stack | 3773.909 | 67.632% | 2629.889 | 2463.602 | 1310.307 | 12894.7 | 3565.7 | 1049.92 | 121904 | 0.159081 |
+| P-Stack fallback disabled | 10552.197 | 9.497% | 9408.178 | 10253.681 | 298.516 | 9583.2 | 10189.4 | 474.32 | 7661 | 0.009483 |
+
+### Stackelberg Diagnostics
+
+| Mode | intervals | fallback evals | fallback selected | PFO fallback selected | coarse selected | refined selected | avg full leader eval | early term sum | avg N_P_star | avg N_UF_star |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Previous guarded P-Stack | 40 | 80 | 40 | 40 | 0 | 0 | 11.625 | 32552 | n/a | n/a |
+| P-Stack fallback disabled | 40 | 0 | 0 | 0 | 29 | 11 | 8.150 | 0 | 490.052 | 5137.026 |
+
+### Interpretation
+
+- The exact equality between previous P-Stack and PFO was caused by the fallback
+  guard: the previous peak run selected PFO fallback in all 40 control intervals.
+- With fallback disabled, P-Stack no longer matches PFO. It selects leader
+  candidates in every interval, with `N_UF_star` averaging `5137.026 veh/h`.
+- The leader-only solution strongly protects the freeway (`freeway_ttt=298.516`)
+  but pushes cost into the urban side (`urban_ttt=10253.681`), so total TTT is
+  much worse than PFO despite still beating no-control by `9.497%`.
+- Computation drops from `1049.92 s` to `474.32 s` because the expensive PFO
+  fallback response is not evaluated; however, this is not a viable controller
+  performance profile.
+
+### Failed Criteria / Next Modification
+
+- Fallback-disabled P-Stack fails the practical performance comparison against
+  PFO and guarded P-Stack.
+- The next diagnosis should focus on the leader objective/allocation coupling:
+  leader-conditioned actions appear biased toward freeway clearance and are not
+  internalizing the urban TTT increase enough. Candidate generation is active;
+  the issue is more likely objective weighting/coverage, target binding, or the
+  allocation module's response to high `N_UF_star` than fallback mechanics alone.
+
+## 2026-06-20: Leader MPC Future-State Penalty Evaluation
+
+### Implementation
+
+- Changed Stackelberg leader `follower_ttt` evaluation so the base objective
+  remains the follower/Nash response objective, but leader target, boundary-in,
+  and density penalties are evaluated on future MPC rollout states instead of
+  repeated copies of the current state.
+- Added diagnostics that distinguish:
+  - `leader_rollout_prediction_used`
+  - `leader_follower_response_objective_used`
+  - `leader_rollout_objective_base_used`
+- Updated the Stackelberg unit test to verify that default `follower_ttt` mode
+  uses future penalty states while keeping the follower response objective as
+  the base.
+
+Changed files:
+
+- `src/controllers/stackelberg_mpc.py`
+- `src/tests/test_constraints.py`
+- `reports/codex_run_report.md`
+
+### Validation
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m py_compile src\controllers\stackelberg_mpc.py src\models\state.py src\experiments\all_scenarios_four_controller_comparison.py src\experiments\six_controller_comparison.py src\tests\test_constraints.py
+```
+
+Result: PASS.
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m unittest src.tests.test_constraints.ConstraintTests.test_stackelberg_prediction_uses_coupling_module src.tests.test_constraints.ConstraintTests.test_stackelberg_default_objective_uses_follower_response_with_future_penalty_states src.tests.test_constraints.ConstraintTests.test_default_leader_objective_uses_follower_ttt_base src.tests.test_offramp_reattribution.OffRampReattributionTests.test_leader_boundary_in_cost_enters_total_objective -v
+```
+
+Result: PASS (`4` tests).
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m unittest src.tests.test_constraints.ConstraintTests.test_stackelberg_fallback_guard_rejects_terminal_worse_leader src.tests.test_constraints.ConstraintTests.test_stackelberg_leader_evaluates_coarse_and_refined_grid src.tests.test_constraints.ConstraintTests.test_stackelberg_prediction_uses_coupling_module src.tests.test_constraints.ConstraintTests.test_stackelberg_default_objective_uses_follower_response_with_future_penalty_states src.tests.test_offramp_reattribution.OffRampReattributionTests.test_leader_boundary_in_cost_enters_total_objective -v
+```
+
+Result: PASS (`5` tests, `83.905 s`).
+
+### Smoke Run
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.all_scenarios_four_controller_comparison --scenario peak_demand --controllers PROPOSED-STACKELBERG --T-total 360 --output outputs\pstack_future_rollout_penalty_peak_360_2026_06_20 --max-nash-iter 1 --freeway-prediction-horizon-steps 3 --grid-parallel-backend process --grid-parallel-max-workers 8 --grid-parallel-chunk-size 8 --disable-stackelberg-fallback
+```
+
+Result:
+
+| Scenario | Controller | Total TTT | Improvement | Urban TTT | Freeway TTT | Compute sec | Mean B sum |
+|---|---|---:|---:|---:|---:|---:|---:|
+| peak_demand | NO-CONTROL | 49.745 | baseline | n/a | n/a | 0.00 | 0.144364 |
+| peak_demand | PROPOSED-STACKELBERG | 57.989 | -16.573% | 44.576 | 13.414 | 26.96 | 0.044296 |
+
+Diagnostics confirmed the intended objective structure:
+
+| Diagnostic | Mean |
+|---|---:|
+| `leader_rollout_prediction_used` | 1.000 |
+| `leader_follower_response_objective_used` | 1.000 |
+| `leader_rollout_objective_base_used` | 0.000 |
+| `leader_boundary_in_queue_penalty` | 44.410 |
+| `leader_selected_N_UF_star` | 5812.500 |
+
+### 7200 s Peak Run
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.all_scenarios_four_controller_comparison --scenario peak_demand --controllers PROPOSED-STACKELBERG --T-total 7200 --output outputs\pstack_future_rollout_penalty_peak_7200_2026_06_20 --max-nash-iter 1 --freeway-prediction-horizon-steps 3 --grid-parallel-backend process --grid-parallel-max-workers 8 --grid-parallel-chunk-size 8 --disable-stackelberg-fallback
+```
+
+Output:
+
+```text
+outputs\pstack_future_rollout_penalty_peak_7200_2026_06_20
+```
+
+Summary:
+
+| Mode | Total TTT | Improvement vs no-control | Total delay | Urban TTT | Freeway TTT | Throughput veh/h | Terminal veh | Compute sec | Solver evals | Mean B sum |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| NO-CONTROL | 11659.562 | baseline | 10515.542 | 6759.336 | 4900.226 | 7936.1 | 13488.0 | 0.00 | 0 | 0.082207 |
+| Previous PFO | 3773.909 | 67.632% | 2629.889 | 2463.602 | 1310.307 | 12894.7 | 3565.7 | 380.20 | 10570 | 0.159081 |
+| Old P-Stack fallback disabled | 10552.197 | 9.497% | 9408.178 | 10253.681 | 298.516 | 9583.2 | 10189.4 | 474.32 | 7661 | 0.009483 |
+| Future-penalty P-Stack fallback disabled | 10581.044 | 9.250% | 9437.024 | 10275.913 | 305.131 | 9671.6 | 10013.2 | 491.13 | 8923 | 0.008058 |
+
+Selected-objective diagnostics:
+
+| Mode | rollout used | follower base used | rollout base used | avg objective base | avg boundary penalty | avg target penalty | avg N_UF_star | avg terminal urban proxy |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Old P-Stack fallback disabled | 0.000 | 1.000 | 0.000 | 1345.632 | 349.998 | 60.225 | 5137.026 | 6182.575 |
+| Future-penalty P-Stack fallback disabled | 1.000 | 1.000 | 0.000 | 1241.874 | 396.828 | 66.916 | 5426.789 | 6182.728 |
+
+### Interpretation
+
+- The implementation now makes leader penalties MPC-style: they are evaluated
+  on future rollout states rather than current-state copies.
+- This did increase the boundary-in penalty (`349.998 -> 396.828`) and correctly
+  marks rollout state usage in diagnostics.
+- It did not fix the leader-only performance problem. Peak Total TTT changed
+  from `10552.197` to `10581.044`, still far worse than PFO (`3773.909`).
+- The selected leader `N_UF_star` increased (`5137.026 -> 5426.789`), which
+  means the remaining issue is not simply missing future penalty states. The
+  leader/allocation objective still prefers high ramp discharge / freeway
+  clearance under fallback-disabled selection.
+
+### Failed Criteria / Next Modification
+
+- Future-state penalties are structurally correct but not sufficient.
+- The next diagnosis should compare candidate-level `N_UF_star` vs predicted
+  urban terminal accumulation and realized urban TTT. If higher `N_UF_star`
+  keeps looking cheaper, the likely fix is a leader feasibility/constraint or
+  allocation target reformulation, not more boundary queue accounting.
+
+## 2026-06-20: Stackelberg Leader N_P Grid Expansion
+
+### Implementation
+
+- Broadened the Stackelberg leader `N_P_star` grid from the tight calibrated
+  band `0.90~1.05 * N_P_crit` to `0.40~1.35 * N_P_crit`.
+  - With the current `N_P_crit=509.449 veh`, the default grid range is now
+    `203.780~687.756 veh`.
+  - This covers the previously observed peak PFO protected-accumulation band
+    of roughly `244~592 veh`.
+- Aligned the dataclass default `leader.N_P_star_range` with
+  `src/config/default.yaml` (`[0.0, 850.0]`) so direct `ExperimentConfig()`
+  use does not silently cap the leader grid at `500 veh`.
+- Kept movement-reachability bounds as diagnostics and candidate anchors rather
+  than hard clipping the leader `N_P_star` setpoint range.
+- Added current `protected_accumulation`, movement lower/upper anchors, and
+  `N_P_crit` anchors to both coarse and refined leader candidate generation.
+- Added a regression test that the default leader `N_P` candidate bounds cover
+  the observed PFO band.
+
+Changed files:
+
+- `src/config/default.yaml`
+- `src/controllers/leader.py`
+- `src/models/state.py`
+- `src/tests/test_constraints.py`
+- `reports/codex_run_report.md`
+
+### Validation
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m py_compile src\controllers\leader.py src\controllers\stackelberg_mpc.py src\models\state.py src\tests\test_constraints.py
+```
+
+Result: PASS.
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m unittest src.tests.test_constraints.ConstraintTests.test_leader_candidate_budget_covers_extremes_and_previous_action src.tests.test_constraints.ConstraintTests.test_leader_np_candidates_use_calibrated_crit_band src.tests.test_constraints.ConstraintTests.test_default_leader_np_grid_covers_observed_pfo_band src.tests.test_constraints.ConstraintTests.test_stackelberg_fallback_guard_rejects_terminal_worse_leader src.tests.test_constraints.ConstraintTests.test_stackelberg_default_objective_uses_follower_response_with_future_penalty_states -v
+```
+
+Result: PASS (`5` tests).
+
+Default-grid diagnostic:
+
+```text
+N_P_bounds 203.780 687.756
+movement_bounds 96.000 2496.000
+candidate_count 50
+N_P_candidates [203.780, 284.442, 365.105, 445.768, 509.449, 526.430, 607.093, 687.756]
+```
+
+### Smoke Run
+
+180 s baseline and proposed-controller command:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.all_scenarios_four_controller_comparison --scenario peak_demand --controllers PROPOSED-STACKELBERG --T-total 360 --output outputs\pstack_expanded_np_grid_peak_360_2026_06_20 --max-nash-iter 1 --freeway-prediction-horizon-steps 3 --grid-parallel-backend process --grid-parallel-max-workers 8 --grid-parallel-chunk-size 8 --disable-stackelberg-fallback
+```
+
+| Scenario | Controller | Total TTT | Improvement | Urban TTT | Freeway TTT | Compute sec | Mean B sum |
+|---|---|---:|---:|---:|---:|---:|---:|
+| peak_demand | NO-CONTROL | 49.745 | baseline | 31.886 | 17.859 | 0.00 | 0.144364 |
+| peak_demand | PROPOSED-STACKELBERG | 58.356 | -17.310% | 45.106 | 13.250 | 36.22 | 0.044643 |
+
+Smoke leader diagnostics:
+
+| Diagnostic | Mean | Min | Max |
+|---|---:|---:|---:|
+| `diag_leader_np_bound_lower` | 203.780 | 203.780 | 203.780 |
+| `diag_leader_np_bound_upper` | 687.756 | 687.756 | 687.756 |
+| `N_P_star` | 211.342 | 203.780 | 218.904 |
+| `N_UF_star` | 6000.000 | 6000.000 | 6000.000 |
+| `diag_leader_candidate_prefilter_top_k` | 4.000 | 4.000 | 4.000 |
+| `diag_leader_candidate_full_evaluated_count` | 8.500 | 8.000 | 9.000 |
+
+### 7200 s Peak Run
+
+Baseline and proposed-controller command:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.all_scenarios_four_controller_comparison --scenario peak_demand --controllers PROPOSED-STACKELBERG --T-total 7200 --output outputs\pstack_expanded_np_grid_peak_7200_2026_06_20 --max-nash-iter 1 --freeway-prediction-horizon-steps 3 --grid-parallel-backend process --grid-parallel-max-workers 8 --grid-parallel-chunk-size 8 --disable-stackelberg-fallback
+```
+
+| Scenario | Controller | Total TTT | Improvement | Total delay | Urban TTT | Freeway TTT | Throughput veh/h | Terminal veh | Compute sec | Solver evals | Mean B sum |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| peak_demand | NO-CONTROL | 11659.562 | baseline | 10515.542 | 6759.336 | 4900.226 | 7936.1 | 13488.0 | 0.00 | 0 | 0.082207 |
+| peak_demand | PROPOSED-STACKELBERG | 10554.805 | 9.475% | 9410.786 | 10245.342 | 309.464 | 9704.5 | 9946.9 | 694.52 | 8450 | 0.011982 |
+
+Leader diagnostics:
+
+| Diagnostic | Mean | Min | Max |
+|---|---:|---:|---:|
+| `N_P_star` | 204.741 | 203.780 | 211.808 |
+| `N_UF_star` | 5659.936 | 5283.953 | 6000.000 |
+| `diag_leader_np_bound_lower` | 203.780 | 203.780 | 203.780 |
+| `diag_leader_np_bound_upper` | 687.756 | 687.756 | 687.756 |
+| `diag_leader_nuf_bound_lower` | 2735.532 | 1523.888 | 4102.101 |
+| `diag_leader_nuf_bound_upper` | 6000.000 | 6000.000 | 6000.000 |
+| `diag_leader_candidate_prefilter_top_k` | 4.000 | 4.000 | 4.000 |
+| `diag_leader_candidate_full_evaluated_count` | 8.150 | 8.000 | 10.000 |
+| `diag_leader_boundary_in_queue_penalty` | 390.077 | 36.546 | 822.522 |
+| `diag_leader_target_penalty` | 70.143 | 0.000 | 172.008 |
+| `diag_leader_follower_ttt_base` | 1233.342 | 94.047 | 2625.081 |
+
+### Interpretation
+
+- The leader now definitely searches the PFO-like low protected-accumulation
+  region. In both smoke and 7200 s peak runs, it selected the new lower band
+  rather than being trapped near `N_P_crit`.
+- This rules out a narrow `N_P` grid as the primary remaining cause of the
+  P-Stack vs PFO gap.
+- The remaining failure mode is sharper: even with low `N_P_star`, the leader
+  still selects very high `N_UF_star` (`mean 5659.936 veh/h`), producing low
+  freeway TTT but very high urban TTT.
+- Boundary balance improved relative to no-control (`B_sum 0.082207 ->
+  0.011982`), but Total TTT is still far worse than the previous PFO peak
+  result (`3773.909`). This is not an acceptance pass for the proposed
+  Stackelberg controller.
+
+### Failed Criteria / Next Modification
+
+- Main Total TTT improvement over no-control is positive but still fails the
+  research goal because P-Stack remains much worse than PFO under the same
+  scenario class.
+- The next diagnosis should move from `N_P` feasibility to `N_UF` candidate
+  and objective coverage:
+  - compare candidate-level `N_UF_star` vs predicted urban queue/terminal
+    accumulation,
+  - check whether low/mid `N_UF_star` candidates are filtered out by cheap
+    proxy top-K before full follower evaluation,
+  - inspect whether follower response under low `N_UF_star` is over-penalized
+    by ramp/on-ramp queue terms or under-credited for urban throughput.
+
+## 2026-06-20: Stackelberg N_UF / Global TTT Mismatch Diagnosis
+
+### Diagnostic Context
+
+The user questioned whether selecting high `N_UF_star` while closed-loop global
+Total TTT degrades is itself evidence of a coding/objective problem.
+
+I inspected the Stackelberg evaluation path:
+
+- `PROPOSED-STACKELBERG` mutates `mpc.follower_solver_mode` to `distributed`.
+- Leader coarse/refined candidates are first cheap-prefiltered.
+- Full candidate evaluation calls the distributed follower.
+- The leader base objective then uses the follower response objective
+  (`nash.objective_value`) and adds leader penalties on predicted states.
+- In the distributed Stackelberg follower path, the leader-conditioned follower
+  did not reuse the shared structured-grid search primitives used by the
+  follower-only path. It used a reduced leader-conditioned candidate set:
+  - ramp metering projected to `leader.N_UF_star`,
+  - green around allocation-derived setpoints (`±6 s`),
+  - offset around the local center (`±5 s`),
+  - no full shared RM/green/offset/VSL grid under the leader constraints.
+
+### Candidate Sweep Evidence
+
+I ran an in-memory diagnostic on the initial `peak_demand` state using the same
+important experiment settings:
+
+```text
+follower_solver_mode = distributed
+relaxed_quantized_controls = true
+max_nash_iter = 1
+horizon_steps = 3
+freeway_prediction_horizon_steps = 3
+grid_parallel_backend = serial for diagnostic stability
+```
+
+The diagnostic evaluated every coarse leader candidate with full distributed
+follower evaluation, not only the top-K prefilter candidates.
+
+Top result by full leader objective:
+
+| idx | N_P_star | N_UF_star | prefilter | full objective | follower rollout TTT | rollout urban | rollout freeway | terminal rollout veh |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 203.780 | 6000.000 | true | 127.647 | 83.680 | 66.447 | 17.233 | 777.914 |
+
+Best full-evaluated objective by `N_UF_star` group:
+
+| N_UF_star | best N_P_star | full objective | rollout TTT | rollout urban | rollout freeway | prefilter selected |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1862.000 | 284.442 | 169.604 | 100.078 | 86.213 | 13.864 | false |
+| 2482.667 | 203.780 | 172.520 | 101.087 | 86.977 | 14.110 | false |
+| 2551.667 | 284.442 | 164.703 | 96.843 | 83.052 | 13.792 | false |
+| 3103.333 | 203.780 | 144.911 | 91.083 | 76.058 | 15.025 | false |
+| 3241.333 | 284.442 | 165.927 | 94.592 | 79.706 | 14.886 | false |
+| 3931.000 | 284.442 | 151.245 | 91.699 | 75.737 | 15.962 | false |
+| 4620.667 | 203.780 | 155.301 | 96.157 | 81.629 | 14.527 | true |
+| 5310.333 | 203.780 | 136.961 | 87.120 | 70.824 | 16.296 | true |
+| 6000.000 | 203.780 | 127.647 | 83.680 | 66.447 | 17.233 | true |
+
+### Interpretation
+
+- This is not merely a top-K prefilter bug. At the initial peak state, the full
+  distributed follower horizon objective itself prefers `N_UF_star=6000`.
+- The controller is therefore not minimizing the eventual 7200 s global Total
+  TTT. It is minimizing a short MPC-horizon response objective that currently
+  views high ramp discharge as beneficial.
+- The remaining code-level mismatch is likely the Stackelberg follower response
+  set, not only the scalar leader objective:
+  - The follower-only path uses the broader shared structured grid and can find
+    a much better closed-loop policy.
+  - P-Stack's leader-conditioned follower uses a much narrower local candidate
+    set around allocation/projection centers.
+  - Therefore the leader may never evaluate a comparable control combination
+    even if the abstract leader variables could represent it.
+
+### Next Modification
+
+The next fix should make the Stackelberg follower response comparable to the
+follower-only search space without using the follower-only selected solution as
+truth:
+
+1. For each leader candidate, build follower candidates from the same
+   shared structured-grid primitives.
+2. Project only the parts that must obey leader constraints:
+   - RM sum to `N_UF_star`,
+   - green/allocation around the leader `N_P_star` allocation plan.
+3. Keep the full green/offset/VSL neighborhood and sensitivity candidates
+   available under those projections.
+4. Then evaluate projected candidates with the same rollout TTT objective.
+
+This tests the critical question directly:
+
+```text
+Can the leader choose a variable pair whose induced follower feasible set
+contains a PFO-like good solution?
+```
+
+If yes, P-Stack should stop being worse than PFO for coding reasons. If no, the
+Stackelberg formulation/leader variables are over-constraining the problem and
+need reformulation rather than another penalty tweak.
+
+## 2026-06-20: Leader-Conditioned Shared Structured Follower Search
+
+### Implementation
+
+- Changed the Stackelberg distributed follower response so leader-conditioned
+  follower candidates are generated from the shared structured-grid primitives
+  rather than the former narrow hand-written leader-local candidate set.
+- This does not run `PROPOSED-FOLLOWERS-ONLY` first and does not inject a PFO
+  selected control as a truth solution.
+- Each shared candidate is projected into the Stackelberg leader feasible set:
+  - `N_P_star` and `N_UF_star` are copied from the leader action,
+  - ramp-metering rates are projected so their sum tracks `leader.N_UF_star`,
+    preserving the candidate's ramp ratio as much as possible,
+  - inflow/outflow allocation is replaced by the allocation-module result for
+    the leader `N_P_star`,
+  - green times are clipped only to the allocation phase band so the shared
+    grid/sensitivity direction remains visible under the allocation constraint,
+  - offset and VSL candidates remain available subject to the existing actuator
+    repair and rollout feasibility checks.
+- Replaced the former one-stage Stackelberg follower refinement with the same
+  four-stage structure used by the follower-only grid search:
+  - coarse shared grid,
+  - finite-difference sensitivity probes,
+  - sensitivity-direction candidates,
+  - fine local shared grid.
+
+Changed files:
+
+- `src/controllers/distributed_coordinator.py`
+- `src/tests/test_constraints.py`
+- `reports/codex_run_report.md`
+
+### Validation
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m py_compile src\controllers\distributed_coordinator.py src\controllers\stackelberg_mpc.py src\controllers\leader.py src\models\state.py src\tests\test_constraints.py
+```
+
+Result: PASS.
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m unittest src.tests.test_constraints.ConstraintTests.test_distributed_coordinator_returns_per_agent_diagnostics src.tests.test_constraints.ConstraintTests.test_leader_conditioned_grid_projects_metering_target src.tests.test_constraints.ConstraintTests.test_default_leader_np_grid_covers_observed_pfo_band src.tests.test_constraints.ConstraintTests.test_stackelberg_fallback_guard_rejects_terminal_worse_leader src.tests.test_constraints.ConstraintTests.test_stackelberg_default_objective_uses_follower_response_with_future_penalty_states -v
+```
+
+Result: PASS (`5` tests, `11.621 s`).
+
+### Smoke Run
+
+Baseline and proposed-controller command:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.all_scenarios_four_controller_comparison --scenario peak_demand --controllers PROPOSED-STACKELBERG --T-total 180 --output outputs\pstack_shared_structured_leader_followers_peak_180_2026_06_20 --max-nash-iter 1 --freeway-prediction-horizon-steps 3 --grid-parallel-backend process --grid-parallel-max-workers 8 --grid-parallel-chunk-size 8 --disable-stackelberg-fallback
+```
+
+| Scenario | Controller | Total TTT | Improvement | Urban TTT | Freeway TTT | Compute sec | Mean B sum |
+|---|---|---:|---:|---:|---:|---:|---:|
+| peak_demand | NO-CONTROL | 20.181 | baseline | 12.730 | 7.451 | 0.00 | 0.111382 |
+| peak_demand | PROPOSED-STACKELBERG | 21.165 | -4.876% | 14.546 | 6.619 | 56.29 | 0.097095 |
+
+Follower-search diagnostics from the smoke run:
+
+| Diagnostic | Mean | Min | Max |
+|---|---:|---:|---:|
+| `distributed_grid_parallel_stages` | 4.000 | 4.000 | 4.000 |
+| `distributed_grid_full_search_active` | 1.000 | 1.000 | 1.000 |
+| `distributed_grid_leader_conditioned` | 1.000 | 1.000 | 1.000 |
+| `distributed_grid_stage1_candidates` | 92.000 | 92.000 | 92.000 |
+| `distributed_grid_stage2_candidates` | 47.000 | 47.000 | 47.000 |
+| `distributed_grid_sensitivity_probe_candidates` | 25.000 | 25.000 | 25.000 |
+| `distributed_grid_sensitivity_direction_candidates` | 0.000 | 0.000 | 0.000 |
+| `distributed_grid_total_candidates` | 164.000 | 164.000 | 164.000 |
+| `leader_candidate_full_evaluated_count` | 10.000 | 10.000 | 10.000 |
+| `leader_selected_N_UF_star` | 6000.000 | 6000.000 | 6000.000 |
+| `leader_selected_N_P_star` | 284.442 | 284.442 | 284.442 |
+
+360 s follow-up smoke command:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.all_scenarios_four_controller_comparison --scenario peak_demand --controllers PROPOSED-STACKELBERG --T-total 360 --output outputs\pstack_shared_structured_leader_followers_peak_360_2026_06_20 --max-nash-iter 1 --freeway-prediction-horizon-steps 3 --grid-parallel-backend process --grid-parallel-max-workers 8 --grid-parallel-chunk-size 8 --disable-stackelberg-fallback
+```
+
+| Scenario | Controller | Total TTT | Improvement | Urban TTT | Freeway TTT | Compute sec | Mean B sum |
+|---|---|---:|---:|---:|---:|---:|---:|
+| peak_demand | NO-CONTROL | 49.745 | baseline | 31.886 | 17.859 | 0.00 | 0.144364 |
+| peak_demand | PROPOSED-STACKELBERG | 56.811 | -14.204% | 43.051 | 13.759 | 87.20 | 0.043516 |
+
+360 s follower-search diagnostics:
+
+| Diagnostic | Mean | Min | Max |
+|---|---:|---:|---:|
+| `distributed_grid_parallel_stages` | 4.000 | 4.000 | 4.000 |
+| `distributed_grid_full_search_active` | 1.000 | 1.000 | 1.000 |
+| `distributed_grid_stage1_candidates` | 73.000 | 47.000 | 99.000 |
+| `distributed_grid_stage2_candidates` | 47.000 | 46.000 | 48.000 |
+| `distributed_grid_sensitivity_probe_candidates` | 25.000 | 25.000 | 25.000 |
+| `distributed_grid_sensitivity_direction_candidates` | 0.000 | 0.000 | 0.000 |
+| `distributed_grid_total_candidates` | 145.000 | 120.000 | 170.000 |
+| `leader_candidate_full_evaluated_count` | 9.000 | 8.000 | 10.000 |
+| `leader_selected_N_UF_star` | 6000.000 | 6000.000 | 6000.000 |
+| `leader_selected_N_P_star` | 213.862 | 203.780 | 223.945 |
+
+### Interpretation
+
+- The implementation now answers the user's concern: Stackelberg does not reuse
+  a PFO-selected solution as truth; it reuses only the shared search basis, then
+  applies leader allocation/RM constraints to every candidate.
+- The allocation module still has authority because every projected candidate
+  receives the allocation-module flow map for the tested leader action.
+- The former follower candidate-space mismatch is reduced: Stackelberg follower
+  search now evaluates coarse, probe, direction, and fine stages under leader
+  constraints.
+- The 180 s and 360 s smoke runs still selected `N_UF_star=6000` and did not
+  improve Total TTT. These short runs are not acceptance runs, but they show the
+  high-`N_UF` bias is not fixed solely by broadening the follower candidate
+  generator.
+- Sensitivity-direction candidates were `0` in the smoke because the probe
+  stage did not find a finite-difference descent direction after projection.
+  This is diagnostically useful: the probe stage is active, but the projected
+  local direction set may still be too constrained or too myopic.
+
+### Failed Criteria / Next Modification
+
+- Acceptance is still FAIL. Only 180 s and 360 s smokes were run after this
+  structural change, and both were worse than no-control.
+- Next diagnostic should compare leader-conditioned projected candidates against
+  follower-only candidates at the same state to see which dimensions collapse
+  under allocation projection, especially green phase bands and RM projection.
+
+## 2026-06-20: Stackelberg Top-K Prefilter vs Search-Space Diagnosis
+
+The user asked whether the remaining PFO-vs-Stackelberg gap is caused by the
+runtime-lightweight `top-K` leader prefilter or by the underlying Stackelberg
+leader/follower search itself.
+
+### Simulation / Diagnostic Commands
+
+Full-evaluation 180 s smoke with Stackelberg fallback disabled and leader
+prefilter disabled:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.all_scenarios_four_controller_comparison --scenario peak_demand --controllers PROPOSED-STACKELBERG --T-total 180 --output outputs\pstack_no_prefilter_peak_180_2026_06_20 --max-nash-iter 1 --freeway-prediction-horizon-steps 3 --grid-parallel-backend process --grid-parallel-max-workers 8 --grid-parallel-chunk-size 8 --disable-stackelberg-fallback --stackelberg-prefilter-top-k 0 --stackelberg-prefilter-local-top-k 0
+```
+
+Targeted one-decision replay diagnostic:
+
+- Replayed the saved fallback-disabled peak Stackelberg control sequence from
+  `outputs/pstack_expanded_np_grid_peak_7200_2026_06_20` up to control step 9.
+- Re-evaluated the same reproduced state with current code under:
+  - default lightweight `top-K=4`
+  - no prefilter, `top-K=0`
+- Fallback remained disabled in both cases.
+
+### Results
+
+180 s full-evaluation smoke:
+
+| Scenario | Controller | Total TTT | Improvement | Mean B sum | Interpretation |
+|---|---|---:|---:|---:|---|
+| peak_demand | NO-CONTROL | 20.181 | baseline | 0.111382 | baseline |
+| peak_demand | P-Stack no-prefilter | 21.165 | -4.876% | 0.097095 | same TTT as top-K smoke |
+
+Targeted step-9 replay:
+
+| Mode | Full leader evals | Selected `N_UF_star` | Leader objective | Runtime |
+|---|---:|---:|---:|---:|
+| `top-K=4` | 8 | 5550.058 | 190.907390 | 10.902 s |
+| `top-K=0` | 74 | 5400.077 | 186.090962 | 101.682 s |
+
+Reference from the previous PFO peak 7200 s control log at the same step:
+
+| Quantity | Value |
+|---|---:|
+| PFO actual RM sum | 4418.750 veh/h |
+| Stack top-K selected `N_UF_star` | 5550.058 veh/h |
+| Stack no-prefilter selected `N_UF_star` | 5400.077 veh/h |
+
+### Interpretation
+
+- The runtime-lightweight prefilter is part of the problem: disabling it at the
+  reproduced step improves the selected leader objective and moves `N_UF_star`
+  downward by about `150 veh/h`.
+- But prefiltering is not the whole problem. Even with all 74 leader candidates
+  fully evaluated, Stackelberg still selects a high-`N_UF` target around
+  `5400 veh/h`, far above the PFO actual RM sum around `4419 veh/h`.
+- Therefore the current evidence points to both:
+  1. `top-K` can worsen the leader choice.
+  2. The full Stackelberg leader/follower objective/search still prefers too much
+     freeway release relative to the PFO direct-control solution.
+- A separate implementation issue is visible: the returned control's actual RM
+  sum can remain above the selected `N_UF_star` after Nash relaxation/merge. The
+  step-9 replay returned actual RM sum `5700.231 veh/h` while the selected
+  leader target was `5400.077 veh/h`. This means leader target selection and
+  plant-applied RM are not perfectly aligned under the current relaxed
+  follower merge path.
+
+### Next Modification
+
+- First, make the leader-conditioned follower output enforce the selected
+  `N_UF_star` after Nash relaxation/merge, or explicitly diagnose the intended
+  relaxation semantics.
+- Then rerun the targeted step-9 comparison to determine whether low/mid
+  `N_UF` candidates remain unattractive when the plant-applied RM actually
+  matches the evaluated leader target.
+
+## 2026-06-20: PFO vs Stackelberg Player Region / Objective Coverage Check
+
+The user asked whether the Stackelberg failure could be caused by PFO players
+and Stackelberg follower players looking at different TTT regions.
+
+### Code Inspection
+
+- `DistributedCoordinator.__init__()` calls the same `build_agent_specs(cfg)`
+  for both leaderless PFO and Stackelberg.
+- The resulting player set is independent of `leader`:
+  - urban agents: signals `A, B, C, D, F`
+  - freeway agents: every segment of `FW_E` and `FW_W`
+- Node `E` remains uncontrolled, but its queues/storage are included in
+  follower TTS diagnostics through `uncontrolled_node_*` terms.
+- The final distributed response objective is computed by the same
+  `_response_tts_objective()` function for both PFO and Stackelberg. This
+  objective includes:
+  - urban vehicles from movement queues and in-transit storage,
+  - uncontrolled-node vehicles,
+  - ramp queues,
+  - freeway segment vehicles,
+  - off-ramp storage,
+  - mainline origin queue,
+  - terminal proxy vehicles and spillback penalties.
+
+### Log Coverage Check
+
+Selected rows from the previous peak 7200 s logs:
+
+| Step | Controller | Urban agents | Freeway agents | E covered | Allocation used | RM sum | Response objective | Current vehicles | Terminal proxy | Movement queue projection |
+|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 0 | PFO | 5 | 8 | 1 | 0 | 6000.000 | 106.774 | 284.000 | 1139.653 | 140.000 |
+| 0 | Stack | 5 | 8 | 1 | 1 | 6000.000 | 117.756 | 284.000 | 1286.083 | 140.000 |
+| 9 | PFO | 5 | 8 | 1 | 0 | 4418.750 | 220.625 | 857.983 | 1841.576 | 309.097 |
+| 9 | Stack | 5 | 8 | 1 | 1 | 5700.231 | 440.541 | 2319.252 | 3554.622 | 2051.485 |
+| 20 | PFO | 5 | 8 | 1 | 0 | 3806.641 | 363.454 | 1773.957 | 2885.844 | 615.250 |
+| 20 | Stack | 5 | 8 | 1 | 1 | 5283.953 | 1330.419 | 5621.813 | 6744.919 | 5341.201 |
+| 39 | PFO | 5 | 8 | 1 | 0 | 4500.042 | 598.454 | 3541.478 | 4248.482 | 2491.059 |
+| 39 | Stack | 5 | 8 | 1 | 1 | 5675.347 | 2625.081 | 9745.649 | 10605.867 | 9553.394 |
+
+### Interpretation
+
+- The available evidence does not support a missing-player-region explanation:
+  PFO and Stackelberg both report the same player counts, and uncontrolled node
+  `E` coverage is active in both.
+- Stackelberg is not blind to the urban queue buildup. Its own response
+  objective becomes much worse as urban movement queues grow.
+- However, the optimization problems are still not equivalent:
+  - PFO has no allocation module and searches direct control variables.
+  - Stackelberg conditions follower candidates on `N_P_star`, `N_UF_star`, and
+    the allocation module, so green/allocation/RM feasible actions are projected
+    differently.
+  - The leader's default `follower_ttt` mode uses the follower response
+    objective as the base, while future rollout states are used for penalties.
+    It is therefore not pure full-rollout global TTT minimization at the leader
+    outer loop.
+  - The previous step-9 diagnostic showed the selected `N_UF_star` can differ
+    from the final plant-applied RM sum after Nash relaxation/merge.
+
+### Next Modification
+
+- First fix or explicitly account for the selected-`N_UF_star` vs final-RM-sum
+  mismatch in the leader-conditioned follower path.
+- Then run a same-state candidate-level table with columns:
+  `N_UF_star`, plant-applied RM sum, rollout TTT, response objective,
+  terminal urban vehicles, movement queue projection, and allocation residual.
+  This will separate objective-proxy error from feasible-set/projection error.
+
+## 2026-06-20: Stackelberg Step-9 Same-State Candidate / Allocation Diagnosis
+
+The user asked to analyze three suspected causes of the Stackelberg-vs-PFO
+gap:
+
+1. selected `N_UF_star` vs final applied ramp-metering sum mismatch,
+2. same-state candidate-level `N_UF` objective table,
+3. allocation on/off style diagnostic.
+
+### Files / Artifacts
+
+- Added diagnostic-only script:
+  `outputs/diagnostics/stack_step9_leader_follower_analysis_2026_06_20/diagnose_stack_step9.py`
+- Generated diagnostic artifacts:
+  - `summary.json`
+  - `candidate_table_all.csv`
+  - `candidate_table_top15.csv`
+  - `candidate_bins.csv`
+  - `allocation_ablation_fixed_actions.csv`
+  - `progress.log`
+
+No production controller code was changed in this diagnostic pass.
+
+### Commands
+
+Targeted same-state replay/candidate diagnostic:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B outputs\diagnostics\stack_step9_leader_follower_analysis_2026_06_20\diagnose_stack_step9.py
+```
+
+Diagnostic script compile check:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m py_compile outputs\diagnostics\stack_step9_leader_follower_analysis_2026_06_20\diagnose_stack_step9.py
+```
+
+### Results
+
+The script replayed the saved fallback-disabled peak Stackelberg sequence from
+`outputs/pstack_expanded_np_grid_peak_7200_2026_06_20` to the state before
+control decision step 9 (`time_sec=1620.0`). It then evaluated the same state
+with PFO and with Stackelberg full no-prefilter leader candidate capture.
+
+Same-state PFO reference:
+
+| Metric | Value |
+|---|---:|
+| PFO response objective | 422.686 |
+| PFO applied RM sum | 5100.231 veh/h |
+| PFO terminal urban vehicles | 2977.422 |
+| PFO movement queue projection | 2051.485 |
+| PFO solve time | 9.919 s |
+
+Stackelberg full no-prefilter capture:
+
+| Metric | Value |
+|---|---:|
+| Candidate count | 74 |
+| Full capture time | 241.824 s |
+| Selected `N_P_star` | 203.780 veh |
+| Selected `N_UF_star` | 5700.231 veh/h |
+| Applied RM sum | 5700.231 veh/h |
+| Applied RM minus target | 0.000 veh/h |
+| Leader objective | 571.972 |
+| Follower/rollout base | 405.043 |
+| Boundary-in penalty | 166.527 |
+| Response objective | 439.764 |
+| Terminal urban vehicles | 3441.088 |
+
+Best Stackelberg candidate by `N_UF` bin:
+
+| `N_UF` bin | Count | Best `N_UF_star` | Applied RM | Leader objective | Response objective | Terminal urban |
+|---|---:|---:|---:|---:|---:|---:|
+| 0-4500 | 20 | 4200.231 | 4200.231 | 590.937 | 444.623 | 3507.452 |
+| 4500-5000 | 16 | 4650.174 | 4650.174 | 590.572 | 444.705 | 3507.523 |
+| 5000-5500 | 14 | 5100.116 | 5100.116 | 584.545 | 440.113 | 3447.316 |
+| 5500-6000 | 16 | 5700.231 | 5700.231 | 571.972 | 439.764 | 3441.088 |
+| 6000-7000 | 8 | 6000.000 | 6000.000 | 597.034 | 446.038 | 3526.076 |
+
+Allocation/green-band diagnostic on two fixed leader actions:
+
+| Case | `N_UF_star` | Leader objective | Follower base | Boundary-in penalty | Response objective | Terminal urban |
+|---|---:|---:|---:|---:|---:|---:|
+| selected high `N_UF`, normal | 5700.231 | 571.972 | 405.043 | 166.527 | 439.764 | 3441.088 |
+| selected high `N_UF`, green band 999 | 5700.231 | 568.029 | 404.654 | 162.974 | 440.221 | 3447.187 |
+| selected high `N_UF`, neutral allocation diagnostic | 5700.231 | 670.076 | 423.678 | 236.615 | 423.678 | 2989.145 |
+| PFO-like low `N_UF`, normal | 5100.116 | 584.545 | 408.926 | 173.717 | 440.113 | 3447.316 |
+| PFO-like low `N_UF`, green band 999 | 5100.116 | 582.130 | 409.125 | 171.103 | 440.488 | 3452.323 |
+| PFO-like low `N_UF`, neutral allocation diagnostic | 5100.116 | 668.774 | 423.678 | 236.615 | 423.678 | 2989.145 |
+
+### Interpretation
+
+- At this reproduced pre-step-9 state, the selected `N_UF_star` is preserved:
+  applied RM sum exactly matches the selected leader target for the selected
+  candidate and for the best candidate in every `N_UF` bin. Therefore the
+  selected-target vs applied-RM mismatch is not the dominant explanation for
+  this specific logged step.
+- Full no-prefilter search does see lower `N_UF` regions. It evaluates 20
+  candidates below `4500 veh/h`, 16 in `4500-5000`, and 14 in `5000-5500`.
+  However, within the current Stackelberg follower response model, the
+  `5500-6000 veh/h` bin has the lowest leader objective.
+- The important gap is between Stackelberg's leader-conditioned follower
+  response and PFO's direct follower response. On the same reproduced Stack
+  state, PFO chooses an applied RM sum near `5100 veh/h` and reaches terminal
+  urban vehicles `2977.422`, while the Stackelberg `N_UF≈5100` candidate still
+  has terminal urban vehicles `3447.316`.
+- Relaxing the allocation green band improves the leader objective slightly,
+  but does not flip the ranking: high `N_UF` remains preferred over the
+  PFO-like lower `N_UF`.
+- The neutral-allocation diagnostic is not a valid controller candidate because
+  it bypasses allocation constraints and loses the leader-conditioned grid
+  diagnostics, but it is informative: terminal urban vehicles fall near the PFO
+  range (`~2989`). This points to the allocation-conditioned follower feasible
+  response as a stronger suspect than the leader `N_UF` grid itself.
+
+### Next Modification
+
+Investigate and revise the leader-conditioned follower construction so that,
+when the leader sets `N_P_star` and `N_UF_star`, the follower's green/offset/RM
+response can still reproduce the direct-control PFO feasible response when that
+response is TTT-better. Specifically inspect:
+
+- allocation module movement-flow constraints and their interaction with
+  `_select_stage2_controls()`,
+- whether allocation-derived green setpoints over-constrain stage-2 service
+  even when the green band is widened,
+- whether Stackelberg should evaluate a direct-control follower guard candidate
+  with the same `N_UF` projection but without forcing allocation setpoints.
+## 2026-06-20: Stackelberg Direct Leader-Feasible Follower Search
+
+### Implementation
+
+- Revised the distributed Stackelberg follower path so the inflow-outflow
+  allocation module is no longer used as the follower candidate generator.
+- Stack follower controls are now projected directly into the leader-constrained
+  set:
+  - ramp metering is projected so `sum(ramp_metering) ~= leader.N_UF_star`,
+  - green/offset/VSL remain direct structured-grid candidates,
+  - `inflow_outflow_allocation` is cleared for the Stack follower path.
+- Added leader `N_P_star` net-inflow feasibility diagnostics and pre-checks:
+  - projected candidate net inflow,
+  - target net inflow from `urban_accumulation_feedback_flow`,
+  - net-inflow residual beyond `eps_U`,
+  - projected movement storage violation.
+- Added balance tie-break diagnostics. Balance is used only as a near-equal-TTT
+  tie-break among leader-direct grid candidates, not as an additive TTT cost.
+- Updated the Nash-iteration candidate under a leader so it is also evaluated
+  by the same rollout TTT path; the selected Stack follower response no longer
+  falls back to proxy-only `distributed_response_objective_tts`.
+
+Changed files:
+
+- `src/controllers/distributed_coordinator.py`
+- `src/controllers/urban_follower.py`
+- `reports/codex_run_report.md`
+
+### Validation
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m py_compile src\controllers\distributed_coordinator.py src\controllers\urban_follower.py
+```
+
+Result: PASS.
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m unittest src.tests.test_constraints.ConstraintTests.test_urban_follower_objective_covers_uncontrolled_E_vehicles src.tests.test_constraints.ConstraintTests.test_allocation_net_inflow_binding_uses_inflow_outflow_extremes -v
+```
+
+Result: PASS (`2` tests).
+
+### Smoke Runs
+
+180 s command:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.all_scenarios_four_controller_comparison --scenario medium_demand --controllers PROPOSED-STACKELBERG --T-total 180 --output outputs\pstack_direct_feasible_medium_180_2026_06_20 --max-nash-iter 1 --freeway-prediction-horizon-steps 3 --grid-parallel-backend thread --grid-parallel-max-workers 4 --grid-parallel-chunk-size 8 --disable-stackelberg-fallback
+```
+
+360 s command:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.all_scenarios_four_controller_comparison --scenario medium_demand --controllers PROPOSED-STACKELBERG --T-total 360 --output outputs\pstack_direct_feasible_medium_360_2026_06_20 --max-nash-iter 1 --freeway-prediction-horizon-steps 3 --grid-parallel-backend thread --grid-parallel-max-workers 4 --grid-parallel-chunk-size 8 --disable-stackelberg-fallback
+```
+
+| Horizon | Controller | Total TTT | Improvement vs no-control | Total delay | Throughput veh/h | Mean B sum | Compute sec |
+|---:|---|---:|---:|---:|---:|---:|---:|
+| 180 s | NO-CONTROL | 17.616 | baseline | 1.046 | 8000.6 | 0.109886 | 0.00 |
+| 180 s | PROPOSED-STACKELBERG | 17.625 | -0.051% | 1.055 | 7770.2 | 0.122422 | 334.07 |
+| 360 s | NO-CONTROL | 41.011 | baseline | 0.610 | 9185.7 | 0.146213 | 0.00 |
+| 360 s | PROPOSED-STACKELBERG | 41.301 | -0.707% | 0.901 | 9114.5 | 0.109114 | 558.32 |
+
+### Control Validation Summary
+
+- Direct Stack path diagnostics are active in the selected response:
+  - `distributed_grid_leader_allocation_module_disabled = 1.0`,
+  - `distributed_stackelberg_direct_feasible_set_active = 1.0`,
+  - `distributed_grid_leader_direct_feasible_set_active = 1.0`,
+  - `allocation_module_active = 0.0`,
+  - `agent_U_A_allocation_module_used = 0.0`.
+- The selected 180 s Stack response was evaluated by rollout:
+  - `distributed_response_rollout_active = 1.0`,
+  - `distributed_nash_candidate_rollout_evaluated = 1.0`.
+- Remaining issue: the current leader-selected `N_P_star/N_UF_star` combination
+  still creates an empty or nearly empty feasible set under the direct
+  net-inflow pre-check. In the 180 s medium smoke, selected diagnostics were:
+  - target net inflow `-728.147 veh/h`,
+  - projected net inflow `-2403.333 veh/h`,
+  - absolute residual `1675.186 veh/h`,
+  - constraint violation after `eps_U=100` of `1575.186`.
+
+### Failed Criteria / Next Modification
+
+- This is not an acceptance pass. Short smoke Total TTT is slightly worse than
+  no-control, and computation cost is high.
+- The implementation now matches the intended structural direction better:
+  allocation no longer decides the follower action, and final selected Stack
+  follower candidates use rollout TTT.
+- The next issue is feasibility coverage, not allocation leakage: the leader is
+  still selecting high `N_UF_star` values whose direct follower candidate set
+  cannot satisfy the `N_P_star` net-inflow target. The next modification should
+  diagnose leader candidate filtering/ranking with the new
+  `distributed_grid_leader_net_inflow_*` diagnostics and either reject such
+  leader candidates earlier or widen direct green/on-ramp candidates enough to
+  make the leader feasible set non-empty before comparing TTT.
