@@ -192,13 +192,18 @@ iteration을 유지하면서 upper-level Leader-conditioning interface만 추가
 
 ```text
 U_L_WU = [
-  N_P_star,
-  N_F_star
+  N_P_ref,
+  N_F_ref
 ]
 ```
 
-- `N_P_star`: urban accumulation coordination target [veh]
-- `N_F_star`: freeway accumulation coordination target [veh]
+- `N_P_ref`: urban accumulation reference/ceiling [veh]
+- `N_F_ref`: freeway accumulation reference/ceiling [veh]
+
+This Wu-authority-matched variant uses accumulation references because its
+conditioning term limits predicted accumulation exceedance. Do not overload the
+proposed-controller `N_P_star` name here: in the proposed Stackelberg controller
+`N_P_star` means protected-urban net-inflow target, not protected accumulation.
 
 Ramp metering이 없으므로 기존 `[veh/h]` ramp-flow 의미의 `N_UF_star`는 사용하지 않는다.
 
@@ -210,12 +215,12 @@ Wu base objective는 유지하고 Leader target에 반응하는 최소 condition
 J_i_WU_stack =
     J_i_WU_local
   + w_P_target
-    * positive_part(n_P_i_predicted - omega_P[i] * N_P_star)
+    * positive_part(n_P_i_predicted - omega_P[i] * N_P_ref)
 
 J_p_WU_stack =
     J_p_WU_local
   + w_F_target
-    * positive_part(n_F_p_predicted - omega_F[p] * N_F_star)
+    * positive_part(n_F_p_predicted - omega_F[p] * N_F_ref)
 ```
 
 ```text
@@ -228,7 +233,7 @@ Agent weights는 evaluation 전에 고정하며 결과를 보고 재조정하지
 ### Leader evaluation
 
 ```text
-for each (N_P_star, N_F_star) candidate:
+for each (N_P_ref, N_F_ref) candidate:
   solve Wu distributed follower response
   predict coupled plant
   evaluate system objective
@@ -311,14 +316,19 @@ U_L = [
 ]
 ```
 
-- `N_P_star`: urban protected-network accumulation/coordination target
+- `N_P_star`: target net inflow to the protected urban network
 - `N_UF_star`: configured freeway/on-ramp coordination target
-- 단위는 config와 report에서 명시
+- Units are explicit in config and reports. If `N_P_star` is configured as a
+  flow, convert it to vehicles over the follower horizon before comparing with
+  projected inflow-minus-outflow service. Do not convert it from
+  `(target_accumulation - current_accumulation) / feedback_h`; `N_P_crit` is a
+  separate critical-accumulation guard used by the objective/constraints.
 
 ### Followers
 
-- allocation module이 Leader target과 observed queue/storage를 movement service 및 green
-  setpoint로 변환
+- allocation module 또는 direct follower candidate generation maps the leader
+  net-inflow target and observed queue/storage to feasible movement service and
+  green setpoints
 - urban players가 green fine-tuning과 offset을 결정
 - freeway players가 VSL과 ramp metering을 결정
 - coupling variable을 교환하며 follower response를 갱신
@@ -335,11 +345,14 @@ J_L =
         L[m] * lambda_eff[m,i](t)
         * positive_part(rho[m,i](t) - rho_crit[m])
   ]
-  + w_L * L1_norm(U_L(t) - U_L(t-1))
 ```
 
 Leader target 자체를 critical threshold로 사용하지 않는다. 각 target 후보에 대한 coupled
 follower response를 위 system objective로 평가한다.
+
+Leader action smoothness is disabled in the active objective. The diagnostic
+field remains for provenance, but target changes must be ranked by the
+TTT/TTS-compatible response and guard terms.
 
 ## 16.9 Controller 4: `PROPOSED-CENTRALIZED`
 

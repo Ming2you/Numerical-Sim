@@ -203,16 +203,17 @@ mpc:
   stackelberg_leader_parallel_max_workers: 4
   stackelberg_inner_backend_when_outer_process: thread
   stackelberg_reuse_process_pool: true
+  stackelberg_allocation_mode: direct
 leader:
   objective_mode: follower_ttt
   w_P: 1.0
   w_F: 1.0
-  w_L: 0.05
+  w_L: 0.0
   # boundary_in queue는 최종 Total TTT에 포함되므로 leader_total_objective에도 TTS 항으로 더한다.
   w_boundary_in: 1.0
   N_P_star_range:
-  - 0.0
-  - 850.0
+  - -3500.0
+  - 3500.0
   N_UF_star_range:
   - 0.0
   - 6000.0

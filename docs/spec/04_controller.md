@@ -36,7 +36,6 @@ Implement the leader objective as configurable. The default base term is the fol
 J_L = TTT_freeway + TTT_urban
       + boundary_in_queue_TTS
       + target_exceedance_penalties
-      + smoothness_penalty
 ```
 
 where:
@@ -51,20 +50,12 @@ target_exceedance_penalties =
           + w_F * sum_m sum_i L[m] * lanes[m] * positive_part(rho[m,i](t) - rho_crit[m])
         )
     ]
-smoothness_penalty =
-    sum_over_horizon[w_L * L1_norm(U_L(t) - U_L(t-1))]
 ```
 
-If `N_UF_star` is configured as a flow (`veh_per_hour`), convert its
-increment to vehicles over the control interval before adding it to the
-smoothness L1 norm:
-
-```text
-|Delta U_L|_1 = |Delta N_P_star| + T_c_h * |Delta N_UF_star|
-```
-
-If `N_UF_star_unit = veh_per_control_interval`, use `|Delta N_UF_star|`
-directly.
+Leader action smoothness is not part of `leader_total_objective`. The
+`leader_smoothness_penalty` diagnostic is logged as `0.0` so that leader target
+changes are accepted or rejected by the TTT/TTS-compatible objective rather
+than by inertia against the previous target.
 
 The legacy state-accumulation base remains available only when explicitly configured:
 

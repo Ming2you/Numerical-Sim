@@ -368,6 +368,7 @@ class MPCConfig:
     stackelberg_leader_parallel_max_workers: int = 4
     stackelberg_inner_backend_when_outer_process: str = "thread"
     stackelberg_reuse_process_pool: bool = True
+    stackelberg_allocation_mode: str = "direct"
 
 
 @dataclass
@@ -375,10 +376,10 @@ class LeaderConfig:
     objective_mode: str = "follower_ttt"
     w_P: float = 1.0
     w_F: float = 1.0
-    w_L: float = 0.05
+    w_L: float = 0.0
     # Step D: boundary_in 큐 비용은 진단용으로 계산하되 leader_total_objective에는 더하지 않는다.
     w_boundary_in: float = 1.0
-    N_P_star_range: List[float] = field(default_factory=lambda: [0.0, 850.0])
+    N_P_star_range: List[float] = field(default_factory=lambda: [-3500.0, 3500.0])
     N_UF_star_range: List[float] = field(default_factory=lambda: [0.0, 6000.0])
     N_P_crit_veh: float = 509.448830418254
     N_P_candidate_lower_factor: float = 0.40
@@ -530,6 +531,8 @@ class ExperimentConfig:
             raise ValueError("mpc.stackelberg_leader_parallel_max_workers must be positive.")
         if self.mpc.stackelberg_inner_backend_when_outer_process not in {"serial", "thread"}:
             raise ValueError("mpc.stackelberg_inner_backend_when_outer_process must be serial or thread.")
+        if self.mpc.stackelberg_allocation_mode not in {"direct", "simplified", "pso"}:
+            raise ValueError("mpc.stackelberg_allocation_mode must be direct, simplified, or pso.")
         cap_drop = self.freeway_offramp_capacity_drop
         if cap_drop.lane_reduction < 0.0:
             raise ValueError("freeway_offramp_capacity_drop.lane_reduction must be non-negative.")

@@ -704,6 +704,19 @@ def estimate_onramp_reservoir_inflow(
     return release
 
 
+def _control_net_inflow_target_veh_h(control: ControlAction, cfg: ExperimentConfig) -> float:
+    diagnostics = getattr(control, "diagnostics", {}) or {}
+    for key in (
+        "urban_net_inflow_target_veh_h",
+        "distributed_grid_leader_net_inflow_target_rate_veh_h",
+    ):
+        if key in diagnostics:
+            return float(diagnostics.get(key, 0.0))
+    horizon_steps = max(1, int(getattr(cfg.mpc, "horizon_steps", 1)))
+    horizon_h = max(float(cfg.simulation.T_c_h) * horizon_steps, 1.0e-9)
+    return float(control.N_P_star) / horizon_h
+
+
 def urban_substep(
     state: TrafficState,
     control: ControlAction,
@@ -724,8 +737,8 @@ def urban_substep(
         "onramp_two_reservoir_active": 1.0,
     }
     initial_accumulation = state.protected_accumulation_veh(cfg.network)
-    interval_net_inflow_target = urban_accumulation_feedback_flow(state, cfg, control.N_P_star)
-    initial_accumulation_error = initial_accumulation - control.N_P_star
+    interval_net_inflow_target = _control_net_inflow_target_veh_h(control, cfg)
+    initial_accumulation_error = 0.0
     overflow_count = 0.0
     projection_count = 0.0
     total_departures_veh = 0.0
@@ -957,7 +970,7 @@ def urban_substep(
     inbound = inbound_service_veh / max(sim.T_u_h, 1.0e-9)
     outbound = outbound_service_veh / max(sim.T_u_h, 1.0e-9)
     net_inflow = inbound - outbound
-    accumulation_error = state.protected_accumulation_veh(cfg.network) - control.N_P_star
+    accumulation_error = 0.0
     net_inflow_error = abs(net_inflow - interval_net_inflow_target)
     diagnostics["inbound_service_veh"] = float(inbound_service_veh)
     diagnostics["outbound_service_veh"] = float(outbound_service_veh)
@@ -968,7 +981,8 @@ def urban_substep(
     diagnostics["urban_accumulation_initial_veh"] = float(initial_accumulation)
     diagnostics["urban_accumulation_initial_error_veh"] = float(initial_accumulation_error)
     diagnostics["urban_accumulation_veh"] = float(state.protected_accumulation_veh(cfg.network))
-    diagnostics["urban_accumulation_target_veh"] = float(control.N_P_star)
+    diagnostics["urban_accumulation_target_disabled"] = 1.0
+    diagnostics["urban_accumulation_target_veh"] = 0.0
     diagnostics["urban_accumulation_error_veh"] = float(accumulation_error)
     diagnostics["urban_accumulation_abs_error_veh"] = abs(float(accumulation_error))
     diagnostics["urban_net_inflow_tracking_error_veh_h"] = float(net_inflow_error)
@@ -1048,7 +1062,9 @@ def aggregate_urban_diagnostics(
             "net_inflow": 0.0,
             "net_inflow_target": net_inflow_target,
             "urban_net_inflow_target_veh_h": net_inflow_target,
-            "urban_accumulation_target_veh": float(control.N_P_star),
+            "urban_net_inflow_target_veh": float(control.N_P_star),
+            "urban_accumulation_target_disabled": 1.0,
+            "urban_accumulation_target_veh": 0.0,
             "urban_accumulation_abs_error_veh": 0.0,
             "urban_net_inflow_tracking_error_veh_h": abs(net_inflow_target),
             "net_inflow_tracking_error": abs(net_inflow_target),
@@ -1109,6 +1125,8 @@ def aggregate_urban_diagnostics(
     out["net_inflow"] = float(net_inflow)
     out["net_inflow_target"] = float(net_inflow_target)
     out["urban_net_inflow_target_veh_h"] = float(net_inflow_target)
+    out["urban_net_inflow_target_veh"] = float(control.N_P_star)
+    out["urban_accumulation_target_disabled"] = 1.0
     out["urban_net_inflow_tracking_error_veh_h"] = float(net_inflow_error)
     out["net_inflow_tracking_error"] = float(net_inflow_error)
     return out

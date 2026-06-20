@@ -7,10 +7,7 @@ import numpy as np
 
 from src.models.demand import DemandStep
 from src.models.state import ControlAction, ExperimentConfig, TrafficState
-from src.models.urban_queue_model import (
-    _forecast_offramp_inflow_veh_h,
-    estimate_onramp_green_release_flows,
-)
+from src.models.urban_queue_model import estimate_onramp_green_release_flows
 
 
 @dataclass(frozen=True)
@@ -81,8 +78,7 @@ class Leader:
         bounds = self._candidate_bounds(state, previous, demand, forecast)
         np_lower, np_upper = bounds.np_lower, bounds.np_upper
         np_values = set(float(v) for v in np.linspace(np_lower, np_upper, n_np))
-        np_values.add(float(np.clip(leader.N_P_crit_veh, np_lower, np_upper)))
-        np_values.add(float(np.clip(state.protected_accumulation_veh(self.cfg.network), np_lower, np_upper)))
+        np_values.add(float(np.clip(0.0, np_lower, np_upper)))
         np_values.add(float(np.clip(bounds.movement_np_lower, np_lower, np_upper)))
         np_values.add(float(np.clip(bounds.movement_np_upper, np_lower, np_upper)))
         density_ratio = self._density_ratio(state)
@@ -119,7 +115,7 @@ class Leader:
             LeaderAction(np_values[-1], nuf_values[0]),
             LeaderAction(np_values[-1], nuf_values[-1]),
             LeaderAction(
-                float(np.clip(leader.N_P_crit_veh, np_lower, np_upper)),
+                float(np.clip(0.0, np_lower, np_upper)),
                 float(min(nuf_values, key=lambda value: abs(value - bounds.heuristic_nuf))),
             ),
         ]
@@ -192,8 +188,7 @@ class Leader:
         np_values = set(float(v) for v in np.linspace(np_low, np_high, n_np))
         nuf_values = set(float(v) for v in np.linspace(nuf_low, nuf_high, n_nuf))
         np_values.add(float(np.clip(center.N_P_star, bounds.np_lower, bounds.np_upper)))
-        np_values.add(float(np.clip(self.cfg.leader.N_P_crit_veh, bounds.np_lower, bounds.np_upper)))
-        np_values.add(float(np.clip(state.protected_accumulation_veh(self.cfg.network), bounds.np_lower, bounds.np_upper)))
+        np_values.add(float(np.clip(0.0, bounds.np_lower, bounds.np_upper)))
         np_values.add(float(np.clip(bounds.movement_np_lower, bounds.np_lower, bounds.np_upper)))
         np_values.add(float(np.clip(bounds.movement_np_upper, bounds.np_lower, bounds.np_upper)))
         nuf_values.add(float(np.clip(center.N_UF_star, bounds.nuf_lower, bounds.nuf_upper)))
@@ -278,8 +273,19 @@ class Leader:
         )
         # N_P_star는 보호영역 누적의 setpoint이지 한 step에서 반드시 도달 가능한 상태가 아니다.
         # movement reachability는 진단/anchor로만 쓰고, PFO식 낮은 누적 운전점도 탐색한다.
-        np_lower = base_np_lower
-        np_upper = base_np_upper
+        # Proposed Stackelberg N_P_star is a direct net-inflow target [veh] over
+        # the follower evaluation horizon. Bound it by movement-level
+        # inflow-minus-outflow reachability, not by N_P_crit.
+        np_lower = max(base_np_lower, movement_np_lower)
+        np_upper = min(base_np_upper, movement_np_upper)
+        if np_lower > np_upper:
+            if base_np_upper < movement_np_lower:
+                np_lower = np_upper = movement_np_lower
+            elif base_np_lower > movement_np_upper:
+                np_lower = np_upper = movement_np_upper
+            else:
+                midpoint = 0.5 * (movement_np_lower + movement_np_upper)
+                np_lower = np_upper = float(np.clip(midpoint, base_np_lower, base_np_upper))
         return LeaderCandidateBounds(
             np_lower=float(np_lower),
             np_upper=float(np_upper),
@@ -290,9 +296,14 @@ class Leader:
             movement_max_net_flow_veh_h=float(max_net),
             movement_np_lower=float(movement_np_lower),
             movement_np_upper=float(movement_np_upper),
-            movement_np_lower_active=False,
-            movement_np_upper_active=False,
+            movement_np_lower_active=float(np_lower) > float(base_np_lower) + 1.0e-9,
+            movement_np_upper_active=float(np_upper) < float(base_np_upper) - 1.0e-9,
         )
+
+    def _np_target_horizon_h(self, forecast: list[DemandStep]) -> float:
+        steps = forecast[: max(1, self.cfg.mpc.horizon_steps)] if forecast else []
+        count = len(steps) if steps else max(1, int(self.cfg.mpc.horizon_steps))
+        return float(max(self.cfg.simulation.T_c_h * count, 1.0e-9))
 
     def _movement_np_bounds(
         self,
@@ -301,20 +312,11 @@ class Leader:
         nuf_upper: float,
     ) -> tuple[float, float, float, float]:
         min_net, max_net = self._movement_net_flow_bounds(nuf_upper)
-        limit = max(0.0, float(self.cfg.leader.N_P_feedback_flow_limit_veh_h))
-        flow_lower = max(min_net, -limit)
-        flow_upper = min(max_net, limit)
-        if flow_lower > flow_upper:
-            midpoint = 0.5 * (min_net + max_net)
-            flow_lower = flow_upper = float(np.clip(midpoint, -limit, limit))
-        forecast_offramp = (
-            _forecast_offramp_inflow_veh_h(state, self.cfg, forecast)
-            if forecast else 0.0
-        )
-        feedback_h = max(float(self.cfg.leader.N_P_feedback_horizon_h), 1.0e-9)
-        current = state.protected_accumulation_veh(self.cfg.network)
-        np_lower = current + feedback_h * (flow_lower + forecast_offramp)
-        np_upper = current + feedback_h * (flow_upper + forecast_offramp)
+        flow_lower = min_net
+        flow_upper = max_net
+        horizon_h = self._np_target_horizon_h(forecast)
+        np_lower = flow_lower * horizon_h
+        np_upper = flow_upper * horizon_h
         return float(np_lower), float(np_upper), float(min_net), float(max_net)
 
     def _movement_net_flow_bounds(self, nuf_upper: float) -> tuple[float, float]:
@@ -378,12 +380,8 @@ class Leader:
     def _np_candidate_bounds(self, state: TrafficState) -> tuple[float, float]:
         """Calibration된 n_P_crit 주변으로 leader의 도시 누적 목표 후보를 제한한다."""
         leader = self.cfg.leader
-        crit = float(leader.N_P_crit_veh)
         range_lower, range_upper = sorted(float(v) for v in leader.N_P_star_range[:2])
-        lower = max(range_lower, crit * float(leader.N_P_candidate_lower_factor))
-        upper = min(range_upper, crit * float(leader.N_P_candidate_upper_factor))
-        lower = max(0.0, min(lower, upper))
-        return float(lower), float(upper)
+        return float(range_lower), float(range_upper)
 
     def _ramp_merge_index(self, ramp: str, n_segments: int) -> int:
         configured = getattr(self.cfg.network, "ramp_merge_segment_index", {})
@@ -574,16 +572,10 @@ class Leader:
         )
         density_excess, density_effective_count = self._density_penalty(states)
         density_penalty = lc.w_F * density_excess * accumulation_penalty_scale
+        # Leader action smoothness is diagnostic-disabled. Medium-demand
+        # injection diagnostics showed it can dominate lower rollout TTT
+        # candidates and keep the leader pinned to the previous target.
         smooth = 0.0
-        if previous is not None:
-            previous_nuf = self._previous_nuf_target(previous)
-            nuf_delta = abs(action.N_UF_star - previous_nuf)
-            if lc.N_UF_star_unit == "veh_per_hour":
-                nuf_delta *= self.cfg.simulation.T_c_h
-            smooth = lc.w_L * (
-                abs(action.N_P_star - previous.N_P_star)
-                + nuf_delta
-            )
         conv, obj_component, control_component = self._non_convergence_penalty(
             nash_converged,
             nash_residual_objective,
@@ -591,7 +583,7 @@ class Leader:
         )
         # Boundary-in queues are priced because final Total TTT counts them.
         # Non-convergence remains diagnostic-only per Spec 4.6.
-        total = base + target_penalty + boundary_in_queue_penalty + density_penalty + smooth
+        total = base + target_penalty + boundary_in_queue_penalty + density_penalty
         return {
             "leader_base_accumulation": float(state_base),
             "leader_objective_base": float(base),

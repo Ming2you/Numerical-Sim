@@ -24,7 +24,6 @@ from src.models.urban_queue_model import (
     ensure_urban_state,
     movement_balance_summary,
     movement_specs,
-    urban_accumulation_feedback_flow,
 )
 
 
@@ -41,15 +40,27 @@ class UrbanFollowerResult:
 class UrbanFollower:
     """Two-stage urban follower.
 
-    Stage 1 allocates inflow/outflow service and green splits to track
-    `N_P_star` while balancing boundary queues. Stage 2 computes bounded signal
-    offsets from current speed/queue-derived travel-time estimates.
+    Stage 1 allocates inflow/outflow service and green splits to track the
+    leader net-inflow target `N_P_star` while balancing boundary queues. Stage 2
+    computes bounded signal offsets from current speed/queue-derived travel-time
+    estimates.
     """
 
     def __init__(self, cfg: ExperimentConfig):
         self.cfg = cfg
         self.allocation_module = InflowOutflowAllocationModule(cfg)
         self._repair_diagnostics: Dict[str, float] = {}
+
+    def _leader_net_inflow_target(
+        self,
+        leader: LeaderAction,
+        forecast: Optional[list[DemandStep]],
+    ) -> tuple[float, float]:
+        steps = forecast[: max(1, self.cfg.mpc.horizon_steps)] if forecast else []
+        count = len(steps) if steps else max(1, int(self.cfg.mpc.horizon_steps))
+        horizon_h = max(float(self.cfg.simulation.T_c_h) * count, 1.0e-9)
+        target_veh = float(leader.N_P_star)
+        return target_veh, target_veh / horizon_h
 
     def _freeway_pressure(self, freeway_response: object | None) -> Dict[str, float]:
         """Freeway follower 결과를 urban 신호/배분이 사용할 압력 지표로 바꾼다."""
@@ -740,21 +751,17 @@ class UrbanFollower:
                 phase_arrivals,
                 phase_coupling_total,
             )
-            target_net_inflow = urban_accumulation_feedback_flow(
-                state,
-                self.cfg,
-                leader.N_P_star,
-                forecast,
-            )
+            target_net_inflow_veh, target_net_inflow = self._leader_net_inflow_target(leader, forecast)
             metrics = dict(direct.metrics)
             metrics.update({
                 "allocation_module_active": 0.0,
                 "leader_direct_feasible_set_active": 1.0,
-                "urban_accumulation_target_veh": float(leader.N_P_star),
-                "urban_accumulation_error_veh": float(
-                    state.protected_accumulation_veh(self.cfg.network) - leader.N_P_star
-                ),
+                "urban_net_inflow_target_veh": float(target_net_inflow_veh),
                 "urban_net_inflow_target_veh_h": float(target_net_inflow),
+                "urban_accumulation_target_disabled": 1.0,
+                "urban_accumulation_target_veh": 0.0,
+                "urban_accumulation_error_veh": 0.0,
+                "urban_accumulation_abs_error_veh": 0.0,
             })
             return UrbanFollowerResult(
                 green_times=direct.green_times,
@@ -779,6 +786,7 @@ class UrbanFollower:
             green,
             plan,
         )
+        target_net_inflow_veh, target_net_inflow_rate = self._leader_net_inflow_target(leader, forecast)
         balance = movement_balance_summary(
             state,
             self.cfg,
@@ -804,12 +812,12 @@ class UrbanFollower:
                 for key in (getattr(freeway_response, "infeasibility", {}) or {})
             )),
             "urban_accumulation_veh": float(state.protected_accumulation_veh(self.cfg.network)),
-            "urban_accumulation_target_veh": float(leader.N_P_star) if leader is not None else 0.0,
-            "urban_accumulation_error_veh": (
-                float(state.protected_accumulation_veh(self.cfg.network) - leader.N_P_star)
-                if leader is not None else 0.0
-            ),
-            "urban_net_inflow_target_veh_h": float(target_net_inflow),
+            "urban_net_inflow_target_veh": float(target_net_inflow_veh),
+            "urban_net_inflow_target_veh_h": float(target_net_inflow_rate),
+            "urban_accumulation_target_disabled": 1.0,
+            "urban_accumulation_target_veh": 0.0,
+            "urban_accumulation_error_veh": 0.0,
+            "urban_accumulation_abs_error_veh": 0.0,
         }
         metrics.update(allocation_metrics)
         metrics.update(stage2_metrics)
@@ -868,6 +876,9 @@ class UrbanFollower:
             "urban_accumulation_veh": float(state.protected_accumulation_veh(self.cfg.network)),
             "urban_accumulation_target_veh": 0.0,
             "urban_accumulation_error_veh": 0.0,
+            "urban_accumulation_target_disabled": 1.0,
+            "urban_accumulation_abs_error_veh": 0.0,
+            "urban_net_inflow_target_veh": 0.0,
             "urban_net_inflow_target_veh_h": 0.0,
         }
         metrics.update(stage2_metrics)

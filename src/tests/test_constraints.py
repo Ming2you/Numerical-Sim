@@ -9,6 +9,7 @@ from src.controllers.leader import Leader, LeaderAction
 from src.controllers.inflow_outflow_allocation import InflowOutflowAllocationModule
 from src.controllers.nash_solver import NashResult
 from src.controllers.relaxed_quantization import repair_green_pair, repair_vsl_value
+from src.controllers.simplified_inflow_outflow_allocation import SimplifiedInflowOutflowAllocationModule
 from src.controllers.spillback_constraints import (
     assess_offramp_spillback,
     assess_onramp_spillback,
@@ -80,6 +81,74 @@ class ConstraintTests(unittest.TestCase):
 
         for got, expected in zip(batch, scalar):
             self.assertAlmostEqual(float(got), float(expected), places=12)
+
+    def test_simplified_allocation_uses_np_star_as_net_inflow_vehicles(self):
+        cfg = short_config().with_updates({
+            "mpc": {"stackelberg_allocation_mode": "simplified", "horizon_steps": 3},
+        })
+        module = SimplifiedInflowOutflowAllocationModule(cfg)
+        state = TrafficState.initial(cfg)
+        forecast = DemandProfile(cfg, ScenarioConfig("test")).horizon(0.0, cfg.mpc.horizon_steps)
+        leader = LeaderAction(300.0, cfg.network.total_ramp_capacity)
+
+        plan = module.solve(state, leader, forecast)
+        horizon_h = cfg.simulation.T_c_h * cfg.mpc.horizon_steps
+
+        self.assertAlmostEqual(plan.target_net_inflow_veh_h * horizon_h, 300.0)
+        self.assertLessEqual(plan.residual_veh_h * horizon_h, cfg.urban_follower.eps_U + 1.0e-9)
+        self.assertEqual(plan.diagnostics["allocation_simplified_module_active"], 1.0)
+
+    def test_stackelberg_simplified_allocation_projection_keeps_allocation_map(self):
+        cfg = short_config().with_updates({
+            "mpc": {"stackelberg_allocation_mode": "simplified", "horizon_steps": 3},
+        })
+        coordinator = DistributedCoordinator(cfg)
+        state = TrafficState.initial(cfg)
+        forecast = DemandProfile(cfg, ScenarioConfig("test")).horizon(0.0, cfg.mpc.horizon_steps)
+        leader = LeaderAction(300.0, cfg.network.total_ramp_capacity)
+
+        plan = coordinator._stackelberg_allocation_plan(state, leader, forecast)
+        self.assertIsNotNone(plan)
+        control = coordinator._project_control_to_leader_constraints(
+            ControlAction.fixed(cfg),
+            leader,
+            plan,
+        )
+        diagnostics = coordinator._leader_direct_feasible_set_diagnostics(
+            state,
+            control,
+            forecast,
+            leader,
+        )
+
+        self.assertTrue(control.inflow_outflow_allocation)
+        self.assertEqual(control.diagnostics["stackelberg_allocation_mode_simplified"], 1.0)
+        self.assertEqual(diagnostics["distributed_grid_leader_allocation_module_active"], 1.0)
+        self.assertEqual(diagnostics["distributed_grid_leader_allocation_module_disabled"], 0.0)
+
+    def test_stackelberg_pso_allocation_uses_original_module(self):
+        cfg = short_config().with_updates({
+            "mpc": {"stackelberg_allocation_mode": "pso", "horizon_steps": 2},
+            "urban_follower": {"allocation_pso_particles": 4, "allocation_pso_iterations": 3},
+        })
+        coordinator = DistributedCoordinator(cfg)
+        state = TrafficState.initial(cfg)
+        forecast = DemandProfile(cfg, ScenarioConfig("test")).horizon(0.0, cfg.mpc.horizon_steps)
+        leader = LeaderAction(300.0, cfg.network.total_ramp_capacity)
+
+        plan = coordinator._stackelberg_allocation_plan(state, leader, forecast)
+        self.assertIsNotNone(plan)
+        self.assertIsInstance(coordinator.allocation_module, InflowOutflowAllocationModule)
+        self.assertEqual(plan.diagnostics["allocation_module_active"], 1.0)
+        self.assertNotIn("allocation_simplified_module_active", plan.diagnostics)
+
+        control = coordinator._project_control_to_leader_constraints(
+            ControlAction.fixed(cfg),
+            leader,
+            plan,
+        )
+        self.assertTrue(control.inflow_outflow_allocation)
+        self.assertEqual(control.diagnostics["stackelberg_allocation_mode_pso"], 1.0)
 
     def test_relaxed_green_repair_satisfies_cycle_and_bounds(self):
         cfg = short_config().with_updates({"mpc": {"relaxed_quantized_controls": True}})
@@ -493,7 +562,7 @@ class ConstraintTests(unittest.TestCase):
     def test_relaxed_wu_urban_green_evaluates_neighborhood_candidates(self):
         cfg = short_config().with_updates({"mpc": {"relaxed_quantized_controls": True}})
         state = TrafficState.initial(cfg)
-        demand = DemandProfile(cfg, ScenarioConfig("test")).at(0.0)
+        forecast = DemandProfile(cfg, ScenarioConfig("test")).horizon(0.0, cfg.mpc.horizon_steps)
         controller = WuDistributedController(cfg)
         previous = _wu_fixed_control(cfg)
         coupling = controller._coupling(state, previous, demand)
@@ -739,19 +808,45 @@ class ConstraintTests(unittest.TestCase):
         forecast = DemandProfile(cfg, ScenarioConfig("test")).horizon(0.0, cfg.mpc.horizon_steps)
         previous = ControlAction.fixed(cfg)
         leader = LeaderAction(cfg.leader.N_P_crit_veh, 0.75 * cfg.network.total_ramp_capacity)
-        allocation_plan = coordinator.urban_follower.allocation_module.solve(state, leader, forecast)
-
         candidates = coordinator._leader_conditioned_grid_candidates(
             previous,
             previous.copy(),
             leader,
-            allocation_plan,
+            None,
+            state=state,
+            forecast=forecast,
         )
 
         self.assertGreater(len(candidates), 40)
         self.assertTrue(any(candidate.label.startswith("leader_coarse_global_green_") for candidate in candidates))
+        self.assertTrue(any("target_net_inflow" in candidate.label for candidate in candidates))
         self.assertTrue(any(candidate.label.startswith("leader_coarse_global_vsl_") for candidate in candidates))
         self.assertTrue(any("offset" in candidate.label for candidate in candidates))
+        base_candidates = coordinator._leader_conditioned_grid_candidates(
+            previous,
+            previous.copy(),
+            leader,
+            None,
+        )
+        base_best_residual = min(
+            abs(coordinator._leader_direct_feasible_set_diagnostics(
+                state,
+                candidate.control,
+                forecast,
+                leader,
+            )["distributed_grid_leader_net_inflow_residual_veh"])
+            for candidate in base_candidates
+        )
+        augmented_best_residual = min(
+            abs(coordinator._leader_direct_feasible_set_diagnostics(
+                state,
+                candidate.control,
+                forecast,
+                leader,
+            )["distributed_grid_leader_net_inflow_residual_veh"])
+            for candidate in candidates
+        )
+        self.assertLessEqual(augmented_best_residual, base_best_residual)
         for candidate in candidates:
             total_metering = sum(
                 candidate.control.ramp_metering.get(ramp, 0.0)
@@ -761,7 +856,7 @@ class ConstraintTests(unittest.TestCase):
             self.assertEqual(candidate.stage, "coarse")
             self.assertEqual(candidate.scope, "global")
             self.assertEqual(candidate.control.N_UF_star, leader.N_UF_star)
-            self.assertTrue(candidate.control.inflow_outflow_allocation)
+            self.assertFalse(candidate.control.inflow_outflow_allocation)
 
     def test_distributed_link_vsl_consensus_is_order_independent(self):
         cfg = short_config()
@@ -1156,7 +1251,7 @@ class ConstraintTests(unittest.TestCase):
         previous = ControlAction.fixed(cfg)
         # previous N_P_star는 후보 범위(n_crit×[0.9,1.05]) 안이어야 clip 없이 보존된다.
         # n_crit 재calibration에도 견고하도록 crit 상대값(밴드 중앙 0.95×crit)으로 둔다.
-        prev_np = round(0.95 * cfg.leader.N_P_crit_veh, 6)
+        prev_np = -250.0
         previous.N_P_star = prev_np
         previous.N_UF_star = 3333.0
         candidates = Leader(cfg).candidates(state, previous, demand)
@@ -1184,7 +1279,7 @@ class ConstraintTests(unittest.TestCase):
         coordinator = DistributedCoordinator(cfg)
         weights = {ramp: cfg.network.ramp_capacity_veh_h[ramp] for ramp in cfg.network.ramps}
         projected = coordinator._leader_metering_projection(
-            LeaderAction(cfg.leader.N_P_crit_veh, 0.0),
+            LeaderAction(0.0, 0.0),
             weights,
         )
         self.assertAlmostEqual(sum(projected.values()), min_total)
@@ -1404,12 +1499,13 @@ class ConstraintTests(unittest.TestCase):
             self.assertGreaterEqual(value, 0.0)
             self.assertLess(value, cfg.network.cycle_length)
 
-    def test_leader_np_candidates_use_calibrated_crit_band(self):
+    def test_leader_np_candidates_use_feasible_net_inflow_range(self):
         cfg = ExperimentConfig.from_file(
             "src/config/default.yaml",
             {
                 "mpc": {"leader_candidate_count": 6},
                 "leader": {
+                    "N_P_star_range": [-4000.0, 4000.0],
                     "N_P_crit_veh": 172.0,
                     "N_P_candidate_lower_factor": 0.9,
                     "N_P_candidate_upper_factor": 1.05,
@@ -1417,33 +1513,34 @@ class ConstraintTests(unittest.TestCase):
             },
         )
         state = TrafficState.initial(cfg)
-        demand = DemandProfile(cfg, ScenarioConfig("test")).at(0.0)
+        forecast = DemandProfile(cfg, ScenarioConfig("test")).horizon(0.0, cfg.mpc.horizon_steps)
         previous = ControlAction.fixed(cfg)
         previous.N_P_star = 333.0
 
-        actions = Leader(cfg).candidates(state, previous, demand)
+        leader = Leader(cfg)
+        bounds = leader._candidate_bounds(state, previous, forecast[0], forecast)
+        actions = leader.candidates(state, previous, forecast[0], forecast)
         nps = [action.N_P_star for action in actions]
-        self.assertTrue(all(0.9 * 172.0 <= value <= 1.05 * 172.0 for value in nps))
-        self.assertTrue(any(abs(value - 172.0) <= 1.0e-9 for value in nps))
+        self.assertLess(bounds.np_lower, 0.0)
+        self.assertGreater(bounds.np_upper, 0.0)
+        self.assertTrue(all(bounds.np_lower - 1.0e-9 <= value <= bounds.np_upper + 1.0e-9 for value in nps))
+        self.assertTrue(any(value < 0.0 for value in nps))
+        self.assertTrue(any(value > 1000.0 for value in nps))
+        self.assertTrue(any(abs(value) <= 1.0e-9 for value in nps))
+        self.assertFalse(all(0.9 * 172.0 <= value <= 1.05 * 172.0 for value in nps))
 
-        congested = state.copy()
-        for movement in congested.urban_movement_queue:
-            congested.urban_movement_queue[movement] = 0.0
         # internal movement 큐는 보호영역 누적 N_P에 포함된다(그리드 라우팅 이후 정의).
-        congested.urban_movement_queue["A_S_to_E"] = 220.0
-        congested_actions = Leader(cfg).candidates(congested, previous, demand)
-        self.assertTrue(all(action.N_P_star <= 1.05 * 172.0 + 1.0e-9 for action in congested_actions))
-        self.assertTrue(any(action.N_P_star > 172.0 + 1.0e-9 for action in congested_actions))
 
-    def test_default_leader_np_grid_covers_observed_pfo_band(self):
+    def test_default_leader_np_grid_covers_feasible_net_inflow_range(self):
         cfg = ExperimentConfig.from_file("src/config/default.yaml")
         state = TrafficState.initial(cfg)
-        lower, upper = Leader(cfg)._np_candidate_bounds(state)
+        forecast = DemandProfile(cfg, ScenarioConfig("test")).horizon(0.0, cfg.mpc.horizon_steps)
+        bounds = Leader(cfg)._candidate_bounds(state, None, forecast[0], forecast)
 
         # Peak PFO 진단에서 관측된 protected accumulation 운전점(약 244~592 veh)을
         # leader grid가 원천적으로 배제하지 않는지 확인한다.
-        self.assertLessEqual(lower, 244.0)
-        self.assertGreaterEqual(upper, 592.0)
+        self.assertLessEqual(bounds.np_lower, -3000.0)
+        self.assertGreaterEqual(bounds.np_upper, 3000.0)
 
     def test_leader_objective_matches_spec_accumulation_form(self):
         cfg = ExperimentConfig.from_file(
@@ -1507,7 +1604,6 @@ class ConstraintTests(unittest.TestCase):
             + 2.0 * max(0.0, n_p_protected - 100.0)
             + 1.0 * boundary_in_queue
             + 3.0 * density_excess
-            + 0.5 * (abs(170.0 - 160.0) + cfg.simulation.T_c_h * abs(300.0 - 250.0))
         )
         leader = Leader(cfg)
         terms = leader.objective_terms(
@@ -1521,6 +1617,7 @@ class ConstraintTests(unittest.TestCase):
         self.assertAlmostEqual(terms["leader_boundary_leg_excluded_veh"], 77.0)
         self.assertAlmostEqual(terms["leader_target_penalty"], 2.0 * max(0.0, n_p_protected - 100.0))
         self.assertAlmostEqual(terms["leader_boundary_in_queue_penalty"], 1.0 * boundary_in_queue)
+        self.assertAlmostEqual(terms["leader_smoothness_penalty"], 0.0)
 
     def test_default_leader_objective_uses_follower_ttt_base(self):
         cfg = ExperimentConfig.from_file(

@@ -138,6 +138,8 @@ def _parse_updates(args: argparse.Namespace) -> Dict[str, Any]:
     overrides["mpc"] = {"relaxed_quantized_controls": True}
     if args.leader_candidate_count is not None:
         overrides["mpc"]["leader_candidate_count"] = args.leader_candidate_count
+    if args.leader_refinement_candidate_count is not None:
+        overrides["mpc"]["leader_refinement_candidate_count"] = args.leader_refinement_candidate_count
     if args.max_nash_iter is not None:
         overrides["mpc"]["max_nash_iter"] = args.max_nash_iter
     if args.optimizer_maxiter is not None:
@@ -174,6 +176,8 @@ def _parse_updates(args: argparse.Namespace) -> Dict[str, Any]:
         overrides["mpc"]["stackelberg_inner_backend_when_outer_process"] = (
             args.stackelberg_inner_backend_when_outer_process
         )
+    if args.stackelberg_allocation_mode is not None:
+        overrides["mpc"]["stackelberg_allocation_mode"] = args.stackelberg_allocation_mode
     if args.freeway_prediction_horizon_steps is not None:
         overrides["freeway_follower"] = {
             "freeway_prediction_horizon_steps": args.freeway_prediction_horizon_steps
@@ -191,6 +195,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     parser.add_argument("--controllers", default=",".join(PRIMARY_CONTROLLERS))
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--leader-candidate-count", type=int, default=None)
+    parser.add_argument("--leader-refinement-candidate-count", type=int, default=None)
     parser.add_argument("--max-nash-iter", type=int, default=None)
     parser.add_argument("--optimizer-maxiter", type=int, default=None)
     parser.add_argument("--optimizer-n-starts", type=int, default=None)
@@ -208,6 +213,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     parser.add_argument("--stackelberg-leader-parallel-backend", choices=["serial", "thread", "process"], default=None)
     parser.add_argument("--stackelberg-leader-parallel-max-workers", type=int, default=None)
     parser.add_argument("--stackelberg-inner-backend-when-outer-process", choices=["serial", "thread"], default=None)
+    parser.add_argument("--stackelberg-allocation-mode", choices=["direct", "simplified", "pso"], default=None)
     parser.add_argument("--freeway-prediction-horizon-steps", type=int, default=None)
     args = parser.parse_args(argv)
 

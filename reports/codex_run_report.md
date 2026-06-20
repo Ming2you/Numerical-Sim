@@ -8095,3 +8095,824 @@ Result: PASS (`2` tests).
   `distributed_grid_leader_net_inflow_*` diagnostics and either reject such
   leader candidates earlier or widen direct green/on-ramp candidates enough to
   make the leader feasible set non-empty before comparing TTT.
+## 2026-06-20: Target-Aware Green Projection for Stackelberg Followers
+
+### Implementation
+
+- Added target-aware green projection to the Stackelberg distributed follower
+  candidate path.
+- Each leader-conditioned structured-grid seed is now augmented with an
+  additional `target_net_inflow` candidate when green adjustment reduces the
+  residual between:
+  - `urban_accumulation_feedback_flow(state, cfg, leader.N_P_star, forecast)`,
+  - the candidate's projected net inflow from boundary/off-ramp inflow and
+    boundary/on-ramp outflow service.
+- The projection keeps the leader constraints:
+  - ramp metering remains projected to `N_UF_star`,
+  - allocation module remains disabled,
+  - only direct green splits are adjusted.
+- Added a coarse all-signal min/max green pass before coordinate search so the
+  projection is less likely to get stuck in one-signal local minima.
+- Added a hard feasibility penalty to rollout objective when a candidate still
+  violates the leader direct net-inflow/storage constraints. This is a
+  constraint violation penalty, not a balance cost term.
+- Applied the same target-aware green projection to leader-present Nash
+  iteration candidates before rollout evaluation so the final response cannot
+  bypass the target-aware candidate logic.
+
+Changed files:
+
+- `src/controllers/distributed_coordinator.py`
+- `src/tests/test_constraints.py`
+- `reports/codex_run_report.md`
+
+### Validation
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m py_compile src\controllers\distributed_coordinator.py src\controllers\urban_follower.py src\tests\test_constraints.py
+```
+
+Result: PASS.
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m unittest src.tests.test_constraints.ConstraintTests.test_leader_conditioned_grid_projects_metering_target src.tests.test_constraints.ConstraintTests.test_urban_follower_objective_covers_uncontrolled_E_vehicles src.tests.test_constraints.ConstraintTests.test_allocation_net_inflow_binding_uses_inflow_outflow_extremes -v
+```
+
+Result: PASS (`3` tests).
+
+Candidate-level diagnostic on the initial `medium_demand` state:
+
+| Candidate set | Count | target-net candidates | Best abs net-inflow residual | Best projected net inflow | Target net inflow |
+|---|---:|---:|---:|---:|---:|
+| Base leader-conditioned grid | 127 | 0 | 3530.964 | 2739.457 | -791.507 |
+| Target-aware augmented grid | 182 | 55 | 3254.347 | 2462.840 | -791.507 |
+
+### Smoke Run
+
+Command:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.all_scenarios_four_controller_comparison --scenario medium_demand --controllers PROPOSED-STACKELBERG --T-total 180 --output outputs\pstack_target_green_nash_medium_180_2026_06_20 --max-nash-iter 1 --freeway-prediction-horizon-steps 3 --grid-parallel-backend thread --grid-parallel-max-workers 4 --grid-parallel-chunk-size 8 --disable-stackelberg-fallback
+```
+
+| Controller | Total TTT | Improvement vs no-control | Total delay | Throughput veh/h | Mean B sum | Compute sec |
+|---|---:|---:|---:|---:|---:|---:|
+| NO-CONTROL | 17.616 | baseline | 1.046 | 8000.6 | 0.109886 | 0.00 |
+| PROPOSED-STACKELBERG | 17.439 | 1.005% | 0.869 | 7881.3 | 0.064870 | 593.16 |
+
+Selected response diagnostics:
+
+| Diagnostic | Value |
+|---|---:|
+| `distributed_response_rollout_active` | 1.0 |
+| `distributed_nash_candidate_target_green_projection_active` | 1.0 |
+| `allocation_module_active` | 0.0 |
+| `distributed_grid_leader_net_inflow_target_veh_h` | -674.372 |
+| `distributed_grid_leader_projected_net_inflow_veh_h` | 2372.000 |
+| `distributed_grid_leader_net_inflow_abs_residual_veh_h` | 3046.372 |
+| `distributed_grid_leader_constraint_penalty` | 13258.673 |
+
+### Interpretation
+
+- The structural correction is active: Stack follower responses are direct
+  control candidates, allocation is disabled, and selected Nash candidates are
+  forced through target-aware green projection before rollout evaluation.
+- The 180 s medium smoke improves Total TTT and boundary balance compared with
+  no-control, but the controller is not acceptance-ready.
+- The remaining problem is now clearer: the selected leader target can still be
+  outside what the direct green/RM feasible set can realize over the current
+  horizon. In this smoke, the target asks for negative net inflow, while the
+  best selected projected net inflow is still strongly positive.
+
+### Failed Criteria / Next Modification
+
+- This is not a final performance pass: horizon is only 180 s and computation
+  cost is high.
+- Next modification should move the feasibility logic one level up:
+  leader candidates whose follower feasible set cannot get near the `N_P_star`
+  net-inflow target should be rejected or heavily down-ranked before expensive
+  full follower evaluation, and the leader `N_P_star` grid should prefer targets
+  whose requested net inflow is reachable by direct green/RM controls in the
+  current state.
+## 2026-06-20: Net-Inflow Feasibility Unit Normalization
+
+### Implementation
+
+- Removed the Stack follower leader-constraint penalty from rollout objective.
+  The selected grid objective is again:
+  - rollout Total TTT,
+  - plus existing spillback penalty only.
+- Converted direct leader net-inflow feasibility diagnostics to vehicle units:
+  - `distributed_grid_leader_net_inflow_target_veh`,
+  - `distributed_grid_leader_projected_net_inflow_veh`,
+  - `distributed_grid_leader_net_inflow_residual_veh`,
+  - `distributed_grid_leader_net_inflow_abs_residual_veh`,
+  - `distributed_grid_leader_net_inflow_eps_veh`,
+  - `distributed_grid_leader_net_inflow_violation_veh`.
+- Kept rate diagnostics only as explicitly named rates:
+  - `distributed_grid_leader_net_inflow_target_rate_veh_h`,
+  - `distributed_grid_leader_projected_net_inflow_rate_veh_h`.
+- `distributed_grid_leader_total_constraint_violation` is now in vehicles, so
+  it is unit-compatible with spillback/storage violation checks.
+
+Changed files:
+
+- `src/controllers/distributed_coordinator.py`
+- `src/tests/test_constraints.py`
+- `reports/codex_run_report.md`
+
+### Validation
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m py_compile src\controllers\distributed_coordinator.py src\controllers\urban_follower.py src\tests\test_constraints.py
+```
+
+Result: PASS.
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m unittest src.tests.test_constraints.ConstraintTests.test_leader_conditioned_grid_projects_metering_target src.tests.test_constraints.ConstraintTests.test_urban_follower_objective_covers_uncontrolled_E_vehicles src.tests.test_constraints.ConstraintTests.test_allocation_net_inflow_binding_uses_inflow_outflow_extremes -v
+```
+
+Result: PASS (`3` tests).
+
+Candidate-level unit diagnostic on the initial `medium_demand` state:
+
+| Metric | Value |
+|---|---:|
+| Augmented candidate count | 182 |
+| Target-net-inflow candidates | 55 |
+| Best abs residual | 488.152 veh |
+| Target net inflow | -118.726 veh |
+| Projected net inflow | 369.426 veh |
+| Net-inflow eps | 15.000 veh |
+| Total constraint violation | 473.152 veh |
+
+No closed-loop smoke was rerun after this unit-only correction because the
+latest 180 s Stack smoke took roughly ten minutes and included the now-removed
+leader-constraint penalty. That previous smoke should not be interpreted as the
+current implementation's performance result.
+
+### Interpretation
+
+- The previous `veh/h + veh` constraint aggregation was unit-inconsistent. This
+  is fixed: net-inflow residuals are converted to vehicle counts over the
+  follower horizon before feasibility comparison.
+- The remaining gap is not just a unit issue. The target can still be physically
+  hard to realize with the current direct green/RM candidate set.
+- The MFD-style feedback target can also conflict with TTT minimization in
+  under-critical scenarios. If the leader objective penalizes only
+  `N_P > N_P_crit`, then all under-critical protected accumulations are nearly
+  equivalent from the critical-penalty perspective. In median/slack states, a
+  high or permissive `N_P_star` can allow more vehicles into the protected
+  network even when doing so is not Total TTT-optimal.
+
+### Failed Criteria / Next Modification
+
+- This is not an acceptance pass; no post-fix 7200 s or smoke performance run
+  has been completed.
+- Next modification should separate the two concepts:
+  - keep MFD critical-overflow protection as a gridlock prevention term,
+  - avoid using the feedback target as a hard constraint when the network is
+    below critical or when the target is unreachable over the MPC horizon.
+  A reasonable next test is to gate `N_P` target tracking so it activates only
+  when protected accumulation is near/above critical, while still letting
+  rollout TTT decide below-critical median states.
+
+## 2026-06-20: Spec 16 N_P_star Semantics Correction
+
+### Implementation
+
+- Corrected `docs/spec/16_six_controller_comparison.md` so it no longer defines
+  proposed-controller `N_P_star` as a protected-network accumulation target.
+- The proposed Stackelberg section now matches the base controller specs:
+  `N_P_star` is the target net inflow to the protected urban network, while
+  `N_P_crit` is a separate critical-accumulation guard used by the
+  objective/constraints.
+- Renamed the Wu-authority-matched Stackelberg variant's accumulation references
+  from `N_P_star/N_F_star` to `N_P_ref/N_F_ref` inside the spec to avoid
+  overloading `N_P_star` with two meanings.
+
+Changed file:
+
+- `docs/spec/16_six_controller_comparison.md`
+
+### Validation
+
+- No code tests or closed-loop simulations were run for this documentation-only
+  correction.
+
+### Interpretation
+
+- The primary specs already stated the intended semantics:
+  - `docs/spec/01_control_concept.md`: `N_P_star` is target net inflow.
+  - `docs/spec/04_controller.md`: urban follower constraints compare projected
+    inflow-minus-outflow service against `N_P_star`.
+- `docs/spec/16_six_controller_comparison.md` had drifted and was describing
+  `N_P_star` as accumulation/coordination target, which is inconsistent with
+  the proposed controller formulation and contributed to the current code path
+  that computes
+  `(target_accumulation - current_accumulation) / feedback_h`.
+
+### Failed Criteria / Next Modification
+
+- This does not fix the implementation yet. Current code still contains
+  accumulation-target semantics in `urban_accumulation_feedback_flow()` and in
+  leader candidate bounds tied to `N_P_crit`.
+- Next implementation step should restore proposed-controller `N_P_star` as a
+  direct net-inflow target and broaden leader search over feasible net-inflow
+  values, while keeping `N_P_crit` only as a critical-overflow guard.
+
+## 2026-06-20: P-Stack N_P_star Direct Net-Inflow Semantics
+
+### Implementation
+
+- Restored Proposed Stackelberg `N_P_star` to the original spec meaning:
+  protected-urban net-inflow target, expressed as vehicles over the follower
+  evaluation horizon.
+- Changed leader candidate generation so `N_P_star` is no longer generated from
+  an `N_P_crit` accumulation band. The default search is now clipped by:
+  - configured direct target range `leader.N_P_star_range`,
+  - movement-level feasible inflow-minus-outflow bounds over the follower
+    horizon.
+- Updated default `leader.N_P_star_range` from `[0, 850]` to
+  `[-3500, 3500]`, matching the current topology's approximate feasible
+  medium initial-state horizon range (`-3315` to `3220 veh`).
+- Removed accumulation-feedback conversion from P-Stack direct follower
+  diagnostics:
+  - old: `(target_accumulation - current_accumulation) / feedback_h`,
+  - new: `target_net_inflow_veh = leader.N_P_star` and
+    `target_rate = target_net_inflow_veh / horizon_h`.
+- Treated `urban_follower.eps_U` as a vehicle-count tolerance in the direct
+  follower precheck, not a rate multiplied by horizon.
+- Updated the allocation module so if it is used with a leader, it converts
+  direct `N_P_star` vehicles to a veh/h service target by dividing by the
+  follower horizon.
+- Updated urban follower and urban model diagnostics so P-Stack no longer logs
+  `N_P_star` as an accumulation target. Accumulation target diagnostics are
+  disabled and net-inflow target diagnostics are logged explicitly.
+- Updated `docs/spec/09_configuration_requirements.md` to match the corrected
+  direct net-inflow semantics.
+
+Changed files:
+
+- `src/controllers/leader.py`
+- `src/controllers/distributed_coordinator.py`
+- `src/controllers/urban_follower.py`
+- `src/controllers/inflow_outflow_allocation.py`
+- `src/models/urban_queue_model.py`
+- `src/models/state.py`
+- `src/config/default.yaml`
+- `src/tests/test_constraints.py`
+- `docs/spec/09_configuration_requirements.md`
+- `reports/codex_run_report.md`
+
+### Validation
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m py_compile src\controllers\leader.py src\controllers\distributed_coordinator.py src\controllers\urban_follower.py src\controllers\inflow_outflow_allocation.py src\models\urban_queue_model.py src\models\state.py src\tests\test_constraints.py
+```
+
+Result: PASS.
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m unittest src.tests.test_constraints.ConstraintTests.test_leader_candidate_budget_covers_extremes_and_previous_action src.tests.test_constraints.ConstraintTests.test_leader_np_candidates_use_feasible_net_inflow_range src.tests.test_constraints.ConstraintTests.test_default_leader_np_grid_covers_feasible_net_inflow_range src.tests.test_constraints.ConstraintTests.test_leader_conditioned_grid_projects_metering_target src.tests.test_constraints.ConstraintTests.test_allocation_net_inflow_binding_uses_inflow_outflow_extremes -v
+```
+
+Result: PASS (`5` tests).
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m unittest src.tests.test_metanet_equations.MetanetEquationTests.test_config_exposes_time_ratios_and_units src.tests.test_metanet_equations.MetanetEquationTests.test_config_rejects_invalid_np_candidate_band -v
+```
+
+Result: PASS (`2` tests).
+
+Candidate-bound diagnostic on initial `medium_demand`:
+
+| Metric | Value |
+|---|---:|
+| leader `N_P_star` lower | -3315.000 veh |
+| leader `N_P_star` upper | 3220.000 veh |
+| candidate count | 50 |
+| zero target included | yes |
+
+### Smoke Run
+
+Command:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.all_scenarios_four_controller_comparison --scenario medium_demand --controllers PROPOSED-STACKELBERG --T-total 180 --output outputs\pstack_np_direct_net_inflow_medium_180_2026_06_20 --max-nash-iter 1 --freeway-prediction-horizon-steps 3 --grid-parallel-backend thread --grid-parallel-max-workers 4 --grid-parallel-chunk-size 8 --disable-stackelberg-fallback
+```
+
+| Controller | Total TTT | Improvement vs no-control | Total delay | Throughput veh/h | Mean B sum | Compute sec |
+|---|---:|---:|---:|---:|---:|---:|
+| NO-CONTROL | 17.616 | baseline | 1.046 | 8000.6 | 0.109886 | 0.0 |
+| PROPOSED-STACKELBERG | 17.439 | 1.005% | 0.869 | 7881.3 | 0.064870 | 564.2 |
+
+Selected diagnostic row:
+
+| Diagnostic | Value |
+|---|---:|
+| selected `N_P_star` | 0.000 veh |
+| selected `N_UF_star` | 6000.000 veh/h |
+| leader `N_P_star` bound lower | -3315.000 veh |
+| leader `N_P_star` bound upper | 3220.000 veh |
+| target net inflow | 0.000 veh |
+| projected net inflow | 355.800 veh |
+| net-inflow residual | 355.800 veh |
+| net-inflow eps | 100.000 veh |
+
+### Interpretation
+
+- The semantic correction is active: the leader searched negative, zero, and
+  positive direct net-inflow targets, and the selected 180 s smoke target was
+  `N_P_star = 0 veh` rather than an accumulation target near `N_P_crit`.
+- The direct follower diagnostics now compare projected
+  `inflow_veh - outflow_veh` against `leader.N_P_star` in vehicle units.
+- The smoke result is not an acceptance result. It is only a semantic
+  closed-loop check over 180 s. Improvement remains small and throughput is
+  lower than no-control.
+- Computation cost remains high (`564.2 s` for one 180 s Stack smoke), so future
+  7200 s runs still need a candidate-evaluation cost reduction or smaller
+  semantic smoke harness.
+
+### Failed Criteria / Next Modification
+
+- Full 7200 s acceptance was not run.
+- The selected `N_UF_star` is still at the high bound in this short medium
+  smoke, so the remaining P-Stack/PFO gap may now be more about `N_UF_star`
+  leader search/prefilter and the follower feasible response than about
+  `N_P_star` semantics.
+- Next recommended diagnostic: compare full-evaluated leader candidates grouped
+  by `N_UF_star` under the corrected `N_P_star` semantics and verify whether the
+  proxy prefilter is still dropping lower-freeway-release candidates that have
+  better rollout Total TTT.
+
+## 2026-06-20: Simplified Allocation-Backed P-Stack Ablation
+
+### Purpose
+
+`N_P_star` 의미 오류 때문에 기존 allocation module이 잘못 작동했는지 분리해서
+확인했다. 기존 direct feasible Stackelberg path는 삭제하지 않고, 새 deterministic
+allocation module을 별도 파일로 추가한 뒤 `mpc.stackelberg_allocation_mode=simplified`
+일 때만 사용했다.
+
+### Implementation
+
+Changed files:
+
+- `src/controllers/simplified_inflow_outflow_allocation.py`
+- `src/controllers/distributed_coordinator.py`
+- `src/models/state.py`
+- `src/config/default.yaml`
+- `src/experiments/all_scenarios_four_controller_comparison.py`
+- `src/tests/test_constraints.py`
+- `reports/codex_run_report.md`
+
+Implementation notes:
+
+- Added `SimplifiedInflowOutflowAllocationModule`.
+- It interprets `leader.N_P_star` as protected-urban net inflow target in
+  vehicles over the follower horizon, then converts to veh/h only inside the
+  allocation module.
+- It uses deterministic queue/balance seed plus net-inflow projection. It does
+  not use PSO, so this ablation does not mix allocation semantics with
+  stochastic solver noise.
+- Default `mpc.stackelberg_allocation_mode` remains `direct`; current direct
+  feasible Stackelberg behavior is preserved.
+- In simplified mode, the distributed Stackelberg follower skips the broad
+  direct grid and evaluates the allocation seed plus Nash response only. This is
+  an ablation path, not the primary controller definition.
+
+### Validation
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m py_compile src\controllers\simplified_inflow_outflow_allocation.py src\controllers\distributed_coordinator.py src\models\state.py src\experiments\all_scenarios_four_controller_comparison.py src\tests\test_constraints.py
+```
+
+Result: PASS.
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m unittest src.tests.test_constraints.ConstraintTests.test_simplified_allocation_uses_np_star_as_net_inflow_vehicles src.tests.test_constraints.ConstraintTests.test_stackelberg_simplified_allocation_projection_keeps_allocation_map src.tests.test_constraints.ConstraintTests.test_leader_np_candidates_use_feasible_net_inflow_range src.tests.test_constraints.ConstraintTests.test_default_leader_np_grid_covers_feasible_net_inflow_range -v
+```
+
+Result: PASS (`4` tests).
+
+### 180 s Smoke
+
+Command:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.all_scenarios_four_controller_comparison --scenario medium_demand --controllers PROPOSED-STACKELBERG --T-total 180 --output outputs\pstack_simplified_allocation_seed_medium_180_2026_06_20 --max-nash-iter 1 --stackelberg-allocation-mode simplified --stackelberg-leader-parallel-backend thread --stackelberg-leader-parallel-max-workers 4 --stackelberg-prefilter-top-k 4 --stackelberg-prefilter-local-top-k 4 --grid-parallel-backend thread --grid-parallel-max-workers 4 --grid-parallel-chunk-size 8 --freeway-prediction-horizon-steps 3 --disable-stackelberg-fallback
+```
+
+| Controller | Total TTT | Improvement vs no-control | Urban TTT | Freeway TTT | Throughput veh/h | Terminal vehicles | Mean B sum | Compute sec |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| NO-CONTROL | 17.616 | baseline | 11.253 | 6.363 | 8000.6 | 399.4 | 0.109886 | 0.0 |
+| PROPOSED-STACKELBERG simplified allocation | 19.445 | -10.383% | 15.035 | 4.410 | 5739.8 | 512.9 | 0.050733 | 4.98 |
+
+Key diagnostics:
+
+| Diagnostic | Value |
+|---|---:|
+| selected `N_P_star` | 0.000 veh |
+| selected `N_UF_star` | 6000.000 veh/h |
+| allocation target net inflow | 0.000 veh |
+| allocation projected net inflow | approximately 0.000 veh |
+| allocation residual | approximately 0.000 veh |
+
+### 7200 s Medium Scenario Run
+
+Command:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.all_scenarios_four_controller_comparison --scenario medium_demand --controllers PROPOSED-STACKELBERG --T-total 7200 --output outputs\pstack_simplified_allocation_seed_medium_7200_2026_06_20 --max-nash-iter 1 --stackelberg-allocation-mode simplified --stackelberg-leader-parallel-backend thread --stackelberg-leader-parallel-max-workers 4 --stackelberg-prefilter-top-k 4 --stackelberg-prefilter-local-top-k 4 --grid-parallel-backend thread --grid-parallel-max-workers 4 --grid-parallel-chunk-size 8 --freeway-prediction-horizon-steps 3 --disable-stackelberg-fallback
+```
+
+| Controller | Total TTT | Improvement vs no-control | Urban TTT | Freeway TTT | Total delay | Completed vehicles | Throughput veh/h | Terminal vehicles | Mean B sum | Compute sec |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| NO-CONTROL | 1943.962 | baseline | 887.149 | 1056.814 | 1019.342 | 21380.3 | 10690.1 | 2469.8 | 0.189289 | 0.0 |
+| PROPOSED-STACKELBERG simplified allocation | 10728.267 | -451.876% | 10518.924 | 209.344 | 9803.647 | 14013.1 | 7006.6 | 9842.6 | 0.016441 | 186.21 |
+
+Boundary balance is numerically lower in `B_sum`, but this is not a valid
+success because boundary overflow worsened (`max_OverflowRatio_boundary=0.5`)
+and terminal vehicles increased by `7372.8` vehicles.
+
+### Diagnosis
+
+- The new allocation module itself is not failing the `N_P_star` target
+  constraint. Across 40 control intervals, `N_P_star=0` and `N_UF_star=6000`
+  were selected every time. Allocation net-inflow residual averaged only
+  `1.98 veh` and maxed at `14.61 veh`.
+- The failure is throughput/terminal-state collapse: completed vehicles fell
+  from `21380.3` to `14013.1`, throughput fell by `3683.5 veh/h`, and terminal
+  urban vehicles rose from `1224.9` to `9736.5`.
+- Freeway TTT dropped sharply (`1056.814 -> 209.344`), but the controller
+  achieved this by shifting cost into the urban network. This is exactly the
+  subnetwork-scale/leader-objective imbalance suspected in the discussion.
+- Therefore the old allocation module may indeed have been confused by the old
+  `N_P_star` feedback interpretation, but after fixing the semantics the pure
+  allocation-backed ablation still fails. The remaining root cause is not the
+  allocation target residual; it is that the Leader keeps choosing
+  `N_P_star=0, N_UF_star=6000` because its evaluated objective/prefilter does
+  not sufficiently price future urban terminal queues and lost throughput.
+
+### Failed Criteria / Next Modification
+
+- FAIL: Total TTT is far worse than no-control.
+- FAIL: Total delay and average delay per completed vehicle are far worse than
+  no-control.
+- FAIL: Throughput is materially lower and terminal vehicles are materially
+  higher.
+- FAIL: Boundary overflow worsened despite lower mean `B_sum`.
+- Next modification should target the Leader evaluation, not the allocation
+  residual: add a hard/large throughput-shortfall and terminal-urban-vehicle
+  guard to leader candidate evaluation, then verify whether candidates with
+  nonzero/positive `N_P_star` beat the current `N_P_star=0` solution under the
+  corrected allocation semantics.
+
+## 2026-06-20: Direct P-Stack Leader Candidate Table Diagnostic
+
+### Purpose
+
+Direct/no-allocation Stackelberg에서도 `N_P_star=0, N_UF_star=6000`이 왜
+선택되는지 첫 medium-demand MPC decision의 후보별 objective table을 직접
+재현했다.
+
+### Diagnostic Setup
+
+- Scenario: `medium_demand`
+- State: initial state
+- Horizon: `mpc.horizon_steps=3`
+- Mode: direct Stackelberg (`mpc.stackelberg_allocation_mode=direct`)
+- Fallback disabled for leader-candidate diagnosis
+- `max_nash_iter=1`
+- The table was generated by reproducing `StackelbergMPCController` internal
+  candidate generation, prefiltering, and `_evaluate_full_candidate()` calls.
+
+### Prefilter Table
+
+Top coarse candidates before full evaluation:
+
+| Rank | Index | `N_P_star` | `N_UF_star` | Proxy obj | Follower TTT proxy | Selected for full eval |
+|---:|---:|---:|---:|---:|---:|:---:|
+| 1 | 5 | 0.0 | 6000.0 | 114.776 | 93.776 | yes |
+| 2 | 20 | -47.5 | 5294.3 | 118.916 | 93.776 | yes |
+| 3 | 39 | -47.5 | 4588.5 | 120.680 | 93.776 | yes |
+| 4 | 49 | 0.0 | 2942.7 | 122.420 | 93.776 | yes |
+| 5 | 12 | -47.5 | 3882.8 | 122.444 | 93.776 | no |
+| 6 | 29 | -47.5 | 3177.1 | 124.209 | 93.776 | no |
+| 7 | 4 | 0.0 | 2354.1 | 125.156 | 95.042 | no |
+| 8 | 45 | -47.5 | 1765.6 | 135.411 | 101.450 | yes |
+
+### Full-Evaluated Candidate Table
+
+The full-evaluated leader candidates are not ignoring the rollout TTT among the
+candidate set: the leader-objective ranking and the rollout-TTT ranking both
+put `N_P_star=0, N_UF_star=6000` first.
+
+| Rank | Stage | Index | `N_P_star` | `N_UF_star` | Leader obj | Rollout TTT | Urban | Freeway | Terminal urban proxy | Completed proxy |
+|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | coarse | 5 | 0.0 | 6000.0 | 81.624 | 65.158 | 46.029 | 19.129 | 839.4 | 1022.4 |
+| 2 | refined | 50 | 0.0 | 6000.0 | 81.624 | 65.158 | 46.029 | 19.129 | 839.4 | 1022.4 |
+| 3 | refined | 73 | 0.0 | 5625.0 | 82.622 | 65.218 | 46.027 | 19.191 | 839.4 | 1022.4 |
+| 4 | refined | 72 | 0.0 | 5250.0 | 83.678 | 65.336 | 46.023 | 19.314 | 839.4 | 1022.4 |
+| 5 | refined | 71 | 0.0 | 4875.0 | 84.763 | 65.484 | 46.016 | 19.468 | 839.4 | 1022.4 |
+| 6 | coarse | 20 | -47.5 | 5294.3 | 85.926 | 65.320 | 46.023 | 19.297 | 839.4 | 1022.4 |
+| 7 | coarse | 39 | -47.5 | 4588.5 | 87.995 | 65.625 | 46.012 | 19.613 | 839.4 | 1022.4 |
+| 8 | coarse | 49 | 0.0 | 2942.7 | 93.691 | 69.581 | 45.885 | 23.695 | 839.4 | 1022.4 |
+| 9 | refined | 69 | 0.0 | 2354.1 | 98.364 | 72.783 | 45.779 | 27.004 | 839.4 | 1010.4 |
+| 10 | coarse | 45 | -47.5 | 1765.6 | 105.872 | 76.445 | 45.671 | 30.774 | 839.4 | 925.0 |
+| 11 | coarse | 0 | -3315.0 | 1765.6 | 269.247 | 76.445 | 45.671 | 30.774 | 839.4 | 925.0 |
+
+### Guard/Fallback Comparison
+
+When the physical no-control action is rolled out over the same three-step
+MPC horizon, it has lower rollout TTT than the selected leader candidate.
+
+| Candidate | Leader/follower obj | Rollout TTT | Urban | Freeway | Completed proxy | Terminal urban | Terminal freeway |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| selected `N_P=0,N_UF=6000` | 81.624 | 65.158 | 46.029 | 19.129 | 1330.9 | 404.6 | 124.6 |
+| physical no-control | proxy 129.757 | 60.478 | 40.407 | 20.071 | 1418.6 | 314.2 | 127.3 |
+| PFO fallback | 67.531 | 67.531 | 49.493 | 18.038 | 1302.4 | 437.5 | 119.1 |
+
+### Diagnosis
+
+- Among the evaluated leader candidates, `N_P=0,N_UF=6000` is not ignoring TTT;
+  it is the lowest rollout-TTT candidate in that restricted candidate set.
+- The physical no-control action is not part of the leader candidate set.
+- The fallback no-control path uses a response proxy for its leader objective,
+  not the same full rollout TTT used in the diagnostic comparison above.
+  Therefore no-control can have better rollout TTT (`60.478`) but still look
+  worse to the fallback/leader objective (`129.757 > 81.624`).
+- Root cause: objective/candidate-set mismatch, not allocation residual.
+
+### Next Modification
+
+- Add physical no-control/previous-control guard candidates directly into leader
+  candidate evaluation, not only in fallback.
+- Evaluate guard candidates with the same rollout-TTT-compatible metric used for
+  full leader candidates.
+- Add terminal-urban and throughput-shortfall guard terms so a candidate cannot
+  win by reducing freeway TTT while accumulating hidden urban queues or reducing
+  completed vehicles.
+
+## 2026-06-20: Medium 1800 s PFO Horizon Check
+
+### Purpose
+
+Checked whether the short 180 s finding that the follower-only/PFO-style guard
+can reduce TTT persists over a longer 1800 s medium-demand run.
+
+### Run Command
+
+Baseline and proposed controller were run in the same command with identical
+scenario, demand, and horizon:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.all_scenarios_four_controller_comparison --scenario medium_demand --controllers PROPOSED-FOLLOWERS-ONLY --T-total 1800 --output outputs\pfo_medium_1800_2026_06_20 --max-nash-iter 1 --grid-parallel-backend thread --grid-parallel-max-workers 4 --grid-parallel-chunk-size 8 --freeway-prediction-horizon-steps 3
+```
+
+### Results
+
+| Controller | Total TTT | Total delay | Urban TTT | Freeway TTT | Throughput | Terminal vehicles | Mean B_sum | Wall time |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| NO-CONTROL | 244.284 | 16.595 | 159.181 | 85.103 | 11390.3 | 464.1 | 0.145984 | 0.557 s |
+| PROPOSED-FOLLOWERS-ONLY | 239.241 | 11.552 | 155.151 | 84.090 | 11417.0 | 456.9 | 0.143317 | 288.258 s |
+
+Improvement rate: `2.064%` Total TTT reduction vs no-control.
+
+Boundary queue balancing result: non-degraded (`mean_B_sum` improves by
+`0.002667`, max boundary overflow remains `0.0`).
+
+Control validation summary: authority checks passed for
+`PROPOSED-FOLLOWERS-ONLY`; solver convergence rate was `1.0`.
+
+### Diagnosis
+
+- The 180 s PFO/fallback benefit is not only a one-interval artifact: over
+  1800 s, PFO still improves Total TTT, urban TTT, freeway TTT, throughput, and
+  terminal vehicles relative to no-control.
+- The improvement remains below the 8% acceptance threshold, so this is a
+  diagnostic pass rather than controller acceptance.
+- Running direct Stackelberg for 1800 s with the current full candidate
+  evaluation would likely be much more expensive than this PFO check; the prior
+  first-decision diagnostic already took roughly minutes per MPC decision.
+
+### Next Modification
+
+Before a full 1800 s direct Stackelberg run, align the fallback/guard candidates
+with the same rollout-TTT-compatible evaluation used for full leader candidates,
+and add physical no-control/previous-control guard actions directly to the
+leader candidate set. This should separate a true leader-grid spacing issue
+from the current objective/candidate-set mismatch.
+
+## 2026-06-20: Medium 180 s Tight Leader Grid Injection Diagnostic
+
+### Purpose
+
+Tested whether the Stackelberg leader fails because the leader grid does not
+contain the no-control/PFO-equivalent `N_P_star` and `N_UF_star` choices. The
+diagnostic reverse-engineered leader targets from the physical no-control
+action and the PFO action, injected those exact targets into a tight leader
+candidate grid, and evaluated the candidates with the production distributed
+follower path.
+
+An initial diagnostic attempt accidentally used the default legacy
+`follower_solver_mode=two_block`; that result is superseded. The valid run
+below explicitly sets `follower_solver_mode=distributed`, matching the
+`PROPOSED-STACKELBERG` adapter.
+
+### Run Command
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.leader_grid_injection_diagnostic --scenario medium_demand --T-total 180 --output outputs\leader_grid_injection_medium_180_distributed_fg_2026_06_20 --max-nash-iter 1 --np-step 40 --nuf-step 500
+```
+
+### Reverse-Engineered Anchors
+
+Both physical no-control and PFO produced the same leader target pair under
+the current reverse mapping:
+
+| Source action | Reverse `N_P_star` | Reverse `N_UF_star` | One-step plant TTT | Urban TTT | Freeway TTT | Terminal vehicles |
+|---|---:|---:|---:|---:|---:|---:|
+| no-control | 461.300 | 6000.000 | 17.616 | 11.253 | 6.363 | 399.382 |
+| PFO | 461.300 | 6000.000 | 17.320 | 10.986 | 6.334 | 394.131 |
+
+### Tight Candidate Ranking
+
+| Rank | Label | `N_P_star` | `N_UF_star` | Leader obj | Rollout TTT | Urban rollout | Freeway rollout | Boundary penalty | Smoothness penalty |
+|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | previous_default_exact | 0.000 | 6000.000 | 80.481 | 64.367 | 45.506 | 18.861 | 16.114 | 0.000 |
+| 2 | no_control_np_-80 | 381.300 | 6000.000 | 82.333 | 58.796 | 39.221 | 19.575 | 4.473 | 19.065 |
+| 3 | no_control_np_-40 | 421.300 | 6000.000 | 84.333 | 58.796 | 39.221 | 19.575 | 4.473 | 21.065 |
+| 4 | reverse_no_control_exact | 461.300 | 6000.000 | 86.333 | 58.796 | 39.221 | 19.575 | 4.473 | 23.065 |
+| 5 | no_control_nuf_-500 | 461.300 | 5500.000 | 87.636 | 58.849 | 39.220 | 19.629 | 4.473 | 24.315 |
+| 6 | no_control_np_+40 | 501.300 | 6000.000 | 88.333 | 58.796 | 39.221 | 19.575 | 4.473 | 25.065 |
+| 7 | no_control_nuf_-1000 | 461.300 | 5000.000 | 88.998 | 58.960 | 39.218 | 19.742 | 4.473 | 25.565 |
+| 8 | no_control_np_+80 | 541.300 | 6000.000 | 90.333 | 58.796 | 39.221 | 19.575 | 4.473 | 27.065 |
+
+Selected leader candidate: `previous_default_exact`
+(`N_P_star=0`, `N_UF_star=6000`).
+
+### Diagnosis
+
+- The reverse-engineered no-control/PFO target was present in the leader
+  candidate set, but it was not selected.
+- The injected reverse target has much lower distributed rollout TTT
+  (`58.796`) than the selected previous/default target (`64.367`).
+- The exact reverse target loses because `leader_smoothness_penalty=23.065`
+  dominates the rollout-TTT and boundary-penalty improvement. Without the
+  smoothness term, the exact reverse target would have objective
+  `58.796 + 4.473 = 63.269`, which beats the selected candidate's
+  `64.367 + 16.114 = 80.481`.
+
+### Failed Criteria / Next Modification
+
+- FAIL: The leader does not choose the injected lower-rollout-TTT PFO/no-control
+  target.
+- Likely cause is not coarse leader grid spacing in this first medium decision;
+  it is the `N_P_star` smoothness penalty scale/definition.
+- Next modification should either remove `N_P_star` from the leader smoothness
+  penalty, dramatically rescale it, or apply smoothness only as a tie-break
+  after rollout-TTT-compatible objective comparison. Then rerun this same tight
+  injection diagnostic.
+
+## 2026-06-20: No-Smooth Leader and PSO Allocation Recheck
+
+### Implementation
+
+- Removed leader action smoothness from `leader_total_objective`.
+  `leader_smoothness_penalty` remains logged as `0.0` for provenance.
+- Set default `leader.w_L` to `0.0`.
+- Added Stackelberg allocation mode `pso`, which uses the original
+  `InflowOutflowAllocationModule` instead of the simplified ablation module.
+- Added CLI support for `--stackelberg-allocation-mode pso` and for
+  `--leader-refinement-candidate-count`.
+- Added a diagnostic experiment
+  `src/experiments/leader_grid_injection_diagnostic.py`.
+
+### Changed Files
+
+- `src/controllers/leader.py`
+- `src/controllers/distributed_coordinator.py`
+- `src/models/state.py`
+- `src/config/default.yaml`
+- `src/experiments/all_scenarios_four_controller_comparison.py`
+- `src/experiments/leader_grid_injection_diagnostic.py`
+- `src/tests/test_constraints.py`
+- `docs/spec/04_controller.md`
+- `docs/spec/09_configuration_requirements.md`
+- `docs/spec/16_six_controller_comparison.md`
+
+### Validation
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m py_compile src\controllers\distributed_coordinator.py src\controllers\inflow_outflow_allocation.py src\controllers\leader.py src\models\state.py src\experiments\all_scenarios_four_controller_comparison.py src\experiments\leader_grid_injection_diagnostic.py
+```
+
+PASS.
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m unittest src.tests.test_constraints.ConstraintTests.test_stackelberg_pso_allocation_uses_original_module src.tests.test_constraints.ConstraintTests.test_stackelberg_simplified_allocation_projection_keeps_allocation_map src.tests.test_constraints.ConstraintTests.test_simplified_allocation_uses_np_star_as_net_inflow_vehicles src.tests.test_constraints.ConstraintTests.test_leader_objective_matches_spec_accumulation_form src.tests.test_constraints.ConstraintTests.test_default_leader_objective_uses_follower_ttt_base -v
+```
+
+PASS, 5 tests.
+
+### No-Smooth Injection Sanity Check
+
+Command:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.leader_grid_injection_diagnostic --scenario medium_demand --T-total 180 --output outputs\leader_grid_injection_medium_180_no_smooth_2026_06_20 --max-nash-iter 1 --np-step 40 --nuf-step 500
+```
+
+Result: after removing smoothness, the leader selected the injected
+`reverse_no_control_exact` / PFO-equivalent target
+(`N_P_star=461.3`, `N_UF_star=6000`) with `leader_obj=63.268` and one-step
+plant TTT `17.320`. This confirms the previous failure was caused by leader
+smoothness, not by the injected target being absent.
+
+### 7200 s Run Commands
+
+PFO reference:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.all_scenarios_four_controller_comparison --scenario medium_demand,peak_demand --controllers PROPOSED-FOLLOWERS-ONLY --T-total 7200 --output outputs\pfo_no_smooth_finegrid_medium_peak_7200_2026_06_20_fg --max-nash-iter 1 --leader-candidate-count 81 --leader-refinement-candidate-count 49 --stackelberg-prefilter-top-k 8 --stackelberg-prefilter-local-top-k 8 --stackelberg-leader-parallel-backend thread --stackelberg-leader-parallel-max-workers 8 --grid-parallel-backend thread --grid-parallel-max-workers 8 --grid-parallel-chunk-size 8 --freeway-prediction-horizon-steps 3
+```
+
+P-Stack PSO allocation with default fallback enabled:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.all_scenarios_four_controller_comparison --scenario medium_demand,peak_demand --controllers PROPOSED-STACKELBERG --T-total 7200 --output outputs\pstack_pso_allocation_no_smooth_finegrid_medium_peak_7200_2026_06_20_fg --max-nash-iter 1 --stackelberg-allocation-mode pso --leader-candidate-count 81 --leader-refinement-candidate-count 49 --stackelberg-prefilter-top-k 8 --stackelberg-prefilter-local-top-k 8 --stackelberg-leader-parallel-backend thread --stackelberg-leader-parallel-max-workers 8 --grid-parallel-backend thread --grid-parallel-max-workers 8 --grid-parallel-chunk-size 8 --freeway-prediction-horizon-steps 3
+```
+
+P-Stack PSO allocation with fallback disabled, to prevent PFO from being
+selected:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.all_scenarios_four_controller_comparison --scenario medium_demand,peak_demand --controllers PROPOSED-STACKELBERG --T-total 7200 --output outputs\pstack_pso_allocation_no_smooth_no_pfo_fallback_finegrid_medium_peak_7200_2026_06_20_fg --max-nash-iter 1 --stackelberg-allocation-mode pso --leader-candidate-count 81 --leader-refinement-candidate-count 49 --stackelberg-prefilter-top-k 8 --stackelberg-prefilter-local-top-k 8 --stackelberg-leader-parallel-backend thread --stackelberg-leader-parallel-max-workers 8 --grid-parallel-backend thread --grid-parallel-max-workers 8 --grid-parallel-chunk-size 8 --freeway-prediction-horizon-steps 3 --disable-stackelberg-fallback
+```
+
+P-Stack direct/allocation-off fine-grid attempt:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.all_scenarios_four_controller_comparison --scenario medium_demand,peak_demand --controllers PROPOSED-STACKELBERG --T-total 7200 --output outputs\pstack_direct_no_smooth_finegrid_medium_peak_7200_2026_06_20_fg --max-nash-iter 1 --stackelberg-allocation-mode direct --leader-candidate-count 81 --leader-refinement-candidate-count 49 --stackelberg-prefilter-top-k 8 --stackelberg-prefilter-local-top-k 8 --stackelberg-leader-parallel-backend thread --stackelberg-leader-parallel-max-workers 8 --grid-parallel-backend thread --grid-parallel-max-workers 8 --grid-parallel-chunk-size 8 --freeway-prediction-horizon-steps 3
+```
+
+This direct/allocation-off run timed out after 7200 s before completing the
+medium-demand Stackelberg run. Only the medium no-control baseline files were
+written, so no valid direct P-Stack 7200 s result is available for this
+fine-grid setting.
+
+### Results
+
+| Scenario | Controller / mode | Fallback | Total TTT | Improvement vs no-control | Total delay | Throughput veh/h | Terminal vehicles | Mean B_sum | Boundary non-degraded |
+|---|---|---|---:|---:|---:|---:|---:|---:|---|
+| medium | NO-CONTROL | n/a | 1943.962 | 0.000% | 1019.342 | 10690.1 | 2469.8 | 0.189289 | n/a |
+| medium | PFO | n/a | 1000.610 | 48.527% | 75.990 | 11720.0 | 418.3 | 0.155851 | yes |
+| medium | P-Stack PSO allocation | enabled | 1000.610 | 48.527% | 75.990 | 11720.0 | 418.3 | 0.155851 | yes |
+| medium | P-Stack PSO allocation | disabled | 10819.104 | -456.549% | 9894.484 | 6281.0 | 10937.6 | 0.046258 | no |
+| peak | NO-CONTROL | n/a | 11659.562 | 0.000% | 10515.542 | 7936.1 | 13488.0 | 0.082207 | n/a |
+| peak | PFO | n/a | 3773.909 | 67.632% | 2629.889 | 12894.7 | 3565.7 | 0.159081 | no |
+| peak | P-Stack PSO allocation | enabled | 3773.909 | 67.632% | 2629.889 | 12894.7 | 3565.7 | 0.159081 | no |
+| peak | P-Stack PSO allocation | disabled | 14732.361 | -26.354% | 13588.341 | 7236.3 | 14889.5 | 0.044965 | yes |
+
+### Diagnosis
+
+- Production 7200 s runs did not inject reverse-engineered PFO targets into the
+  leader grid. That injection is confined to the diagnostic script.
+- With default fallback enabled, P-Stack PSO allocation exactly matches PFO
+  because `leader_fallback_guard_selected_pfo=1.0`; the leader candidate itself
+  is rejected by the fallback guard.
+- With fallback disabled, PSO allocation does not match PFO, but performance is
+  much worse. Early diagnostics show the leader repeatedly selects
+  `N_P_star=3219.999...` and `N_UF_star=6000`, i.e. the upper feasible
+  protected net-inflow target, causing large terminal urban/on-ramp queues and
+  throughput loss.
+- The original PSO allocation module is therefore not merely hidden by the
+  simplified module. Its leader-candidate objective/search still prefers an
+  over-inflow/high-release target when PFO fallback is removed.
+- The direct/allocation-off fine-grid path is currently computationally
+  infeasible at 7200 s under `leader_candidate_count=81`,
+  `leader_refinement_candidate_count=49`, and top-K `8/8`; it did not finish
+  one Stackelberg medium scenario within 7200 s wall time.
+
+### Failed Criteria / Next Modification
+
+- FAIL: P-Stack PSO allocation without fallback is worse than no-control in
+  both medium and peak.
+- FAIL: P-Stack with fallback enabled is not evidence of leader value because
+  fallback selects PFO.
+- FAIL: Peak PFO/P-Stack fallback result improves TTT but degrades boundary
+  balancing.
+- Next modification should inspect why the no-fallback leader objective ranks
+  the upper `N_P_star` bound so strongly. Candidate fixes:
+  1. Add a throughput-shortfall / terminal-urban guard directly to full leader
+     candidate evaluation, not only fallback.
+  2. Re-rank leader candidates by rollout terminal vehicles and completed
+     proxy before accepting high `N_P_star`.
+  3. Make allocation-on follower evaluation use a broader green/offset/RM
+     neighborhood around the PSO plan, instead of a single allocation seed.
+  4. For direct/allocation-off 7200 s, reduce the full rollout burden with a
+     cached no-fallback candidate table or a scenario-level checkpoint runner
+     before repeating fine-grid runs.

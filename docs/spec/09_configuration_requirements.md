@@ -26,8 +26,8 @@ leader:
   objective_mode: follower_ttt
   w_P: 1.0
   w_F: 1.0
-  w_L: 0.05
-  N_P_star_range: [0, 500]
+  w_L: 0.0  # retained for compatibility; leader smoothness is disabled
+  N_P_star_range: [-3500, 3500]
   N_UF_star_range: [0, 6000]
 
 freeway_offramp_capacity_drop:
@@ -69,6 +69,9 @@ auto_tuning:
   preserve_all_runs: true
 ```
 
-Adjust units consistently. If `N_UF_star` and `N_P_star` are in vehicles per control interval rather than veh/h, make that explicit in the config and convert internally.
+Adjust units consistently. `N_P_star` is the protected-urban net-inflow target
+in vehicles over the follower horizon; convert it internally when a module
+needs a veh/h service target. If `N_UF_star` is in vehicles per control interval
+rather than veh/h, make that explicit in the config and convert internally.
 
 ---

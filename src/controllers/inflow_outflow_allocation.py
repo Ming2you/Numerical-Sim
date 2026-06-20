@@ -13,7 +13,6 @@ from src.models.urban_queue_model import (
     movement_storage_capacity,
     movement_specs,
     safe_balance_index,
-    urban_accumulation_feedback_flow,
 )
 
 
@@ -60,6 +59,18 @@ class InflowOutflowAllocationModule:
         self.cfg = cfg
         self.solve_count = 0
 
+    def _target_horizon_h(self, forecast: "list[DemandStep] | None") -> float:
+        steps = forecast[: max(1, self.cfg.mpc.horizon_steps)] if forecast else []
+        count = len(steps) if steps else max(1, int(self.cfg.mpc.horizon_steps))
+        return float(max(self.cfg.simulation.T_c_h * count, 1.0e-9))
+
+    def _leader_net_inflow_target_veh_h(
+        self,
+        leader: LeaderAction,
+        forecast: "list[DemandStep] | None",
+    ) -> float:
+        return float(leader.N_P_star) / self._target_horizon_h(forecast)
+
     def solve(
         self,
         state: TrafficState,
@@ -79,7 +90,7 @@ class InflowOutflowAllocationModule:
         if not movements:
             return AllocationResult({}, {}, 0.0, 0.0, 0.0, {"allocation_module_active": 1.0})
 
-        target = urban_accumulation_feedback_flow(state, self.cfg, leader.N_P_star, forecast)
+        target = self._leader_net_inflow_target_veh_h(leader, forecast)
         lower, upper = self._bounds(movements, specs, leader)
         kinds = [str(specs[m].get("kind", "")) for m in movements]
         target = self._clip_target(target, lower, upper, kinds)
