@@ -349,7 +349,18 @@ def sensitivity_direction_candidates(
             benefit = -float(best_obj)
         directions.append((-benefit, axis, float(direction_delta), float(slope)))
     directions.sort(key=lambda item: item[0])
-    selected = directions[:max_axes]
+
+    # leader 축(target_net_inflow 등)은 coordinator projection으로 probe 단계에서만 탐색되고,
+    # 이 generic follower-control 섭동(_apply_axis_delta)으로는 재투영 불가하다(ValueError).
+    # direction/combo 단계가 그 축을 perturbation하지 않도록 적용 가능한 축만 남긴다.
+    def _axis_applicable(axis: str, delta: float) -> bool:
+        try:
+            _apply_axis_delta(center.copy(), cfg, previous, axis, delta)
+            return True
+        except ValueError:
+            return False
+
+    selected = [item for item in directions if _axis_applicable(item[1], item[2])][:max_axes]
 
     for rank, (_score, axis, delta, _slope) in enumerate(selected, start=1):
         cand = center.copy()

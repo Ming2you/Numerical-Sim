@@ -565,7 +565,7 @@ class ConstraintTests(unittest.TestCase):
         forecast = DemandProfile(cfg, ScenarioConfig("test")).horizon(0.0, cfg.mpc.horizon_steps)
         controller = WuDistributedController(cfg)
         previous = _wu_fixed_control(cfg)
-        coupling = controller._coupling(state, previous, demand)
+        coupling = controller._coupling(state, previous, forecast[0])
 
         p1, _, evals = controller._solve_urban_agent("A", state, coupling, previous, None)
 
@@ -782,15 +782,9 @@ class ConstraintTests(unittest.TestCase):
             result.control.diagnostics["distributed_grid_rollout_objective"],
         )
         self.assertEqual(set(result.control.vsl), set(cfg.network.freeway_links))
-        boundary_out_total = sum(
-            result.control.inflow_outflow_allocation[movement]
-            for movement, spec in cfg.network.urban_movements.items()
-            if spec.get("destination") == "out_A_left" and spec.get("kind") == "boundary_out"
-        )
-        self.assertAlmostEqual(
-            result.control.inflow_outflow_allocation["out_A_left"],
-            boundary_out_total,
-        )
+        # NOTE: boundary_out allocation 집계 단언은 PSO allocation 모드 전용이라 제거됨.
+        # 기본 stackelberg_allocation_mode=direct에서는 inflow_outflow_allocation을 채우지
+        # 않으므로(leader가 net-inflow/metering을 직접 적용), 이 테스트는 grid 진단만 검증한다.
 
     def test_leader_conditioned_grid_projects_metering_target(self):
         cfg = ExperimentConfig.from_file(
@@ -1602,7 +1596,7 @@ class ConstraintTests(unittest.TestCase):
             n_p
             + n_f
             + 2.0 * max(0.0, n_p_protected - 100.0)
-            + 1.0 * boundary_in_queue
+            + cfg.leader.w_boundary_in * boundary_in_queue
             + 3.0 * density_excess
         )
         leader = Leader(cfg)
@@ -1616,7 +1610,7 @@ class ConstraintTests(unittest.TestCase):
         self.assertAlmostEqual(terms["leader_total_objective"], expected)
         self.assertAlmostEqual(terms["leader_boundary_leg_excluded_veh"], 77.0)
         self.assertAlmostEqual(terms["leader_target_penalty"], 2.0 * max(0.0, n_p_protected - 100.0))
-        self.assertAlmostEqual(terms["leader_boundary_in_queue_penalty"], 1.0 * boundary_in_queue)
+        self.assertAlmostEqual(terms["leader_boundary_in_queue_penalty"], cfg.leader.w_boundary_in * boundary_in_queue)
         self.assertAlmostEqual(terms["leader_smoothness_penalty"], 0.0)
 
     def test_default_leader_objective_uses_follower_ttt_base(self):

@@ -378,7 +378,7 @@ class LeaderConfig:
     w_F: float = 1.0
     w_L: float = 0.0
     # Step D: boundary_in 큐 비용은 진단용으로 계산하되 leader_total_objective에는 더하지 않는다.
-    w_boundary_in: float = 1.0
+    w_boundary_in: float = 0.0
     N_P_star_range: List[float] = field(default_factory=lambda: [-3500.0, 3500.0])
     N_UF_star_range: List[float] = field(default_factory=lambda: [0.0, 6000.0])
     N_P_crit_veh: float = 509.448830418254

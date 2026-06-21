@@ -1,0 +1,253 @@
+# VISSIM 개포동 Test-bed 망을 numerical sim(van den Berg 도시 + METANET 고속 + Wu 결합)
+# 컨트롤러에 매핑하기 위한 네트워크 토폴로지 기입 양식.
+#
+# 작성 규칙.
+#  - 각 섹션의 첫 항목은 "# EXAMPLE"로 형식을 보여주는 예시다. 지우지 말고 참고만.
+#  - 그 아래 빈 항목(값이 null/[])을 복제해서 실제 값으로 채운다.
+#  - 모르는 값은 null로 두면 내가 기본값을 제안하거나 .inpx에서 보완한다.
+#  - id는 VISSIM의 link no / node no를 그대로 쓰면 추적이 쉽다(문자열로 적어도 됨).
+#  - 단위는 meta.units에서 한 번만 정의하고 전체에서 그 단위를 따른다.
+
+# =====================================================================
+# 0. META — 식별 규칙과 단위 (가장 먼저 채워주세요. 내가 헷갈린 핵심)
+# =====================================================================
+meta:
+  units:
+    length: m          # 길이 단위
+    speed: km/h        # 속도 단위
+    flow: veh/h        # 유량 단위
+    density: veh/km/lane  # 밀도 단위
+    time: s            # 시간 단위
+  # freeway / ramp / urban 을 VISSIM에서 어떻게 구분하는지 한 줄씩.
+  identification_rules:
+    freeway_mainline: null   # 예: "link no 300-380" 또는 "linkBehavType=2" 또는 "desSpeed>=80"
+    on_ramp: null            # 예: "특정 노드로 합류하는 커넥터" 또는 "no 91xx"
+    off_ramp: null           # 예: "본선에서 분류되는 커넥터" 또는 "no 92xx"
+    urban_signalized: null   # 예: "signalHead가 붙은 link"
+  notes: null                # 기타 전달사항(좌표계, 누락구간 등)
+
+# =====================================================================
+# 1. NODES — 모든 노드를 타입으로 분류 (freeway-urban 경계의 1차 기준)
+# =====================================================================
+# type 허용값:
+#   URBAN_SIG        신호교차로
+#   URBAN_UNSIG      비신호 교차/합류(있으면)
+#   FW_JUNC          고속 본선 접속(분기·합류 아님)
+#   ONRAMP_MERGE     on-ramp 합류점
+#   OFFRAMP_DIVERGE  off-ramp 분류점
+#   ORIGIN           유입 경계(수요 진입)
+#   SINK             유출 경계
+nodes:
+  # EXAMPLE:
+  # - id: "5"
+  #   type: URBAN_SIG
+  #   name: "도곡역"
+  - id: null
+    type: null
+    name: null
+
+# =====================================================================
+# 2-A. URBAN LINKS — 방향성 도시 링크
+# =====================================================================
+urban_links:
+  # EXAMPLE:
+  # - id: "364"
+  #   from_node: "12"
+  #   to_node: "5"
+  #   length: 320
+  #   lanes: 3
+  #   v_free: 50
+  #   sat_flow_per_lane: 1900   # 포화교통류율(차로당). 모르면 null
+  #   storage_veh: null          # 링크 차량 저장용량. 모르면 null(길이·차로로 추정)
+  - id: null
+    from_node: null
+    to_node: null
+    length: null
+    lanes: null
+    v_free: null
+    sat_flow_per_lane: null
+    storage_veh: null
+
+# =====================================================================
+# 2-B. FREEWAY SEGMENTS — 고속 본선 (한 본선 링크 = 여러 세그먼트)
+# =====================================================================
+# 같은 fw_link_id 안에서 seg_idx = 0,1,2... 상류→하류 순서.
+freeway_segments:
+  # EXAMPLE:
+  # - fw_link_id: "FW_W"
+  #   seg_idx: 0
+  #   from_node: "FWN1"
+  #   to_node: "FWN2"
+  #   length: 500
+  #   lanes: 3            # 차로수 λ
+  #   v_free: 90
+  #   rho_crit: null      # 임계밀도. 모르면 null(표준값 사용)
+  #   rho_max: null       # 정체밀도(jam). 모르면 null
+  #   capacity: null      # 세그먼트 용량. 모르면 null
+  - fw_link_id: null
+    seg_idx: null
+    from_node: null
+    to_node: null
+    length: null
+    lanes: null
+    v_free: null
+    rho_crit: null
+    rho_max: null
+    capacity: null
+
+# =====================================================================
+# 2-C. RAMP LINKS — on/off 램프 자체의 물리 제원
+# =====================================================================
+ramps:
+  # EXAMPLE:
+  # - id: "OR_D_W"
+  #   kind: OFF          # ON 또는 OFF
+  #   length: 150
+  #   lanes: 1
+  #   storage_veh: 30    # 램프에 담기는 최대 대수(off-ramp spillback 핵심)
+  #   v_free: 40
+  - id: null
+    kind: null
+    length: null
+    lanes: null
+    storage_veh: null
+    v_free: null
+
+# =====================================================================
+# 3. MOVEMENTS — 노드별 이동류와 회전비 β (각 노드에서 Σβ=1)
+# =====================================================================
+movements:
+  # EXAMPLE:
+  # - node_id: "5"
+  #   in_link: "364"
+  #   out_link: "401"
+  #   beta: 0.6              # 회전비(turning ratio)
+  #   controlled_by_sg: "2"  # 이 이동류를 제어하는 신호그룹 id. 비신호면 null
+  #   sat_flow: 1900         # 이동류 포화류율. 모르면 null
+  - node_id: null
+    in_link: null
+    out_link: null
+    beta: null
+    controlled_by_sg: null
+    sat_flow: null
+
+# =====================================================================
+# 4. SIGNALS — 신호교차로별 신호 구조 (컨트롤러 연결 본체)
+# =====================================================================
+signals:
+  # EXAMPLE:
+  # - node_id: "5"
+  #   controller_no: "5"
+  #   current_cycle: 160        # 현 고정시간 주기
+  #   current_offset: 59        # 현 offset
+  #   stages:                   # 현시 순서(stage = 동시 녹색 SG 묶음)
+  #     - stage_idx: 1
+  #       green_sgs: ["1", "2"]   # 이 현시에 녹색인 SG id 목록
+  #       min_green: 5
+  #       max_green: null         # 정책 상한. 모르면 null
+  #     - stage_idx: 2
+  #       green_sgs: ["3", "4"]
+  #       min_green: 5
+  #       max_green: null
+  #   intergreen: 3             # amber/clearance(초). SG쌍별로 다르면 notes에
+  #   signal_groups:            # SG ↔ 이동류 이름 매핑
+  #     - sg_id: "1"
+  #       movement: "WBL"
+  #     - sg_id: "2"
+  #       movement: "EBT"
+  - node_id: null
+    controller_no: null
+    current_cycle: null
+    current_offset: null
+    stages: []
+    intergreen: null
+    signal_groups: []
+
+# =====================================================================
+# 5. COUPLING — Freeway ↔ Urban 결합 (가장 중요. seg_idx 필수)
+# =====================================================================
+coupling:
+  on_ramps:
+    # EXAMPLE:
+    # - onramp_id: "ONR_W"
+    #   from_urban: "401"      # 합류 차량을 보내는 urban link/node
+    #   to_fw_link: "FW_W"
+    #   to_seg_idx: 2          # 본선 몇 번째 세그먼트에 합류하는지
+    #   merge_lanes: 1
+    #   metering: true         # ramp metering 적용 가능 여부
+    #   queue_storage_veh: 50  # 미터링 시 램프 큐 저장용량
+    - onramp_id: null
+      from_urban: null
+      to_fw_link: null
+      to_seg_idx: null
+      merge_lanes: null
+      metering: null
+      queue_storage_veh: null
+  off_ramps:
+    # EXAMPLE:
+    # - offramp_id: "OR_D_W"
+    #   from_fw_link: "FW_W"
+    #   from_seg_idx: 0        # 본선 몇 번째 세그먼트에서 분류되는지(capacity-drop 위치)
+    #   to_urban: "364"        # 분류 차량이 도착하는 urban link/node
+    #   split_beta: 0.2        # 본선→off-ramp 분류 비율
+    #   storage_veh: 30        # off-ramp 저장용량(적체→spillback)
+    #   spillback_target_seg: 0  # 적체 시 차로감소(λ_eff) 적용 세그먼트(보통 from_seg_idx)
+    - offramp_id: null
+      from_fw_link: null
+      from_seg_idx: null
+      to_urban: null
+      split_beta: null
+      storage_veh: null
+      spillback_target_seg: null
+
+# =====================================================================
+# 6. DEMAND — 시변 수요 (15분 간격) + 경로
+# =====================================================================
+demand:
+  interval_s: 900          # 수요 시간대 간격(기본 15분)
+  inputs:
+    # EXAMPLE:
+    # - origin_link: "308"
+    #   name: "매봉터널_SB"
+    #   vehicle_composition: "1"
+    #   volumes: [109.76, 156.8, 164.64]  # 시간대 순서대로 veh/h
+    - origin_link: null
+      name: null
+      vehicle_composition: null
+      volumes: []
+  # 정적 경로/OD 비율이 있으면 여기에. 없으면 movements의 beta로 대체.
+  routing: null
+
+# =====================================================================
+# 7. CONTROL AUTHORITY — 각 컨트롤러를 무엇에 연결하나
+# =====================================================================
+control_authority:
+  leader_perimeter:
+    # N_P(보호망 누적)를 세는 경계 링크 집합. perimeter 유입 배분 대상.
+    boundary_links: []      # 예: ["364", "401", ...]
+  urban_follower:
+    # green-split·offset을 조작할 신호교차로 node 목록.
+    signalized_nodes: []
+  ramp_metering:
+    # 미터링율을 조작할 on-ramp 목록.
+    onramp_ids: []
+  vsl:
+    # 가변속도를 적용할 freeway 세그먼트 목록.
+    segments: []            # 예: [{fw_link_id: "FW_W", seg_idx: 0}, ...]
+
+# =====================================================================
+# 8. CALIBRATION — 모델 파라미터 (없으면 null, 내가 표준값 제안)
+# =====================================================================
+calibration:
+  saturation_flow_per_lane: null   # 보통 1800-2000
+  metanet:
+    tau: null      # 속도 완화시간
+    nu: null       # anticipation
+    kappa: null
+    a: null        # 속도-밀도 곡선 파라미터
+  capacity_drop:
+    gamma: null            # off-ramp spillback 강도(Wu Eq22)
+    lane_reduction: null   # 적체 시 차로감소율
+  control:
+    decision_dt: null      # 제어주기(예: 사이클 단위 또는 고정 Δt)
+    horizon_np: null       # 예측지평(예: 10)

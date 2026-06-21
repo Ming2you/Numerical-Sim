@@ -210,7 +210,7 @@ leader:
   w_F: 1.0
   w_L: 0.0
   # boundary_in queue는 최종 Total TTT에 포함되므로 leader_total_objective에도 TTS 항으로 더한다.
-  w_boundary_in: 1.0
+  w_boundary_in: 0.0
   N_P_star_range:
   - -3500.0
   - 3500.0
