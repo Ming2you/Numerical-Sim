@@ -176,6 +176,12 @@ mpc:
   leader_local_nuf_radius_veh_h: 1500.0
   leader_continuous_max_evals: 25
   leader_continuous_seed_count: 7
+  leader_continuous_prefilter_samples: 31
+  leader_continuous_prefilter_top_k: 7
+  leader_continuous_hard_precheck: true
+  leader_continuous_precheck_spillback_tolerance_veh: 0.0
+  leader_continuous_parallel_multistart: true
+  leader_continuous_use_sensitivity_directions: true
   leader_continuous_local_iterations: 4
   leader_continuous_initial_step_fraction: 0.35
   leader_continuous_shrink_factor: 0.5

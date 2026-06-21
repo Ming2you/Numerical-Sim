@@ -465,7 +465,7 @@ class StackelbergMPCController:
             )
 
         max_evals = max(1, int(self.cfg.mpc.leader_continuous_max_evals))
-        seed_actions = self._continuous_seed_actions(
+        raw_seed_actions = self._continuous_seed_actions(
             previous,
             bounds,
             np_lower,
@@ -474,7 +474,20 @@ class StackelbergMPCController:
             nuf_upper,
             clipped,
         )
-        seed_actions = self._unique_leader_actions(seed_actions)[: max(1, int(self.cfg.mpc.leader_continuous_seed_count))]
+        # Continuous search도 grid prefilter와 같은 구조를 쓴다. 먼저 넓은
+        # deterministic low-discrepancy sample을 cheap proxy로 정렬하고, full
+        # follower evaluation은 top-K seed에만 쓴다.
+        seed_actions, prefilter_metadata = self._continuous_prefilter_actions(
+            raw_seed_actions,
+            state,
+            forecast,
+            previous,
+            np_lower,
+            np_upper,
+            nuf_lower,
+            nuf_upper,
+        )
+        seed_actions = seed_actions[: max(1, int(self.cfg.mpc.leader_continuous_seed_count))]
         coarse_stage = "continuous_global" if global_refresh else "continuous_local"
         evaluated, incumbent_obj = self._evaluate_continuous_action_set(
             seed_actions[:max_evals],
@@ -508,7 +521,7 @@ class StackelbergMPCController:
         shrink = float(self.cfg.mpc.leader_continuous_shrink_factor)
         min_np_step = float(self.cfg.mpc.leader_continuous_min_np_step_veh)
         min_nuf_step = float(self.cfg.mpc.leader_continuous_min_nuf_step_veh_h)
-        directions = [
+        base_directions = [
             (-1.0, 0.0),
             (1.0, 0.0),
             (0.0, -1.0),
@@ -523,6 +536,16 @@ class StackelbergMPCController:
             if remaining <= 0:
                 break
             candidates: list[LeaderAction] = []
+            directions = self._continuous_ranked_directions(
+                best.action,
+                state,
+                forecast,
+                previous,
+                np_step,
+                nuf_step,
+                clipped,
+                base_directions,
+            )
             for dx, dy in directions:
                 action = clipped(
                     best.action.N_P_star + dx * np_step,
@@ -590,6 +613,7 @@ class StackelbergMPCController:
             "leader_continuous_final_np_step_veh": float(np_step),
             "leader_continuous_final_nuf_step_veh_h": float(nuf_step),
         })
+        base_metadata.update(prefilter_metadata)
         return full_evaluations, base_metadata, {}, {}
 
     def _continuous_seed_actions(
@@ -619,6 +643,170 @@ class StackelbergMPCController:
             clipped(np_mid, nuf_upper),
         ]
 
+    def _continuous_prefilter_actions(
+        self,
+        seed_actions: list[LeaderAction],
+        state: TrafficState,
+        forecast: list[DemandStep],
+        previous: ControlAction,
+        np_lower: float,
+        np_upper: float,
+        nuf_lower: float,
+        nuf_upper: float,
+    ) -> tuple[list[LeaderAction], Dict[str, float]]:
+        samples = self._unique_leader_actions(
+            seed_actions
+            + self._continuous_low_discrepancy_samples(
+                int(self.cfg.mpc.leader_continuous_prefilter_samples),
+                np_lower,
+                np_upper,
+                nuf_lower,
+                nuf_upper,
+            )
+        )
+        rows: list[Dict[str, float]] = []
+        filtered = 0
+        spillback_filtered = 0
+        for idx, action in enumerate(samples):
+            if not self._continuous_candidate_bounds_ok(action, np_lower, np_upper, nuf_lower, nuf_upper):
+                filtered += 1
+                continue
+            row = self._proxy_score_candidate(idx, action, state, forecast, previous)
+            if bool(self.cfg.mpc.leader_continuous_hard_precheck):
+                tolerance = float(self.cfg.mpc.leader_continuous_precheck_spillback_tolerance_veh)
+                if row["spillback_violation"] > tolerance:
+                    filtered += 1
+                    spillback_filtered += 1
+                    continue
+            rows.append(row)
+        if not rows:
+            # Hard pre-check가 지나치게 강하면 기존 seed를 보존한다. feasibility
+            # 진단은 남기되 controller가 후보 0개로 죽지 않게 한다.
+            rows = [
+                self._proxy_score_candidate(idx, action, state, forecast, previous)
+                for idx, action in enumerate(self._unique_leader_actions(seed_actions))
+            ]
+        rows = sorted(rows, key=lambda row: (row["objective"], row["spillback_violation"], row["index"]))
+        top_k = max(1, int(self.cfg.mpc.leader_continuous_prefilter_top_k))
+        selected_indices = [int(row["index"]) for row in rows[:top_k]]
+        selected_actions = [samples[idx] for idx in selected_indices if 0 <= idx < len(samples)]
+        # 기본/직전 seed가 cheap proxy에서 살짝 밀려도 한 개는 남겨 guard 역할을 하게 한다.
+        if seed_actions:
+            selected_actions.insert(0, seed_actions[0])
+        selected_actions = self._unique_leader_actions(selected_actions)
+        objectives = [float(row["objective"]) for row in rows] or [0.0]
+        best = rows[0] if rows else {"index": 0.0, "objective": 0.0}
+        second = rows[1] if len(rows) > 1 else best
+        return selected_actions, {
+            "leader_continuous_prefilter_active": 1.0,
+            "leader_continuous_prefilter_samples": float(len(samples)),
+            "leader_continuous_prefilter_proxy_evaluated_count": float(len(rows)),
+            "leader_continuous_prefilter_selected_count": float(len(selected_actions)),
+            "leader_continuous_prefilter_top_k": float(top_k),
+            "leader_continuous_precheck_filtered_count": float(filtered),
+            "leader_continuous_precheck_spillback_filtered_count": float(spillback_filtered),
+            "leader_continuous_proxy_best_index": float(best["index"]),
+            "leader_continuous_proxy_second_index": float(second["index"]),
+            "leader_continuous_proxy_best_objective": float(best["objective"]),
+            "leader_continuous_proxy_second_objective": float(second["objective"]),
+            "leader_continuous_proxy_objective_gap": float(second["objective"] - best["objective"]),
+            "leader_continuous_proxy_objective_spread": float(max(objectives) - min(objectives)),
+        }
+
+    def _continuous_low_discrepancy_samples(
+        self,
+        count: int,
+        np_lower: float,
+        np_upper: float,
+        nuf_lower: float,
+        nuf_upper: float,
+    ) -> list[LeaderAction]:
+        count = max(0, int(count))
+        np_span = max(np_upper - np_lower, 0.0)
+        nuf_span = max(nuf_upper - nuf_lower, 0.0)
+
+        def vdc(index: int, base: int) -> float:
+            value = 0.0
+            denom = 1.0
+            n = max(0, int(index))
+            while n:
+                n, rem = divmod(n, base)
+                denom *= base
+                value += rem / denom
+            return value
+
+        actions: list[LeaderAction] = []
+        for i in range(1, count + 1):
+            np_frac = vdc(i, 2)
+            nuf_frac = vdc(i, 3)
+            actions.append(LeaderAction(
+                float(np_lower + np_frac * np_span),
+                float(nuf_lower + nuf_frac * nuf_span),
+            ))
+        return actions
+
+    def _continuous_candidate_bounds_ok(
+        self,
+        action: LeaderAction,
+        np_lower: float,
+        np_upper: float,
+        nuf_lower: float,
+        nuf_upper: float,
+    ) -> bool:
+        values = [action.N_P_star, action.N_UF_star, np_lower, np_upper, nuf_lower, nuf_upper]
+        if any(value != value for value in values):
+            return False
+        eps = 1.0e-6
+        return (
+            np_lower - eps <= action.N_P_star <= np_upper + eps
+            and nuf_lower - eps <= action.N_UF_star <= nuf_upper + eps
+        )
+
+    def _continuous_ranked_directions(
+        self,
+        center: LeaderAction,
+        state: TrafficState,
+        forecast: list[DemandStep],
+        previous: ControlAction,
+        np_step: float,
+        nuf_step: float,
+        clipped,
+        base_directions: list[tuple[float, float]],
+    ) -> list[tuple[float, float]]:
+        if not bool(self.cfg.mpc.leader_continuous_use_sensitivity_directions):
+            return base_directions
+        scored: list[tuple[float, float, float]] = []
+        for dx, dy in base_directions:
+            action = clipped(
+                center.N_P_star + dx * np_step,
+                center.N_UF_star + dy * nuf_step,
+            )
+            row = self._proxy_score_candidate(0, action, state, forecast, previous)
+            scored.append((float(row["objective"]), dx, dy))
+        scored.sort(key=lambda item: item[0])
+        ranked = [(dx, dy) for _objective, dx, dy in scored]
+        if len(ranked) >= 2:
+            best_dx, best_dy = ranked[0]
+            second_dx, second_dy = ranked[1]
+            sensitivity = (
+                float(max(-1.0, min(1.0, best_dx + 0.5 * second_dx))),
+                float(max(-1.0, min(1.0, best_dy + 0.5 * second_dy))),
+            )
+            if abs(sensitivity[0]) > 1.0e-9 or abs(sensitivity[1]) > 1.0e-9:
+                ranked.insert(0, sensitivity)
+        return self._unique_directions(ranked)
+
+    def _unique_directions(self, directions: list[tuple[float, float]]) -> list[tuple[float, float]]:
+        seen: set[tuple[float, float]] = set()
+        out: list[tuple[float, float]] = []
+        for dx, dy in directions:
+            key = (round(float(dx), 6), round(float(dy), 6))
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append((float(dx), float(dy)))
+        return out
+
     def _evaluate_continuous_action_set(
         self,
         actions: list[LeaderAction],
@@ -630,46 +818,39 @@ class StackelbergMPCController:
         incumbent_obj: float,
     ) -> tuple[list[_LeaderCandidateEvaluation], float]:
         actions = self._unique_leader_actions(actions)
-        self._append_progress_event(
-            event="stage_started",
-            stage=stage,
-            completed=0,
-            total=len(actions),
-            best_objective=incumbent_obj if incumbent_obj < float("inf") else None,
-        )
-        results: list[_LeaderCandidateEvaluation] = []
-        stage_incumbent = float(incumbent_obj)
-        for offset, action in enumerate(actions):
-            result = self._evaluate_full_candidate(
-                index_start + offset,
-                action,
+        if not actions:
+            return [], float(incumbent_obj)
+        if not bool(self.cfg.mpc.leader_continuous_parallel_multistart):
+            eval_cfg = self.cfg.with_updates({"mpc": {"stackelberg_leader_parallel_backend": "serial"}})
+            controller = StackelbergMPCController(eval_cfg)
+            try:
+                results = controller._evaluate_candidate_set(
+                    actions,
+                    list(range(len(actions))),
+                    state,
+                    forecast,
+                    previous,
+                    stage=stage,
+                    index_offset=index_start,
+                    incumbent_obj=incumbent_obj,
+                )
+            finally:
+                controller.close()
+        else:
+            # Grid path의 parallel evaluator를 재사용한다. 첫 후보는 serial로
+            # incumbent를 만든 뒤 나머지 multi-start 후보를 thread/process로 평가한다.
+            results = self._evaluate_candidate_set(
+                actions,
+                list(range(len(actions))),
                 state,
                 forecast,
                 previous,
                 stage=stage,
-                incumbent_obj=stage_incumbent,
+                index_offset=index_start,
+                incumbent_obj=incumbent_obj,
             )
-            result.metadata.update({
-                "leader_candidate_parallel_backend_serial": 1.0,
-                "leader_candidate_parallel_backend_thread": 0.0,
-                "leader_candidate_parallel_backend_process": 0.0,
-                "leader_candidate_process_pool_reuse_enabled": 0.0,
-                "leader_candidate_process_pool_reused_existing": 0.0,
-                "leader_candidate_inner_grid_backend_serial": float(self.cfg.mpc.grid_parallel_backend == "serial"),
-                "leader_candidate_inner_grid_backend_thread": float(self.cfg.mpc.grid_parallel_backend == "thread"),
-                "leader_candidate_inner_grid_backend_process": float(self.cfg.mpc.grid_parallel_backend == "process"),
-            })
-            results.append(result)
-            stage_incumbent = min(stage_incumbent, float(result.objective))
-            self._append_progress_event(
-                event="candidate_evaluated",
-                stage=stage,
-                completed=len(results),
-                total=len(actions),
-                evaluation=result,
-                best_objective=stage_incumbent,
-            )
-        return results, stage_incumbent
+        stage_incumbent = min((float(result.objective) for result in results), default=float(incumbent_obj))
+        return results, min(float(incumbent_obj), stage_incumbent)
 
     def _fallback_full_refresh_active(self, state: TrafficState) -> bool:
         interval = max(float(self.cfg.simulation.control_interval), 1.0e-9)

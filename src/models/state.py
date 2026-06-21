@@ -341,6 +341,12 @@ class MPCConfig:
     leader_local_nuf_radius_veh_h: float = 1500.0
     leader_continuous_max_evals: int = 25
     leader_continuous_seed_count: int = 7
+    leader_continuous_prefilter_samples: int = 31
+    leader_continuous_prefilter_top_k: int = 7
+    leader_continuous_hard_precheck: bool = True
+    leader_continuous_precheck_spillback_tolerance_veh: float = 0.0
+    leader_continuous_parallel_multistart: bool = True
+    leader_continuous_use_sensitivity_directions: bool = True
     leader_continuous_local_iterations: int = 4
     leader_continuous_initial_step_fraction: float = 0.35
     leader_continuous_shrink_factor: float = 0.5
@@ -519,6 +525,12 @@ class ExperimentConfig:
             raise ValueError("mpc.leader_continuous_max_evals must be positive.")
         if self.mpc.leader_continuous_seed_count <= 0:
             raise ValueError("mpc.leader_continuous_seed_count must be positive.")
+        if self.mpc.leader_continuous_prefilter_samples < 0:
+            raise ValueError("mpc.leader_continuous_prefilter_samples must be non-negative.")
+        if self.mpc.leader_continuous_prefilter_top_k <= 0:
+            raise ValueError("mpc.leader_continuous_prefilter_top_k must be positive.")
+        if self.mpc.leader_continuous_precheck_spillback_tolerance_veh < 0.0:
+            raise ValueError("mpc.leader_continuous_precheck_spillback_tolerance_veh must be non-negative.")
         if self.mpc.leader_continuous_local_iterations < 0:
             raise ValueError("mpc.leader_continuous_local_iterations must be non-negative.")
         if self.mpc.leader_continuous_initial_step_fraction <= 0.0:

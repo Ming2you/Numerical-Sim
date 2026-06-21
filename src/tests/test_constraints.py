@@ -1398,8 +1398,11 @@ class ConstraintTests(unittest.TestCase):
                     "leader_search_mode": "continuous",
                     "leader_continuous_max_evals": 3,
                     "leader_continuous_seed_count": 2,
+                    "leader_continuous_prefilter_samples": 5,
+                    "leader_continuous_prefilter_top_k": 2,
                     "leader_continuous_local_iterations": 0,
                     "stackelberg_enable_fallback": False,
+                    "stackelberg_leader_parallel_backend": "serial",
                     "max_nash_iter": 1,
                     "grid_parallel_backend": "serial",
                 },
@@ -1417,6 +1420,12 @@ class ConstraintTests(unittest.TestCase):
         self.assertGreater(meta["leader_candidate_full_evaluated_count"], 0.0)
         self.assertLessEqual(meta["leader_candidate_full_evaluated_count"], 3.0)
         self.assertEqual(meta["leader_candidate_parallel_backend_serial"], 1.0)
+        self.assertEqual(meta["leader_continuous_prefilter_active"], 1.0)
+        self.assertGreater(meta["leader_continuous_prefilter_proxy_evaluated_count"], 0.0)
+        self.assertLessEqual(
+            meta["leader_continuous_prefilter_selected_count"],
+            meta["leader_continuous_prefilter_top_k"] + 1.0,
+        )
         self.assertGreaterEqual(meta["leader_continuous_search_bound_np_upper"], meta["leader_continuous_search_bound_np_lower"])
         self.assertGreaterEqual(
             meta["leader_continuous_search_bound_nuf_upper"],

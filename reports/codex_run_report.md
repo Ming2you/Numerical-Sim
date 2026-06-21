@@ -9266,3 +9266,193 @@ Diagnostics:
 - Next modification should reduce per-leader-evaluation distributed follower
   cost or add a reliable resume/checkpoint runner before running medium/peak
   1800 s and then 7200 s comparisons with continuous mode.
+
+## 2026-06-21 - Peak 1800 s PFO vs Continuous P-Stack Comparison
+
+### Run
+
+User requested a 1800 s comparison between PFO and the new continuous leader
+Stackelberg path. This run uses peak demand, `leader_search_mode=continuous`,
+five leader target evaluations per control step, direct allocation mode, and
+fallback disabled so the P-Stack result is not masked by PFO fallback.
+
+Command:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.all_scenarios_four_controller_comparison --scenario peak_demand --T-total 1800 --controllers PROPOSED-FOLLOWERS-ONLY,PROPOSED-STACKELBERG --output outputs\continuous_leader_peak_1800_pfo_pstack_evals5_20260621 --leader-search-mode continuous --leader-continuous-max-evals 5 --leader-continuous-seed-count 3 --leader-continuous-local-iterations 1 --max-nash-iter 1 --disable-stackelberg-fallback --stackelberg-allocation-mode direct --grid-parallel-backend thread --grid-parallel-max-workers 4 --grid-parallel-chunk-size 4 --freeway-prediction-horizon-steps 2
+```
+
+Output:
+
+- `outputs/continuous_leader_peak_1800_pfo_pstack_evals5_20260621`
+
+### Results
+
+| Controller | Total TTT | Total delay | Improvement vs no-control | Throughput veh/h | Completed vehicles | Terminal vehicles | Mean B_sum | Computation sec |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| PROPOSED-FOLLOWERS-ONLY | 451.476 | 169.745 | 25.477% | 11849.9 | 5925.0 | 1616.6 | 0.158910 | 363.76 |
+| PROPOSED-STACKELBERG continuous | 468.482 | 186.750 | 22.670% | 12233.7 | 6116.9 | 1411.0 | 0.194264 | 1703.12 |
+
+Delta P-Stack minus PFO:
+
+| Metric | Delta |
+|---|---:|
+| Total TTT | +17.006 veh*h |
+| Total delay | +17.005 veh*h |
+| Throughput | +383.8 veh/h |
+| Completed vehicles | +191.9 |
+| Terminal vehicles | -205.6 |
+| Average TTT / completed vehicle | +1.40 s |
+
+Step trace:
+
+| Step | Time sec | PFO cumulative TTT | P-Stack cumulative TTT | Delta | P-Stack N_P_star | P-Stack N_UF_star |
+|---:|---:|---:|---:|---:|---:|---:|
+| 0 | 180 | 19.857 | 19.897 | +0.040 | 2287.25 | 6000.0 |
+| 1 | 360 | 46.839 | 48.432 | +1.593 | 2287.25 | 6000.0 |
+| 2 | 540 | 77.124 | 82.388 | +5.264 | 2287.25 | 6000.0 |
+| 3 | 720 | 111.283 | 121.879 | +10.596 | 2287.25 | 6000.0 |
+| 4 | 900 | 150.204 | 166.870 | +16.666 | 2287.25 | 6000.0 |
+| 5 | 1080 | 194.731 | 217.044 | +22.313 | 2287.25 | 6000.0 |
+| 6 | 1260 | 245.794 | 272.450 | +26.657 | 2247.25 | 4500.0 |
+| 7 | 1440 | 304.995 | 333.077 | +28.082 | 2247.25 | 4500.0 |
+| 8 | 1620 | 373.938 | 398.789 | +24.852 | 2247.25 | 4500.0 |
+| 9 | 1800 | 451.476 | 468.482 | +17.006 | 2207.25 | 6000.0 |
+
+### Diagnosis
+
+- Continuous leader search changed the selected target from the old grid upper
+  bound (`N_P_star ~= 3220`) to an interior positive target around
+  `N_P_star ~= 2207-2287`.
+- However, the selected targets still push strongly toward high protected
+  network inflow and high ramp release. P-Stack therefore processes more
+  vehicles than PFO (`+191.9` completed vehicles), but Total TTT remains higher.
+- Average TTT per completed vehicle is only about `+1.40 s` worse than PFO, so
+  part of the TTT increase is explained by higher throughput/vehicle processing.
+  Still, under the configured Total TTT criterion, P-Stack continuous fails to
+  beat PFO.
+- Boundary balance is worse than PFO in this run (`mean_B_sum 0.194264` vs
+  `0.158910`), and `boundary_balance_non_degraded_vs_no_control` is false for
+  P-Stack.
+- Computation cost remains high: `1703.12 s` controller computation for a
+  1800 s peak run with only five leader evaluations per step.
+
+### Failed Criteria / Next Modification
+
+- FAIL: P-Stack continuous is worse than PFO on peak 1800 s by `+17.006` veh*h
+  Total TTT.
+- FAIL: boundary balance degrades relative to no-control/PFO.
+- PARTIAL: throughput and completed vehicles improve substantially, so the
+  leader may be favoring completion/terminal reduction in a way not captured by
+  the final Total TTT target.
+- Next diagnostic should inspect per-candidate leader objective decomposition
+  for steps 0-5, especially why `N_P_star ~= 2287`, `N_UF_star=6000` beats lower
+  `N_P` alternatives under the leader objective even though realized closed-loop
+  TTT is worse than PFO.
+
+## 2026-06-21 - Continuous Leader Search Lightweight Guards
+
+### Implementation
+
+User selected the following continuous-search acceleration/diagnosis features:
+
+1. hard feasibility pre-check
+2. incumbent-based early termination
+3. adaptive top-K equivalent with cheap proxy sampling
+4. parallel multi-start full evaluation
+5. sensitivity/finite-difference direction generation
+
+Implemented them in the `leader_search_mode=continuous` path only. The legacy
+grid path is unchanged.
+
+New configuration keys:
+
+```yaml
+mpc:
+  leader_continuous_prefilter_samples: 31
+  leader_continuous_prefilter_top_k: 7
+  leader_continuous_hard_precheck: true
+  leader_continuous_precheck_spillback_tolerance_veh: 0.0
+  leader_continuous_parallel_multistart: true
+  leader_continuous_use_sensitivity_directions: true
+```
+
+Continuous leader search now works as:
+
+1. Build deterministic low-discrepancy samples in the continuous
+   `(N_P_star, N_UF_star)` feasible box.
+2. Score samples with the existing cheap leader proxy.
+3. Apply hard spillback pre-check when enabled.
+4. Select top-K proxy-ranked targets for full follower evaluation.
+5. Reuse the grid path's `_evaluate_candidate_set`, so the first target seeds
+   the incumbent and remaining multi-start targets can be evaluated through the
+   configured leader backend (`serial`, `thread`, or `process`).
+6. Rank local pattern-search directions with cheap proxy scores and insert a
+   sensitivity-like direction before evaluating local refinements.
+
+Changed files:
+
+- `src/models/state.py`
+- `src/config/default.yaml`
+- `src/controllers/stackelberg_mpc.py`
+- `src/experiments/all_scenarios_four_controller_comparison.py`
+- `src/experiments/six_controller_comparison.py`
+- `src/tests/test_constraints.py`
+- `docs/spec/04_controller.md`
+- `docs/spec/09_configuration_requirements.md`
+- `reports/codex_run_report.md`
+
+### Validation
+
+Syntax compile:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m py_compile src\models\state.py src\controllers\stackelberg_mpc.py src\experiments\all_scenarios_four_controller_comparison.py src\experiments\six_controller_comparison.py src\tests\test_constraints.py
+```
+
+Result: PASS.
+
+Targeted tests:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m unittest src.tests.test_constraints.ConstraintTests.test_stackelberg_leader_continuous_search_evaluates_targets -v
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m unittest src.tests.test_constraints.ConstraintTests.test_stackelberg_leader_evaluates_coarse_and_refined_grid -v
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m unittest src.tests.test_constraints.ConstraintTests.test_leader_all_urban_halfcap_penalty_counts_boundary_and_storage -v
+```
+
+Result: PASS.
+
+Short distributed smoke:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.all_scenarios_four_controller_comparison --scenario peak_demand --T-total 180 --controllers PROPOSED-STACKELBERG --output outputs\continuous_leader_prefilter_smoke_peak_180_20260621 --leader-search-mode continuous --leader-continuous-max-evals 2 --leader-continuous-seed-count 2 --leader-continuous-prefilter-samples 5 --leader-continuous-prefilter-top-k 2 --leader-continuous-local-iterations 0 --max-nash-iter 1 --disable-stackelberg-fallback --stackelberg-allocation-mode direct --stackelberg-leader-parallel-backend thread --stackelberg-leader-parallel-max-workers 2 --grid-parallel-backend thread --grid-parallel-max-workers 4 --grid-parallel-chunk-size 4 --freeway-prediction-horizon-steps 2
+```
+
+Result:
+
+| Run | Horizon | Total TTT | Improvement vs no-control | Throughput veh/h | Terminal vehicles | Computation sec |
+|---|---:|---:|---:|---:|---:|---:|
+| P-Stack continuous prefilter smoke | 180 s | 19.991 | 0.941% | 8521.9 | 493.6 | 122.10 |
+
+Continuous diagnostics:
+
+- `leader_continuous_prefilter_active = 1.0`
+- `leader_continuous_prefilter_samples = 16.0`
+- `leader_continuous_prefilter_proxy_evaluated_count = 16.0`
+- `leader_continuous_prefilter_selected_count = 2.0`
+- `leader_candidate_full_evaluated_count = 2.0`
+- `leader_candidate_parallel_backend_thread = 1.0`
+- `leader_candidate_incumbent_any_active = 1.0`
+- `leader_candidate_follower_early_terminated_candidates_total = 406.0`
+- selected `N_P_star = 0.0`, `N_UF_star = 6000.0`
+
+### Failed Criteria / Next Modification
+
+- PASS: selected continuous-search safeguards are implemented and logged.
+- PASS: legacy grid path still passes the targeted compatibility test.
+- PASS: short distributed smoke completed.
+- NOT RUN: 1800 s PFO/P-Stack comparison after these new safeguards.
+- Next run should repeat the peak 1800 s PFO vs P-Stack continuous comparison
+  with `leader_continuous_prefilter_samples` and `leader_continuous_prefilter_top_k`
+  enabled, then inspect whether the selected targets move away from the previous
+  high-release pattern.

@@ -514,6 +514,12 @@ def main(argv: Optional[List[str]] = None) -> None:
     parser.add_argument("--leader-search-mode", choices=["grid", "continuous"], default=None)
     parser.add_argument("--leader-continuous-max-evals", type=int, default=None)
     parser.add_argument("--leader-continuous-seed-count", type=int, default=None)
+    parser.add_argument("--leader-continuous-prefilter-samples", type=int, default=None)
+    parser.add_argument("--leader-continuous-prefilter-top-k", type=int, default=None)
+    parser.add_argument("--disable-leader-continuous-hard-precheck", action="store_true")
+    parser.add_argument("--leader-continuous-precheck-spillback-tolerance-veh", type=float, default=None)
+    parser.add_argument("--disable-leader-continuous-parallel-multistart", action="store_true")
+    parser.add_argument("--disable-leader-continuous-sensitivity-directions", action="store_true")
     parser.add_argument("--leader-continuous-local-iterations", type=int, default=None)
     parser.add_argument("--leader-continuous-initial-step-fraction", type=float, default=None)
     parser.add_argument("--leader-continuous-shrink-factor", type=float, default=None)
@@ -554,6 +560,24 @@ def main(argv: Optional[List[str]] = None) -> None:
         overrides.setdefault("mpc", {})["leader_continuous_max_evals"] = args.leader_continuous_max_evals
     if args.leader_continuous_seed_count is not None:
         overrides.setdefault("mpc", {})["leader_continuous_seed_count"] = args.leader_continuous_seed_count
+    if args.leader_continuous_prefilter_samples is not None:
+        overrides.setdefault("mpc", {})["leader_continuous_prefilter_samples"] = (
+            args.leader_continuous_prefilter_samples
+        )
+    if args.leader_continuous_prefilter_top_k is not None:
+        overrides.setdefault("mpc", {})["leader_continuous_prefilter_top_k"] = (
+            args.leader_continuous_prefilter_top_k
+        )
+    if args.disable_leader_continuous_hard_precheck:
+        overrides.setdefault("mpc", {})["leader_continuous_hard_precheck"] = False
+    if args.leader_continuous_precheck_spillback_tolerance_veh is not None:
+        overrides.setdefault("mpc", {})["leader_continuous_precheck_spillback_tolerance_veh"] = (
+            args.leader_continuous_precheck_spillback_tolerance_veh
+        )
+    if args.disable_leader_continuous_parallel_multistart:
+        overrides.setdefault("mpc", {})["leader_continuous_parallel_multistart"] = False
+    if args.disable_leader_continuous_sensitivity_directions:
+        overrides.setdefault("mpc", {})["leader_continuous_use_sensitivity_directions"] = False
     if args.leader_continuous_local_iterations is not None:
         overrides.setdefault("mpc", {})["leader_continuous_local_iterations"] = (
             args.leader_continuous_local_iterations

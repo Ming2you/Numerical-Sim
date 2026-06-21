@@ -18,6 +18,12 @@ mpc:
   leader_candidate_count: 15
   leader_continuous_max_evals: 25
   leader_continuous_seed_count: 7
+  leader_continuous_prefilter_samples: 31
+  leader_continuous_prefilter_top_k: 7
+  leader_continuous_hard_precheck: true
+  leader_continuous_precheck_spillback_tolerance_veh: 0.0
+  leader_continuous_parallel_multistart: true
+  leader_continuous_use_sensitivity_directions: true
   leader_continuous_local_iterations: 4
   leader_continuous_initial_step_fraction: 0.35
   leader_continuous_shrink_factor: 0.5
@@ -90,5 +96,10 @@ rather than veh/h, make that explicit in the config and convert internally.
 leader targets and uses deterministic derivative-free pattern search. This does
 not relax follower actuator feasibility. `leader_search_mode = grid` preserves
 the coarse/refined candidate-grid path for ablation and reproducibility checks.
+Continuous mode may use a cheap proxy prefilter over deterministic
+low-discrepancy samples, hard spillback feasibility screening, top-K full
+evaluation, incumbent-based early termination inside follower evaluation,
+parallel multi-start full evaluation, and proxy-ranked sensitivity directions
+for local refinement.
 
 ---

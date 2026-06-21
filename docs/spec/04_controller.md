@@ -38,7 +38,14 @@ target search. Follower actuators remain subject to their existing feasible
 sets: green cycle repair, offset step limits, ramp metering bounds, and discrete
 VSL values. Since the follower response can be piecewise-flat or discontinuous
 as the target changes, continuous leader search must use derivative-free
-evaluation, not gradient descent.
+evaluation, not gradient descent. The continuous path should keep the same
+computational safeguards as the grid path where possible:
+
+- hard feasibility pre-checks before full follower evaluation
+- cheap proxy sampling and top-K full evaluation
+- incumbent-based follower early termination
+- parallel multi-start evaluation when configured
+- proxy-ranked finite-difference/sensitivity directions for local refinement
 
 ### 4.2 Leader objective
 
