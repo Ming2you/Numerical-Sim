@@ -59,6 +59,8 @@ def run_closed_loop(
     state_rows: List[Dict[str, Any]] = []
     control_rows: List[Dict[str, Any]] = []
     run_rows: List[Dict[str, Any]] = []
+    progress_rows: List[Dict[str, Any]] = []
+    out = Path(output_dir) if output_dir is not None else None
 
     for step in range(cfg.simulation.n_control_steps):
         current_demand = demand.at(sim.state.time_sec)
@@ -81,6 +83,34 @@ def run_closed_loop(
         }
         run_row.update({k: v for k, v in log.diagnostics.items() if isinstance(v, (int, float, bool))})
         run_rows.append(run_row)
+        progress_rows.append({
+            "step": step,
+            "time_sec": sim.state.time_sec,
+            "controller_id": "STACKELBERG-MPC" if controller else "NO-CONTROL",
+            "step_total_ttt": log.freeway_ttt + log.urban_ttt,
+            "step_urban_ttt": log.urban_ttt,
+            "step_freeway_ttt": log.freeway_ttt,
+            "cumulative_total_ttt": sim.total_ttt,
+            "cumulative_urban_ttt": sim.urban_ttt,
+            "cumulative_freeway_ttt": sim.freeway_ttt,
+            "N_P_star": control.N_P_star,
+            "N_UF_star": control.N_UF_star,
+            "mean_B_sum_step": float(run_row.get("B_in", 0.0)) + float(run_row.get("B_out", 0.0)),
+            "terminal_total_vehicles": (
+                sim.state.total_urban_vehicles(cfg.network) + sim.state.total_freeway_vehicles(cfg.network)
+            ),
+        })
+        if out is not None:
+            out.mkdir(parents=True, exist_ok=True)
+            _write_csv(out / "state_timeseries.csv", state_rows)
+            _write_csv(out / "control_timeseries.csv", control_rows)
+            _write_csv(out / "run_log.csv", run_rows)
+            _write_csv(out / "progress_summary.csv", progress_rows)
+            print(
+                f"{progress_rows[-1]['controller_id']} step {step + 1}/{cfg.simulation.n_control_steps} "
+                f"cum_ttt={sim.total_ttt:.3f} step_ttt={log.freeway_ttt + log.urban_ttt:.3f}",
+                flush=True,
+            )
 
     result = {
         "mode": mode,
@@ -92,6 +122,7 @@ def run_closed_loop(
         "state_rows": state_rows,
         "control_rows": control_rows,
         "run_rows": run_rows,
+        "progress_rows": progress_rows,
         "final_state": sim.state,
     }
     if output_dir is not None:
@@ -100,6 +131,7 @@ def run_closed_loop(
         _write_csv(out / "state_timeseries.csv", state_rows)
         _write_csv(out / "control_timeseries.csv", control_rows)
         _write_csv(out / "run_log.csv", run_rows)
+        _write_csv(out / "progress_summary.csv", progress_rows)
         summary = {
             "mode": mode,
             "scenario": scenario.name,

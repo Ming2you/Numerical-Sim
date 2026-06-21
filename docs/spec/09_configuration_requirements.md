@@ -14,7 +14,15 @@ simulation:
 
 mpc:
   horizon_steps: 5
+  leader_search_mode: continuous  # continuous | grid
   leader_candidate_count: 15
+  leader_continuous_max_evals: 25
+  leader_continuous_seed_count: 7
+  leader_continuous_local_iterations: 4
+  leader_continuous_initial_step_fraction: 0.35
+  leader_continuous_shrink_factor: 0.5
+  leader_continuous_min_np_step_veh: 40.0
+  leader_continuous_min_nuf_step_veh_h: 125.0
   follower_solver_mode: two_block  # two_block | distributed
   max_nash_iter: 10
   nash_obj_tol: 1.0e-3
@@ -27,6 +35,10 @@ leader:
   w_P: 1.0
   w_F: 1.0
   w_L: 0.0  # retained for compatibility; leader smoothness is disabled
+  mfd_penalty_mode: all_urban_halfcap  # disabled, protected_exceed, all_urban_halfcap, combined
+  mfd_storage_threshold_ratio: 0.5
+  mfd_storage_weight: 1.0
+  mfd_boundary_queue_capacity_veh: 220.0  # leader penalty reference only; no queue clipping
   N_P_star_range: [-3500, 3500]
   N_UF_star_range: [0, 6000]
 
@@ -73,5 +85,10 @@ Adjust units consistently. `N_P_star` is the protected-urban net-inflow target
 in vehicles over the follower horizon; convert it internally when a module
 needs a veh/h service target. If `N_UF_star` is in vehicles per control interval
 rather than veh/h, make that explicit in the config and convert internally.
+
+`leader_search_mode = continuous` treats `N_P_star` and `N_UF_star` as continuous
+leader targets and uses deterministic derivative-free pattern search. This does
+not relax follower actuator feasibility. `leader_search_mode = grid` preserves
+the coarse/refined candidate-grid path for ablation and reproducibility checks.
 
 ---

@@ -1,7 +1,11 @@
 from __future__ import annotations
 
-from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
+import json
+import os
+import csv
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, Iterable, Optional
 
 from src.controllers.distributed_coordinator import DistributedCoordinator
@@ -81,6 +85,70 @@ class StackelbergMPCController:
             return DistributedCoordinator(cfg)
         return NashSolver(cfg)
 
+    def _append_progress_event(
+        self,
+        *,
+        event: str,
+        stage: str,
+        completed: int,
+        total: int,
+        evaluation: Optional[_LeaderCandidateEvaluation] = None,
+        best_objective: Optional[float] = None,
+    ) -> None:
+        path_text = os.environ.get("NUMSIM_STACKELBERG_PROGRESS_FILE", "")
+        if not path_text:
+            return
+        row: Dict[str, object] = {
+            "event": event,
+            "step": os.environ.get("NUMSIM_STACKELBERG_PROGRESS_STEP", ""),
+            "stage": stage,
+            "completed": int(completed),
+            "total": int(total),
+        }
+        if best_objective is not None:
+            row["best_objective_so_far"] = float(best_objective)
+        if evaluation is not None:
+            row.update({
+                "candidate_index": int(evaluation.index),
+                "N_P_star": float(evaluation.action.N_P_star),
+                "N_UF_star": float(evaluation.action.N_UF_star),
+                "objective": float(evaluation.objective),
+                "follower_ttt": float(evaluation.objective_terms.get("leader_follower_ttt_base", 0.0)),
+                "mfd_storage_penalty": float(evaluation.objective_terms.get("leader_mfd_storage_penalty", 0.0)),
+                "mfd_storage_excess_veh": float(
+                    evaluation.objective_terms.get("leader_mfd_storage_excess_veh", 0.0)
+                ),
+            })
+        try:
+            path = Path(path_text)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+            csv_path = path.with_suffix(".csv")
+            fields = [
+                "step",
+                "event",
+                "stage",
+                "completed",
+                "total",
+                "candidate_index",
+                "N_P_star",
+                "N_UF_star",
+                "objective",
+                "best_objective_so_far",
+                "follower_ttt",
+                "mfd_storage_penalty",
+                "mfd_storage_excess_veh",
+            ]
+            write_header = not csv_path.exists()
+            with csv_path.open("a", newline="", encoding="utf-8") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fields, extrasaction="ignore")
+                if write_header:
+                    writer.writeheader()
+                writer.writerow(row)
+        except OSError:
+            return
+
     def decide(
         self,
         state: TrafficState,
@@ -116,21 +184,8 @@ class StackelbergMPCController:
         )
         previous = self._normalize_previous_leader_reference(previous)
         global_refresh = self._leader_global_refresh_active(state)
-        if global_refresh:
-            coarse_candidates = self.leader.candidates(state, previous, forecast[0], forecast=forecast)
-            coarse_stage = "coarse_global"
-        else:
-            previous_leader = LeaderAction(previous.N_P_star, previous.N_UF_star)
-            coarse_candidates = self.leader.refined_candidates(
-                state,
-                previous_leader,
-                previous,
-                forecast[0],
-                forecast=forecast,
-                count=self.cfg.mpc.leader_candidate_count,
-            )
-            coarse_stage = "coarse_local"
-        fallback_start_index = len(coarse_candidates) + max(0, int(self.cfg.mpc.leader_refinement_candidate_count))
+        search_mode = str(self.cfg.mpc.leader_search_mode)
+        fallback_start_index = 1000000
         fallback_enabled = bool(self.cfg.mpc.stackelberg_enable_fallback)
         fallback_evaluations = (
             self._evaluate_fallback_candidates(
@@ -146,100 +201,40 @@ class StackelbergMPCController:
             (item.objective for item in fallback_evaluations),
             default=float("inf"),
         )
-        selected_indices, proxy_metadata = self._prefilter_leader_candidates(
-            coarse_candidates,
-            state,
-            forecast,
-            previous,
-            global_scope=global_refresh,
-        )
-        coarse_evaluations = self._evaluate_candidate_set(
-            coarse_candidates,
-            selected_indices,
-            state,
-            forecast,
-            previous,
-            stage=coarse_stage,
-            incumbent_obj=fallback_incumbent_obj,
-        )
-        coarse_best = min(coarse_evaluations, key=lambda item: item.objective)
-        refined_candidates = self._unique_leader_actions(
-            self.leader.refined_candidates(
-                state,
-                coarse_best.action,
-                previous,
-                forecast[0],
-                forecast=forecast,
-            )
-        )
-        refined_indices: list[int] = []
-        refined_proxy_metadata: Dict[str, float] = {}
-        if refined_candidates:
-            refined_indices, raw_refined_proxy_metadata = self._prefilter_leader_candidates(
-                refined_candidates,
+        if search_mode == "continuous":
+            (
+                full_evaluations,
+                base_metadata,
+                proxy_metadata,
+                refined_proxy_metadata,
+            ) = self._continuous_leader_search(
                 state,
                 forecast,
                 previous,
-                global_scope=False,
+                global_refresh,
+                fallback_incumbent_obj,
             )
-            refined_proxy_metadata = self._stage_prefilter_metadata(
-                raw_refined_proxy_metadata,
-                "refined",
+        else:
+            (
+                full_evaluations,
+                base_metadata,
+                proxy_metadata,
+                refined_proxy_metadata,
+            ) = self._grid_leader_search(
+                state,
+                forecast,
+                previous,
+                global_refresh,
+                fallback_incumbent_obj,
             )
-        refined_evaluations = self._evaluate_candidate_set(
-            refined_candidates,
-            refined_indices,
-            state,
-            forecast,
-            previous,
-            stage="refined",
-            index_offset=len(coarse_candidates),
-            incumbent_obj=min(coarse_best.objective, fallback_incumbent_obj),
-        ) if refined_candidates else []
-        full_evaluations = coarse_evaluations + refined_evaluations
-        base_metadata = leader_metadata(coarse_candidates + refined_candidates)
-        base_metadata.update(self.leader.candidate_bound_metadata(state, previous, forecast[0], forecast=forecast))
-        base_metadata.update(self._forecast_demand_metadata(forecast))
-        def candidate_meta_any(key: str) -> float:
-            return float(max((item.metadata.get(key, 0.0) for item in full_evaluations), default=0.0))
-
         base_metadata.update({
-            "leader_candidate_coarse_count": float(len(coarse_candidates)),
-            "leader_candidate_coarse_evaluated_count": float(len(coarse_evaluations)),
-            "leader_candidate_refined_count": float(len(refined_candidates)),
-            "leader_candidate_refined_evaluated_count": float(len(refined_evaluations)),
-            "leader_candidate_refinement_active": float(bool(refined_candidates)),
-            "leader_candidate_global_refresh": float(global_refresh),
-            "leader_candidate_coarse_global": float(coarse_stage == "coarse_global"),
-            "leader_candidate_coarse_local": float(coarse_stage == "coarse_local"),
+            "leader_search_mode_grid": float(search_mode == "grid"),
+            "leader_search_mode_continuous": float(search_mode == "continuous"),
             "leader_fallback_enabled": float(fallback_enabled),
             "leader_fallback_incumbent_seed_active": float(fallback_incumbent_obj < float("inf")),
             "leader_fallback_incumbent_objective": float(
                 fallback_incumbent_obj if fallback_incumbent_obj < float("inf") else 0.0
             ),
-            "leader_candidate_parallel_backend_serial": candidate_meta_any(
-                "leader_candidate_parallel_backend_serial"
-            ),
-            "leader_candidate_parallel_backend_thread": candidate_meta_any(
-                "leader_candidate_parallel_backend_thread"
-            ),
-            "leader_candidate_parallel_backend_process": candidate_meta_any(
-                "leader_candidate_parallel_backend_process"
-            ),
-            "leader_candidate_process_pool_reuse_enabled": candidate_meta_any(
-                "leader_candidate_process_pool_reuse_enabled"
-            ),
-            "leader_candidate_process_pool_reused_existing": candidate_meta_any(
-                "leader_candidate_process_pool_reused_existing"
-            ),
-            "leader_candidate_incumbent_any_active": float(any(
-                item.metadata.get("leader_candidate_incumbent_active", 0.0) > 0.5
-                for item in full_evaluations
-            )),
-            "leader_candidate_follower_early_terminated_candidates_total": float(sum(
-                item.metadata.get("leader_candidate_follower_early_terminated_candidates", 0.0)
-                for item in full_evaluations
-            )),
         })
         all_evaluations = full_evaluations + fallback_evaluations
         evaluations: list[dict[str, object]] = [
@@ -305,6 +300,376 @@ class StackelbergMPCController:
         step_index = int(round(float(state.time_sec) / interval))
         refresh_steps = max(1, int(round(float(self.cfg.mpc.leader_global_refresh_sec) / interval)))
         return step_index == 0 or step_index % refresh_steps == 0
+
+    def _grid_leader_search(
+        self,
+        state: TrafficState,
+        forecast: list[DemandStep],
+        previous: ControlAction,
+        global_refresh: bool,
+        fallback_incumbent_obj: float,
+    ) -> tuple[list[_LeaderCandidateEvaluation], Dict[str, float], Dict[str, float], Dict[str, float]]:
+        if global_refresh:
+            coarse_candidates = self.leader.candidates(state, previous, forecast[0], forecast=forecast)
+            coarse_stage = "coarse_global"
+        else:
+            previous_leader = LeaderAction(previous.N_P_star, previous.N_UF_star)
+            coarse_candidates = self.leader.refined_candidates(
+                state,
+                previous_leader,
+                previous,
+                forecast[0],
+                forecast=forecast,
+                count=self.cfg.mpc.leader_candidate_count,
+            )
+            coarse_stage = "coarse_local"
+        selected_indices, proxy_metadata = self._prefilter_leader_candidates(
+            coarse_candidates,
+            state,
+            forecast,
+            previous,
+            global_scope=global_refresh,
+        )
+        coarse_evaluations = self._evaluate_candidate_set(
+            coarse_candidates,
+            selected_indices,
+            state,
+            forecast,
+            previous,
+            stage=coarse_stage,
+            incumbent_obj=fallback_incumbent_obj,
+        )
+        coarse_best = min(coarse_evaluations, key=lambda item: item.objective)
+        refined_candidates = self._unique_leader_actions(
+            self.leader.refined_candidates(
+                state,
+                coarse_best.action,
+                previous,
+                forecast[0],
+                forecast=forecast,
+            )
+        )
+        refined_indices: list[int] = []
+        refined_proxy_metadata: Dict[str, float] = {}
+        if refined_candidates:
+            refined_indices, raw_refined_proxy_metadata = self._prefilter_leader_candidates(
+                refined_candidates,
+                state,
+                forecast,
+                previous,
+                global_scope=False,
+            )
+            refined_proxy_metadata = self._stage_prefilter_metadata(
+                raw_refined_proxy_metadata,
+                "refined",
+            )
+        refined_evaluations = self._evaluate_candidate_set(
+            refined_candidates,
+            refined_indices,
+            state,
+            forecast,
+            previous,
+            stage="refined",
+            index_offset=len(coarse_candidates),
+            incumbent_obj=min(coarse_best.objective, fallback_incumbent_obj),
+        ) if refined_candidates else []
+        full_evaluations = coarse_evaluations + refined_evaluations
+        base_metadata = leader_metadata(coarse_candidates + refined_candidates)
+        base_metadata.update(self.leader.candidate_bound_metadata(state, previous, forecast[0], forecast=forecast))
+        base_metadata.update(self._forecast_demand_metadata(forecast))
+        base_metadata.update(self._leader_search_common_metadata(
+            full_evaluations,
+            global_refresh,
+            coarse_stage,
+            len(coarse_candidates),
+            len(coarse_evaluations),
+            len(refined_candidates),
+            len(refined_evaluations),
+            bool(refined_candidates),
+        ))
+        return full_evaluations, base_metadata, proxy_metadata, refined_proxy_metadata
+
+    def _leader_search_common_metadata(
+        self,
+        full_evaluations: list[_LeaderCandidateEvaluation],
+        global_refresh: bool,
+        coarse_stage: str,
+        coarse_count: int,
+        coarse_evaluated_count: int,
+        refined_count: int,
+        refined_evaluated_count: int,
+        refinement_active: bool,
+    ) -> Dict[str, float]:
+        def candidate_meta_any(key: str) -> float:
+            return float(max((item.metadata.get(key, 0.0) for item in full_evaluations), default=0.0))
+
+        return {
+            "leader_candidate_coarse_count": float(coarse_count),
+            "leader_candidate_coarse_evaluated_count": float(coarse_evaluated_count),
+            "leader_candidate_refined_count": float(refined_count),
+            "leader_candidate_refined_evaluated_count": float(refined_evaluated_count),
+            "leader_candidate_refinement_active": float(refinement_active),
+            "leader_candidate_global_refresh": float(global_refresh),
+            "leader_candidate_coarse_global": float(coarse_stage in {"coarse_global", "continuous_global"}),
+            "leader_candidate_coarse_local": float(coarse_stage in {"coarse_local", "continuous_local"}),
+            "leader_candidate_parallel_backend_serial": candidate_meta_any(
+                "leader_candidate_parallel_backend_serial"
+            ),
+            "leader_candidate_parallel_backend_thread": candidate_meta_any(
+                "leader_candidate_parallel_backend_thread"
+            ),
+            "leader_candidate_parallel_backend_process": candidate_meta_any(
+                "leader_candidate_parallel_backend_process"
+            ),
+            "leader_candidate_process_pool_reuse_enabled": candidate_meta_any(
+                "leader_candidate_process_pool_reuse_enabled"
+            ),
+            "leader_candidate_process_pool_reused_existing": candidate_meta_any(
+                "leader_candidate_process_pool_reused_existing"
+            ),
+            "leader_candidate_incumbent_any_active": float(any(
+                item.metadata.get("leader_candidate_incumbent_active", 0.0) > 0.5
+                for item in full_evaluations
+            )),
+            "leader_candidate_follower_early_terminated_candidates_total": float(sum(
+                item.metadata.get("leader_candidate_follower_early_terminated_candidates", 0.0)
+                for item in full_evaluations
+            )),
+        }
+
+    def _continuous_leader_search(
+        self,
+        state: TrafficState,
+        forecast: list[DemandStep],
+        previous: ControlAction,
+        global_refresh: bool,
+        fallback_incumbent_obj: float,
+    ) -> tuple[list[_LeaderCandidateEvaluation], Dict[str, float], Dict[str, float], Dict[str, float]]:
+        bounds = self.leader._candidate_bounds(state, previous, forecast[0], forecast)
+        np_lower, np_upper = float(bounds.np_lower), float(bounds.np_upper)
+        nuf_lower, nuf_upper = float(bounds.nuf_lower), float(bounds.nuf_upper)
+        if not global_refresh:
+            np_lower = max(np_lower, float(previous.N_P_star) - float(self.cfg.mpc.leader_local_np_radius_veh))
+            np_upper = min(np_upper, float(previous.N_P_star) + float(self.cfg.mpc.leader_local_np_radius_veh))
+            nuf_lower = max(nuf_lower, float(previous.N_UF_star) - float(self.cfg.mpc.leader_local_nuf_radius_veh_h))
+            nuf_upper = min(nuf_upper, float(previous.N_UF_star) + float(self.cfg.mpc.leader_local_nuf_radius_veh_h))
+        if np_lower > np_upper:
+            np_lower = np_upper = float(previous.N_P_star)
+        if nuf_lower > nuf_upper:
+            nuf_lower = nuf_upper = float(previous.N_UF_star)
+
+        def clipped(np_value: float, nuf_value: float) -> LeaderAction:
+            return LeaderAction(
+                float(min(max(float(np_value), np_lower), np_upper)),
+                float(min(max(float(nuf_value), nuf_lower), nuf_upper)),
+            )
+
+        max_evals = max(1, int(self.cfg.mpc.leader_continuous_max_evals))
+        seed_actions = self._continuous_seed_actions(
+            previous,
+            bounds,
+            np_lower,
+            np_upper,
+            nuf_lower,
+            nuf_upper,
+            clipped,
+        )
+        seed_actions = self._unique_leader_actions(seed_actions)[: max(1, int(self.cfg.mpc.leader_continuous_seed_count))]
+        coarse_stage = "continuous_global" if global_refresh else "continuous_local"
+        evaluated, incumbent_obj = self._evaluate_continuous_action_set(
+            seed_actions[:max_evals],
+            state,
+            forecast,
+            previous,
+            stage=coarse_stage,
+            index_start=0,
+            incumbent_obj=fallback_incumbent_obj,
+        )
+        if not evaluated:
+            raise ValueError("Continuous leader search produced no evaluated candidates.")
+        seen = {
+            (round(float(item.action.N_P_star), 6), round(float(item.action.N_UF_star), 6))
+            for item in evaluated
+        }
+        best = min(evaluated, key=lambda item: item.objective)
+        np_span = max(np_upper - np_lower, 1.0e-9)
+        nuf_span = max(nuf_upper - nuf_lower, 1.0e-9)
+        np_step = max(
+            float(self.cfg.mpc.leader_continuous_min_np_step_veh),
+            np_span * float(self.cfg.mpc.leader_continuous_initial_step_fraction),
+        )
+        nuf_step = max(
+            float(self.cfg.mpc.leader_continuous_min_nuf_step_veh_h),
+            nuf_span * float(self.cfg.mpc.leader_continuous_initial_step_fraction),
+        )
+        local_evaluations: list[_LeaderCandidateEvaluation] = []
+        iterations_completed = 0
+        next_index = len(evaluated)
+        shrink = float(self.cfg.mpc.leader_continuous_shrink_factor)
+        min_np_step = float(self.cfg.mpc.leader_continuous_min_np_step_veh)
+        min_nuf_step = float(self.cfg.mpc.leader_continuous_min_nuf_step_veh_h)
+        directions = [
+            (-1.0, 0.0),
+            (1.0, 0.0),
+            (0.0, -1.0),
+            (0.0, 1.0),
+            (-1.0, -1.0),
+            (-1.0, 1.0),
+            (1.0, -1.0),
+            (1.0, 1.0),
+        ]
+        for iteration in range(max(0, int(self.cfg.mpc.leader_continuous_local_iterations))):
+            remaining = max_evals - len(evaluated) - len(local_evaluations)
+            if remaining <= 0:
+                break
+            candidates: list[LeaderAction] = []
+            for dx, dy in directions:
+                action = clipped(
+                    best.action.N_P_star + dx * np_step,
+                    best.action.N_UF_star + dy * nuf_step,
+                )
+                key = (round(float(action.N_P_star), 6), round(float(action.N_UF_star), 6))
+                if key in seen:
+                    continue
+                seen.add(key)
+                candidates.append(action)
+                if len(candidates) >= remaining:
+                    break
+            if not candidates:
+                np_step *= shrink
+                nuf_step *= shrink
+                if np_step < min_np_step and nuf_step < min_nuf_step:
+                    break
+                continue
+            stage = f"continuous_refined_{iteration}"
+            new_evaluations, incumbent_obj = self._evaluate_continuous_action_set(
+                candidates,
+                state,
+                forecast,
+                previous,
+                stage=stage,
+                index_start=next_index,
+                incumbent_obj=incumbent_obj,
+            )
+            next_index += len(new_evaluations)
+            local_evaluations.extend(new_evaluations)
+            if new_evaluations:
+                new_best = min(new_evaluations + [best], key=lambda item: item.objective)
+                if new_best.objective < best.objective - 1.0e-12:
+                    best = new_best
+                else:
+                    np_step *= shrink
+                    nuf_step *= shrink
+            iterations_completed += 1
+            if np_step < min_np_step and nuf_step < min_nuf_step:
+                break
+
+        full_evaluations = evaluated + local_evaluations
+        actions = [item.action for item in full_evaluations]
+        base_metadata = leader_metadata(actions)
+        base_metadata.update(self.leader.candidate_bound_metadata(state, previous, forecast[0], forecast=forecast))
+        base_metadata.update(self._forecast_demand_metadata(forecast))
+        base_metadata.update(self._leader_search_common_metadata(
+            full_evaluations,
+            global_refresh,
+            coarse_stage,
+            len(seed_actions),
+            len(evaluated),
+            len(local_evaluations),
+            len(local_evaluations),
+            bool(local_evaluations),
+        ))
+        base_metadata.update({
+            "leader_continuous_search_bound_np_lower": float(np_lower),
+            "leader_continuous_search_bound_np_upper": float(np_upper),
+            "leader_continuous_search_bound_nuf_lower": float(nuf_lower),
+            "leader_continuous_search_bound_nuf_upper": float(nuf_upper),
+            "leader_continuous_max_evals": float(max_evals),
+            "leader_continuous_seed_count": float(len(seed_actions)),
+            "leader_continuous_iterations_completed": float(iterations_completed),
+            "leader_continuous_final_np_step_veh": float(np_step),
+            "leader_continuous_final_nuf_step_veh_h": float(nuf_step),
+        })
+        return full_evaluations, base_metadata, {}, {}
+
+    def _continuous_seed_actions(
+        self,
+        previous: ControlAction,
+        bounds,
+        np_lower: float,
+        np_upper: float,
+        nuf_lower: float,
+        nuf_upper: float,
+        clipped,
+    ) -> list[LeaderAction]:
+        np_mid = 0.5 * (np_lower + np_upper)
+        nuf_mid = 0.5 * (nuf_lower + nuf_upper)
+        heuristic_nuf = float(min(max(float(bounds.heuristic_nuf), nuf_lower), nuf_upper))
+        return [
+            clipped(previous.N_P_star, previous.N_UF_star),
+            clipped(np_mid, nuf_mid),
+            clipped(0.0, heuristic_nuf),
+            clipped(np_lower, nuf_lower),
+            clipped(np_lower, nuf_upper),
+            clipped(np_upper, nuf_lower),
+            clipped(np_upper, nuf_upper),
+            clipped(np_lower, nuf_mid),
+            clipped(np_upper, nuf_mid),
+            clipped(np_mid, nuf_lower),
+            clipped(np_mid, nuf_upper),
+        ]
+
+    def _evaluate_continuous_action_set(
+        self,
+        actions: list[LeaderAction],
+        state: TrafficState,
+        forecast: list[DemandStep],
+        previous: ControlAction,
+        stage: str,
+        index_start: int,
+        incumbent_obj: float,
+    ) -> tuple[list[_LeaderCandidateEvaluation], float]:
+        actions = self._unique_leader_actions(actions)
+        self._append_progress_event(
+            event="stage_started",
+            stage=stage,
+            completed=0,
+            total=len(actions),
+            best_objective=incumbent_obj if incumbent_obj < float("inf") else None,
+        )
+        results: list[_LeaderCandidateEvaluation] = []
+        stage_incumbent = float(incumbent_obj)
+        for offset, action in enumerate(actions):
+            result = self._evaluate_full_candidate(
+                index_start + offset,
+                action,
+                state,
+                forecast,
+                previous,
+                stage=stage,
+                incumbent_obj=stage_incumbent,
+            )
+            result.metadata.update({
+                "leader_candidate_parallel_backend_serial": 1.0,
+                "leader_candidate_parallel_backend_thread": 0.0,
+                "leader_candidate_parallel_backend_process": 0.0,
+                "leader_candidate_process_pool_reuse_enabled": 0.0,
+                "leader_candidate_process_pool_reused_existing": 0.0,
+                "leader_candidate_inner_grid_backend_serial": float(self.cfg.mpc.grid_parallel_backend == "serial"),
+                "leader_candidate_inner_grid_backend_thread": float(self.cfg.mpc.grid_parallel_backend == "thread"),
+                "leader_candidate_inner_grid_backend_process": float(self.cfg.mpc.grid_parallel_backend == "process"),
+            })
+            results.append(result)
+            stage_incumbent = min(stage_incumbent, float(result.objective))
+            self._append_progress_event(
+                event="candidate_evaluated",
+                stage=stage,
+                completed=len(results),
+                total=len(actions),
+                evaluation=result,
+                best_objective=stage_incumbent,
+            )
+        return results, stage_incumbent
 
     def _fallback_full_refresh_active(self, state: TrafficState) -> bool:
         interval = max(float(self.cfg.simulation.control_interval), 1.0e-9)
@@ -538,14 +903,23 @@ class StackelbergMPCController:
             residual_control=0.0,
             diagnostics=dict(no_diag),
         )
-        evaluations.append(self._make_fallback_evaluation(
+        no_eval = self._make_fallback_evaluation(
             start_index,
             "fallback_no_control",
             no_nash,
             previous,
             state,
             forecast,
-        ))
+        )
+        evaluations.append(no_eval)
+        self._append_progress_event(
+            event="candidate_evaluated",
+            stage="fallback_no_control",
+            completed=1,
+            total=2,
+            evaluation=no_eval,
+            best_objective=no_eval.objective,
+        )
 
         fallback_refresh = self._fallback_full_refresh_active(state)
         cached_previous_used = (
@@ -568,7 +942,7 @@ class StackelbergMPCController:
             pfo_previous,
         )
         self._pfo_fallback_previous_control = pfo_nash.control.copy()
-        evaluations.append(self._make_fallback_evaluation(
+        pfo_eval = self._make_fallback_evaluation(
             start_index + 1,
             "fallback_pfo",
             pfo_nash,
@@ -583,7 +957,16 @@ class StackelbergMPCController:
                     self.cfg.mpc.stackelberg_fallback_full_refresh_sec
                 ),
             },
-        ))
+        )
+        evaluations.append(pfo_eval)
+        self._append_progress_event(
+            event="candidate_evaluated",
+            stage="fallback_pfo",
+            completed=2,
+            total=2,
+            evaluation=pfo_eval,
+            best_objective=min(item.objective for item in evaluations),
+        )
         return evaluations
 
     def _make_fallback_evaluation(
@@ -619,6 +1002,14 @@ class StackelbergMPCController:
                 "leader_follower_ttt_base": float(objective_terms.get("leader_follower_ttt_base", nash.objective_value)),
                 "leader_boundary_leg_excluded_veh": float(objective_terms.get("leader_boundary_leg_excluded_veh", 0.0)),
                 "leader_target_penalty": float(objective_terms.get("leader_target_penalty", 0.0)),
+                "leader_mfd_storage_excess_veh": float(
+                    objective_terms.get("leader_mfd_storage_excess_veh", 0.0)
+                ),
+                "leader_mfd_movement_excess_veh": float(
+                    objective_terms.get("leader_mfd_movement_excess_veh", 0.0)
+                ),
+                "leader_mfd_link_excess_veh": float(objective_terms.get("leader_mfd_link_excess_veh", 0.0)),
+                "leader_mfd_storage_penalty": float(objective_terms.get("leader_mfd_storage_penalty", 0.0)),
                 "leader_boundary_in_queue_penalty": float(objective_terms.get("leader_boundary_in_queue_penalty", 0.0)),
                 "leader_density_excess": float(objective_terms.get("leader_density_excess", 0.0)),
                 "leader_density_penalty": float(objective_terms.get("leader_density_penalty", 0.0)),
@@ -790,6 +1181,14 @@ class StackelbergMPCController:
         stage_incumbent = float(incumbent_obj)
         seed_used = False
         process_pool_reused_existing = False
+        total_candidates = len(selected_indices)
+        self._append_progress_event(
+            event="stage_started",
+            stage=stage,
+            completed=0,
+            total=total_candidates,
+            best_objective=stage_incumbent if stage_incumbent < float("inf") else None,
+        )
         if payloads:
             seed_payload = dict(payloads[0])
             seed_payload["incumbent_obj"] = stage_incumbent
@@ -797,6 +1196,14 @@ class StackelbergMPCController:
             results.append(seed_result)
             stage_incumbent = min(stage_incumbent, float(seed_result.objective))
             seed_used = True
+            self._append_progress_event(
+                event="candidate_evaluated",
+                stage=stage,
+                completed=len(results),
+                total=total_candidates,
+                evaluation=seed_result,
+                best_objective=stage_incumbent,
+            )
             payloads = payloads[1:]
             for payload in payloads:
                 payload["incumbent_obj"] = stage_incumbent
@@ -806,20 +1213,64 @@ class StackelbergMPCController:
                 result = _stackelberg_candidate_worker(payload)
                 results.append(result)
                 stage_incumbent = min(stage_incumbent, float(result.objective))
+                self._append_progress_event(
+                    event="candidate_evaluated",
+                    stage=stage,
+                    completed=len(results),
+                    total=total_candidates,
+                    evaluation=result,
+                    best_objective=stage_incumbent,
+                )
             backend_used = "serial"
             chunks = 1
         elif backend == "thread":
             with ThreadPoolExecutor(max_workers=workers) as executor:
-                results.extend(executor.map(_stackelberg_candidate_worker, payloads))
+                futures = [executor.submit(_stackelberg_candidate_worker, payload) for payload in payloads]
+                for future in as_completed(futures):
+                    result = future.result()
+                    results.append(result)
+                    stage_incumbent = min(stage_incumbent, float(result.objective))
+                    self._append_progress_event(
+                        event="candidate_evaluated",
+                        stage=stage,
+                        completed=len(results),
+                        total=total_candidates,
+                        evaluation=result,
+                        best_objective=stage_incumbent,
+                    )
             backend_used = "thread"
             chunks = max(1, len(payloads))
         else:
             if self.cfg.mpc.stackelberg_reuse_process_pool:
                 executor, process_pool_reused_existing = self._leader_process_executor(workers)
-                results.extend(executor.map(_stackelberg_candidate_worker, payloads))
+                futures = [executor.submit(_stackelberg_candidate_worker, payload) for payload in payloads]
+                for future in as_completed(futures):
+                    result = future.result()
+                    results.append(result)
+                    stage_incumbent = min(stage_incumbent, float(result.objective))
+                    self._append_progress_event(
+                        event="candidate_evaluated",
+                        stage=stage,
+                        completed=len(results),
+                        total=total_candidates,
+                        evaluation=result,
+                        best_objective=stage_incumbent,
+                    )
             else:
                 with ProcessPoolExecutor(max_workers=workers) as executor:
-                    results.extend(executor.map(_stackelberg_candidate_worker, payloads))
+                    futures = [executor.submit(_stackelberg_candidate_worker, payload) for payload in payloads]
+                    for future in as_completed(futures):
+                        result = future.result()
+                        results.append(result)
+                        stage_incumbent = min(stage_incumbent, float(result.objective))
+                        self._append_progress_event(
+                            event="candidate_evaluated",
+                            stage=stage,
+                            completed=len(results),
+                            total=total_candidates,
+                            evaluation=result,
+                            best_objective=stage_incumbent,
+                        )
             backend_used = "process"
             chunks = max(1, len(payloads))
         diag = {

@@ -14,19 +14,31 @@ class StackelbergMPCController:
 
 At every control interval, it must:
 
-1. Generate leader candidate pairs `(N_P_star, N_UF_star)`.
-2. For each leader candidate:
+1. Search feasible leader target pairs `(N_P_star, N_UF_star)`.
+   - `leader_search_mode = grid`: evaluate the existing coarse/refined
+     candidate grid.
+   - `leader_search_mode = continuous`: treat `(N_P_star, N_UF_star)` as
+     continuous leader targets and run deterministic derivative-free pattern
+     search over the feasible bounds.
+2. For each evaluated leader target:
    - solve freeway follower response
    - solve urban follower response
    - iterate follower responses until convergence or maximum Nash iterations
    - compute leader objective from the follower-response objective
-3. Select the candidate with minimum objective.
+3. Select the evaluated target with minimum objective.
 4. Return first-step controls:
    - ramp metering rates
    - VSL values
    - green times
    - offsets
    - inflow-outflow allocation decisions
+
+The continuous leader search changes only the outer `(N_P_star, N_UF_star)`
+target search. Follower actuators remain subject to their existing feasible
+sets: green cycle repair, offset step limits, ramp metering bounds, and discrete
+VSL values. Since the follower response can be piecewise-flat or discontinuous
+as the target changes, continuous leader search must use derivative-free
+evaluation, not gradient descent.
 
 ### 4.2 Leader objective
 
@@ -35,7 +47,8 @@ Implement the leader objective as configurable. The default base term is the fol
 ```text
 J_L = TTT_freeway + TTT_urban
       + boundary_in_queue_TTS
-      + target_exceedance_penalties
+      + configured_MFD_storage_penalties
+      + freeway_density_penalties
 ```
 
 where:
@@ -43,12 +56,27 @@ where:
 ```text
 U_L(t) = [N_P_star(t), N_UF_star(t)]
 positive_part(x) = max(x, 0)
-target_exceedance_penalties =
+protected_exceed penalty mode =
     sum_over_horizon[
         T_c_h * (
           w_P * positive_part(n_P(t) - n_P_crit)
-          + w_F * sum_m sum_i L[m] * lanes[m] * positive_part(rho[m,i](t) - rho_crit[m])
         )
+    ]
+```
+
+The leader MFD/storage penalty is controlled by `leader.mfd_penalty_mode`:
+
+- `protected_exceed`: legacy protected-network accumulation exceedance above `N_P_crit_veh`.
+- `all_urban_halfcap`: sum `positive_part(queue_or_occupancy - threshold_ratio * storage_capacity)` over every urban movement queue, including boundary movements, and every non-off-ramp urban link storage occupancy. Boundary movements use `mfd_boundary_queue_capacity_veh` as the reference cap for this calculation only; the plant queue is not clipped by this penalty cap. In `follower_ttt` mode this vehicle excess is multiplied by `T_c_h` and `mfd_storage_weight`.
+- `combined`: both terms.
+- `disabled`: no MFD/storage penalty.
+
+The freeway density penalty remains:
+
+```text
+density_penalty =
+    sum_over_horizon[
+        T_c_h * w_F * sum_m sum_i L[m] * lanes[m] * positive_part(rho[m,i](t) - rho_crit[m])
     ]
 ```
 

@@ -8916,3 +8916,353 @@ fine-grid setting.
   4. For direct/allocation-off 7200 s, reduce the full rollout burden with a
      cached no-fallback candidate table or a scenario-level checkpoint runner
      before repeating fine-grid runs.
+
+## 2026-06-21 - Leader All-Urban Half-Cap MFD Penalty and Checkpoint Logging
+
+### Implementation
+
+- Added `leader.mfd_penalty_mode` with modes `disabled`, `protected_exceed`,
+  `all_urban_halfcap`, and `combined`.
+- Set the default mode to `all_urban_halfcap`.
+- In `all_urban_halfcap`, the leader adds
+  `mfd_storage_weight * sum(max(0, q_i - threshold_ratio * cap_i))` over all
+  urban movement queues, including boundary movements, and non-off-ramp urban
+  link occupancies. In `follower_ttt` mode this is scaled by `T_c_h`.
+- Added `leader.mfd_boundary_queue_capacity_veh=220.0` as a penalty reference
+  for boundary movement queues only. The plant queue is not clipped by this
+  value.
+- Kept the legacy protected-network exceedance term as the
+  `protected_exceed` mode instead of deleting it.
+- Added step checkpoint files:
+  `run_log.csv`, `control_timeseries.csv`, `state_timeseries.csv`,
+  `decision_diagnostics.csv`, and `progress_summary.csv` are refreshed after
+  each control step.
+- Added Stackelberg candidate-progress files:
+  `decision_progress.jsonl` and `decision_progress.csv` record fallback,
+  coarse, and refined candidate evaluation progress within each long step.
+
+Changed files:
+
+- `src/config/default.yaml`
+- `src/models/state.py`
+- `src/controllers/leader.py`
+- `src/controllers/stackelberg_mpc.py`
+- `src/experiments/six_controller_comparison.py`
+- `src/simulation/closed_loop_runner.py`
+- `src/tests/test_constraints.py`
+- `docs/spec/04_controller.md`
+- `docs/spec/09_configuration_requirements.md`
+
+### Validation
+
+Syntax compile:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -c "from pathlib import Path; files=['src/controllers/stackelberg_mpc.py','src/experiments/six_controller_comparison.py']; [compile(Path(f).read_text(encoding='utf-8'), f, 'exec') for f in files]; print('syntax compile ok')"
+```
+
+Targeted tests:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m unittest src.tests.test_constraints.ConstraintTests.test_leader_all_urban_halfcap_penalty_counts_boundary_and_storage -v
+```
+
+Result: PASS.
+
+Checkpoint smoke:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.all_scenarios_four_controller_comparison --scenario peak_demand --T-total 360 --controllers PROPOSED-FOLLOWERS-ONLY --output outputs/checkpoint_smoke_peak_360_20260621 --leader-candidate-count 9 --leader-refinement-candidate-count 9 --max-nash-iter 1 --grid-parallel-backend thread --grid-parallel-max-workers 4 --grid-parallel-chunk-size 4 --freeway-prediction-horizon-steps 2
+```
+
+Result: PASS. `progress_summary.csv` was written during the run.
+
+Candidate-progress smoke:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.all_scenarios_four_controller_comparison --scenario peak_demand --T-total 180 --controllers PROPOSED-STACKELBERG --output outputs/candidate_progress_smoke_peak_180_20260621 --leader-candidate-count 5 --leader-refinement-candidate-count 5 --max-nash-iter 1 --stackelberg-prefilter-top-k 2 --stackelberg-prefilter-local-top-k 2 --stackelberg-leader-parallel-backend thread --stackelberg-leader-parallel-max-workers 2 --stackelberg-allocation-mode direct --grid-parallel-backend thread --grid-parallel-max-workers 2 --grid-parallel-chunk-size 2 --freeway-prediction-horizon-steps 2
+```
+
+Result: PASS. `decision_progress.jsonl` and `decision_progress.csv` show
+fallback and candidate-stage events within the long first step.
+
+### Peak 1800 s Runs
+
+PFO full run:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.all_scenarios_four_controller_comparison --scenario peak_demand --T-total 1800 --controllers PROPOSED-FOLLOWERS-ONLY --output outputs/mfd_halfcap_peak_1800_pfo_20260621 --leader-candidate-count 81 --leader-refinement-candidate-count 49 --max-nash-iter 1 --stackelberg-prefilter-top-k 8 --stackelberg-prefilter-local-top-k 8 --stackelberg-fallback-full-refresh-sec 1800 --stackelberg-leader-parallel-backend thread --stackelberg-leader-parallel-max-workers 8 --stackelberg-inner-backend-when-outer-process thread --grid-parallel-backend thread --grid-parallel-max-workers 8 --grid-parallel-chunk-size 8 --freeway-prediction-horizon-steps 3
+```
+
+P-Stack allocation-on PSO full run:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.all_scenarios_four_controller_comparison --scenario peak_demand --T-total 1800 --controllers PROPOSED-STACKELBERG --output outputs/mfd_halfcap_peak_1800_pstack_pso_20260621 --leader-candidate-count 81 --leader-refinement-candidate-count 49 --max-nash-iter 1 --stackelberg-prefilter-top-k 8 --stackelberg-prefilter-local-top-k 8 --stackelberg-fallback-full-refresh-sec 1800 --stackelberg-leader-parallel-backend thread --stackelberg-leader-parallel-max-workers 8 --stackelberg-inner-backend-when-outer-process thread --stackelberg-allocation-mode pso --grid-parallel-backend thread --grid-parallel-max-workers 8 --grid-parallel-chunk-size 8 --freeway-prediction-horizon-steps 3
+```
+
+P-Stack allocation-off direct checkpoint attempt:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.all_scenarios_four_controller_comparison --scenario peak_demand --T-total 1800 --controllers PROPOSED-STACKELBERG --output outputs/mfd_halfcap_peak_1800_pstack_direct_topk4_20260621 --leader-candidate-count 81 --leader-refinement-candidate-count 49 --max-nash-iter 1 --stackelberg-prefilter-top-k 4 --stackelberg-prefilter-local-top-k 4 --stackelberg-fallback-full-refresh-sec 1800 --stackelberg-leader-parallel-backend thread --stackelberg-leader-parallel-max-workers 8 --stackelberg-inner-backend-when-outer-process thread --stackelberg-allocation-mode direct --grid-parallel-backend thread --grid-parallel-max-workers 8 --grid-parallel-chunk-size 8 --freeway-prediction-horizon-steps 3
+```
+
+The direct allocation-off attempt was stopped after 2/10 control steps because
+the first two steps already required a long wall-clock time. Partial outputs
+are preserved.
+
+| Run | Horizon completed | Total TTT | Total delay | Improvement vs no-control | Throughput veh/h | Terminal vehicles | Computation / wall time |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| NO-CONTROL | 1800 s | 605.825 | 324.093 | 0.000% | 10002.1 | 2539.0 | n/a |
+| PFO | 1800 s | 451.476 | 169.745 | 25.477% | 11849.9 | 1616.6 | 372.52 / 373.09 s |
+| P-Stack allocation on, PSO | 1800 s | 451.476 | 169.745 | 25.477% | 11849.9 | 1616.6 | 457.82 / 458.37 s |
+| P-Stack allocation off, direct | 360 s partial | 46.839 cumulative | n/a | same as PFO at 360 s | n/a | n/a | partial only |
+
+### Direct Allocation-Off Candidate Diagnosis
+
+For `outputs/mfd_halfcap_peak_1800_pstack_direct_topk4_20260621`, the first
+two completed steps both selected `fallback_pfo`:
+
+| Step | P-Stack cumulative TTT | PFO cumulative TTT | Delta vs PFO | Selected stage | N_P_star | N_UF_star |
+|---:|---:|---:|---:|---|---:|---:|
+| 0 | 19.856931 | 19.856931 | ~0 | fallback_pfo | 0.0 | 0.0 |
+| 1 | 46.839085 | 46.839085 | ~0 | fallback_pfo | 0.0 | 0.0 |
+
+Candidate-progress evidence:
+
+- Step 0 fallback PFO objective: `77.1965`.
+- Step 0 coarse/refined direct leader candidates were all worse than fallback
+  PFO; the best observed direct candidate objective was `82.7214`.
+- Step 1 fallback PFO objective: `91.4487`.
+- Step 1 coarse/refined direct leader candidates were all worse than fallback
+  PFO; the best observed direct candidate objective was `100.8989`.
+- Step 2 began before the run was stopped; fallback PFO objective was
+  `103.5099`, while the first coarse direct candidate was `121.8787`.
+
+### Failed Criteria / Next Modification
+
+- PASS: all-urban half-cap MFD penalty mode is implemented without clipping
+  plant queues.
+- PASS: step-level and candidate-level checkpoint logging works.
+- PARTIAL: peak 1800 s PFO and P-Stack PSO allocation-on runs completed.
+- PARTIAL: direct allocation-off run did not complete 1800 s due computation
+  cost; the partial result indicates fallback PFO dominates the evaluated
+  direct candidates.
+- NOT RUN: allocation-off fallback-disabled 1800 s was not started after the
+  direct fallback-on run showed prohibitive per-step cost.
+- Next modification should reduce direct Stackelberg full-evaluation cost before
+  repeating fallback-off 1800 s. Candidate options:
+  1. Add a safe stage-level cutoff when fallback incumbent is far better and
+     evaluated direct candidates plus proxy ranking are consistently worse.
+  2. Add scenario-level resume/checkpoint so an interrupted 1800 s run can
+     continue from the last completed control step.
+  3. Run fallback-off first at 360/900 s with candidate progress to identify
+     whether direct leader choices are qualitatively different before spending
+     a full 1800 s run.
+
+## 2026-06-21 - Peak 1800 s Direct P-Stack Without Fallback
+
+### Run
+
+User requested the same peak 1800 s direct/allocation-off Stackelberg run with
+fallback removed to measure how far it diverges from PFO.
+
+Command:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.all_scenarios_four_controller_comparison --scenario peak_demand --T-total 1800 --controllers PROPOSED-STACKELBERG --output outputs/mfd_halfcap_peak_1800_pstack_direct_no_fallback_topk4_20260621 --leader-candidate-count 81 --leader-refinement-candidate-count 49 --max-nash-iter 1 --stackelberg-prefilter-top-k 4 --stackelberg-prefilter-local-top-k 4 --stackelberg-fallback-full-refresh-sec 1800 --disable-stackelberg-fallback --stackelberg-leader-parallel-backend thread --stackelberg-leader-parallel-max-workers 8 --stackelberg-inner-backend-when-outer-process thread --stackelberg-allocation-mode direct --grid-parallel-backend thread --grid-parallel-max-workers 8 --grid-parallel-chunk-size 8 --freeway-prediction-horizon-steps 3
+```
+
+Output:
+
+- `outputs/mfd_halfcap_peak_1800_pstack_direct_no_fallback_topk4_20260621`
+
+### Results
+
+| Run | Total TTT | Total delay | Improvement vs no-control | Throughput veh/h | Terminal vehicles | Computation sec | Wall sec | Delta vs PFO TTT |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| NO-CONTROL | 605.825 | 324.093 | 0.000% | 10002.1 | 2539.0 | 0.00 | 0.56 | n/a |
+| PFO | 451.476 | 169.745 | 25.477% | 11849.9 | 1616.6 | 372.52 | 373.09 | 0.000 |
+| P-Stack PSO fallback on | 451.476 | 169.745 | 25.477% | 11849.9 | 1616.6 | 457.82 | 458.37 | 0.000 |
+| P-Stack direct fallback off | 471.030 | 189.298 | 22.250% | 12183.9 | 1452.0 | 3374.79 | 3375.57 | +19.554 |
+
+### Step Trace
+
+| Step | Time sec | P-Stack cumulative TTT | PFO cumulative TTT | Delta vs PFO | N_P_star | N_UF_star |
+|---:|---:|---:|---:|---:|---:|---:|
+| 0 | 180 | 19.897 | 19.857 | +0.040 | 3220.0 | 6000.0 |
+| 1 | 360 | 48.432 | 46.839 | +1.593 | 3220.0 | 6000.0 |
+| 2 | 540 | 82.388 | 77.124 | +5.264 | 3220.0 | 6000.0 |
+| 3 | 720 | 121.879 | 111.283 | +10.596 | 3220.0 | 6000.0 |
+| 4 | 900 | 166.870 | 150.204 | +16.666 | 3220.0 | 6000.0 |
+| 5 | 1080 | 217.044 | 195.270 | +21.774 | 3220.0 | 6000.0 |
+| 6 | 1260 | 272.423 | 245.794 | +26.629 | 3220.0 | 6000.0 |
+| 7 | 1440 | 332.968 | 304.995 | +27.973 | 3220.0 | 6000.0 |
+| 8 | 1620 | 399.435 | 373.938 | +25.498 | -3315.0 | 4500.0 |
+| 9 | 1800 | 471.030 | 451.476 | +19.554 | -3315.0 | 4125.0 |
+
+### Diagnosis
+
+- Removing fallback exposes the direct Stackelberg leader/follower choice. It
+  does not match PFO.
+- For steps 0-7, the direct no-fallback Stackelberg consistently selected the
+  upper leader targets `N_P_star ~= 3220` and `N_UF_star = 6000`.
+- The cumulative TTT gap against PFO grew from `+0.040` veh*h at 180 s to
+  `+27.973` veh*h at 1440 s.
+- At steps 8-9, the selected `N_P_star` switched to the lower bound and the gap
+  narrowed, but the final 1800 s TTT remained `+19.554` veh*h worse than PFO.
+- The no-fallback run still improves over no-control, but less than PFO:
+  `22.250%` vs `25.477%` improvement.
+- Computation cost is high: `3374.79 s` controller computation for a 1800 s
+  peak run.
+
+### Failed Criteria / Next Modification
+
+- FAIL: direct no-fallback P-Stack is worse than PFO on peak 1800 s.
+- FAIL: computation cost is too high for iterative diagnostics.
+- The next diagnostic should inspect why the direct leader objective ranks the
+  high `N_P_star`, high `N_UF_star` candidates best for steps 0-7 despite worse
+  closed-loop TTT. Candidate-level logs are available in
+  `decision_progress.csv`; the next useful table is per-step selected
+  candidate objective decomposition: follower TTT base, MFD storage penalty,
+  density penalty, terminal/throughput proxies, and realized next-step TTT.
+
+## 2026-06-21 - Continuous Leader Optimizer Implementation
+
+### Discussion Summary
+
+Added a written discussion record:
+
+- `reports/leader_continuous_optimizer_discussion.md`
+
+The summary records the current diagnosis:
+
+- `N_P_star` and `N_UF_star` are continuous leader targets; grid search was a
+  numerical approximation, not a mathematical requirement.
+- Dense/fine grid diagnostics showed an intermediate `N_P_star ~= 1819.6`
+  candidate nearly tied with the upper-bound `N_P_star ~= 3220` candidate at
+  step 0, indicating that coarse grid/top-K filtering can hide useful interior
+  regions.
+- `leader_candidate_proxy_objective_spread = 0.0` in earlier diagnostics means
+  the cheap proxy prefilter may not rank candidates meaningfully; top-K
+  candidate ordering can therefore influence which candidates receive full
+  follower evaluation.
+- Follower actuators remain discrete/quantized where required, so leader search
+  should use derivative-free continuous optimization rather than gradient
+  descent.
+
+### Implementation
+
+Implemented configurable Stackelberg leader search mode:
+
+```yaml
+mpc:
+  leader_search_mode: continuous  # continuous | grid
+  leader_continuous_max_evals: 25
+  leader_continuous_seed_count: 7
+  leader_continuous_local_iterations: 4
+  leader_continuous_initial_step_fraction: 0.35
+  leader_continuous_shrink_factor: 0.5
+  leader_continuous_min_np_step_veh: 40.0
+  leader_continuous_min_nuf_step_veh_h: 125.0
+```
+
+`leader_search_mode=continuous` now evaluates continuous `(N_P_star, N_UF_star)`
+targets using deterministic derivative-free pattern search:
+
+1. Build continuous feasible bounds from movement/net-inflow and ramp-release
+   constraints.
+2. Evaluate seed targets: previous/default, midpoint, heuristic, and bounds.
+3. Evaluate coordinate/diagonal local perturbations around the incumbent best.
+4. Shrink step size when no improvement is found.
+5. Preserve existing follower response, fallback guard, candidate diagnostics,
+   and progress logging.
+
+`leader_search_mode=grid` preserves the previous coarse/refined grid path.
+
+Changed files:
+
+- `src/models/state.py`
+- `src/config/default.yaml`
+- `src/controllers/stackelberg_mpc.py`
+- `src/experiments/all_scenarios_four_controller_comparison.py`
+- `src/experiments/six_controller_comparison.py`
+- `src/experiments/leader_grid_injection_diagnostic.py`
+- `src/tests/test_constraints.py`
+- `docs/spec/04_controller.md`
+- `docs/spec/09_configuration_requirements.md`
+- `reports/leader_continuous_optimizer_discussion.md`
+- `reports/codex_run_report.md`
+
+### Validation
+
+Syntax compile:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m py_compile src\models\state.py src\controllers\stackelberg_mpc.py src\experiments\all_scenarios_four_controller_comparison.py src\experiments\six_controller_comparison.py src\experiments\leader_grid_injection_diagnostic.py src\tests\test_constraints.py
+```
+
+Result: PASS.
+
+Targeted unit tests:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m unittest src.tests.test_constraints.ConstraintTests.test_stackelberg_leader_continuous_search_evaluates_targets src.tests.test_constraints.ConstraintTests.test_stackelberg_leader_evaluates_coarse_and_refined_grid src.tests.test_constraints.ConstraintTests.test_leader_all_urban_halfcap_penalty_counts_boundary_and_storage -v
+```
+
+Result: PASS, 3 tests in 3.518 s.
+
+Full `src.tests.test_constraints` was not completed in this turn because the
+large test suite exceeded the tool timeout during Stackelberg/distributed
+controller tests. The targeted tests above cover the new continuous mode,
+legacy grid mode compatibility, and the recent MFD half-cap penalty.
+
+### Distributed Smoke
+
+First distributed smoke with 5 continuous leader evaluations produced output
+but exceeded the tool timeout:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.all_scenarios_four_controller_comparison --scenario peak_demand --T-total 180 --controllers PROPOSED-STACKELBERG --output outputs\continuous_leader_smoke_peak_180_20260621 --leader-search-mode continuous --leader-continuous-max-evals 5 --leader-continuous-seed-count 3 --leader-continuous-local-iterations 1 --max-nash-iter 1 --disable-stackelberg-fallback --stackelberg-allocation-mode direct --grid-parallel-backend thread --grid-parallel-max-workers 4 --grid-parallel-chunk-size 4 --freeway-prediction-horizon-steps 2
+```
+
+Output showed `leader_search_mode_continuous=1`, 5 evaluated leader targets,
+and selected `N_P_star=2287.25`, `N_UF_star=6000.0`, but controller compute
+time was about 312.6 s for one 180 s step. This confirms the continuous leader
+outer loop works, while distributed follower evaluation remains expensive.
+
+Shorter smoke completed successfully:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.all_scenarios_four_controller_comparison --scenario peak_demand --T-total 180 --controllers PROPOSED-STACKELBERG --output outputs\continuous_leader_smoke_peak_180_evals2_20260621 --leader-search-mode continuous --leader-continuous-max-evals 2 --leader-continuous-seed-count 2 --leader-continuous-local-iterations 0 --max-nash-iter 1 --disable-stackelberg-fallback --stackelberg-allocation-mode direct --grid-parallel-backend thread --grid-parallel-max-workers 4 --grid-parallel-chunk-size 4 --freeway-prediction-horizon-steps 2
+```
+
+Result:
+
+| Run | Horizon | Total TTT | Total delay | Improvement vs no-control | Throughput veh/h | Terminal vehicles | Computation sec |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| PROPOSED-STACKELBERG continuous | 180 s | 19.991 | -0.522 | 0.941% | 8521.9 | 493.6 | 118.69 |
+
+Diagnostics:
+
+- `leader_search_mode_continuous = 1.0`
+- `leader_candidate_full_evaluated_count = 2.0`
+- `leader_candidate_coarse_evaluated_count = 2.0`
+- `leader_candidate_refined_evaluated_count = 0.0`
+- selected `N_P_star = 0.0`
+- selected `N_UF_star = 6000.0`
+- boundary balance was not degraded vs no-control in this one-step smoke:
+  `mean_B_sum = 0.068619` vs no-control `0.111382`
+
+### Failed Criteria / Next Modification
+
+- PASS: continuous leader target search is implemented and configurable.
+- PASS: legacy grid leader search remains available via `leader_search_mode=grid`.
+- PASS: syntax compile and targeted tests passed.
+- PASS: short distributed closed-loop smoke completed.
+- PARTIAL: 5-evaluation continuous smoke shows the expected intermediate target
+  behavior but is still too expensive for routine closed-loop diagnosis.
+- FAIL for final acceptance: no 7200 s scenario comparison was run after this
+  implementation.
+- Next modification should reduce per-leader-evaluation distributed follower
+  cost or add a reliable resume/checkpoint runner before running medium/peak
+  1800 s and then 7200 s comparisons with continuous mode.

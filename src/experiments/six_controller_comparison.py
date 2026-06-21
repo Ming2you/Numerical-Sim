@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -262,6 +263,9 @@ def run_controller(
 ) -> Dict[str, Any]:
     """단일 controller closed-loop 실행 — 모든 controller가 같은 plant/step 루프를 쓴다."""
     output_dir.mkdir(parents=True, exist_ok=True)
+    decision_progress_path = output_dir / "decision_progress.jsonl"
+    decision_progress_path.unlink(missing_ok=True)
+    decision_progress_path.with_suffix(".csv").unlink(missing_ok=True)
     profile = DemandProfile(cfg, scenario)
     sim = MixedTrafficSimulator(cfg)
     adapter = _ControllerAdapter(cfg, controller_id)
@@ -270,26 +274,87 @@ def run_controller(
     control_rows: List[Dict[str, Any]] = []
     state_rows: List[Dict[str, Any]] = []
     decision_rows: List[Dict[str, Any]] = []
+    progress_rows: List[Dict[str, Any]] = []
     for step in range(steps):
+        step_start = time.perf_counter()
         t = step * cfg.simulation.control_interval
         forecast = profile.horizon(t, cfg.mpc.horizon_steps)
-        control, diag = adapter.decide(sim.state.copy(), forecast)
+        old_progress_file = os.environ.get("NUMSIM_STACKELBERG_PROGRESS_FILE")
+        old_progress_step = os.environ.get("NUMSIM_STACKELBERG_PROGRESS_STEP")
+        os.environ["NUMSIM_STACKELBERG_PROGRESS_FILE"] = str(decision_progress_path)
+        os.environ["NUMSIM_STACKELBERG_PROGRESS_STEP"] = str(step)
+        try:
+            control, diag = adapter.decide(sim.state.copy(), forecast)
+        finally:
+            if old_progress_file is None:
+                os.environ.pop("NUMSIM_STACKELBERG_PROGRESS_FILE", None)
+            else:
+                os.environ["NUMSIM_STACKELBERG_PROGRESS_FILE"] = old_progress_file
+            if old_progress_step is None:
+                os.environ.pop("NUMSIM_STACKELBERG_PROGRESS_STEP", None)
+            else:
+                os.environ["NUMSIM_STACKELBERG_PROGRESS_STEP"] = old_progress_step
         log = sim.step(control, forecast[0], step)
-        run_rows.append({"step": step, "time_sec": sim.state.time_sec, **{
+        run_row = {"step": step, "time_sec": sim.state.time_sec, **{
             k: v for k, v in log.diagnostics.items() if isinstance(v, (int, float, bool))
-        }, "freeway_ttt": log.freeway_ttt, "urban_ttt": log.urban_ttt})
+        }, "freeway_ttt": log.freeway_ttt, "urban_ttt": log.urban_ttt}
+        decision_row = {"step": step, **diag}
         control_rows.append(control_row(control, cfg, step, sim.state.time_sec))
         state_rows.append(state_row(sim.state, cfg, step))
-        decision_rows.append({"step": step, **diag})
+        run_rows.append(run_row)
+        decision_rows.append(decision_row)
+        progress_rows.append({
+            "step": step,
+            "time_sec": sim.state.time_sec,
+            "controller_id": controller_id,
+            "step_total_ttt": log.freeway_ttt + log.urban_ttt,
+            "step_urban_ttt": log.urban_ttt,
+            "step_freeway_ttt": log.freeway_ttt,
+            "cumulative_total_ttt": sim.total_ttt,
+            "cumulative_urban_ttt": sim.urban_ttt,
+            "cumulative_freeway_ttt": sim.freeway_ttt,
+            "N_P_star": control.N_P_star,
+            "N_UF_star": control.N_UF_star,
+            "wall_time_sec": time.perf_counter() - step_start,
+            "controller_compute_time_sec": float(diag.get("computation_time_sec", 0.0)),
+            "leader_selected_objective": float(diag.get("leader_selected_objective", 0.0)),
+            "leader_selected_N_P_star": float(diag.get("leader_selected_N_P_star", control.N_P_star)),
+            "leader_selected_N_UF_star": float(diag.get("leader_selected_N_UF_star", control.N_UF_star)),
+            "leader_selected_stage_fallback": float(diag.get("leader_selected_stage_fallback", 0.0)),
+            "leader_selected_stage_fallback_pfo": float(diag.get("leader_selected_stage_fallback_pfo", 0.0)),
+            "leader_selected_stage_fallback_no_control": float(
+                diag.get("leader_selected_stage_fallback_no_control", 0.0)
+            ),
+            "leader_fallback_guard_selected": float(diag.get("leader_fallback_guard_selected", 0.0)),
+            "leader_mfd_storage_penalty": float(diag.get("leader_mfd_storage_penalty", 0.0)),
+            "leader_mfd_storage_excess_veh": float(diag.get("leader_mfd_storage_excess_veh", 0.0)),
+            "mean_B_sum_step": float(run_row.get("B_in", 0.0)) + float(run_row.get("B_out", 0.0)),
+            "terminal_total_vehicles": (
+                sim.state.total_urban_vehicles(cfg.network) + sim.state.total_freeway_vehicles(cfg.network)
+            ),
+        })
+        _write_csv(output_dir / "run_log.csv", run_rows)
+        _write_csv(output_dir / "control_timeseries.csv", control_rows)
+        _write_csv(output_dir / "state_timeseries.csv", state_rows)
+        _write_csv(output_dir / "decision_diagnostics.csv", decision_rows)
+        _write_csv(output_dir / "progress_summary.csv", progress_rows)
+        print(
+            f"{controller_id} step {step + 1}/{steps} "
+            f"cum_ttt={sim.total_ttt:.3f} step_ttt={log.freeway_ttt + log.urban_ttt:.3f} "
+            f"N_P={control.N_P_star:.1f} N_UF={control.N_UF_star:.1f}",
+            flush=True,
+        )
     _write_csv(output_dir / "run_log.csv", run_rows)
     _write_csv(output_dir / "control_timeseries.csv", control_rows)
     _write_csv(output_dir / "state_timeseries.csv", state_rows)
     _write_csv(output_dir / "decision_diagnostics.csv", decision_rows)
+    _write_csv(output_dir / "progress_summary.csv", progress_rows)
     return {
         "run_rows": run_rows,
         "control_rows": control_rows,
         "state_rows": state_rows,
         "decision_rows": decision_rows,
+        "progress_rows": progress_rows,
         "final_state": sim.state,
         "total_ttt": sim.total_ttt,
         "urban_ttt": sim.urban_ttt,
@@ -446,6 +511,14 @@ def main(argv: Optional[List[str]] = None) -> None:
     parser.add_argument("--relaxed-rounding-mode", choices=["floor", "nearest"], default=None)
     parser.add_argument("--relaxed-green-quantum-sec", type=float, default=None)
     parser.add_argument("--relaxed-vsl-quantum-km-h", type=float, default=None)
+    parser.add_argument("--leader-search-mode", choices=["grid", "continuous"], default=None)
+    parser.add_argument("--leader-continuous-max-evals", type=int, default=None)
+    parser.add_argument("--leader-continuous-seed-count", type=int, default=None)
+    parser.add_argument("--leader-continuous-local-iterations", type=int, default=None)
+    parser.add_argument("--leader-continuous-initial-step-fraction", type=float, default=None)
+    parser.add_argument("--leader-continuous-shrink-factor", type=float, default=None)
+    parser.add_argument("--leader-continuous-min-np-step-veh", type=float, default=None)
+    parser.add_argument("--leader-continuous-min-nuf-step-veh-h", type=float, default=None)
     parser.add_argument("--grid-parallel-backend", choices=["serial", "thread", "process"], default=None)
     parser.add_argument("--grid-parallel-max-workers", type=int, default=None)
     parser.add_argument("--grid-parallel-chunk-size", type=int, default=None)
@@ -475,6 +548,30 @@ def main(argv: Optional[List[str]] = None) -> None:
         overrides.setdefault("mpc", {})["relaxed_green_quantum_sec"] = args.relaxed_green_quantum_sec
     if args.relaxed_vsl_quantum_km_h is not None:
         overrides.setdefault("mpc", {})["relaxed_vsl_quantum_km_h"] = args.relaxed_vsl_quantum_km_h
+    if args.leader_search_mode is not None:
+        overrides.setdefault("mpc", {})["leader_search_mode"] = args.leader_search_mode
+    if args.leader_continuous_max_evals is not None:
+        overrides.setdefault("mpc", {})["leader_continuous_max_evals"] = args.leader_continuous_max_evals
+    if args.leader_continuous_seed_count is not None:
+        overrides.setdefault("mpc", {})["leader_continuous_seed_count"] = args.leader_continuous_seed_count
+    if args.leader_continuous_local_iterations is not None:
+        overrides.setdefault("mpc", {})["leader_continuous_local_iterations"] = (
+            args.leader_continuous_local_iterations
+        )
+    if args.leader_continuous_initial_step_fraction is not None:
+        overrides.setdefault("mpc", {})["leader_continuous_initial_step_fraction"] = (
+            args.leader_continuous_initial_step_fraction
+        )
+    if args.leader_continuous_shrink_factor is not None:
+        overrides.setdefault("mpc", {})["leader_continuous_shrink_factor"] = args.leader_continuous_shrink_factor
+    if args.leader_continuous_min_np_step_veh is not None:
+        overrides.setdefault("mpc", {})["leader_continuous_min_np_step_veh"] = (
+            args.leader_continuous_min_np_step_veh
+        )
+    if args.leader_continuous_min_nuf_step_veh_h is not None:
+        overrides.setdefault("mpc", {})["leader_continuous_min_nuf_step_veh_h"] = (
+            args.leader_continuous_min_nuf_step_veh_h
+        )
     if args.grid_parallel_backend is not None:
         overrides.setdefault("mpc", {})["grid_parallel_backend"] = args.grid_parallel_backend
     if args.grid_parallel_max_workers is not None:

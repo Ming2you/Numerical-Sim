@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import time
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
@@ -86,6 +87,11 @@ def _candidate_rows(evaluations: list[Any], labels: Dict[int, str]) -> List[Dict
     for item in sorted(evaluations, key=lambda value: float(value.objective)):
         diag = dict(item.nash.diagnostics)
         diag.update(item.nash.control.diagnostics)
+        control = item.nash.control
+        ramp_sum = float(sum(control.ramp_metering.get(ramp, 0.0) for ramp in control.ramp_metering))
+        vsl_values = list(control.vsl.values())
+        green_values = list(control.green_times.values())
+        offset_values = list(control.offsets.values())
         rows.append({
             "rank": len(rows) + 1,
             "index": int(item.index),
@@ -98,11 +104,16 @@ def _candidate_rows(evaluations: list[Any], labels: Dict[int, str]) -> List[Dict
             "leader_target_penalty": float(item.objective_terms.get("leader_target_penalty", 0.0)),
             "leader_boundary_penalty": float(item.objective_terms.get("leader_boundary_in_queue_penalty", 0.0)),
             "leader_density_penalty": float(item.objective_terms.get("leader_density_penalty", 0.0)),
+            "leader_mfd_storage_penalty": float(item.objective_terms.get("leader_mfd_storage_penalty", 0.0)),
+            "leader_mfd_excess_veh": float(item.objective_terms.get("leader_mfd_storage_excess_veh", 0.0)),
             "leader_smoothness_penalty": float(item.objective_terms.get("leader_smoothness_penalty", 0.0)),
             "rollout_ttt": float(diag.get("distributed_response_rollout_ttt", 0.0)),
             "rollout_urban_ttt": float(diag.get("distributed_response_rollout_urban_ttt", 0.0)),
             "rollout_freeway_ttt": float(diag.get("distributed_response_rollout_freeway_ttt", 0.0)),
             "rollout_terminal_vehicles": float(diag.get("distributed_response_terminal_rollout_vehicles", 0.0)),
+            "terminal_proxy_vehicles": float(diag.get("distributed_response_terminal_proxy_vehicles", 0.0)),
+            "completed_proxy_veh": float(diag.get("distributed_response_mainline_exit_veh", 0.0))
+            + float(diag.get("distributed_response_boundary_out_sink_veh", 0.0)),
             "projected_net_inflow_veh": float(
                 diag.get("distributed_grid_leader_projected_net_inflow_veh", 0.0)
             ),
@@ -111,11 +122,43 @@ def _candidate_rows(evaluations: list[Any], labels: Dict[int, str]) -> List[Dict
             ),
             "metering_sum_veh_h": float(
                 diag.get("distributed_grid_leader_selected_metering_sum_veh_h", 0.0)
-                or sum(item.nash.control.ramp_metering.get(ramp, 0.0) for ramp in item.nash.control.ramp_metering)
+                or ramp_sum
             ),
             "early_terminated": float(diag.get("distributed_grid_early_terminated", 0.0)),
+            "early_terminated_candidates": float(diag.get("distributed_grid_early_terminated_candidates", 0.0)),
+            "avg_vsl_km_h": float(np.mean(vsl_values)) if vsl_values else 0.0,
+            "avg_green_sec": float(np.mean(green_values)) if green_values else 0.0,
+            "avg_offset_sec": float(np.mean(offset_values)) if offset_values else 0.0,
         })
     return rows
+
+
+def _dense_grid_candidates(
+    bounds: Any,
+    np_count: int,
+    nuf_count: int,
+) -> List[Tuple[str, LeaderAction]]:
+    np_count = max(2, int(np_count))
+    nuf_count = max(2, int(nuf_count))
+    rows: List[Tuple[str, LeaderAction]] = []
+    for i, np_value in enumerate(np.linspace(bounds.np_lower, bounds.np_upper, np_count)):
+        for j, nuf_value in enumerate(np.linspace(bounds.nuf_lower, bounds.nuf_upper, nuf_count)):
+            rows.append((
+                f"dense_np{i:02d}_nuf{j:02d}",
+                LeaderAction(float(np_value), float(nuf_value)),
+            ))
+    return rows
+
+
+def _production_grid_candidates(
+    controller: StackelbergMPCController,
+    state: Any,
+    previous: ControlAction,
+    current_demand: Any,
+    forecast: list[Any],
+) -> List[Tuple[str, LeaderAction]]:
+    rows = controller.leader.candidates(state.copy(), previous, current_demand, forecast=forecast)
+    return [(f"production_{idx:03d}", action) for idx, action in enumerate(rows)]
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -128,6 +171,21 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--max-nash-iter", type=int, default=1)
     parser.add_argument("--np-step", type=float, default=40.0)
     parser.add_argument("--nuf-step", type=float, default=500.0)
+    parser.add_argument(
+        "--candidate-mode",
+        choices=("injected", "dense", "combined"),
+        default="injected",
+        help="Candidate set to evaluate exactly: legacy injected anchors, dense grid, or both.",
+    )
+    parser.add_argument("--np-grid-count", type=int, default=9)
+    parser.add_argument("--nuf-grid-count", type=int, default=9)
+    parser.add_argument("--include-production-grid", action="store_true")
+    parser.add_argument("--allocation-mode", choices=("direct", "simplified", "pso"), default="direct")
+    parser.add_argument("--leader-parallel-backend", choices=("serial", "thread", "process"), default="serial")
+    parser.add_argument("--leader-parallel-max-workers", type=int, default=1)
+    parser.add_argument("--grid-parallel-backend", choices=("serial", "thread", "process"), default="thread")
+    parser.add_argument("--grid-parallel-max-workers", type=int, default=8)
+    parser.add_argument("--progress-step-label", default="diagnostic")
     args = parser.parse_args(argv)
 
     overrides = {
@@ -138,10 +196,11 @@ def main(argv: list[str] | None = None) -> None:
             "stackelberg_enable_fallback": False,
             "stackelberg_prefilter_top_k": 0,
             "stackelberg_prefilter_local_top_k": 0,
-            "stackelberg_leader_parallel_backend": "thread",
-            "stackelberg_leader_parallel_max_workers": 4,
-            "grid_parallel_backend": "thread",
-            "grid_parallel_max_workers": 4,
+            "stackelberg_leader_parallel_backend": args.leader_parallel_backend,
+            "stackelberg_leader_parallel_max_workers": int(args.leader_parallel_max_workers),
+            "stackelberg_allocation_mode": args.allocation_mode,
+            "grid_parallel_backend": args.grid_parallel_backend,
+            "grid_parallel_max_workers": int(args.grid_parallel_max_workers),
             "grid_parallel_chunk_size": 8,
         },
         "freeway_follower": {"freeway_prediction_horizon_steps": 3},
@@ -172,7 +231,9 @@ def main(argv: list[str] | None = None) -> None:
     controller = StackelbergMPCController(cfg)
     bounds = controller.leader._candidate_bounds(state, previous, current_demand, forecast)
 
-    raw_candidates: List[Tuple[str, LeaderAction]] = [
+    # Spec 7.3 Case A: grid failure diagnosis. PFO/no-control 역산값은 production
+    # 후보에 주입하지 않고, dense grid가 같은 영역을 평가하는지 확인하는 기준점으로만 둔다.
+    anchor_candidates: List[Tuple[str, LeaderAction]] = [
         ("reverse_no_control_exact", no_action),
         ("reverse_pfo_exact", pfo_action),
         ("previous_default_exact", LeaderAction(previous.N_P_star, previous.N_UF_star)),
@@ -180,15 +241,23 @@ def main(argv: list[str] | None = None) -> None:
     ]
     for center_label, center in (("no_control", no_action), ("pfo", pfo_action)):
         for delta_np in (-2.0 * args.np_step, -args.np_step, args.np_step, 2.0 * args.np_step):
-            raw_candidates.append((
+            anchor_candidates.append((
                 f"{center_label}_np_{delta_np:+.0f}",
                 LeaderAction(center.N_P_star + delta_np, center.N_UF_star),
             ))
         for delta_nuf in (-2.0 * args.nuf_step, -args.nuf_step, args.nuf_step, 2.0 * args.nuf_step):
-            raw_candidates.append((
+            anchor_candidates.append((
                 f"{center_label}_nuf_{delta_nuf:+.0f}",
                 LeaderAction(center.N_P_star, center.N_UF_star + delta_nuf),
             ))
+
+    raw_candidates: List[Tuple[str, LeaderAction]] = []
+    if args.candidate_mode in {"injected", "combined"}:
+        raw_candidates.extend(anchor_candidates)
+    if args.candidate_mode in {"dense", "combined"}:
+        raw_candidates.extend(_dense_grid_candidates(bounds, args.np_grid_count, args.nuf_grid_count))
+    if args.include_production_grid:
+        raw_candidates.extend(_production_grid_candidates(controller, state, previous, current_demand, forecast))
 
     candidates_with_labels = _unique_actions(raw_candidates, bounds)
     candidates = [action for _label, action in candidates_with_labels]
@@ -198,6 +267,8 @@ def main(argv: list[str] | None = None) -> None:
         "LEADER_GRID_INJECTION_START "
         f"scenario={args.scenario} "
         f"follower_solver={cfg.mpc.follower_solver_mode} "
+        f"allocation_mode={cfg.mpc.stackelberg_allocation_mode} "
+        f"candidate_mode={args.candidate_mode} "
         f"candidates={len(candidates)} "
         f"no_control_N_P={no_action.N_P_star:.3f} "
         f"no_control_N_UF={no_action.N_UF_star:.3f} "
@@ -206,6 +277,13 @@ def main(argv: list[str] | None = None) -> None:
         flush=True,
     )
     start = time.perf_counter()
+    out = Path(args.output)
+    out.mkdir(parents=True, exist_ok=True)
+    progress_path = out / "candidate_progress.jsonl"
+    old_progress = os.environ.get("NUMSIM_STACKELBERG_PROGRESS_FILE")
+    old_step = os.environ.get("NUMSIM_STACKELBERG_PROGRESS_STEP")
+    os.environ["NUMSIM_STACKELBERG_PROGRESS_FILE"] = str(progress_path)
+    os.environ["NUMSIM_STACKELBERG_PROGRESS_STEP"] = str(args.progress_step_label)
     evaluations = controller._evaluate_candidate_set(
         candidates,
         list(range(len(candidates))),
@@ -215,6 +293,14 @@ def main(argv: list[str] | None = None) -> None:
         stage="tight_injected",
         incumbent_obj=float("inf"),
     )
+    if old_progress is None:
+        os.environ.pop("NUMSIM_STACKELBERG_PROGRESS_FILE", None)
+    else:
+        os.environ["NUMSIM_STACKELBERG_PROGRESS_FILE"] = old_progress
+    if old_step is None:
+        os.environ.pop("NUMSIM_STACKELBERG_PROGRESS_STEP", None)
+    else:
+        os.environ["NUMSIM_STACKELBERG_PROGRESS_STEP"] = old_step
     elapsed = time.perf_counter() - start
     rows = _candidate_rows(evaluations, labels)
     best_eval = min(evaluations, key=lambda item: item.objective)
@@ -223,12 +309,14 @@ def main(argv: list[str] | None = None) -> None:
     no_metrics = _plant_one_step(cfg, no_control, current_demand)
     pfo_metrics = _plant_one_step(cfg, pfo_control, current_demand)
 
-    out = Path(args.output)
-    out.mkdir(parents=True, exist_ok=True)
     _write_csv(out / "candidate_table.csv", rows)
     summary = {
         "scenario": args.scenario,
         "T_total": float(args.T_total),
+        "candidate_mode": args.candidate_mode,
+        "allocation_mode": cfg.mpc.stackelberg_allocation_mode,
+        "np_grid_count": int(args.np_grid_count),
+        "nuf_grid_count": int(args.nuf_grid_count),
         "candidate_count": len(candidates),
         "evaluation_wall_time_sec": round(elapsed, 3),
         "bounds": {

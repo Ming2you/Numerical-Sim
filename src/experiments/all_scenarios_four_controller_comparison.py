@@ -136,10 +136,28 @@ def _parse_updates(args: argparse.Namespace) -> Dict[str, Any]:
     if args.seed is not None:
         overrides["simulation"]["random_seed"] = args.seed
     overrides["mpc"] = {"relaxed_quantized_controls": True}
+    if args.leader_search_mode is not None:
+        overrides["mpc"]["leader_search_mode"] = args.leader_search_mode
     if args.leader_candidate_count is not None:
         overrides["mpc"]["leader_candidate_count"] = args.leader_candidate_count
     if args.leader_refinement_candidate_count is not None:
         overrides["mpc"]["leader_refinement_candidate_count"] = args.leader_refinement_candidate_count
+    if args.leader_continuous_max_evals is not None:
+        overrides["mpc"]["leader_continuous_max_evals"] = args.leader_continuous_max_evals
+    if args.leader_continuous_seed_count is not None:
+        overrides["mpc"]["leader_continuous_seed_count"] = args.leader_continuous_seed_count
+    if args.leader_continuous_local_iterations is not None:
+        overrides["mpc"]["leader_continuous_local_iterations"] = args.leader_continuous_local_iterations
+    if args.leader_continuous_initial_step_fraction is not None:
+        overrides["mpc"]["leader_continuous_initial_step_fraction"] = (
+            args.leader_continuous_initial_step_fraction
+        )
+    if args.leader_continuous_shrink_factor is not None:
+        overrides["mpc"]["leader_continuous_shrink_factor"] = args.leader_continuous_shrink_factor
+    if args.leader_continuous_min_np_step_veh is not None:
+        overrides["mpc"]["leader_continuous_min_np_step_veh"] = args.leader_continuous_min_np_step_veh
+    if args.leader_continuous_min_nuf_step_veh_h is not None:
+        overrides["mpc"]["leader_continuous_min_nuf_step_veh_h"] = args.leader_continuous_min_nuf_step_veh_h
     if args.max_nash_iter is not None:
         overrides["mpc"]["max_nash_iter"] = args.max_nash_iter
     if args.optimizer_maxiter is not None:
@@ -194,8 +212,16 @@ def main(argv: Optional[List[str]] = None) -> None:
     parser.add_argument("--output", required=True)
     parser.add_argument("--controllers", default=",".join(PRIMARY_CONTROLLERS))
     parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument("--leader-search-mode", choices=["grid", "continuous"], default=None)
     parser.add_argument("--leader-candidate-count", type=int, default=None)
     parser.add_argument("--leader-refinement-candidate-count", type=int, default=None)
+    parser.add_argument("--leader-continuous-max-evals", type=int, default=None)
+    parser.add_argument("--leader-continuous-seed-count", type=int, default=None)
+    parser.add_argument("--leader-continuous-local-iterations", type=int, default=None)
+    parser.add_argument("--leader-continuous-initial-step-fraction", type=float, default=None)
+    parser.add_argument("--leader-continuous-shrink-factor", type=float, default=None)
+    parser.add_argument("--leader-continuous-min-np-step-veh", type=float, default=None)
+    parser.add_argument("--leader-continuous-min-nuf-step-veh-h", type=float, default=None)
     parser.add_argument("--max-nash-iter", type=int, default=None)
     parser.add_argument("--optimizer-maxiter", type=int, default=None)
     parser.add_argument("--optimizer-n-starts", type=int, default=None)

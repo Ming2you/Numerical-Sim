@@ -1344,10 +1344,14 @@ class ConstraintTests(unittest.TestCase):
             {
                 "simulation": {"T_total": 360.0},
                 "mpc": {
-                    "follower_solver_mode": "distributed",
-                    "leader_candidate_count": 6,
-                    "leader_refinement_candidate_count": 9,
-                    "stackelberg_prefilter_top_k": 3,
+                    "follower_solver_mode": "two_block",
+                    "horizon_steps": 1,
+                    "leader_search_mode": "grid",
+                    "leader_candidate_count": 4,
+                    "leader_refinement_candidate_count": 5,
+                    "stackelberg_prefilter_top_k": 2,
+                    "stackelberg_prefilter_local_top_k": 2,
+                    "stackelberg_enable_fallback": False,
                     "max_nash_iter": 1,
                     "stackelberg_leader_parallel_backend": "serial",
                     "grid_parallel_backend": "serial",
@@ -1374,16 +1378,50 @@ class ConstraintTests(unittest.TestCase):
             meta["leader_candidate_coarse_evaluated_count"] + meta["leader_candidate_refined_evaluated_count"],
         )
         self.assertLess(meta["leader_candidate_full_evaluated_count"], meta["leader_candidate_count"])
-        self.assertEqual(meta["leader_fallback_incumbent_seed_active"], 1.0)
-        self.assertGreater(meta["leader_fallback_incumbent_objective"], 0.0)
-        self.assertEqual(meta["leader_candidate_incumbent_any_active"], 1.0)
+        self.assertEqual(meta["leader_fallback_enabled"], 0.0)
+        self.assertEqual(meta["leader_fallback_incumbent_seed_active"], 0.0)
         self.assertGreaterEqual(
             meta["leader_candidate_best_stage_coarse"]
             + meta["leader_candidate_best_stage_refined"]
             + meta["leader_candidate_best_stage_fallback"],
             1.0,
         )
-        self.assertEqual(meta["leader_fallback_guard_active"], 1.0)
+
+    def test_stackelberg_leader_continuous_search_evaluates_targets(self):
+        cfg = ExperimentConfig.from_file(
+            "src/config/default.yaml",
+            {
+                "simulation": {"T_total": 360.0},
+                "mpc": {
+                    "follower_solver_mode": "two_block",
+                    "horizon_steps": 1,
+                    "leader_search_mode": "continuous",
+                    "leader_continuous_max_evals": 3,
+                    "leader_continuous_seed_count": 2,
+                    "leader_continuous_local_iterations": 0,
+                    "stackelberg_enable_fallback": False,
+                    "max_nash_iter": 1,
+                    "grid_parallel_backend": "serial",
+                },
+            },
+        )
+        result = StackelbergMPCController(cfg).decide_with_info(
+            TrafficState.initial(cfg),
+            DemandProfile(cfg, ScenarioConfig("test")).horizon(0.0, cfg.mpc.horizon_steps),
+            ControlAction.fixed(cfg),
+        )
+        meta = result.metadata
+
+        self.assertEqual(meta["leader_search_mode_continuous"], 1.0)
+        self.assertEqual(meta["leader_search_mode_grid"], 0.0)
+        self.assertGreater(meta["leader_candidate_full_evaluated_count"], 0.0)
+        self.assertLessEqual(meta["leader_candidate_full_evaluated_count"], 3.0)
+        self.assertEqual(meta["leader_candidate_parallel_backend_serial"], 1.0)
+        self.assertGreaterEqual(meta["leader_continuous_search_bound_np_upper"], meta["leader_continuous_search_bound_np_lower"])
+        self.assertGreaterEqual(
+            meta["leader_continuous_search_bound_nuf_upper"],
+            meta["leader_continuous_search_bound_nuf_lower"],
+        )
 
     def test_allocation_net_inflow_binding_uses_inflow_outflow_extremes(self):
         cfg = short_config()
@@ -1546,6 +1584,7 @@ class ConstraintTests(unittest.TestCase):
                     "w_F": 3.0,
                     "w_L": 0.5,
                     "N_P_crit_veh": 100.0,
+                    "mfd_penalty_mode": "protected_exceed",
                     "non_convergence_penalty": 0.0,
                 }
             },
@@ -1655,6 +1694,63 @@ class ConstraintTests(unittest.TestCase):
         self.assertAlmostEqual(terms["leader_boundary_in_queue_penalty"], expected_boundary)
         self.assertAlmostEqual(terms["leader_total_objective"], 1234.0 + expected_boundary)
 
+    def test_leader_all_urban_halfcap_penalty_counts_boundary_and_storage(self):
+        cfg = ExperimentConfig.from_file(
+            "src/config/default.yaml",
+            {
+                "leader": {
+                    "w_P": 99.0,
+                    "w_F": 0.0,
+                    "w_boundary_in": 0.0,
+                    "mfd_penalty_mode": "all_urban_halfcap",
+                    "mfd_storage_threshold_ratio": 0.5,
+                    "mfd_storage_weight": 2.0,
+                    "mfd_boundary_queue_capacity_veh": 220.0,
+                }
+            },
+        )
+        state = TrafficState.initial(cfg)
+        for movement in state.urban_movement_queue:
+            state.urban_movement_queue[movement] = 0.0
+
+        boundary_movement, boundary_spec = next(
+            (movement, spec)
+            for movement, spec in cfg.network.urban_movements.items()
+            if spec.get("kind") == "boundary_in"
+        )
+        internal_movement, internal_spec = next(
+            (movement, spec)
+            for movement, spec in cfg.network.urban_movements.items()
+            if spec.get("kind") == "internal"
+        )
+        boundary_capacity = cfg.leader.mfd_boundary_queue_capacity_veh
+        internal_capacity = movement_storage_capacity(cfg, internal_movement, internal_spec)
+        state.urban_movement_queue[boundary_movement] = 0.5 * boundary_capacity + 10.0
+        state.urban_movement_queue[internal_movement] = 0.5 * internal_capacity + 20.0
+
+        link = "A_to_D"
+        link_capacity = cfg.network.urban_link_storage_veh[link]
+        state.urban_link_storage[link] = link_capacity - (0.5 * link_capacity + 30.0)
+
+        terms = Leader(cfg).objective_terms(
+            [state],
+            ControlAction.fixed(cfg),
+            previous=None,
+            follower_objective=100.0,
+            nash_converged=True,
+        )
+
+        expected_excess = 10.0 + 20.0 + 30.0
+        expected_penalty = 2.0 * expected_excess * cfg.simulation.T_c_h
+        self.assertEqual(cfg.leader.mfd_penalty_mode, "all_urban_halfcap")
+        self.assertAlmostEqual(terms["leader_target_penalty"], 0.0)
+        self.assertAlmostEqual(terms["leader_mfd_movement_excess_veh"], 30.0)
+        self.assertAlmostEqual(terms["leader_mfd_boundary_queue_capacity_veh"], 220.0)
+        self.assertAlmostEqual(terms["leader_mfd_link_excess_veh"], 30.0)
+        self.assertAlmostEqual(terms["leader_mfd_storage_excess_veh"], expected_excess)
+        self.assertAlmostEqual(terms["leader_mfd_storage_penalty"], expected_penalty)
+        self.assertAlmostEqual(terms["leader_total_objective"], 100.0 + expected_penalty)
+
     def test_default_leader_accumulation_penalties_use_control_interval_hours(self):
         cfg = ExperimentConfig.from_file(
             "src/config/default.yaml",
@@ -1664,6 +1760,7 @@ class ConstraintTests(unittest.TestCase):
                     "w_F": 3.0,
                     "w_L": 0.0,
                     "N_P_crit_veh": 100.0,
+                    "mfd_penalty_mode": "protected_exceed",
                 }
             },
         )

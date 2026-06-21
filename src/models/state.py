@@ -333,11 +333,19 @@ class CapacityDropConfig:
 @dataclass
 class MPCConfig:
     horizon_steps: int = 3
+    leader_search_mode: str = "continuous"
     leader_candidate_count: int = 49
     leader_refinement_candidate_count: int = 25
     leader_global_refresh_sec: float = 1800.0
     leader_local_np_radius_veh: float = 40.0
     leader_local_nuf_radius_veh_h: float = 1500.0
+    leader_continuous_max_evals: int = 25
+    leader_continuous_seed_count: int = 7
+    leader_continuous_local_iterations: int = 4
+    leader_continuous_initial_step_fraction: float = 0.35
+    leader_continuous_shrink_factor: float = 0.5
+    leader_continuous_min_np_step_veh: float = 40.0
+    leader_continuous_min_nuf_step_veh_h: float = 125.0
     follower_solver_mode: str = "two_block"
     max_nash_iter: int = 10
     nash_obj_tol: float = 1.0e-3
@@ -379,6 +387,10 @@ class LeaderConfig:
     w_L: float = 0.0
     # Step D: boundary_in 큐 비용은 진단용으로 계산하되 leader_total_objective에는 더하지 않는다.
     w_boundary_in: float = 0.0
+    mfd_penalty_mode: str = "all_urban_halfcap"
+    mfd_storage_threshold_ratio: float = 0.5
+    mfd_storage_weight: float = 1.0
+    mfd_boundary_queue_capacity_veh: float = 220.0
     N_P_star_range: List[float] = field(default_factory=lambda: [-3500.0, 3500.0])
     N_UF_star_range: List[float] = field(default_factory=lambda: [0.0, 6000.0])
     N_P_crit_veh: float = 509.448830418254
@@ -491,6 +503,8 @@ class ExperimentConfig:
         self.simulation.validate()
         if self.mpc.follower_solver_mode not in {"two_block", "distributed"}:
             raise ValueError("mpc.follower_solver_mode must be two_block or distributed.")
+        if self.mpc.leader_search_mode not in {"grid", "continuous"}:
+            raise ValueError("mpc.leader_search_mode must be grid or continuous.")
         if self.mpc.leader_candidate_count <= 0:
             raise ValueError("mpc.leader_candidate_count must be positive.")
         if self.mpc.leader_refinement_candidate_count <= 0:
@@ -501,6 +515,20 @@ class ExperimentConfig:
             raise ValueError("mpc.leader_local_np_radius_veh must be positive.")
         if self.mpc.leader_local_nuf_radius_veh_h <= 0.0:
             raise ValueError("mpc.leader_local_nuf_radius_veh_h must be positive.")
+        if self.mpc.leader_continuous_max_evals <= 0:
+            raise ValueError("mpc.leader_continuous_max_evals must be positive.")
+        if self.mpc.leader_continuous_seed_count <= 0:
+            raise ValueError("mpc.leader_continuous_seed_count must be positive.")
+        if self.mpc.leader_continuous_local_iterations < 0:
+            raise ValueError("mpc.leader_continuous_local_iterations must be non-negative.")
+        if self.mpc.leader_continuous_initial_step_fraction <= 0.0:
+            raise ValueError("mpc.leader_continuous_initial_step_fraction must be positive.")
+        if not 0.0 < self.mpc.leader_continuous_shrink_factor < 1.0:
+            raise ValueError("mpc.leader_continuous_shrink_factor must be in (0, 1).")
+        if self.mpc.leader_continuous_min_np_step_veh <= 0.0:
+            raise ValueError("mpc.leader_continuous_min_np_step_veh must be positive.")
+        if self.mpc.leader_continuous_min_nuf_step_veh_h <= 0.0:
+            raise ValueError("mpc.leader_continuous_min_nuf_step_veh_h must be positive.")
         if self.mpc.distributed_coupling_tol <= 0.0:
             raise ValueError("mpc.distributed_coupling_tol must be positive.")
         if self.mpc.relaxed_green_quantum_sec <= 0.0:
@@ -544,6 +572,22 @@ class ExperimentConfig:
             raise ValueError("freeway_offramp_capacity_drop.b must be positive.")
         if self.leader.objective_mode not in {"state_accumulation", "follower_ttt"}:
             raise ValueError("leader.objective_mode must be state_accumulation or follower_ttt.")
+        if self.leader.mfd_penalty_mode not in {
+            "disabled",
+            "protected_exceed",
+            "all_urban_halfcap",
+            "combined",
+        }:
+            raise ValueError(
+                "leader.mfd_penalty_mode must be disabled, protected_exceed, "
+                "all_urban_halfcap, or combined."
+            )
+        if not 0.0 <= self.leader.mfd_storage_threshold_ratio <= 1.0:
+            raise ValueError("leader.mfd_storage_threshold_ratio must be in [0, 1].")
+        if self.leader.mfd_storage_weight < 0.0:
+            raise ValueError("leader.mfd_storage_weight must be non-negative.")
+        if self.leader.mfd_boundary_queue_capacity_veh <= 0.0:
+            raise ValueError("leader.mfd_boundary_queue_capacity_veh must be positive.")
         if self.leader.N_P_star_unit != "veh":
             raise ValueError("leader.N_P_star_unit must be veh.")
         if self.leader.N_P_crit_veh <= 0.0:

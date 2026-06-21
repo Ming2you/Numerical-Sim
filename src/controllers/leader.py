@@ -7,7 +7,7 @@ import numpy as np
 
 from src.models.demand import DemandStep
 from src.models.state import ControlAction, ExperimentConfig, TrafficState
-from src.models.urban_queue_model import estimate_onramp_green_release_flows
+from src.models.urban_queue_model import estimate_onramp_green_release_flows, movement_storage_capacity
 
 
 @dataclass(frozen=True)
@@ -539,6 +539,30 @@ class Leader:
         penalty = lc.non_convergence_penalty * (obj_component + control_component)
         return float(penalty), float(obj_component), float(control_component)
 
+    def _urban_halfcap_excess(self, states: Iterable[TrafficState]) -> tuple[float, float, float]:
+        net = self.cfg.network
+        threshold = float(self.cfg.leader.mfd_storage_threshold_ratio)
+        movement_excess = 0.0
+        link_excess = 0.0
+        off_ramp_storage_links = set(net.off_ramp_storage_link.values())
+        for state in states:
+            for movement, spec in net.urban_movements.items():
+                kind = str(spec.get("kind", ""))
+                if kind in {"boundary_in", "boundary_out"}:
+                    capacity = self.cfg.leader.mfd_boundary_queue_capacity_veh
+                else:
+                    capacity = movement_storage_capacity(self.cfg, movement, spec)
+                capacity = max(float(capacity), 1.0e-9)
+                queue = max(0.0, state.urban_movement_queue.get(movement, 0.0))
+                movement_excess += max(0.0, queue - threshold * capacity)
+            for link, capacity_value in net.urban_link_storage_veh.items():
+                if link in off_ramp_storage_links:
+                    continue
+                capacity = max(float(capacity_value), 1.0e-9)
+                occupancy = max(0.0, capacity - state.urban_link_storage.get(link, capacity))
+                link_excess += max(0.0, occupancy - threshold * capacity)
+        return float(movement_excess + link_excess), float(movement_excess), float(link_excess)
+
     def objective_terms(
         self,
         predicted_states: Iterable[TrafficState],
@@ -560,13 +584,29 @@ class Leader:
             base = state_base
             accumulation_penalty_scale = 1.0
         target_penalty = 0.0
+        mfd_storage_excess_veh = 0.0
+        mfd_movement_excess_veh = 0.0
+        mfd_link_excess_veh = 0.0
+        mfd_mode = lc.mfd_penalty_mode
+        use_protected_exceed = mfd_mode in {"protected_exceed", "combined"}
+        use_all_urban_halfcap = mfd_mode in {"all_urban_halfcap", "combined"}
         boundary_in_queue_veh = 0.0
         for s in states:
             n_p = s.protected_accumulation_veh(net)
             # follower_ttt 모드의 base는 veh*h이므로 accumulation 초과 항도 T_c_h로 맞춘다.
-            target_penalty += lc.w_P * max(0.0, n_p - lc.N_P_crit_veh) * accumulation_penalty_scale
+            if use_protected_exceed:
+                target_penalty += lc.w_P * max(0.0, n_p - lc.N_P_crit_veh) * accumulation_penalty_scale
             # boundary_in 큐는 최종 Total TTT에 포함되므로 leader TTS 목적함수에도 반영한다.
             boundary_in_queue_veh += s.boundary_in_queue_vehicles(net)
+        if use_all_urban_halfcap:
+            (
+                mfd_storage_excess_veh,
+                mfd_movement_excess_veh,
+                mfd_link_excess_veh,
+            ) = self._urban_halfcap_excess(states)
+        mfd_storage_penalty = (
+            lc.mfd_storage_weight * mfd_storage_excess_veh * accumulation_penalty_scale
+        )
         boundary_in_queue_penalty = (
             lc.w_boundary_in * boundary_in_queue_veh * accumulation_penalty_scale
         )
@@ -583,7 +623,13 @@ class Leader:
         )
         # Boundary-in queues are priced because final Total TTT counts them.
         # Non-convergence remains diagnostic-only per Spec 4.6.
-        total = base + target_penalty + boundary_in_queue_penalty + density_penalty
+        total = (
+            base
+            + target_penalty
+            + mfd_storage_penalty
+            + boundary_in_queue_penalty
+            + density_penalty
+        )
         return {
             "leader_base_accumulation": float(state_base),
             "leader_objective_base": float(base),
@@ -591,6 +637,14 @@ class Leader:
             "leader_follower_ttt_base": float(follower_objective),
             "leader_boundary_leg_excluded_veh": float(boundary_excluded),
             "leader_target_penalty": float(target_penalty),
+            "leader_mfd_penalty_mode_protected_exceed": float(use_protected_exceed),
+            "leader_mfd_penalty_mode_all_urban_halfcap": float(use_all_urban_halfcap),
+            "leader_mfd_storage_threshold_ratio": float(lc.mfd_storage_threshold_ratio),
+            "leader_mfd_boundary_queue_capacity_veh": float(lc.mfd_boundary_queue_capacity_veh),
+            "leader_mfd_storage_excess_veh": float(mfd_storage_excess_veh),
+            "leader_mfd_movement_excess_veh": float(mfd_movement_excess_veh),
+            "leader_mfd_link_excess_veh": float(mfd_link_excess_veh),
+            "leader_mfd_storage_penalty": float(mfd_storage_penalty),
             "leader_boundary_in_queue_veh": float(boundary_in_queue_veh),
             "leader_boundary_in_queue_penalty": float(boundary_in_queue_penalty),
             "leader_density_excess": float(density_excess),
