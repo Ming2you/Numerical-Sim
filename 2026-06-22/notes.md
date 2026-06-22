@@ -144,7 +144,30 @@ full 탐색은 `leader_global_refresh_sec(1800s)`마다만 하고 나머지 스�
 ### 더 줄일 여지(미검증)
 - global 8(6 실패와 10 사이), local 2 — 추가 절감 가능하나 정확도 리스크. 현 10/3이 검증된 안전 최소.
 
-## 8. TODO
+## 8. 추가 진단 (음성 결과) + worker 튜닝
+
+### myopia (horizon) — 가설 기각
+horizon_steps {3,4,5} × 900s: cum_TTT 134.47/134.35/136.24. **horizon 늘려도 개선 없음**(H=5는 악화).
+→ 407<418(예산↓이 더 좋음)은 고칠 수 있는 유한-horizon myopia가 아니라 평평한 objective 근방의 점 선택 차이. horizon_steps=3 유지.
+
+### allocation 모듈(pso/simplified) — direct보다 열위, 근본 규명
+"allocation 켜면 더 좋을 것" 가설 검증 (900s):
+| | landscape | cum_TTT | N_P |
+|---|---|---:|---|
+| direct | 내부최적(488) | **134.47** | 안정 |
+| pso | 울퉁불퉁(noise) | 213.05 | 요동 |
+| simplified(결정론) | 평활 | 229.40 | 993 핀 |
+- pso는 PSO 난수가 leader objective에 noise 주입 → setpoint 요동.
+- 노이즈 제거(simplified)하면 평활해지나 **objective가 상한으로 단조 → 과유입 핀 → 더 나쁨**.
+- 근본: allocation이 net-inflow 목표를 **강제 추종**시켜 follower의 자기절제(green 자유선택)를 제거 → 짧은 horizon에서 "최대 유입" 선호. direct는 follower가 TTT-최적 내부점으로 절제해서 우월.
+- 결론: **이 네트워크에선 allocation ON이 도움 안 됨. direct 유지.**
+- 참고: pso가 빠른 건 PSO라서가 아니라 **목적함수가 analytical 근사(무-rollout)** 라서. direct의 비용=실제 rollout(정확도원). 속도↔정확도는 목적함수 충실도로 묶임.
+
+### grid worker 튜닝 (무손실)
+20코어인데 워커 8 → 12로(16+는 page-file WinError 1455 크래시). step-0 247.8→197.4s(~20%↓), 결정 동일.
+- `grid_parallel_max_workers: 8→12`, `grid_parallel_chunk_size: 8→4`.
+
+## 9. TODO
 
 - (별도) P-STACK 퇴화 근본 수정: `direct` 모드 N_P_star→follower 매핑이 2-plateau로 뭉개지는 문제. leader leverage 회복 설계 필요.
 - (별도) forecast-awareness Phase B 테스트 5건 / ablation 2건 — 기존 미완 작업.

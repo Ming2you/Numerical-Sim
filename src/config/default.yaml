@@ -215,9 +215,11 @@ mpc:
   # process는 production 하네스에서 정상 동작·정확도 동일·2.49× 단축(2026-06-21 검증). leader는 serial로
   # 두어 중첩 pool을 피한다(leader=serial+grid=process가 최적: 229s vs leader=process 362s vs serial 569s).
   grid_parallel_backend: process
-  grid_parallel_max_workers: 8
+  # 20코어 머신: 워커 12가 8 대비 step-0 ~20% 단축(247.8→197.4s)·결정 동일(무손실).
+  # 16+는 Windows page-file 부족(WinError 1455)으로 크래시 → 12가 안전 상한(2026-06-22).
+  grid_parallel_max_workers: 12
   grid_parallel_min_items: 2
-  grid_parallel_chunk_size: 8
+  grid_parallel_chunk_size: 4
   grid_reuse_process_pool: true
   stackelberg_prefilter_top_k: 4
   stackelberg_prefilter_local_top_k: 4
