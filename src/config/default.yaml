@@ -174,10 +174,18 @@ mpc:
   leader_global_refresh_sec: 1800.0
   leader_local_np_radius_veh: 40.0
   leader_local_nuf_radius_veh_h: 1500.0
-  leader_continuous_max_evals: 25
+  # global step 예산: step-0 budget 곡선에서 max_evals=10이 25와 동일 setpoint(N_P=488)·objective를
+  # 내고 시간은 -56%(484s→214s). 6은 부족(상한 saturate). 작아진 탐색공간 덕에 10으로 충분(2026-06-22).
+  leader_continuous_max_evals: 10
   leader_continuous_seed_count: 7
   leader_continuous_prefilter_samples: 31
   leader_continuous_prefilter_top_k: 7
+  # 비-global(local) 스텝 전용 축소 예산: full 탐색은 leader_global_refresh_sec마다만,
+  # 그 외 스텝은 previous 인근 sensitivity 상위 소수만 평가해 비용 절감(2026-06-22).
+  leader_continuous_local_max_evals: 3
+  leader_continuous_local_seed_count: 3
+  leader_continuous_local_prefilter_samples: 12
+  leader_continuous_local_prefilter_top_k: 3
   leader_continuous_hard_precheck: true
   leader_continuous_precheck_spillback_tolerance_veh: 0.0
   leader_continuous_parallel_multistart: true

@@ -87,7 +87,64 @@
   end-to-end는 P-STACK≠P-FO를 명확히 보여줌. 필요시 그 테스트 setup 재검토.
 - 5-시나리오 풀 매트릭스 재실행으로 일반화 확인(선택).
 
-## 6. TODO
+## 6. local 탐색 예산 축소 (computation cost 추가 절감 — 완료·검증)
+
+### 동기
+full 탐색은 `leader_global_refresh_sec(1800s)`마다만 하고 나머지 스텝은 previous 인근만 보는 구조는
+이미 있었으나(`_continuous_leader_search`의 global/local 분기 + local radius + sensitivity 방향),
+**평가 예산(max_evals/seed/prefilter)이 global·local 공통**이라 local 스텝도 작은 영역을 촘촘히 평가했다.
+
+### 변경
+- `src/models/state.py` MpcConfig: local 전용 키 4개 추가(+검증)
+  `leader_continuous_local_max_evals=6`, `local_seed_count=3`, `local_prefilter_samples=12`, `local_prefilter_top_k=3`.
+- `src/config/default.yaml`: 위 키 추가.
+- `src/controllers/stackelberg_mpc.py` `_continuous_leader_search`: global_refresh면 full 예산,
+  아니면 local 축소 예산 사용. `_continuous_prefilter_actions`에 prefilter_samples/top_k 인자 추가.
+
+### 검증 (peak 1800s, P-STACK)
+| | total_ttt | 계산시간 |
+|---|---:|---:|
+| global=8/local=8(직전) | 419.95 | 1640.3s |
+| global=25/**local=6**(현재 기본) | **418.35** | **1362.9s** |
+
+- 계산 **~17% 단축** (global step 예산 8→25로 키웠는데도). 정확도 약간 향상(419.95→418.35), PFO 451.48 대비 우위 유지(30.95%).
+- N_P 안정 내부 이동(487→…→367), local 스텝이 radius 내에서 천천히 추종.
+- 로그: `outputs/pstack_localbudget.log` / `outputs/pstack_localbudget_peak_1800_20260622`.
+
+## 7. 최적 예산 탐색 (computation cost 최소화 — 완료)
+
+### 방법 (full 런 난사 대신 격리 측정)
+- 기존 런 per-step 진단: **global step(step 0)이 전체 1363s의 39%(533s, 25 evals)**, local은 이미 lean(4~6 evals).
+- step-0에서 global max_evals만 바꿔 격리 실행(budget 곡선):
+
+  | max_evals | 선택 N_P | leader_obj | wall |
+  |---:|---:|---:|---:|
+  | 6 | 993(saturate) | 79.909 | 135s |
+  | **10** | **488(최적)** | **74.238** | 214s |
+  | 16 | 488 | 74.238 | 335s |
+  | 25 | 488 | 74.238 | 484s |
+
+  → max_evals=10이 25와 동일 setpoint·objective. knee=10. 6은 부족.
+
+### 확정 값 (default.yaml)
+- `leader_continuous_max_evals: 25 → 10`
+- `leader_continuous_local_max_evals: 6 → 3`
+
+### 검증 (peak 1800s, P-STACK)
+| config | total_ttt | improvement | P-STACK compute |
+|---|---:|---:|---:|
+| global=25 / local=6 | 418.35 | 30.95% | 1362.9s |
+| **global=10 / local=3** | **407.20** | **32.79%** | **714.2s** |
+
+- 계산 **−47.6%**(1362.9→714.2s)인데 정확도 **향상**(418.35→407.20, PFO 451.48 대비 32.8%).
+  (leader objective의 유한-horizon myopia상 과탐색이 오히려 closed-loop 손해인 구간이라, lean 예산이 더 좋음.)
+- 원래 Codex baseline(1703s, 468.48 패배) 대비 누적: **~2.4× 빠르고 패배→승리.**
+- 곡선 probe: `2026-06-22/diag_scripts/_diag_budget.py`, 로그 `outputs/pstack_tuned.log`.
+
+### 더 줄일 여지(미검증)
+- global 8(6 실패와 10 사이), local 2 — 추가 절감 가능하나 정확도 리스크. 현 10/3이 검증된 안전 최소.
+
+## 8. TODO
 
 - (별도) P-STACK 퇴화 근본 수정: `direct` 모드 N_P_star→follower 매핑이 2-plateau로 뭉개지는 문제. leader leverage 회복 설계 필요.
 - (별도) forecast-awareness Phase B 테스트 5건 / ablation 2건 — 기존 미완 작업.

@@ -343,6 +343,12 @@ class MPCConfig:
     leader_continuous_seed_count: int = 7
     leader_continuous_prefilter_samples: int = 31
     leader_continuous_prefilter_top_k: int = 7
+    # 비-global(local) 스텝 전용 축소 예산. full 탐색은 leader_global_refresh_sec마다만 하고,
+    # 그 외 스텝은 previous 인근에서 sensitivity 상위 몇 점만 평가해 비용을 낮춘다.
+    leader_continuous_local_max_evals: int = 6
+    leader_continuous_local_seed_count: int = 3
+    leader_continuous_local_prefilter_samples: int = 12
+    leader_continuous_local_prefilter_top_k: int = 3
     leader_continuous_hard_precheck: bool = True
     leader_continuous_precheck_spillback_tolerance_veh: float = 0.0
     leader_continuous_parallel_multistart: bool = True
@@ -529,6 +535,14 @@ class ExperimentConfig:
             raise ValueError("mpc.leader_continuous_prefilter_samples must be non-negative.")
         if self.mpc.leader_continuous_prefilter_top_k <= 0:
             raise ValueError("mpc.leader_continuous_prefilter_top_k must be positive.")
+        if self.mpc.leader_continuous_local_max_evals <= 0:
+            raise ValueError("mpc.leader_continuous_local_max_evals must be positive.")
+        if self.mpc.leader_continuous_local_seed_count <= 0:
+            raise ValueError("mpc.leader_continuous_local_seed_count must be positive.")
+        if self.mpc.leader_continuous_local_prefilter_samples < 0:
+            raise ValueError("mpc.leader_continuous_local_prefilter_samples must be non-negative.")
+        if self.mpc.leader_continuous_local_prefilter_top_k <= 0:
+            raise ValueError("mpc.leader_continuous_local_prefilter_top_k must be positive.")
         if self.mpc.leader_continuous_precheck_spillback_tolerance_veh < 0.0:
             raise ValueError("mpc.leader_continuous_precheck_spillback_tolerance_veh must be non-negative.")
         if self.mpc.leader_continuous_local_iterations < 0:

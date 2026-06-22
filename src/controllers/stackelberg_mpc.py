@@ -464,7 +464,18 @@ class StackelbergMPCController:
                 float(min(max(float(nuf_value), nuf_lower), nuf_upper)),
             )
 
-        max_evals = max(1, int(self.cfg.mpc.leader_continuous_max_evals))
+        # full 탐색은 global refresh 스텝에서만, local 스텝은 축소 예산으로 previous 인근만 본다.
+        if global_refresh:
+            eff_max_evals = int(self.cfg.mpc.leader_continuous_max_evals)
+            eff_seed_count = int(self.cfg.mpc.leader_continuous_seed_count)
+            eff_prefilter_samples = int(self.cfg.mpc.leader_continuous_prefilter_samples)
+            eff_prefilter_top_k = int(self.cfg.mpc.leader_continuous_prefilter_top_k)
+        else:
+            eff_max_evals = int(self.cfg.mpc.leader_continuous_local_max_evals)
+            eff_seed_count = int(self.cfg.mpc.leader_continuous_local_seed_count)
+            eff_prefilter_samples = int(self.cfg.mpc.leader_continuous_local_prefilter_samples)
+            eff_prefilter_top_k = int(self.cfg.mpc.leader_continuous_local_prefilter_top_k)
+        max_evals = max(1, eff_max_evals)
         raw_seed_actions = self._continuous_seed_actions(
             previous,
             bounds,
@@ -486,8 +497,10 @@ class StackelbergMPCController:
             np_upper,
             nuf_lower,
             nuf_upper,
+            prefilter_samples=eff_prefilter_samples,
+            prefilter_top_k=eff_prefilter_top_k,
         )
-        seed_actions = seed_actions[: max(1, int(self.cfg.mpc.leader_continuous_seed_count))]
+        seed_actions = seed_actions[: max(1, eff_seed_count)]
         coarse_stage = "continuous_global" if global_refresh else "continuous_local"
         evaluated, incumbent_obj = self._evaluate_continuous_action_set(
             seed_actions[:max_evals],
@@ -653,11 +666,17 @@ class StackelbergMPCController:
         np_upper: float,
         nuf_lower: float,
         nuf_upper: float,
+        prefilter_samples: Optional[int] = None,
+        prefilter_top_k: Optional[int] = None,
     ) -> tuple[list[LeaderAction], Dict[str, float]]:
+        if prefilter_samples is None:
+            prefilter_samples = int(self.cfg.mpc.leader_continuous_prefilter_samples)
+        if prefilter_top_k is None:
+            prefilter_top_k = int(self.cfg.mpc.leader_continuous_prefilter_top_k)
         samples = self._unique_leader_actions(
             seed_actions
             + self._continuous_low_discrepancy_samples(
-                int(self.cfg.mpc.leader_continuous_prefilter_samples),
+                int(prefilter_samples),
                 np_lower,
                 np_upper,
                 nuf_lower,
@@ -687,7 +706,7 @@ class StackelbergMPCController:
                 for idx, action in enumerate(self._unique_leader_actions(seed_actions))
             ]
         rows = sorted(rows, key=lambda row: (row["objective"], row["spillback_violation"], row["index"]))
-        top_k = max(1, int(self.cfg.mpc.leader_continuous_prefilter_top_k))
+        top_k = max(1, int(prefilter_top_k))
         selected_indices = [int(row["index"]) for row in rows[:top_k]]
         selected_actions = [samples[idx] for idx in selected_indices if 0 <= idx < len(samples)]
         # 기본/직전 seed가 cheap proxy에서 살짝 밀려도 한 개는 남겨 guard 역할을 하게 한다.
