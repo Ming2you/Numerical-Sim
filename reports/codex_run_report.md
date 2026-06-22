@@ -9456,3 +9456,67 @@ Continuous diagnostics:
   with `leader_continuous_prefilter_samples` and `leader_continuous_prefilter_top_k`
   enabled, then inspect whether the selected targets move away from the previous
   high-release pattern.
+
+## 2026-06-21 - Leader follower-TTT fidelity probe
+
+### Purpose
+
+Claude's boundary-queue hypothesis was set aside. The diagnostic question was
+whether the Stackelberg leader's `leader_follower_ttt_base` is faithful to the
+actual plant TTT/TTS observed after applying the selected control.
+
+### Commands
+
+Existing 1800 s peak continuous P-Stack output was re-read:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -c "<csv correlation probe>" `
+  # input: outputs\continuous_leader_peak_1800_pfo_pstack_evals5_20260621\runs\peak_demand\PROPOSED-STACKELBERG
+```
+
+A current-code smoke probe was also run with a small leader evaluation budget:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" C:\tmp\fidelity_probe_current.py `
+  --scenario peak_demand `
+  --seconds 900 `
+  --max-evals 1 `
+  --prefilter-samples 5 `
+  --prefilter-top-k 1 `
+  --output-dir outputs\fidelity_probe_current_peak_900_evals1_20260621
+```
+
+### Results
+
+Existing 1800 s peak P-Stack continuous output:
+
+| Comparison | Rows | Correlation | Mean ratio | Mean abs error |
+|---|---:|---:|---:|---:|
+| `leader_follower_ttt_base` vs same-step plant TTT | 10 | 0.9995 | 3.419 | n/a |
+| `leader_follower_ttt_base` vs complete 3-step rolling plant TTT | 8 | 0.999999 | 1.002 | 0.272 veh*h |
+
+Current-code 900 s peak smoke (`leader_continuous_max_evals=1`):
+
+| Comparison | Rows | Correlation | Mean ratio | Mean abs error |
+|---|---:|---:|---:|---:|
+| `leader_follower_ttt_base` vs same-step plant TTT | 5 | 0.9906 | 3.503 | n/a |
+| `leader_follower_ttt_base` vs complete 3-step rolling plant TTT | 3 | 0.999891 | 1.007 | 0.617 veh*h |
+
+The same-step comparison is expected to be roughly 3x larger because
+`leader_follower_ttt_base` is an MPC-horizon cost while `step_total_ttt` is a
+single control interval. When compared against the complete 3-step rolling
+plant TTT, the selected-control fidelity is very high.
+
+### Diagnosis
+
+- PASS: for selected controls, `leader_follower_ttt_base` is effectively a
+  3-step plant TTT/TTS proxy under the current model and logging.
+- This does not support the hypothesis that P-Stack is worse because
+  `follower_ttt_base` omits a large part of realized plant TTT.
+- Remaining likely causes are candidate/ranking effects rather than
+  selected-action accounting: finite horizon, leader target feasible-set
+  restrictions, release/throughput tradeoff, continuous-search budget, or
+  penalties shaping the selected target.
+- NOT VERIFIED by this probe: counterfactual candidate-level fidelity. A next
+  diagnostic should compare candidate objective rankings against actual
+  counterfactual rollouts from the same initial state.
