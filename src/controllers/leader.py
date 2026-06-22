@@ -7,7 +7,11 @@ import numpy as np
 
 from src.models.demand import DemandStep
 from src.models.state import ControlAction, ExperimentConfig, TrafficState
-from src.models.urban_queue_model import estimate_onramp_green_release_flows, movement_storage_capacity
+from src.models.urban_queue_model import (
+    estimate_onramp_green_release_flows,
+    movement_forecast_arrivals_veh,
+    movement_storage_capacity,
+)
 
 
 @dataclass(frozen=True)
@@ -311,7 +315,7 @@ class Leader:
         forecast: list[DemandStep],
         nuf_upper: float,
     ) -> tuple[float, float, float, float]:
-        min_net, max_net = self._movement_net_flow_bounds(nuf_upper)
+        min_net, max_net = self._movement_net_flow_bounds(state, forecast, nuf_upper)
         flow_lower = min_net
         flow_upper = max_net
         horizon_h = self._np_target_horizon_h(forecast)
@@ -319,9 +323,27 @@ class Leader:
         np_upper = flow_upper * horizon_h
         return float(np_lower), float(np_upper), float(min_net), float(max_net)
 
-    def _movement_net_flow_bounds(self, nuf_upper: float) -> tuple[float, float]:
+    def _movement_net_flow_bounds(
+        self,
+        state: TrafficState,
+        forecast: list[DemandStep],
+        nuf_upper: float,
+    ) -> tuple[float, float]:
+        # 도달 가능 net-inflow는 movement 용량이 아니라 실제 서비스 가능량(큐+도착)으로
+        # 제한된다. 종전 capacity envelope(flow_max 합)는 수천 veh로 과대해 N_P_star
+        # 탐색이 도달 불가 영역의 saturation 평원으로 퇴화했다(2026-06-22 진단).
         net = self.cfg.network
         flow_max = float(net.green_max) / max(float(net.cycle_length), 1.0e-9) * float(net.movement_capacity_veh_h)
+        horizon_h = self._np_target_horizon_h(forecast)
+        # 후보 범위(feasible set)는 현재 state+첫-스텝 수요로 정해 forecast-미래에 무관하게 둔다
+        # (forecast 민감도는 후보 평가에서 다룬다 — leader 후보 설계 계약). 첫-스텝 도착률을
+        # np 목표 horizon으로 스케일해 큐와 합산한다.
+        dt_h = max(float(self.cfg.simulation.T_c_h), 1.0e-9)
+        first_step = list(forecast)[:1]
+        step_arrivals = movement_forecast_arrivals_veh(self.cfg, first_step)
+        horizon_scale = horizon_h / dt_h
+        arrivals = {movement: value * horizon_scale for movement, value in step_arrivals.items()}
+        total_ramp_cap = max(float(net.total_ramp_capacity), 1.0e-9)
         ramp_counts: Dict[str, int] = {}
         for spec in net.urban_movements.values():
             if str(spec.get("kind", "")) != "on_ramp":
@@ -329,31 +351,32 @@ class Leader:
             ramp = str(spec.get("ramp", ""))
             if ramp:
                 ramp_counts[ramp] = ramp_counts.get(ramp, 0) + 1
-        total_ramp_cap = max(float(net.total_ramp_capacity), 1.0e-9)
-        inflow_lower = inflow_upper = outflow_lower = outflow_upper = 0.0
-        for spec in net.urban_movements.values():
+        inflow_servable = 0.0
+        outflow_servable = 0.0
+        for movement, spec in net.urban_movements.items():
             kind = str(spec.get("kind", ""))
             if kind not in {"boundary_in", "off_ramp", "boundary_out", "on_ramp"}:
                 continue
-            lower = 0.0
-            upper = flow_max
-            if kind == "boundary_out":
-                lower = upper = flow_max
-            elif kind == "on_ramp":
+            cap_flow = flow_max
+            if kind == "on_ramp":
                 ramp = str(spec.get("ramp", ""))
                 share = float(net.ramp_capacity_veh_h.get(ramp, 0.0)) / total_ramp_cap
-                upper = float(np.clip(
+                cap_flow = float(np.clip(
                     nuf_upper * share / max(ramp_counts.get(ramp, 1), 1),
                     0.0,
                     flow_max,
                 ))
+            available_veh = max(0.0, state.urban_movement_queue.get(movement, 0.0)) + max(
+                0.0, arrivals.get(movement, 0.0)
+            )
+            servable_flow = min(available_veh / horizon_h, cap_flow)
             if kind in {"boundary_in", "off_ramp"}:
-                inflow_lower += lower
-                inflow_upper += upper
+                inflow_servable += servable_flow
             else:
-                outflow_lower += lower
-                outflow_upper += upper
-        return float(inflow_lower - outflow_upper), float(inflow_upper - outflow_lower)
+                outflow_servable += servable_flow
+        # 디커플 over-approx: 달성 net-inflow ∈ [−Σoutflow_servable, +Σinflow_servable].
+        # 달성집합을 배제하지 않으면서 capacity envelope보다 압도적으로 타이트하다.
+        return float(-outflow_servable), float(inflow_servable)
 
     def _previous_nuf_target(self, previous: ControlAction) -> float:
         """Interpret no-control ramp metering as full N_UF release for leader grids."""

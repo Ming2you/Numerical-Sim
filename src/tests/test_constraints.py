@@ -1243,8 +1243,9 @@ class ConstraintTests(unittest.TestCase):
         state = TrafficState.initial(cfg)
         demand = DemandProfile(cfg, ScenarioConfig("test")).at(0.0)
         previous = ControlAction.fixed(cfg)
-        # previous N_P_star는 후보 범위(n_crit×[0.9,1.05]) 안이어야 clip 없이 보존된다.
-        # n_crit 재calibration에도 견고하도록 crit 상대값(밴드 중앙 0.95×crit)으로 둔다.
+        # previous N_P_star는 후보에 보존되되, 도달 가능 net-inflow 범위로 클램프된다(2026-06-22).
+        # N_P_star는 horizon당 net-inflow 목표라 빈/저혼잡 state에서 큰 음수(-250)는 도달 불가 →
+        # 범위 하한으로 클램프되는 것이 올바른 동작이다.
         prev_np = -250.0
         previous.N_P_star = prev_np
         previous.N_UF_star = 3333.0
@@ -1255,7 +1256,8 @@ class ConstraintTests(unittest.TestCase):
         nuf_values = [c.N_UF_star for c in candidates]
         self.assertIn((round(min(np_values), 6), round(min(nuf_values), 6)), pairs)
         self.assertIn((round(max(np_values), 6), round(max(nuf_values), 6)), pairs)
-        self.assertIn((prev_np, 3333.0), pairs)
+        clamped_prev = min(max(prev_np, min(np_values)), max(np_values))
+        self.assertIn((round(clamped_prev, 6), 3333.0), pairs)
 
     def test_leader_nuf_candidates_and_projection_respect_ramp_bounds(self):
         cfg = short_config()
@@ -1566,7 +1568,10 @@ class ConstraintTests(unittest.TestCase):
         self.assertGreater(bounds.np_upper, 0.0)
         self.assertTrue(all(bounds.np_lower - 1.0e-9 <= value <= bounds.np_upper + 1.0e-9 for value in nps))
         self.assertTrue(any(value < 0.0 for value in nps))
-        self.assertTrue(any(value > 1000.0 for value in nps))
+        # N_P_star는 horizon당 net-inflow 목표라 후보 상한은 도달 가능 범위를 따른다
+        # (종전 capacity 기반 고정 >1000 기대는 폐기, 2026-06-22). 후보가 도달 가능 상한부를 덮는지 확인.
+        self.assertGreater(bounds.np_upper, 0.0)
+        self.assertTrue(any(value > 0.5 * bounds.np_upper for value in nps))
         self.assertTrue(any(abs(value) <= 1.0e-9 for value in nps))
         self.assertFalse(all(0.9 * 172.0 <= value <= 1.05 * 172.0 for value in nps))
 
@@ -1578,10 +1583,14 @@ class ConstraintTests(unittest.TestCase):
         forecast = DemandProfile(cfg, ScenarioConfig("test")).horizon(0.0, cfg.mpc.horizon_steps)
         bounds = Leader(cfg)._candidate_bounds(state, None, forecast[0], forecast)
 
-        # Peak PFO 진단에서 관측된 protected accumulation 운전점(약 244~592 veh)을
-        # leader grid가 원천적으로 배제하지 않는지 확인한다.
-        self.assertLessEqual(bounds.np_lower, -3000.0)
-        self.assertGreaterEqual(bounds.np_upper, 3000.0)
+        # 수정(2026-06-22): N_P_star는 horizon당 net-inflow 목표[veh]이며 도달 가능 범위
+        # (movement별 큐+도착 servable)로 클램프된다. 종전 capacity envelope(±3500 근처)는
+        # 도달 불가 영역을 포함해 N_P_star 탐색을 saturation 평원으로 퇴화시켰다.
+        # 도달 가능 클램프가 활성(config 범위보다 안쪽)이고, 양/음 net-inflow를 모두 표현 가능한지 확인한다.
+        self.assertGreater(bounds.np_lower, float(cfg.leader.N_P_star_range[0]))
+        self.assertLess(bounds.np_upper, float(cfg.leader.N_P_star_range[1]))
+        self.assertGreater(bounds.np_upper, 0.0)
+        self.assertLessEqual(bounds.np_lower, 0.0)
 
     def test_leader_objective_matches_spec_accumulation_form(self):
         cfg = ExperimentConfig.from_file(

@@ -1,0 +1,7 @@
+NO-CONTROL step 1/2 cum_ttt=20.181 step_ttt=20.181
+NO-CONTROL step 2/2 cum_ttt=49.745 step_ttt=29.564
+peak_demand NO-CONTROL total_ttt=49.745 B_sum=0.144364
+PROPOSED-STACKELBERG step 1/2 cum_ttt=19.897 step_ttt=19.897 N_P=2287.2 N_UF=6000.0
+PROPOSED-STACKELBERG step 2/2 cum_ttt=50.526 step_ttt=30.630 N_P=2287.2 N_UF=6000.0
+peak_demand PROPOSED-STACKELBERG total_ttt=50.526 improvement=-1.570% B_sum=0.273802
+ALL_SCENARIOS output=outputs\proc_gate_gridproc_20260621

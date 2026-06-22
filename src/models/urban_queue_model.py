@@ -39,6 +39,43 @@ def movement_specs(cfg: ExperimentConfig) -> Dict[str, Dict[str, object]]:
     return {key: dict(value) for key, value in cfg.network.urban_movements.items()}
 
 
+def movement_forecast_arrivals_veh(
+    cfg: ExperimentConfig,
+    forecast: Iterable[DemandStep],
+) -> Dict[str, float]:
+    """forecast 구간 동안 movement별 외생 도착량[veh] — boundary_in(게이트)·on_ramp(램프)만.
+
+    off_ramp/boundary_out는 외생 도착이 없고(freeway·내부 흐름에서 유입) 큐로만 잡히므로 0.
+    leader reachability 경계와 coordinator follower가 동일한 도착을 보도록 단일 출처로 둔다."""
+    net = cfg.network
+    dt_h = float(cfg.simulation.T_c_h)
+    specs = movement_specs(cfg)
+    onramp_by_movement = {
+        movement: ramp
+        for ramp, movements in net.on_ramp_to_movement.items()
+        for movement in movements
+    }
+    arrivals: Dict[str, float] = {}
+    for step in forecast:
+        for movement, spec in specs.items():
+            kind = str(spec.get("kind", ""))
+            if kind == "boundary_in":
+                origin = str(spec.get("origin", ""))
+                beta = float(spec.get("beta", 1.0))
+                arrivals[movement] = arrivals.get(movement, 0.0) + (
+                    max(0.0, step.urban_boundary.get(origin, 0.0)) * beta * dt_h
+                )
+            elif kind == "on_ramp":
+                ramp = onramp_by_movement.get(movement, "")
+                if not ramp:
+                    continue
+                share = 1.0 / max(len(net.on_ramp_to_movement.get(ramp, [])), 1)
+                arrivals[movement] = arrivals.get(movement, 0.0) + (
+                    max(0.0, step.ramp_arrival.get(ramp, 0.0)) * share * dt_h
+                )
+    return arrivals
+
+
 def approach_routing(cfg: ExperimentConfig) -> Dict[str, list[tuple[str, float]]]:
     """approach source(링크/게이트/off-ramp storage) → [(movement, β)] 매핑.
 
