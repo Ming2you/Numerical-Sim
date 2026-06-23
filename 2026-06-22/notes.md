@@ -167,7 +167,30 @@ horizon_steps {3,4,5} × 900s: cum_TTT 134.47/134.35/136.24. **horizon 늘려도
 20코어인데 워커 8 → 12로(16+는 page-file WinError 1455 크래시). step-0 247.8→197.4s(~20%↓), 결정 동일.
 - `grid_parallel_max_workers: 8→12`, `grid_parallel_chunk_size: 8→4`.
 
-## 9. TODO
+## 9. 사후분석 게이트 + Centralized 진단 (post_analysis_prompt 대응)
+
+### 게이트: P-Stack vs PFO (peak 1800s, seed 42/123/7)
+| Controller | total_ttt | improvement |
+|---|---:|---:|
+| NO-CONTROL | 605.83 | — |
+| WU-CD-F | 452.41 | 25.3% |
+| PFO | 451.48 | 25.5% |
+| **P-STACK** | **407.20** | **32.8%** |
+| (CENTRALIZED) | 422.76 | 30.2% |
+- **게이트 PASS**: P-STACK이 PFO·WU를 명확히 우세.
+- **seed 42/123/7 결과 완전 동일** → 시뮬레이션 deterministic(`random_seed`/`np.random`/`rng` plant·demand 미사용, grep 0건). **분산은 seed가 아니라 시나리오로 확보해야 함.**
+
+### Centralized 진단 (결론: 제외)
+- P-Stack(407) < Centralized(422)는 버그 아님. Centralized는 (1) 옛 N_P-crit+density penalty objective(P-Stack과 다름) + (2) budget-제한 flat grid(327후보, "전역최적 보장 아님" docstring).
+- **(B) 목적함수 순수 TTT 정렬 시도 → 역효과**(422→569): penalty는 왜곡이 아니라 **myopia 가드(근사 terminal-cost)**. 순수 3-step TTT 최소화는 근시적 과유입 → closed-loop 악화. → **변경 원복(코드 무변경).**
+- budget boost도 차원의 저주로 진짜 상한化 불가.
+- **결정: Centralized 분석에서 제외.** WU/PFO/P-Stack만 분석.
+- 부수 통찰: penalty=terminal-cost 가드 → "왜 모든 컨트롤러가 penalty-guarded objective를 쓰나" 설명(분석 §3/§4 근거).
+
+### 분석 매트릭스 (실행 중)
+시나리오 5종(low/medium/peak/oversaturated/incident) × {WU,PFO,P-STACK}+NO-CONTROL, 1800s, fallback OFF, direct → `outputs/analysis_matrix_1800`. 완료 후 4섹션 분석 작성.
+
+## 10. TODO
 
 - (별도) P-STACK 퇴화 근본 수정: `direct` 모드 N_P_star→follower 매핑이 2-plateau로 뭉개지는 문제. leader leverage 회복 설계 필요.
 - (별도) forecast-awareness Phase B 테스트 5건 / ablation 2건 — 기존 미완 작업.
