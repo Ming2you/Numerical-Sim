@@ -13,10 +13,11 @@ Your task is to analyze the final simulation outputs for the proposed
 urban-freeway integrated control framework. The goal is not merely to rank
 controllers by one metric, but to explain:
 
-1. network-level performance,
-2. microscopic control behavior,
-3. urban-freeway coupling mechanisms,
-4. computational practicality and real-time relevance.
+1. demand-scenario characteristics,
+2. network-level performance,
+3. microscopic control behavior,
+4. urban-freeway coupling mechanisms,
+5. computational practicality and real-time relevance.
 
 Avoid framing `PROPOSED-FOLLOWERS-ONLY` as a weak baseline. It is also a
 proposed method. Treat it as a lightweight distributed variant, while
@@ -40,11 +41,98 @@ performance/computation tradeoff.
 
 ## Core Analysis Structure
 
-Write the analysis in four sections.
+Write the analysis in five sections.
 
 ---
 
-## 1. Macroscopic Network-Level Comparison
+## 1. Demand Scenario Characterization
+
+### Objective
+
+Before comparing controllers, characterize the demand scenarios themselves.
+The controller results must be interpreted relative to how severe each demand
+condition is, where demand enters the network, and whether the scenario is
+freeway-dominant, urban-dominant, ramp-dominant, or strongly coupled.
+
+This section should answer:
+
+- What kind of stress does each scenario impose on the network?
+- Which scenarios are realistically controllable?
+- Which scenarios are demand-saturated enough that even good control may only
+  redistribute queues or increase throughput rather than sharply reduce TTT?
+- Which scenarios should reveal the value of urban-freeway coupling control?
+
+### Required scenario metrics
+
+For each demand scenario, summarize:
+
+- total demand over the full horizon;
+- average demand rate and peak demand rate;
+- freeway mainline demand;
+- on-ramp demand;
+- off-ramp demand if available;
+- urban boundary inflow demand;
+- relative freeway vs urban demand share;
+- relative on-ramp/off-ramp coupling demand;
+- demand-to-capacity or demand-to-storage stress indicators if available;
+- no-control baseline congestion response.
+
+Suggested table:
+
+| Scenario | Total demand | Peak demand rate | Freeway share | Urban share | Ramp/coupling share | No-control TTT | No-control throughput | No-control terminal veh | Interpretation |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+
+If exact share metrics are not already logged, compute them from demand input
+profiles or report the best available proxy.
+
+### Scenario classification
+
+Classify each scenario qualitatively, for example:
+
+| Scenario | Suggested interpretation |
+|---|---|
+| low demand | under-saturated; limited room for improvement; control should avoid harming flow |
+| medium demand | controllable congestion; useful for testing whether control improves TTT without excessive queueing |
+| peak demand | strongly congested; useful for throughput, spillback, and coupling analysis |
+| incident/asymmetric scenarios | useful for checking robustness and localized bottleneck response |
+
+Adapt the labels to the actual configured scenarios.
+
+### No-control baseline as demand response
+
+Use no-control not only as a performance baseline, but also as a demand-response
+diagnostic.
+
+For each scenario, inspect:
+
+- when congestion starts;
+- where queues first form;
+- whether freeway density or urban storage becomes critical first;
+- whether on-ramp or off-ramp queues become bottlenecks;
+- whether terminal vehicles remain at the end of the horizon.
+
+This establishes what each controller is trying to fix.
+
+### Interpretation guidance
+
+Do not say a controller is weak simply because improvement is small in a low
+demand scenario. If the baseline is already uncongested, low improvement can be
+expected.
+
+Likewise, in very high demand scenarios, a controller may increase throughput
+and completed vehicles while also increasing raw TTT because more vehicles are
+admitted and processed. Interpret this using:
+
+- TTT,
+- average travel time,
+- throughput,
+- completed vehicles,
+- terminal vehicles,
+- queue/spillback indicators.
+
+---
+
+## 2. Macroscopic Network-Level Comparison
 
 ### Objective
 
@@ -99,7 +187,7 @@ Then add a second decomposition table:
 
 ---
 
-## 2. Microscopic Peak-Period Control Mechanism Analysis
+## 3. Microscopic Peak-Period Control Mechanism Analysis
 
 ### Objective
 
@@ -186,7 +274,7 @@ Compare PFO and P-Stack not as winner/loser, but as two mechanisms:
 
 ---
 
-## 3. Game-Theoretic Urban-Freeway Coupling Analysis
+## 4. Game-Theoretic Urban-Freeway Coupling Analysis
 
 ### Objective
 
@@ -273,7 +361,7 @@ throughput with a small TTT penalty.
 
 ---
 
-## 4. Computational Practicality And Real-Time Relevance
+## 5. Computational Practicality And Real-Time Relevance
 
 ### Objective
 
@@ -404,4 +492,3 @@ management at the cost of higher computation. Centralized control serves as an
 idealized reference, while P-WU represents a lighter literature-inspired
 distributed controller.
 ```
-

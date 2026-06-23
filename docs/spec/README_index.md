@@ -25,6 +25,7 @@ This folder splits the implementation specification by top-level section so an L
 - `16_six_controller_comparison.md`
 - `17_relaxed_quantized_fast_mode.md`
 - `18_follower_tts_objective_alignment.md`
+- `19_stackelberg_rl_controller.md`
 
 ## Recommended use
 
@@ -38,5 +39,7 @@ This folder splits the implementation specification by top-level section so an L
    `17_relaxed_quantized_fast_mode.md`.
 7. For follower objective repair work, also provide
    `18_follower_tts_objective_alignment.md`.
+8. For reinforcement-learning extensions of the leader-follower game, also
+   provide `19_stackelberg_rl_controller.md`.
 
 Do not give the entire full spec to the coding agent unless the task requires cross-section integration.
