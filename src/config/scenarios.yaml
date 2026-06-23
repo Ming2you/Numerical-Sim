@@ -47,6 +47,44 @@
         "OR_D_E": 0.7,
         "OR_F_E": 0.7
       }
+    },
+    "heavy_demand_140": {
+      "urban_scale": 1.40,
+      "freeway_scale": 1.35,
+      "ramp_scale": 1.45,
+      "incident_capacity_factor": 1.0,
+      "required": false
+    },
+    "heavy_demand_150": {
+      "urban_scale": 1.50,
+      "freeway_scale": 1.45,
+      "ramp_scale": 1.50,
+      "incident_capacity_factor": 1.0,
+      "required": false
+    },
+    "skew_peak": {
+      "urban_scale": 1.25,
+      "freeway_scale": 1.20,
+      "ramp_scale": 1.25,
+      "incident_capacity_factor": 1.0,
+      "required": false,
+      "urban_boundary_weight_override": {
+        "in_C_top": 2.5,
+        "in_C_right": 2.5,
+        "in_F_right": 2.5
+      }
+    },
+    "skew_heavy": {
+      "urban_scale": 1.40,
+      "freeway_scale": 1.35,
+      "ramp_scale": 1.45,
+      "incident_capacity_factor": 1.0,
+      "required": false,
+      "urban_boundary_weight_override": {
+        "in_C_top": 2.5,
+        "in_C_right": 2.5,
+        "in_F_right": 2.5
+      }
     }
   }
 }

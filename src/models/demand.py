@@ -30,6 +30,9 @@ class ScenarioConfig:
     # boundary_out 유한 출구용량[veh/h]을 이 시나리오에서만 덮어쓴다(None이면 1600 유지).
     # heavy-transfer 시나리오에서만 cap을 낮춰 off-ramp 홍수가 urban을 포화시키게 한다(A″-4).
     boundary_out_capacity_override: Optional[float] = None
+    # 시나리오 한정 boundary_in 게이트별 가중치(공간 skew). 적용 후 총 urban 유입은 baseline과
+    # 같도록 renormalize해 skew 효과를 demand 크기와 분리한다. None이면 기존 gradient 유지.
+    urban_boundary_weight_override: Optional[Dict[str, float]] = None
     metadata: Dict[str, float] = field(default_factory=dict)
 
     @classmethod
@@ -49,6 +52,11 @@ class ScenarioConfig:
         cap_override = raw.get("boundary_out_capacity_override")
         if cap_override is not None:
             known["boundary_out_capacity_override"] = float(cap_override)
+        weight_override = raw.get("urban_boundary_weight_override")
+        if isinstance(weight_override, Mapping):
+            known["urban_boundary_weight_override"] = {
+                str(k): float(v) for k, v in weight_override.items()
+            }
         return cls(name=name, **known)
 
 
@@ -107,8 +115,19 @@ class DemandProfile:
             for idx, link in enumerate(net.freeway_links)
         }
         urban = {}
-        for idx, link in enumerate(net.boundary_in_links):
-            urban[link] = urban_base * (1.0 + 0.10 * idx)
+        in_base = {
+            link: urban_base * (1.0 + 0.10 * idx)
+            for idx, link in enumerate(net.boundary_in_links)
+        }
+        weights = self.scenario.urban_boundary_weight_override
+        if weights:
+            # 게이트별 가중치 적용 후 총 유입 보존(renormalize) — skew를 demand 크기와 분리.
+            weighted = {link: in_base[link] * float(weights.get(link, 1.0)) for link in in_base}
+            base_total = sum(in_base.values())
+            w_total = sum(weighted.values())
+            renorm = (base_total / w_total) if w_total > 1.0e-9 else 1.0
+            in_base = {link: weighted[link] * renorm for link in weighted}
+        urban.update(in_base)
         for idx, link in enumerate(net.boundary_out_links):
             urban[link] = urban_base * (0.82 + 0.08 * idx)
         ramp = {
