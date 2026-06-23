@@ -625,6 +625,57 @@ Recommended practical approximations:
 The first implementation should prioritize a stable research prototype over
 exact theoretical replication.
 
+### DDQN-Ready Discrete Action Guidance
+
+Double Deep Q-Learning is appropriate only when each learned action space is
+kept small enough to enumerate.
+
+Recommended DDQN use:
+
+- Stackelberg-RL leader:
+  - discretize `N_P_star` and `N_UF_star` into a small factorized or flattened
+    target set;
+  - use DDQN as an initial leader policy learner.
+- Stackelberg-RL freeway segment followers:
+  - each segment agent chooses from a small local VSL/RM action set;
+  - actions must affect only that segment and its assigned ramp, if any.
+- Stackelberg-RL urban intersection followers:
+  - each intersection agent chooses from a small local green/offset action set;
+  - actions must affect only that intersection.
+- Full Distributed RL:
+  - use the same per-segment/per-intersection DDQN-ready local action spaces;
+  - train local agents toward an approximate distributed Nash response.
+
+DDQN is not recommended for a naive Full Centralized RL baseline that flattens
+all RM, VSL, green, and offset combinations into one joint action. The joint
+action count grows combinatorially and will quickly become intractable.
+
+Acceptable Full Centralized RL options:
+
+1. factorized centralized Q-heads:
+   - one shared global encoder;
+   - separate discrete heads for VSL, RM, green, and offset groups;
+   - log that this is a factorized approximation rather than a true full joint
+     Q-table;
+2. autoregressive discrete policy:
+   - choose control groups sequentially from the global state;
+   - still treat this as centralized because the actor observes global state;
+3. continuous actor-critic baseline:
+   - use SAC/TD3/PPO-style continuous or bounded actions;
+   - project outputs to physical feasible controls.
+
+The first coding milestone should not implement full neural DDQN training.
+It should implement DDQN-ready action-space definitions and mappings:
+
+```text
+discrete action index
+-> local normalized action
+-> projected physical ControlAction field
+```
+
+This keeps the environment and action interface compatible with DDQN while
+allowing safe random-policy and scripted-policy smoke tests before training.
+
 ## Baselines
 
 The RL study must include baselines that show why the hierarchy matters.
