@@ -9701,3 +9701,133 @@ Result: PASS. The command printed paths for all requested output files.
   - Locality / E passive preservation: PASS.
   - Regression tests: PASS.
 - Next foundation step remains follower pretraining/replay sample generation; neural DDQN training is still intentionally out of scope.
+
+## 2026-06-23 - Stackelberg-RL Leader N_P Grid Follow-up
+
+### Review Item Addressed
+
+`reports/rl_code_review_2026-06-23.md` flagged the first DDQN-ready leader
+`N_P_star` grid as too wide and too coarse because it inherited the full MPC
+physical range `[-3500, 3500]`. With 5 bins this produced mostly unreachable
+targets and left little resolution in the useful few-hundred-vehicle range.
+
+### Implementation
+
+- Updated `src/rl/action_space.py`.
+  - `LeaderDiscreteActionSpace` now keeps the broad configured
+    `leader.N_P_star_range` as a physical clipping bound.
+  - The default DDQN pilot vocabulary for `N_P_star` is compacted to
+    `[-100, 1000]`.
+  - With the default 5 bins, leader `N_P_star` values are now
+    `[-100, 175, 450, 725, 1000]`.
+  - `N_UF_star` remains on the configured `[0, 6000]` grid because the review
+    found that axis still has useful leverage.
+- Updated `src/tests/test_rl_environment.py`.
+  - Added `test_leader_np_grid_uses_compact_ddqn_vocabulary`.
+  - The test verifies the compact DDQN `N_P_star` values remain inside the
+    configured physical range while no longer using the extreme
+    `[-3500, 3500]` endpoints.
+
+### Verification
+
+```powershell
+& 'C:\Users\alsrj\AppData\Local\Programs\Python\Python312\python.exe' -B -m py_compile src\rl\__init__.py src\rl\agents.py src\rl\action_space.py src\rl\observations.py src\rl\rewards.py src\rl\env.py src\rl\replay.py src\rl\nash_probe.py src\experiments\rl_stackelberg_smoke.py src\tests\test_rl_environment.py
+```
+
+Result: PASS.
+
+```powershell
+& 'C:\Users\alsrj\AppData\Local\Programs\Python\Python312\python.exe' -B -m unittest src.tests.test_rl_environment -v
+```
+
+Result: PASS, 11 tests OK.
+
+```powershell
+& 'C:\Users\alsrj\AppData\Local\Programs\Python\Python312\python.exe' -B -m src.experiments.rl_stackelberg_smoke --scenario medium_demand --steps 2 --policy scripted --output outputs\rl_stackelberg_smoke_medium
+```
+
+Result: PASS. The smoke log now records the scripted neutral leader target as
+`N_P_star=450`, `N_UF_star=3000`, which is the midpoint of the compact DDQN
+pilot target vocabulary.
+
+## 2026-06-23 - Cheap Replay Dataset Collection Scaffold
+
+### Purpose
+
+Instead of starting expensive neural DDQN training immediately, this update
+adds a low-cost path for accumulating replay data while rollout/training code is
+running. The intent is to let future follower/leader learners append
+transitions step-by-step, then train offline or in small batches from saved
+JSONL data.
+
+### Implementation
+
+- Updated `src/rl/replay.py`.
+  - Added `ReplayDatasetWriter`, an append-only streaming writer.
+  - Writes full transitions to `rl_transitions.jsonl`.
+  - Writes a small scan-friendly `rl_transition_index.csv`.
+  - Writes `metadata.json` with scenario/policy/run metadata and transition
+    count.
+  - Added `transitions_from_env_step(episode, step_result)` to convert one
+    `StackelbergRLEnvironment.step(...)` result into one leader transition plus
+    one transition per follower.
+  - Each transition stores observation features, action index, reward,
+    next-observation features, done flag, and compact info payload.
+- Added `src/experiments/rl_collect_replay_dataset.py`.
+  - Runs cheap scripted or random safe rollouts.
+  - Streams replay transitions as the rollout proceeds.
+  - This is deliberately a data collection entry point, not a neural training
+    loop.
+- Updated `src/experiments/rl_stackelberg_smoke.py`.
+  - Added optional `--replay-output`.
+  - Existing smoke runs can now write replay transitions while they run.
+  - CLI output includes `replay_transitions`, `replay_index`, and
+    `replay_metadata` paths when the option is used.
+- Updated `src/rl/__init__.py`.
+  - Exposes `ReplayDatasetWriter` and `transitions_from_env_step`.
+- Updated `src/tests/test_rl_environment.py`.
+  - Added tests for streaming replay transition files and replay dataset
+    collector output.
+  - Added a smoke-run test for the optional replay stream.
+
+### Verification
+
+```powershell
+& 'C:\Users\alsrj\AppData\Local\Programs\Python\Python312\python.exe' -B -m py_compile src\rl\__init__.py src\rl\agents.py src\rl\action_space.py src\rl\observations.py src\rl\rewards.py src\rl\env.py src\rl\replay.py src\rl\nash_probe.py src\experiments\rl_stackelberg_smoke.py src\experiments\rl_collect_replay_dataset.py src\tests\test_rl_environment.py
+```
+
+Result: PASS.
+
+```powershell
+& 'C:\Users\alsrj\AppData\Local\Programs\Python\Python312\python.exe' -B -m unittest src.tests.test_rl_environment -v
+```
+
+Result: PASS, 14 tests OK after adding the smoke replay stream test.
+
+```powershell
+& 'C:\Users\alsrj\AppData\Local\Programs\Python\Python312\python.exe' -B -m src.experiments.rl_collect_replay_dataset --scenario medium_demand --episodes 1 --steps 2 --policy scripted --output outputs\rl_replay_dataset_medium
+```
+
+Result: PASS.
+
+Generated files:
+
+- `outputs\rl_replay_dataset_medium\rl_transitions.jsonl`
+- `outputs\rl_replay_dataset_medium\rl_transition_index.csv`
+- `outputs\rl_replay_dataset_medium\metadata.json`
+- `outputs\rl_replay_dataset_medium\run_summary.json`
+
+Sanity check: 1 episode x 2 environment steps x 14 agents
+(leader + 13 followers) produced 28 replay transitions.
+
+Smoke-run replay stream:
+
+```powershell
+& 'C:\Users\alsrj\AppData\Local\Programs\Python\Python312\python.exe' -B -m src.experiments.rl_stackelberg_smoke --scenario medium_demand --steps 1 --policy scripted --output outputs\rl_stackelberg_smoke_replay_check --replay-output outputs\rl_replay_from_smoke_check --T-total 360
+```
+
+Result: PASS. The smoke command produced the normal smoke CSV files and replay
+dataset files in parallel.
+
+Sanity check: 1 smoke step x 14 agents produced 14 replay transitions in
+`outputs\rl_replay_from_smoke_check\metadata.json`.

@@ -78,3 +78,10 @@ net-inflow = Σ(inflow service) − Σ(outflow service)이고, urban green으로
 python -B -c "import src.rl.env, src.rl.action_space, src.rl.agents, src.rl.observations, src.rl.rewards, src.rl.nash_probe"
 python -B -m unittest src.tests.test_rl_environment -v   # 10/10 pass
 ```
+
+## Follow-up Fix
+
+The N_P action-grid recommendation above was addressed after this review. The
+Stackelberg-RL DDQN pilot grid now uses compact `N_P_star` values
+`[-100, 175, 450, 725, 1000]` while preserving the broader configured MPC
+physical clipping range.

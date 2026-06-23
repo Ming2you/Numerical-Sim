@@ -73,6 +73,8 @@ class UrbanLocalAction:
 class LeaderDiscreteActionSpace:
     """`(N_P_star, N_UF_star)`를 작은 DDQN용 격자로 펼친다."""
 
+    DEFAULT_DDQN_N_P_RANGE = (-100.0, 1000.0)
+
     def __init__(self, cfg: ExperimentConfig, n_p_bins: int = 5, n_uf_bins: int = 5):
         self.cfg = cfg
         self.n_p_bins = max(1, int(n_p_bins))
@@ -102,7 +104,8 @@ class LeaderDiscreteActionSpace:
     ) -> Tuple[LeaderTargetAction, ...]:
         n_p_bins = max(1, int(n_p_bins))
         n_uf_bins = max(1, int(n_uf_bins))
-        n_p_low, n_p_high = [float(v) for v in cfg.leader.N_P_star_range]
+        n_p_physical_low, n_p_physical_high = [float(v) for v in cfg.leader.N_P_star_range]
+        n_p_low, n_p_high = _ddqn_leader_np_range(cfg)
         n_uf_low, n_uf_high = [float(v) for v in cfg.leader.N_UF_star_range]
         n_p_values = np.linspace(n_p_low, n_p_high, n_p_bins)
         n_uf_values = np.linspace(n_uf_low, n_uf_high, n_uf_bins)
@@ -113,7 +116,7 @@ class LeaderDiscreteActionSpace:
                 actions.append(
                     LeaderTargetAction(
                         index=index,
-                        N_P_star=float(np.clip(n_p, n_p_low, n_p_high)),
+                        N_P_star=float(np.clip(n_p, n_p_physical_low, n_p_physical_high)),
                         N_UF_star=float(np.clip(n_uf, n_uf_low, n_uf_high)),
                         normalized=(
                             _normalize_to_unit(n_p, n_p_low, n_p_high),
@@ -367,6 +370,18 @@ def _normalize_to_unit(value: float, low: float, high: float) -> float:
     if abs(high - low) <= 1.0e-9:
         return 0.0
     return float(2.0 * (float(value) - low) / (high - low) - 1.0)
+
+
+def _ddqn_leader_np_range(cfg: ExperimentConfig) -> Tuple[float, float]:
+    """Use a compact pilot grid for N_P targets while preserving physical bounds."""
+
+    physical_low, physical_high = [float(v) for v in cfg.leader.N_P_star_range]
+    default_low, default_high = LeaderDiscreteActionSpace.DEFAULT_DDQN_N_P_RANGE
+    low = max(physical_low, float(default_low))
+    high = min(physical_high, float(default_high))
+    if low >= high:
+        return physical_low, physical_high
+    return low, high
 
 
 def _bounded_vsl_values(cfg: ExperimentConfig) -> Tuple[float, ...]:

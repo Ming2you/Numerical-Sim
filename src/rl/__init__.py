@@ -9,7 +9,7 @@ from src.rl.env import (
     random_safe_rollout,
 )
 from src.rl.nash_probe import NashProbeResult, probe_follower_nash_residual
-from src.rl.replay import RLTransition
+from src.rl.replay import ReplayDatasetWriter, RLTransition, transitions_from_env_step
 
 FollowerNashProbeResult = NashProbeResult
 
@@ -18,6 +18,7 @@ __all__ = [
     "RLEnvStep",
     "RLStepRecord",
     "RLTransition",
+    "ReplayDatasetWriter",
     "NashProbeResult",
     "FollowerNashProbeResult",
     "StackelbergRLEnvironment",
@@ -25,4 +26,5 @@ __all__ = [
     "export_rollout_records",
     "probe_follower_nash_residual",
     "random_safe_rollout",
+    "transitions_from_env_step",
 ]

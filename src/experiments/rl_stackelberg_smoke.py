@@ -12,6 +12,7 @@ from src.models.demand import load_scenarios
 from src.models.state import ExperimentConfig
 from src.rl.env import RLStepRecord, StackelbergRLEnvironment
 from src.rl.nash_probe import probe_follower_nash_residual
+from src.rl.replay import ReplayDatasetWriter, transitions_from_env_step
 
 
 def run_smoke_rollout(
@@ -76,6 +77,7 @@ def run_smoke_experiment(
     steps: int = 2,
     policy: str = "scripted",
     output_dir: str | Path = "outputs/rl_stackelberg_smoke_medium",
+    replay_output_dir: str | Path | None = None,
     seed: int | None = None,
     t_total: float | None = None,
 ) -> Dict[str, Path]:
@@ -97,6 +99,19 @@ def run_smoke_experiment(
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
     nash_rows = []
+    replay_writer = None
+    replay_paths = None
+    if replay_output_dir is not None:
+        replay_writer = ReplayDatasetWriter(
+            replay_output_dir,
+            metadata={
+                "scenario": scenario_name,
+                "policy": policy,
+                "seed": env.seed,
+                "requested_steps": int(steps),
+                "source": "rl_stackelberg_smoke",
+            },
+        )
     for _ in range(max(0, int(steps))):
         if policy == "scripted":
             leader_index, follower_indices = env.scripted_safe_action_indices()
@@ -109,6 +124,8 @@ def run_smoke_experiment(
         # 1-step probe는 실제 rollout 이전 state에서 unilateral deviation만 복제 평가한다.
         nash_result = probe_follower_nash_residual(env, leader_index, follower_indices)
         step_result = env.step(leader_index, follower_indices)
+        if replay_writer is not None:
+            replay_writer.append_many(transitions_from_env_step(0, step_result))
         nash_row = {
             "step_index": step_result.record.step_index,
             **nash_result.as_dict(),
@@ -116,6 +133,10 @@ def run_smoke_experiment(
         nash_rows.append(nash_row)
         if step_result.done or step_result.truncated:
             break
+
+    if replay_writer is not None:
+        replay_writer.close()
+        replay_paths = replay_writer.paths()
 
     paths = _write_requested_outputs(
         records=env.records,
@@ -127,6 +148,8 @@ def run_smoke_experiment(
         seed=env.seed,
         requested_steps=steps,
     )
+    if replay_paths is not None:
+        paths.update({f"replay_{key}": path for key, path in replay_paths.items()})
     return paths
 
 
@@ -325,6 +348,7 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--T-total", type=float, default=None)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--replay-output", default=None)
     args = parser.parse_args()
 
     paths = run_smoke_experiment(
@@ -334,6 +358,7 @@ def main() -> None:
         steps=args.steps,
         policy=args.policy,
         output_dir=args.output,
+        replay_output_dir=args.replay_output,
         seed=args.seed,
         t_total=args.T_total,
     )

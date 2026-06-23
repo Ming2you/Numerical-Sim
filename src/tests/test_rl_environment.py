@@ -6,10 +6,15 @@ from pathlib import Path
 
 from src.models.demand import ScenarioConfig
 from src.models.state import ControlAction, ExperimentConfig, segment_vsl
-from src.experiments.rl_stackelberg_smoke import run_smoke_rollout, write_smoke_outputs
+from src.experiments.rl_collect_replay_dataset import collect_replay_dataset
+from src.experiments.rl_stackelberg_smoke import (
+    run_smoke_experiment,
+    run_smoke_rollout,
+    write_smoke_outputs,
+)
 from src.rl import StackelbergRLEnvironment, export_rollout_records, random_safe_rollout
 from src.rl.nash_probe import probe_follower_nash_residual
-from src.rl.replay import RLTransition
+from src.rl.replay import ReplayDatasetWriter, RLTransition, transitions_from_env_step
 
 
 def short_config():
@@ -82,6 +87,17 @@ class StackelbergRLEnvironmentTest(unittest.TestCase):
                         cfg.network.effective_green_total,
                     )
                     self.assertTrue(all(0.0 <= value < cfg.network.cycle_length for value in action.offsets.values()))
+
+    def test_leader_np_grid_uses_compact_ddqn_vocabulary(self):
+        cfg = short_config()
+        env = StackelbergRLEnvironment(cfg, ScenarioConfig("test"), seed=7)
+        n_p_values = sorted({action.N_P_star for action in env.leader_action_space.actions})
+
+        self.assertEqual(n_p_values, [-100.0, 175.0, 450.0, 725.0, 1000.0])
+        self.assertGreaterEqual(min(n_p_values), cfg.leader.N_P_star_range[0])
+        self.assertLessEqual(max(n_p_values), cfg.leader.N_P_star_range[1])
+        self.assertNotIn(cfg.leader.N_P_star_range[0], n_p_values)
+        self.assertNotIn(cfg.leader.N_P_star_range[1], n_p_values)
 
     def test_extreme_vsl_action_projects_to_dynamic_step_bound(self):
         cfg = short_config()
@@ -209,6 +225,30 @@ class StackelbergRLEnvironmentTest(unittest.TestCase):
         self.assertTrue(all("features" in row for row in observation_rows))
         self.assertTrue(all(isinstance(json.loads(row["features"]), list) for row in observation_rows))
 
+    def test_smoke_experiment_can_stream_replay_dataset(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "smoke"
+            replay_output = Path(tmp) / "replay"
+            paths = run_smoke_experiment(
+                scenario_name="medium_demand",
+                steps=1,
+                policy="scripted",
+                output_dir=output,
+                replay_output_dir=replay_output,
+                seed=7,
+                t_total=360.0,
+            )
+            transitions = [
+                json.loads(line)
+                for line in paths["replay_transitions"].read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            metadata = json.loads(paths["replay_metadata"].read_text(encoding="utf-8"))
+
+        self.assertEqual(len(transitions), 14)
+        self.assertEqual(metadata["transition_count"], 14)
+        self.assertEqual(metadata["source"], "rl_stackelberg_smoke")
+
     def test_replay_transition_schema_accepts_leader_and_follower(self):
         leader_transition = RLTransition(
             episode=0,
@@ -239,6 +279,57 @@ class StackelbergRLEnvironmentTest(unittest.TestCase):
         self.assertEqual(follower_transition.as_dict()["agent_family"], "freeway_segment")
         self.assertIsInstance(leader_transition.action_index, int)
         self.assertIsInstance(follower_transition.action_index, int)
+
+    def test_replay_writer_streams_step_transitions(self):
+        env = StackelbergRLEnvironment(short_config(), ScenarioConfig("test"), seed=7)
+        env.reset()
+        leader_index, follower_indices = env.scripted_safe_action_indices()
+        step_result = env.step(leader_index, follower_indices)
+        transitions = transitions_from_env_step(episode=0, step_result=step_result)
+
+        self.assertEqual(len(transitions), 1 + len(env.follower_action_spaces))
+        self.assertEqual(transitions[0].agent_id, "leader")
+        self.assertIn("features", transitions[0].observation)
+        self.assertIn("features", transitions[0].next_observation)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            with ReplayDatasetWriter(tmp, metadata={"scenario": "test"}) as writer:
+                writer.append_many(transitions)
+            transition_rows = [
+                json.loads(line)
+                for line in (Path(tmp) / "rl_transitions.jsonl").read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            with (Path(tmp) / "rl_transition_index.csv").open(newline="", encoding="utf-8") as handle:
+                index_rows = list(csv.DictReader(handle))
+            metadata = json.loads((Path(tmp) / "metadata.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(len(transition_rows), len(transitions))
+        self.assertEqual(len(index_rows), len(transitions))
+        self.assertEqual(metadata["transition_count"], len(transitions))
+
+    def test_collect_replay_dataset_writes_training_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = collect_replay_dataset(
+                scenario_name="medium_demand",
+                episodes=1,
+                steps=1,
+                policy="scripted",
+                output_dir=tmp,
+                seed=7,
+                t_total=360.0,
+            )
+            summary = json.loads(paths["summary"].read_text(encoding="utf-8"))
+            transitions = [
+                json.loads(line)
+                for line in paths["transitions"].read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+
+        self.assertEqual(summary["episodes_recorded"], 1)
+        self.assertEqual(summary["environment_steps_recorded"], 1)
+        self.assertEqual(summary["transitions_recorded"], 14)
+        self.assertEqual(len(transitions), 14)
 
     def test_nash_probe_returns_nonnegative_epsilon(self):
         env = StackelbergRLEnvironment(short_config(), ScenarioConfig("test"), seed=7)
