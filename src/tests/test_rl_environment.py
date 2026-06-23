@@ -1,8 +1,15 @@
+import csv
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
 from src.models.demand import ScenarioConfig
 from src.models.state import ControlAction, ExperimentConfig, segment_vsl
-from src.rl import StackelbergRLEnvironment, random_safe_rollout
+from src.experiments.rl_stackelberg_smoke import run_smoke_rollout, write_smoke_outputs
+from src.rl import StackelbergRLEnvironment, export_rollout_records, random_safe_rollout
+from src.rl.nash_probe import probe_follower_nash_residual
+from src.rl.replay import RLTransition
 
 
 def short_config():
@@ -19,6 +26,7 @@ class StackelbergRLEnvironmentTest(unittest.TestCase):
         self.assertNotIn("urban_E", env.agents)
         self.assertFalse(any(agent.signal == "E" for agent in env.agents.values()))
         self.assertFalse(env.centralized_action_space["emits_e_control"])
+        self.assertFalse(any(agent_id.endswith("_E") for agent_id in env.follower_action_spaces))
 
     def test_follower_observations_are_local(self):
         cfg = short_config()
@@ -136,6 +144,131 @@ class StackelbergRLEnvironmentTest(unittest.TestCase):
             self.assertTrue(record.follower_rewards)
             self.assertTrue(all(value <= 0.0 for value in record.follower_rewards.values()))
             self.assertTrue(all(terms for terms in record.follower_reward_terms.values()))
+
+    def test_rollout_export_preserves_reconstruction_keys(self):
+        records = random_safe_rollout(
+            short_config(),
+            ScenarioConfig("test"),
+            max_steps=1,
+            seed=7,
+            policy="scripted",
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = export_rollout_records(records, tmp)
+
+            jsonl_rows = [
+                json.loads(line)
+                for line in paths["jsonl"].read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            with paths["csv"].open(newline="", encoding="utf-8") as handle:
+                csv_rows = list(csv.DictReader(handle))
+
+        self.assertEqual(len(jsonl_rows), 1)
+        self.assertEqual(len(csv_rows), 1)
+        self.assertIn("leader_action", jsonl_rows[0])
+        self.assertIn("physical_follower_actions", jsonl_rows[0])
+        self.assertIn("follower_observations", jsonl_rows[0])
+        self.assertIn("control", jsonl_rows[0])
+        self.assertIn("diagnostics", jsonl_rows[0])
+        self.assertEqual(csv_rows[0]["step_index"], "0")
+        self.assertIn("leader_N_P_star", csv_rows[0])
+        self.assertIn("control_rl_emits_e_control", csv_rows[0])
+
+    def test_smoke_experiment_writes_required_output_files(self):
+        records = run_smoke_rollout(
+            short_config(),
+            ScenarioConfig("test"),
+            steps=1,
+            seed=7,
+            policy="scripted",
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = write_smoke_outputs(
+                records,
+                tmp,
+                {"scenario": "test", "policy": "scripted"},
+            )
+            expected = {
+                "rl_step_records.csv",
+                "rl_rewards.csv",
+                "rl_actions.csv",
+                "rl_observations_summary.csv",
+                "metadata.json",
+            }
+            written = {path.name for path in Path(tmp).iterdir()}
+            metadata = json.loads(paths["metadata"].read_text(encoding="utf-8"))
+            with paths["observations_summary"].open(newline="", encoding="utf-8") as handle:
+                observation_rows = list(csv.DictReader(handle))
+
+        self.assertTrue(expected.issubset(written))
+        self.assertEqual(metadata["steps_recorded"], 1)
+        self.assertEqual(metadata["scenario"], "test")
+        self.assertTrue(all("features" in row for row in observation_rows))
+        self.assertTrue(all(isinstance(json.loads(row["features"]), list) for row in observation_rows))
+
+    def test_replay_transition_schema_accepts_leader_and_follower(self):
+        leader_transition = RLTransition(
+            episode=0,
+            step=0,
+            agent_id="leader",
+            agent_family="leader",
+            observation={"features": [0.0]},
+            action_index=2,
+            reward=-1.0,
+            next_observation={"features": [0.1]},
+            done=False,
+            info={"target": "N_P_star"},
+        )
+        follower_transition = RLTransition(
+            episode=0,
+            step=0,
+            agent_id="freeway_FW_E_seg0",
+            agent_family="freeway_segment",
+            observation={"features": [0.2]},
+            action_index=1,
+            reward=-0.5,
+            next_observation={"features": [0.3]},
+            done=True,
+            info={"local": True},
+        )
+
+        self.assertEqual(leader_transition.as_dict()["agent_family"], "leader")
+        self.assertEqual(follower_transition.as_dict()["agent_family"], "freeway_segment")
+        self.assertIsInstance(leader_transition.action_index, int)
+        self.assertIsInstance(follower_transition.action_index, int)
+
+    def test_nash_probe_returns_nonnegative_epsilon(self):
+        env = StackelbergRLEnvironment(short_config(), ScenarioConfig("test"), seed=7)
+        env.reset()
+        leader_index, follower_indices = env.scripted_safe_action_indices()
+
+        result = probe_follower_nash_residual(env, leader_index, follower_indices)
+
+        self.assertGreaterEqual(result.epsilon_Nash_hat, 0.0)
+        self.assertIsNotNone(result.best_deviating_agent_id)
+        self.assertIsNotNone(result.best_unilateral_action_index)
+        self.assertEqual(env.step_index, 0)
+        self.assertEqual(len(env.records), 0)
+
+    def test_nash_probe_preserves_simulator_accumulators_after_prior_step(self):
+        env = StackelbergRLEnvironment(short_config(), ScenarioConfig("test"), seed=7)
+        env.reset()
+        leader_index, follower_indices = env.scripted_safe_action_indices()
+        env.step(leader_index, follower_indices)
+        total_ttt_before = env.sim.total_ttt
+        logs_before = len(env.sim.logs)
+        step_index_before = env.step_index
+        records_before = len(env.records)
+
+        probe_follower_nash_residual(env, leader_index, follower_indices)
+
+        self.assertEqual(env.step_index, step_index_before)
+        self.assertEqual(len(env.records), records_before)
+        self.assertEqual(len(env.sim.logs), logs_before)
+        self.assertAlmostEqual(env.sim.total_ttt, total_ttt_before)
 
 
 if __name__ == "__main__":

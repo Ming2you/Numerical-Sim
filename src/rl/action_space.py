@@ -75,6 +75,8 @@ class LeaderDiscreteActionSpace:
 
     def __init__(self, cfg: ExperimentConfig, n_p_bins: int = 5, n_uf_bins: int = 5):
         self.cfg = cfg
+        self.n_p_bins = max(1, int(n_p_bins))
+        self.n_uf_bins = max(1, int(n_uf_bins))
         self.actions = self._build_actions(cfg, n_p_bins, n_uf_bins)
 
     @property

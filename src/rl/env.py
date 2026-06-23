@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import csv
+import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, Mapping
 
 import numpy as np
@@ -321,3 +324,132 @@ def random_safe_rollout(
         if step.done or step.truncated:
             break
     return list(env.records)
+
+
+def export_rollout_records(
+    records: list[RLStepRecord],
+    output_dir: str | Path,
+) -> Dict[str, Path]:
+    """Spec 19 로그 요구사항에 맞춰 RL rollout 기록을 JSONL/CSV로 저장한다."""
+
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    jsonl_path = out / "rl_rollout_steps.jsonl"
+    csv_path = out / "rl_rollout_summary.csv"
+
+    # JSONL은 사후 재구성을 위해 관측, action, reward, diagnostics를 중첩 구조 그대로 보존한다.
+    with jsonl_path.open("w", encoding="utf-8") as handle:
+        for record in records:
+            handle.write(json.dumps(_record_to_jsonable(record), ensure_ascii=False, sort_keys=True))
+            handle.write("\n")
+
+    _write_rollout_summary_csv(csv_path, records)
+    return {"jsonl": jsonl_path, "csv": csv_path}
+
+
+def _write_rollout_summary_csv(path: Path, records: list[RLStepRecord]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rows = [_record_summary_row(record) for record in records]
+    if not rows:
+        path.write_text("", encoding="utf-8")
+        return
+    fields = sorted({key for row in rows for key in row})
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def _record_summary_row(record: RLStepRecord) -> Dict[str, Any]:
+    follower_values = list(record.follower_rewards.values())
+    mean_follower_reward = float(sum(follower_values) / len(follower_values)) if follower_values else 0.0
+    row: Dict[str, Any] = {
+        "step_index": int(record.step_index),
+        "time_sec_before": float(record.time_sec_before),
+        "time_sec_after": float(record.time_sec_after),
+        "leader_action_index": int(record.leader_action_index),
+        "leader_N_P_star": float(record.leader_action.get("N_P_star", 0.0)),
+        "leader_N_UF_star": float(record.leader_action.get("N_UF_star", 0.0)),
+        "leader_reward": float(record.leader_reward),
+        "global_step_ttt": float(record.global_step_ttt),
+        "follower_count": len(record.follower_rewards),
+        "mean_follower_reward": mean_follower_reward,
+    }
+    for key, value in record.control.diagnostics.items():
+        row[f"control_{key}"] = _scalar_or_json(value)
+    for key, value in record.diagnostics.items():
+        row[f"sim_{key}"] = _scalar_or_json(value)
+    return row
+
+
+def _record_to_jsonable(record: RLStepRecord) -> Dict[str, Any]:
+    return {
+        "step_index": int(record.step_index),
+        "time_sec_before": float(record.time_sec_before),
+        "time_sec_after": float(record.time_sec_after),
+        "leader_action_index": int(record.leader_action_index),
+        "leader_action": _jsonable(record.leader_action),
+        "follower_action_indices": _jsonable(record.follower_action_indices),
+        "physical_follower_actions": _jsonable(record.physical_follower_actions),
+        "control": _control_to_jsonable(record.control),
+        "leader_observation": _observation_to_jsonable(record.leader_observation),
+        "follower_observations": {
+            agent_id: _observation_to_jsonable(observation)
+            for agent_id, observation in record.follower_observations.items()
+        },
+        "leader_reward": float(record.leader_reward),
+        "follower_rewards": _jsonable(record.follower_rewards),
+        "leader_reward_terms": _jsonable(record.leader_reward_terms),
+        "follower_reward_terms": _jsonable(record.follower_reward_terms),
+        "global_step_ttt": float(record.global_step_ttt),
+        "diagnostics": _jsonable(record.diagnostics),
+    }
+
+
+def _observation_to_jsonable(observation: RLObservation) -> Dict[str, Any]:
+    return {
+        "agent_id": observation.agent_id,
+        "family": observation.family,
+        "features": [float(value) for value in observation.features.tolist()],
+        "feature_names": list(observation.feature_names),
+        "owned_links": list(observation.owned_links),
+        "owned_ramps": list(observation.owned_ramps),
+        "owned_movements": list(observation.owned_movements),
+        "owned_signals": list(observation.owned_signals),
+        "connected_coupling_links": list(observation.connected_coupling_links),
+    }
+
+
+def _control_to_jsonable(control: ControlAction) -> Dict[str, Any]:
+    return {
+        "N_P_star": float(control.N_P_star),
+        "N_UF_star": float(control.N_UF_star),
+        "ramp_metering": _jsonable(control.ramp_metering),
+        "vsl": _jsonable(control.vsl),
+        "green_times": _jsonable(control.green_times),
+        "offsets": _jsonable(control.offsets),
+        "inflow_outflow_allocation": _jsonable(control.inflow_outflow_allocation),
+        "infeasibility": _jsonable(control.infeasibility),
+        "diagnostics": _jsonable(control.diagnostics),
+    }
+
+
+def _scalar_or_json(value: Any) -> Any:
+    converted = _jsonable(value)
+    if isinstance(converted, (str, int, float, bool)) or converted is None:
+        return converted
+    return json.dumps(converted, ensure_ascii=False, sort_keys=True)
+
+
+def _jsonable(value: Any) -> Any:
+    if isinstance(value, np.ndarray):
+        return [_jsonable(item) for item in value.tolist()]
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, Mapping):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)

@@ -9520,3 +9520,184 @@ plant TTT, the selected-control fidelity is very high.
 - NOT VERIFIED by this probe: counterfactual candidate-level fidelity. A next
   diagnostic should compare candidate objective rankings against actual
   counterfactual rollouts from the same initial state.
+
+## 2026-06-23 - Stackelberg-RL Rollout Export 보강
+
+### 구현
+
+Stackelberg-RL Milestone 1 환경 wrapper의 in-memory 기록을 파일로 보존하는
+export 유틸을 추가했다. `export_rollout_records(records, output_dir)`는 다음
+두 파일을 저장한다.
+
+- `rl_rollout_steps.jsonl`: step별 leader target, follower local observations,
+  follower action, physical `ControlAction`, leader/follower reward, simulator
+  diagnostics를 중첩 JSON 구조로 저장한다.
+- `rl_rollout_summary.csv`: step별 leader target, global step TTT, reward,
+  follower count, control/simulator diagnostics를 빠르게 확인하는 요약 표로
+  저장한다.
+
+이 보강은 spec 19의 “leader target -> follower response -> plant outcome”
+사후 재구성 요구사항을 파일 산출물 수준으로 맞추기 위한 것이다. neural
+DDQN/torch/gymnasium training은 아직 추가하지 않았다.
+
+### 변경 파일
+
+- `src/rl/env.py`
+- `src/rl/__init__.py`
+- `src/tests/test_rl_environment.py`
+- `reports/codex_run_report.md`
+
+### 검증
+
+이 세션에는 기존 기록에 있던 Codex Python 런타임
+`C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe`
+가 없어서, `winget`으로 Python 3.12.10을 사용자 범위에 설치하고 `numpy`
+2.5.0을 추가 설치했다.
+
+실행 명령:
+
+```powershell
+winget install --id Python.Python.3.12 --exact --scope user --accept-package-agreements --accept-source-agreements --silent
+& "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe" -m pip install numpy
+& "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe" -B -m py_compile src\rl\__init__.py src\rl\agents.py src\rl\action_space.py src\rl\observations.py src\rl\rewards.py src\rl\env.py src\tests\test_rl_environment.py
+& "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe" -B -m unittest src.tests.test_rl_environment -v
+```
+
+결과:
+
+- `py_compile`: PASS
+- `src.tests.test_rl_environment`: PASS, 6 tests OK
+
+추가한 테스트:
+
+- `StackelbergRLEnvironmentTest.test_rollout_export_preserves_reconstruction_keys`
+
+### Metrics / Acceptance
+
+- Baseline run command: N/A, logging utility 보강.
+- Proposed-controller run command: N/A, logging utility 보강.
+- Baseline Total TTT/TTS: N/A.
+- Proposed Total TTT/TTS: N/A.
+- Improvement rate: N/A.
+- Boundary queue balancing result: N/A.
+- Control validation summary: RL environment compile과 targeted unit tests PASS.
+- Failed criteria: final controller acceptance와 neural training은 범위 밖이며
+  실행되지 않았다.
+- Proposed next modification: follower pretraining용 replay/sample export 또는
+  Phase 1 scaffold를 추가한다.
+
+## 2026-06-23 - Stackelberg-RL Follow-up Foundation
+
+### Milestone 1 Summary
+
+The current Stackelberg-RL foundation preserves the required decision order: leader target -> follower local observation/action -> projected physical `ControlAction` -> plant outcome -> leader/follower rewards.
+
+- `StackelbergRLEnvironment` wraps `MixedTrafficSimulator`.
+- Leader action is a DDQN-ready discrete `(N_P_star, N_UF_star)` target index.
+- Follower actions are DDQN-ready local discrete actions: freeway segment VSL/RM and urban intersection green/offset.
+- Follower observations remain local to owned links, ramps, movements, signals, connected coupling summaries, previous local action, and leader target.
+- Intersection `E` remains passive/no-control and is not emitted as an RL actor.
+- Leader reward uses global step TTT plus freeway density excess and urban half-cap storage terms.
+- Follower rewards use local TTS-compatible costs.
+- VSL requests are projected through `max_vsl_step` and physical VSL bounds.
+- No neural DDQN, torch, gymnasium, or training loop was added.
+
+### This Follow-up Implementation
+
+- Added `src/experiments/rl_stackelberg_smoke.py`.
+  - Runs scripted or random safe Stackelberg-RL rollouts.
+  - Loads real scenarios from `src/config/scenarios.yaml`.
+  - Writes `rl_step_records.csv`, `rl_rewards.csv`, `rl_actions.csv`, `rl_observations_summary.csv`, and `metadata.json`.
+  - Includes `epsilon_Nash_hat` and best-deviation fields in `rl_step_records.csv`.
+- Added `src/rl/replay.py`.
+  - Defines `RLTransition` with `episode`, `step`, `agent_id`, `agent_family`, `observation`, `action_index`, `reward`, `next_observation`, `done`, and `info`.
+  - Schema accepts both leader and follower transitions.
+- Added/kept `src/rl/nash_probe.py`.
+  - Implements a one-step local follower Nash residual probe.
+  - For fixed leader target and fixed other-follower actions, varies each follower's local discrete action through the normal projection/simulator path.
+  - Returns/logs `epsilon_Nash_hat`, best deviating agent id, realized reward, best unilateral reward, best unilateral action index, realized action index, and candidate rewards.
+- Updated `src/rl/__init__.py`.
+  - Exposes `RLTransition`, `NashProbeResult`, and `probe_follower_nash_residual`.
+- Updated `src/rl/action_space.py`.
+  - Stores leader action-space bin metadata for probe/smoke reuse.
+- Updated `src/tests/test_rl_environment.py`.
+  - Covers requested smoke output files, replay leader/follower schema, nonnegative Nash residual, passive/no-control `E`, and existing VSL `max_vsl_step` projection.
+
+### Smoke Output
+
+Output root:
+
+```text
+outputs\rl_stackelberg_smoke_medium
+```
+
+Written files:
+
+- `metadata.json`
+- `rl_step_records.csv`
+- `rl_rewards.csv`
+- `rl_actions.csv`
+- `rl_observations_summary.csv`
+
+Sanity check:
+
+- `metadata.json`: `scenario=medium_demand`, `policy=scripted`, `actual_steps=2`, `seed=42`.
+- `rl_step_records.csv`: 2 rows, `follower_count=13`, `epsilon_Nash_hat=0.0` for the scripted neutral rollout rows.
+
+### Verification
+
+The literal requested wildcard compile command was attempted with the available local Python runtime path and failed because `py_compile` received `src\rl\*.py` as a literal path in this PowerShell/native-command environment:
+
+```powershell
+& 'C:\Users\alsrj\AppData\Local\Programs\Python\Python312\python.exe' -B -m py_compile src\rl\*.py src\experiments\rl_stackelberg_smoke.py src\tests\test_rl_environment.py
+```
+
+Result:
+
+```text
+[Errno 22] Invalid argument: 'src\\rl\\*.py'
+```
+
+Equivalent expanded compile command:
+
+```powershell
+& 'C:\Users\alsrj\AppData\Local\Programs\Python\Python312\python.exe' -B -m py_compile src\rl\__init__.py src\rl\agents.py src\rl\action_space.py src\rl\env.py src\rl\nash_probe.py src\rl\observations.py src\rl\replay.py src\rl\rewards.py src\experiments\rl_stackelberg_smoke.py src\tests\test_rl_environment.py
+```
+
+Result: PASS.
+
+Unit tests:
+
+```powershell
+& 'C:\Users\alsrj\AppData\Local\Programs\Python\Python312\python.exe' -B -m unittest src.tests.test_rl_environment -v
+```
+
+Result: PASS, 10 tests OK.
+
+Smoke run with a valid scenario:
+
+```powershell
+& 'C:\Users\alsrj\AppData\Local\Programs\Python\Python312\python.exe' -B -m src.experiments.rl_stackelberg_smoke --scenario medium_demand --steps 2 --policy scripted --output outputs\rl_stackelberg_smoke_medium
+```
+
+Result: PASS. The command printed paths for all requested output files.
+
+### Reviewer Verdict And Next Work
+
+- Coding subagent implemented the smoke/replay/probe foundation and reported PASS on local compile, unit tests, and smoke run.
+- Reviewer subagent initially returned FAIL on two issues:
+  - Nash residual selected highest absolute best reward instead of highest unilateral improvement.
+  - Observation summary did not persist the actual feature vector.
+- A second reviewer returned FAIL on one additional issue:
+  - Nash probe restored only state and lost simulator accumulators/logs at step > 0.
+- All three issues were fixed:
+  - `src/rl/nash_probe.py` now selects `max_i(max(best_i - realized_i, 0))`.
+  - `rl_observations_summary.csv` now includes `features` JSON.
+  - `src/rl/nash_probe.py` snapshots/restores `env.sim.copy()` and tests preserve simulator accumulators/logs.
+- Final reviewer verdict: PASS.
+  - Reconstruction logging: PASS.
+  - DDQN-ready `RLTransition`: PASS.
+  - One-step unilateral Nash probe and state restoration: PASS.
+  - Locality / E passive preservation: PASS.
+  - Regression tests: PASS.
+- Next foundation step remains follower pretraining/replay sample generation; neural DDQN training is still intentionally out of scope.
