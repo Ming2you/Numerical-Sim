@@ -394,6 +394,10 @@ class MPCConfig:
     stackelberg_inner_backend_when_outer_process: str = "thread"
     stackelberg_reuse_process_pool: bool = True
     stackelberg_allocation_mode: str = "direct"
+    # low_demand 회귀 수정(fix 2): PFO/no-control을 비대칭 가드가 아니라 순수 objective 후보로
+    # 항상 포함해 P-Stack objective <= PFO objective를 탐색 단계에서 보장(leader는 PFO를 못 이기면
+    # PFO를 고름). stackelberg_enable_fallback(비대칭 가드)와 독립.
+    leader_pfo_objective_floor: bool = True
 
 
 @dataclass
@@ -428,6 +432,10 @@ class LeaderConfig:
     metering_queue_weight: float = 4.0
     vsl_activation_density_ratio: float = 0.95
     metering_activation_density_ratio: float = 0.95
+    # low_demand 회귀 수정(fix 1): 저혼잡(density<=metering_activation)에서 N_UF* 하한을
+    # heuristic의 이 비율로 강제하던 clamp. 0.0이면 강제 없음 → leader가 낮은 자연 방출(=PFO 동등
+    # 운전점)도 탐색 가능. (구버전 동작 재현: 0.75)
+    uncongested_nuf_floor_frac: float = 0.0
 
 
 @dataclass

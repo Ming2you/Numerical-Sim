@@ -235,6 +235,8 @@ mpc:
   stackelberg_inner_backend_when_outer_process: thread
   stackelberg_reuse_process_pool: true
   stackelberg_allocation_mode: direct
+  # fix 2: PFO/no-control을 순수 objective 후보로 포함(P-Stack <= PFO 보장). 비대칭 가드와 독립.
+  leader_pfo_objective_floor: true
 leader:
   objective_mode: follower_ttt
   w_P: 1.0
@@ -283,6 +285,8 @@ leader:
   metering_queue_weight: 4.0
   vsl_activation_density_ratio: 0.95
   metering_activation_density_ratio: 0.95
+  # fix 1: 저혼잡 N_UF* 하한 강제 비율. 0.0=강제없음(leader가 낮은 자연 방출 선택 가능, low_demand 회귀 해소). 구버전=0.75.
+  uncongested_nuf_floor_frac: 0.0
 freeway_follower:
   eps_F: 100.0
   vsl_set:
