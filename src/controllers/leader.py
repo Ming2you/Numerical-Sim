@@ -267,8 +267,12 @@ class Leader:
         nuf_upper = min(leader.N_UF_star_range[1], feasible_nuf)
         nuf_upper = max(nuf_lower, nuf_upper)
         heuristic_nuf = min(self._heuristic_nuf_target(state, previous, demand), nuf_upper)
-        if density_ratio <= leader.metering_activation_density_ratio:
-            nuf_lower = min(nuf_upper, max(nuf_lower, 0.75 * heuristic_nuf))
+        # fix 1: 저혼잡에서 N_UF* 하한을 heuristic의 일정비율로 강제하던 clamp. 기본 0.0(강제 없음)이라
+        # leader가 낮은 자연 방출(PFO 동등 운전점)도 고를 수 있다. low_demand에서 강제 과방출 → urban
+        # 침수 회귀를 막는다. (구버전 재현: uncongested_nuf_floor_frac=0.75)
+        floor_frac = float(getattr(leader, "uncongested_nuf_floor_frac", 0.0))
+        if floor_frac > 0.0 and density_ratio <= leader.metering_activation_density_ratio:
+            nuf_lower = min(nuf_upper, max(nuf_lower, floor_frac * heuristic_nuf))
 
         base_np_lower, base_np_upper = self._np_candidate_bounds(state)
         movement_np_lower, movement_np_upper, min_net, max_net = self._movement_np_bounds(

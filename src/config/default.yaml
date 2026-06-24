@@ -285,6 +285,8 @@ leader:
   metering_queue_weight: 4.0
   vsl_activation_density_ratio: 0.95
   metering_activation_density_ratio: 0.95
+  # fix 1: 저혼잡 N_UF* 하한 강제 비율. 0.0=강제없음(leader가 낮은 자연 방출 선택 가능, low_demand 회귀 해소). 구버전=0.75.
+  uncongested_nuf_floor_frac: 0.0
 freeway_follower:
   eps_F: 100.0
   vsl_set:

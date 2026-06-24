@@ -428,6 +428,10 @@ class LeaderConfig:
     metering_queue_weight: float = 4.0
     vsl_activation_density_ratio: float = 0.95
     metering_activation_density_ratio: float = 0.95
+    # low_demand 회귀 수정(fix 1): 저혼잡(density<=metering_activation)에서 N_UF* 하한을
+    # heuristic의 이 비율로 강제하던 clamp. 0.0이면 강제 없음 → leader가 낮은 자연 방출(=PFO 동등
+    # 운전점)도 탐색 가능. (구버전 동작 재현: 0.75)
+    uncongested_nuf_floor_frac: float = 0.0
 
 
 @dataclass
