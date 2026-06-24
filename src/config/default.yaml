@@ -24,7 +24,9 @@ network:
   freeway_lanes: 2
   v_free: 100.0
   rho_crit: 33.5
-  rho_max: 180.0
+  # Eq. 6 capacity-drop FD calibration (2026-06-24): observed density-jump
+  # midpoint. This value is also the CTM receiving/storage jam density.
+  rho_max: 95.01964207118104
   freeway_capacity_veh_h: 4000.0
   ramps:
   - R_D_W

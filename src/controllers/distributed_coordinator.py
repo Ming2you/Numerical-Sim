@@ -38,7 +38,7 @@ from src.controllers.structured_grid import (
     structured_grid_candidates,
 )
 from src.controllers.urban_follower import UrbanFollower
-from src.models.demand import DemandStep
+from src.models.demand import DemandStep, merge_freeway_lane_loss
 from src.models.metanet import effective_lane_profile
 from src.models.state import ControlAction, ExperimentConfig, TrafficState
 from src.models.urban_queue_model import (
@@ -2226,7 +2226,7 @@ class DistributedCoordinator:
         net = self.cfg.network
         dt_h = self.cfg.simulation.T_f_h
         demand = forecast[0]
-        lane_profile, lane_diag = effective_lane_profile(state, self.cfg)
+        lane_profile, lane_diag = effective_lane_profile(state, self.cfg, demand)
         neighbor_pressure = self._freeway_neighbor_pressure(agent, state, coupling, lane_profile)
         neighbor_metering_factor = 1.0 - 0.15 * float(np.clip(
             neighbor_pressure / max(2.0 * net.rho_crit, 1.0e-9),
@@ -3140,6 +3140,7 @@ class DistributedCoordinator:
             urban_boundary=average("urban_boundary"),
             ramp_arrival=average("ramp_arrival"),
             incident_capacity_factor=min(float(getattr(step, "incident_capacity_factor", 1.0)) for step in steps),
+            freeway_lane_loss=merge_freeway_lane_loss(steps),
         )
         return demand, horizon_h, steps
 

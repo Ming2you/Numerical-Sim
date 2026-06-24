@@ -1,16 +1,16 @@
 {
   "scenarios": {
     "low_demand": {
-      "urban_scale": 0.75,
-      "freeway_scale": 0.75,
-      "ramp_scale": 0.70,
+      "urban_scale": 1.0,
+      "freeway_scale": 1.0,
+      "ramp_scale": 1.0,
       "incident_capacity_factor": 1.0,
       "required": false
     },
     "medium_demand": {
-      "urban_scale": 1.0,
-      "freeway_scale": 1.0,
-      "ramp_scale": 1.0,
+      "urban_scale": 1.0375,
+      "freeway_scale": 1.03,
+      "ramp_scale": 1.0375,
       "incident_capacity_factor": 1.0,
       "required": false
     },
@@ -21,71 +21,41 @@
       "incident_capacity_factor": 1.0,
       "required": true
     },
-    "oversaturated_demand": {
-      "urban_scale": 1.55,
-      "freeway_scale": 1.45,
-      "ramp_scale": 1.60,
-      "incident_capacity_factor": 0.92,
+    "medium_incident_east": {
+      "urban_scale": 1.0375,
+      "freeway_scale": 1.03,
+      "ramp_scale": 1.0375,
+      "incident_capacity_factor": 1.0,
+      "freeway_lane_closures": [
+        {
+          "link": "FW_E",
+          "segment": 3,
+          "lane_loss": 1.0,
+          "start_sec": 2400.0,
+          "end_sec": 4800.0
+        }
+      ],
       "required": false
     },
-    "incident_or_capacity_drop": {
-      "urban_scale": 1.20,
-      "freeway_scale": 1.15,
-      "ramp_scale": 1.25,
-      "incident_capacity_factor": 0.72,
+    "medium_urban_west_skew": {
+      "urban_scale": 1.0375,
+      "freeway_scale": 1.03,
+      "ramp_scale": 1.0375,
+      "incident_capacity_factor": 1.0,
+      "urban_west_east_ratio": 2.0,
       "required": false
     },
-    "capacity_drop": {
-      "urban_scale": 3.5,
-      "freeway_scale": 1.6,
-      "ramp_scale": 1.4,
+    "medium_surge": {
+      "urban_scale": 1.0375,
+      "freeway_scale": 1.03,
+      "ramp_scale": 1.0375,
       "incident_capacity_factor": 1.0,
-      "required": false,
-      "off_ramp_split_ratio_override": {
-        "OR_D_W": 0.7,
-        "OR_F_W": 0.7,
-        "OR_D_E": 0.7,
-        "OR_F_E": 0.7
-      }
-    },
-    "heavy_demand_140": {
-      "urban_scale": 1.40,
-      "freeway_scale": 1.35,
-      "ramp_scale": 1.45,
-      "incident_capacity_factor": 1.0,
+      "surge_start_sec": 1800.0,
+      "surge_peak_sec": 3000.0,
+      "surge_end_sec": 4200.0,
+      "surge_peak_scale": 1.15,
+      "surge_recovery_scale": 1.0,
       "required": false
-    },
-    "heavy_demand_150": {
-      "urban_scale": 1.50,
-      "freeway_scale": 1.45,
-      "ramp_scale": 1.50,
-      "incident_capacity_factor": 1.0,
-      "required": false
-    },
-    "skew_peak": {
-      "urban_scale": 1.25,
-      "freeway_scale": 1.20,
-      "ramp_scale": 1.25,
-      "incident_capacity_factor": 1.0,
-      "required": false,
-      "urban_boundary_weight_override": {
-        "in_C_top": 2.5,
-        "in_C_right": 2.5,
-        "in_F_right": 2.5
-      }
-    },
-    "skew_heavy": {
-      "urban_scale": 1.40,
-      "freeway_scale": 1.35,
-      "ramp_scale": 1.45,
-      "incident_capacity_factor": 1.0,
-      "required": false,
-      "urban_boundary_weight_override": {
-        "in_C_top": 2.5,
-        "in_C_right": 2.5,
-        "in_F_right": 2.5
-      }
     }
   }
 }
-

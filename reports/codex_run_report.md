@@ -9831,3 +9831,806 @@ dataset files in parallel.
 
 Sanity check: 1 smoke step x 14 agents produced 14 replay transitions in
 `outputs\rl_replay_from_smoke_check\metadata.json`.
+
+## 2026-06-24 - Capacity Drop Step 2 Hysteresis Gate
+
+### Purpose
+
+`reports/capacity_drop_handoff_for_codex.md` requested Step 2 before any
+scenario matrix rerun: turn on the Arora-Kattan anticipation-regime split,
+tune `metanet_nu_cong_km2_h`, drive the plant with rise-fall demand, and verify
+that a flow-density hysteresis loop is actually visible. If the loop is not
+visible, Step 3 must stop.
+
+### Implementation
+
+- Added `2026-06-24/diag_scripts/capacity_drop_hysteresis_probe.py`.
+- The diagnostic script leaves `src/config/default.yaml` unchanged.
+- Runtime overrides only:
+  - `capacity_drop_anticipation=true/false`.
+  - `metanet_nu_cong_km2_h` sweep.
+  - `freeway_offramp_capacity_drop.enabled=false`.
+  - `off_ramp_split_ratio=0` to isolate anticipation capacity-drop from
+    off-ramp lane-loss spillback.
+- The script uses the existing `freeway_substep` plant and records
+  `rho`, `speed`, and `flow=rho*speed*lanes` for a probe segment under
+  rise-fall mainline/ramp demand.
+- It writes:
+  - `outputs/capacity_drop_hysteresis_step2_final/summary.csv`
+  - `outputs/capacity_drop_hysteresis_step2_final/trajectory_*.csv`
+  - `reports/figures/fig_capacity_drop_hysteresis_step2_final.png`
+
+### Final Gate Run
+
+Preliminary demand sweeps showed two unhelpful regimes:
+
+- Strong surge: the merge segment saturated near `rho_max`, so the plot showed
+  gridlock/saturation rather than a clean capacity-drop loop.
+- Weak surge: density never crossed `rho_crit`.
+
+Final near-critical probe command:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B "2026-06-24\diag_scripts\capacity_drop_hysteresis_probe.py" --out-dir outputs\capacity_drop_hysteresis_step2_final --figure reports\figures\fig_capacity_drop_hysteresis_step2_final.png --mainline-low 2100 --mainline-peak 3600 --ramp-low 0 --ramp-peak 250 --total-sec 5400 --probe-segment 3
+```
+
+Final summary:
+
+| case | nu_cong | drop_pct | loop_gap_veh_h | overlap_bins | has_loop |
+|---|---:|---:|---:|---:|---:|
+| toggle_off | 250 | -0.052 | 30.690 | 4 | 0 |
+| nu_cong_65 | 65 | -0.052 | 30.690 | 4 | 0 |
+| nu_cong_100 | 100 | -0.041 | 34.420 | 4 | 0 |
+| nu_cong_150 | 150 | -0.031 | 38.997 | 4 | 0 |
+| nu_cong_250 | 250 | -5.330 | 44.101 | 4 | 0 |
+
+### Gate Verdict
+
+FAIL for Step 2. The final probe has density overlap between loading and
+unloading branches, but no tested `nu_cong` produces the target `5-15%`
+congested discharge drop or a closed hysteresis loop. Therefore Step 3
+scenario redesign and 4-controller matrix rerun were not executed.
+
+Likely cause: the local `rho > rho_crit -> nu_cong` split has no memory. The
+anticipation term reduces speed when downstream density is higher, but in
+unloading conditions downstream density can be lower, so increasing `nu` may
+accelerate discharge rather than create a persistent capacity-drop branch.
+
+Proposed next modification:
+
+- Add an explicit hysteresis state with recovery threshold
+  `rho_recover < rho_crit`, or
+- Add a demand-supply/discharge capacity-drop term that activates after
+  breakdown and recovers only below a lower threshold.
+
+In both options, preserve the density conservation equation.
+
+### Verification
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m py_compile "2026-06-24\diag_scripts\capacity_drop_hysteresis_probe.py"
+```
+
+Result: PASS.
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m unittest src.tests.test_capacity_drop src.tests.test_metanet_equations
+```
+
+Result: PASS, 24 tests OK.
+
+### Follow-up: Very-Heavy Demand With `nu_cong=150`
+
+User requested a much heavier vehicle load while fixing `nu_cong=150`.
+
+Command:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B "2026-06-24\diag_scripts\capacity_drop_hysteresis_probe.py" --out-dir outputs\capacity_drop_hysteresis_very_heavy_nu150 --figure reports\figures\fig_capacity_drop_hysteresis_very_heavy_nu150.png --nu-values 150 --mainline-low 3000 --mainline-peak 6000 --ramp-low 500 --ramp-peak 3000 --total-sec 5400 --probe-segment 3
+```
+
+Summary:
+
+| case | drop_pct | loop_gap_veh_h | overlap_bins | has_loop |
+|---|---:|---:|---:|---:|
+| toggle_off | 57.846 | -3.380 | 1 | 0 |
+| nu_cong_150 | 58.673 | -2.349 | 1 | 0 |
+
+Additional state check:
+
+- Probe segment saturated near `rho_max`: toggle off 457/540 steps,
+  `nu_cong_150` 462/540 steps above `0.9*rho_max`.
+- Final speed was `v_min=5 km/h` and final probe flow was approximately
+  `1751 veh/h` in both cases.
+- Final mainline origin queue was about `4.6k veh`, and total ramp queue about
+  `11.0k veh`.
+
+Interpretation: under very-heavy demand, a large discharge reduction appears,
+but it appears in both toggle-off and `nu_cong=150` cases and is dominated by
+gridlock/saturation. This does not satisfy the hysteresis gate and does not
+demonstrate an anticipation-regime capacity drop.
+
+### Follow-up: Paper Eq. (6) Boundary-Flow Diagnostic
+
+User asked to implement the paper's Eq. (6) as separate code and rerun the
+hysteresis check. I added a diagnostic-only `--plant-mode eq6` to
+`2026-06-24/diag_scripts/capacity_drop_hysteresis_probe.py`, leaving the core
+plant unchanged.
+
+Eq. (6) diagnostic rule:
+
+- Downstream free: `q_i = min(Q_cap, v_i * rho_i * lanes)`.
+- Downstream congested: `q_i = min(v_{i+1} * rho_{i+1} * lanes, v_i * rho_i * lanes)`.
+- Density conservation and speed update still use the existing code units and
+  functions.
+
+Verification:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m py_compile "2026-06-24\diag_scripts\capacity_drop_hysteresis_probe.py"
+```
+
+Result: PASS.
+
+Near-critical Eq6 run:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B "2026-06-24\diag_scripts\capacity_drop_hysteresis_probe.py" --plant-mode eq6 --out-dir outputs\capacity_drop_hysteresis_eq6_step2_final --figure reports\figures\fig_capacity_drop_hysteresis_eq6_step2_final.png --nu-values 150 --mainline-low 2100 --mainline-peak 3600 --ramp-low 0 --ramp-peak 250 --total-sec 5400 --probe-segment 3
+```
+
+| case | drop_pct | loop_gap_veh_h | overlap_bins | has_loop |
+|---|---:|---:|---:|---:|
+| toggle_off | nan | 77.840 | 3 | 0 |
+| nu_cong_150 | nan | -0.734 | 3 | 0 |
+
+Very-heavy Eq6 run:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B "2026-06-24\diag_scripts\capacity_drop_hysteresis_probe.py" --plant-mode eq6 --out-dir outputs\capacity_drop_hysteresis_eq6_very_heavy_nu150 --figure reports\figures\fig_capacity_drop_hysteresis_eq6_very_heavy_nu150.png --nu-values 150 --mainline-low 3000 --mainline-peak 6000 --ramp-low 500 --ramp-peak 3000 --total-sec 5400 --probe-segment 3
+```
+
+| case | drop_pct | loop_gap_veh_h | overlap_bins | has_loop |
+|---|---:|---:|---:|---:|
+| toggle_off | nan | 15.187 | 1 | 0 |
+| nu_cong_150 | 11.550 | 26.404 | 1 | 0 |
+
+Loop-like 10-minute aggregate Eq6 run:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B "2026-06-24\diag_scripts\capacity_drop_hysteresis_probe.py" --plant-mode eq6 --out-dir outputs\capacity_drop_hysteresis_eq6_best_looplike_nu150 --figure reports\figures\fig_capacity_drop_hysteresis_eq6_best_looplike_nu150.png --nu-values 150 --mainline-low 2400 --mainline-peak 3200 --ramp-low 0 --ramp-peak 500 --total-sec 9000 --probe-segment 3
+```
+
+| case | drop_pct | loop_gap_veh_h | overlap_bins | has_loop |
+|---|---:|---:|---:|---:|
+| toggle_off | nan | 56.477 | 1 | 0 |
+| nu_cong_150 | -4.330 | 75.416 | 4 | 0 |
+
+Generated Figure-7-style 600 s aggregate plot:
+
+- `reports/figures/fig_capacity_drop_hysteresis_eq6_best_looplike_nu150_aggregate.png`
+
+Interpretation:
+
+- Eq. (6) boundary-flow makes the loading/unloading trajectory visibly more
+  loop-like than the existing CTM receiving plant.
+- It still does not reproduce a valid capacity-drop hysteresis loop with
+  `nu_cong=150`: the best overlap case has negative drop, and the very-heavy
+  case has target-sized drop but only one overlap bin.
+- This supports the distinction found in the paper: Figure 7 is a 10-minute
+  aggregate VISSIM no-control vs VSL-HSR plot, not a direct output guaranteed
+  by Eq. (9) alone. Microscopic driver/platoon behavior, calibrated segment
+  parameters, and/or explicit breakdown-recovery memory are likely needed.
+
+### Follow-up: Eq6 `nu_cong=65..150` Step-5 Sweep
+
+User observed that `nu_cong=65..150` looked most natural and requested a
+5-unit search over that range. I reused the same loop-like Eq6 diagnostic
+condition:
+
+- `plant-mode=eq6`
+- `mainline-low=2400`, `mainline-peak=3200`
+- `ramp-low=0`, `ramp-peak=500`
+- `T_total=9000 s`
+- `probe-segment=3`
+- 600 s aggregate plotting to match the paper's Figure 7 style.
+
+Command:
+
+```powershell
+$nu = ((65..150) | Where-Object { ($_ - 65) % 5 -eq 0 }) -join ','
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B "2026-06-24\diag_scripts\capacity_drop_hysteresis_probe.py" --plant-mode eq6 --out-dir outputs\capacity_drop_hysteresis_eq6_nu65_150_step5 --figure reports\figures\fig_capacity_drop_hysteresis_eq6_nu65_150_step5_raw.png --nu-values $nu --mainline-low 2400 --mainline-peak 3200 --ramp-low 0 --ramp-peak 500 --total-sec 9000 --probe-segment 3
+```
+
+Summary:
+
+| nu_cong | drop_pct | loop_gap_veh_h | overlap_bins | has_loop |
+|---:|---:|---:|---:|---:|
+| off/65 | nan | 56.5 | 1 | 0 |
+| 70 | nan | 90.5 | 2 | 0 |
+| 75 | nan | 39.1 | 1 | 0 |
+| 80 | nan | 81.4 | 2 | 0 |
+| 85 | nan | 83.3 | 3 | 0 |
+| 90 | nan | 73.1 | 3 | 0 |
+| 95 | nan | 74.0 | 3 | 0 |
+| 100 | nan | 74.4 | 4 | 0 |
+| 105 | nan | 65.3 | 4 | 0 |
+| 110 | nan | 56.2 | 4 | 0 |
+| 115 | 0.23 | 63.6 | 4 | 0 |
+| 120 | 0.51 | 69.4 | 4 | 0 |
+| 125 | 1.01 | 71.7 | 4 | 0 |
+| 130 | 1.54 | 70.9 | 4 | 0 |
+| 135 | 2.10 | 80.6 | 4 | 0 |
+| 140 | 2.62 | 93.9 | 4 | 1 |
+| 145 | nan | 61.8 | 4 | 0 |
+| 150 | -4.33 | 75.4 | 4 | 0 |
+
+Generated plots:
+
+- `reports/figures/fig_capacity_drop_hysteresis_eq6_nu65_150_step5_common.png`
+- `reports/figures/fig_capacity_drop_hysteresis_eq6_nu65_150_step5_autoscale.png`
+
+Interpretation:
+
+- Visually, the Eq6 boundary-flow diagnostic is much more plausible than the
+  current CTM-receiving dynamics for reproducing a Figure-7-like loop.
+- `nu_cong=115..140` is the smoothest-looking range.
+- `nu_cong=140` is the only value in this sweep marked as `has_loop=1` by the
+  current heuristic.
+- The capacity-drop magnitude is still weak: the largest positive drop in the
+  natural range is `2.62%`, below the earlier 5-15% target.
+
+### Follow-up: Fixed-VSL Preliminary Effect In Eq6 Mode
+
+User asked whether the modified Eq6 METANET dynamics would give VSL an
+inflow-control effect. I added a diagnostic-only `--fixed-vsl` option and ran a
+small sweep with the same loop-like Eq6 condition and `nu_cong=140`.
+
+Command pattern:
+
+```powershell
+$vals = 100,90,80,70,60
+foreach ($v in $vals) {
+  & "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B "2026-06-24\diag_scripts\capacity_drop_hysteresis_probe.py" --plant-mode eq6 --out-dir "outputs\capacity_drop_hysteresis_eq6_vsl_prelim\vsl_$v" --figure "reports\figures\fig_capacity_drop_hysteresis_eq6_vsl_prelim_$v.png" --nu-values 140 --fixed-vsl $v --mainline-low 2400 --mainline-peak 3200 --ramp-low 0 --ramp-peak 500 --total-sec 9000 --probe-segment 3
+}
+```
+
+Generated:
+
+- `outputs/capacity_drop_hysteresis_eq6_vsl_prelim/vsl_prelim_comparison.csv`
+- `reports/figures/fig_capacity_drop_hysteresis_eq6_vsl_prelim_aggregate.png`
+
+Summary:
+
+| VSL | drop_pct | loop_gap_veh_h | overlap_bins | has_loop | max_rho | mean_flow |
+|---:|---:|---:|---:|---:|---:|---:|
+| 100 | 2.62 | 93.86 | 4 | 1 | 38.13 | 3561.64 |
+| 90 | 2.62 | 93.86 | 4 | 1 | 38.13 | 3561.45 |
+| 80 | 2.73 | 101.24 | 5 | 1 | 38.21 | 3558.83 |
+| 70 | 1.13 | 93.76 | 7 | 1 | 39.44 | 3550.33 |
+| 60 | 0.83 | 78.94 | 7 | 0 | 39.55 | 3546.30 |
+
+Interpretation:
+
+- VSL 90 is effectively identical to VSL 100 in this condition, likely because
+  the no-VSL desired speed is already below the cap for much of the critical
+  period.
+- VSL 80 produces the clearest mild inflow-control signature: slightly lower
+  mean flow, more overlap bins, and a slightly larger loop gap.
+- VSL 70/60 reduce mean flow further but do not reduce max density in this
+  probe; they look more like stronger holding/delay redistribution.
+- This is only a diagnostic fixed-VSL probe, not a closed-loop controller
+  performance result.
+
+### Follow-up: Upstream-Only VSL Preliminary Probe
+
+User noted that VSL should be tested upstream of the bottleneck rather than on
+the already-slow probe segment. I extended the diagnostic script with
+`--fixed-vsl-segments` and logged `probe_inflow_veh_h` from the Eq6
+inter-segment boundary flow into the probe segment.
+
+Verification:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m py_compile "2026-06-24\diag_scripts\capacity_drop_hysteresis_probe.py"
+```
+
+Result: PASS.
+
+Condition:
+
+- `plant-mode=eq6`
+- `nu_cong=140`
+- `mainline-low=2400`, `mainline-peak=3200`
+- `ramp-low=0`, `ramp-peak=500`
+- `T_total=9000 s`
+- `probe-segment=3`
+
+Generated:
+
+- `outputs/capacity_drop_hysteresis_eq6_vsl_upstream_prelim/upstream_vsl_comparison.csv`
+- `reports/figures/fig_capacity_drop_hysteresis_eq6_vsl_upstream_prelim.png`
+
+Summary:
+
+| case | drop_pct | loop_gap | bins | mean probe inflow | mean probe flow | max rho |
+|---|---:|---:|---:|---:|---:|---:|
+| VSL100 all | 2.62 | 93.86 | 4 | 3552.0 | 3561.6 | 38.13 |
+| VSL80 all | 2.73 | 101.24 | 5 | 3550.3 | 3558.8 | 38.21 |
+| VSL80 seg0-2 | 2.73 | 101.24 | 5 | 3550.3 | 3558.8 | 38.21 |
+| VSL80 seg2 | 2.73 | 101.24 | 5 | 3550.3 | 3558.8 | 38.21 |
+| VSL70 all | 1.13 | 93.76 | 7 | 3548.2 | 3550.3 | 39.44 |
+| VSL70 seg0-2 | 1.13 | 93.76 | 7 | 3548.2 | 3550.3 | 39.44 |
+| VSL70 seg2 | 1.13 | 93.76 | 7 | 3548.2 | 3550.3 | 39.44 |
+
+Interpretation:
+
+- Eq6 does create a VSL inflow-control channel, but the effect is weak in this
+  demand/probe condition.
+- VSL80 gives the cleanest mild effect: slightly lower probe inflow/flow and
+  larger loop gap/overlap.
+- VSL70 lowers flow a bit more but increases max density, suggesting stronger
+  holding rather than clear congestion relief.
+- Applying VSL to all segments, segments 0-2, or only immediate upstream
+  segment 2 gives identical results here. The key channel is segment-2 sending
+  into the probe segment.
+
+### No-Control Peak Segment FD With Storage Receiving Cap
+
+User asked for freeway segment-level FD plots under the no-control
+`peak_demand` scenario using the plant with receiving/storage cap. I added
+`2026-06-24/diag_scripts/no_control_peak_segment_fd.py` to trace the actual
+coupled plant at every 10 s freeway substep instead of relying on the standard
+closed-loop runner's link-mean state output.
+
+This diagnostic uses the real coupled plant path: urban substeps, on-ramp queue
+sync, actual ramp release, off-ramp storage scheduling, and the existing
+METANET receiving/storage cap in `src/models/metanet.py`.
+
+Verification:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m py_compile "2026-06-24\diag_scripts\no_control_peak_segment_fd.py"
+```
+
+Result: PASS.
+
+Run:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B "2026-06-24\diag_scripts\no_control_peak_segment_fd.py" --scenario peak_demand --out-dir "outputs\no_control_peak_segment_fd_storage_cap" --figure "reports\figures\fig_no_control_peak_segment_fd_storage_cap.png"
+```
+
+Generated:
+
+- `outputs/no_control_peak_segment_fd_storage_cap/segment_fd_timeseries.csv`
+- `outputs/no_control_peak_segment_fd_storage_cap/segment_fd_aggregate.csv`
+- `outputs/no_control_peak_segment_fd_storage_cap/segment_fd_summary.csv`
+- `outputs/no_control_peak_segment_fd_storage_cap/control_interval_summary.csv`
+- `reports/figures/fig_no_control_peak_segment_fd_storage_cap.png`
+
+Summary:
+
+| link | seg | max rho | final rho | mean flow | max flow | min speed | congested samples |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| FW_E | 0 | 175.6 | 175.5 | 1811 | 3173 | 5.0 | 609/720 |
+| FW_E | 1 | 175.6 | 175.5 | 1727 | 3291 | 5.0 | 625/720 |
+| FW_E | 2 | 175.1 | 175.1 | 2149 | 4781 | 5.0 | 679/720 |
+| FW_E | 3 | 166.7 | 166.7 | 1945 | 4157 | 5.0 | 669/720 |
+| FW_W | 0 | 175.6 | 175.5 | 1818 | 3096 | 5.0 | 561/720 |
+| FW_W | 1 | 175.6 | 175.5 | 1739 | 3291 | 5.0 | 578/720 |
+| FW_W | 2 | 175.1 | 175.1 | 2294 | 4762 | 5.0 | 652/720 |
+| FW_W | 3 | 166.7 | 166.7 | 2082 | 4165 | 5.0 | 634/720 |
+
+Final totals:
+
+- freeway TTT: `4895.503`
+- urban TTT: `6759.336`
+- total TTT: `11654.839`
+- final mainline origin queue: `2088.703 veh`
+- final ramp queue total: `720.000 veh`
+- accepted off-ramp arrivals: `950.397 veh`
+- rejected off-ramp arrivals: `0.000 veh`
+
+Interpretation:
+
+- The no-control `peak_demand` run enters a severe storage-limited freeway
+  state. Most segments spend the majority of the 720 ten-second samples above
+  `rho_crit=33.5`, and several segments finish near `rho_max=180`.
+- The receiving/storage cap prevents unbounded density growth, but under
+  peak no-control it turns the freeway into a capped queue reservoir. This is
+  why the segment FD plots show many points near the high-density boundary
+  instead of a clean recovery loop.
+- Segment 2 and segment 3 show the strongest flow variation because they are
+  closest to ramp merge/off-ramp interactions; upstream segments 0 and 1 are
+  dominated by high-density storage saturation.
+
+### No-Control Peak Segment FD With Calibrated Rho Cap
+
+User pointed out that the storage cap/kink should be near `rho≈94`, not near the
+default `rho_max=180`. I estimated the kink from the previous no-control
+`peak_demand` segment FD in two ways:
+
+- analytical speed-floor kink from the desired-speed curve:
+  `rho_crit * (a * ln(v_free / v_min)) ** (1/a) = 84.236`
+- empirical aggregate FD largest-density-jump midpoint across all segments:
+  mean `95.020`, median `96.496`
+
+Because the user's target was the observed `rho≈94` elbow, I used the empirical
+mean `rho_max=95.01964207118104` as a runtime override and reran the same
+no-control `peak_demand` trace.
+
+Verification:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m py_compile "2026-06-24\diag_scripts\no_control_peak_segment_fd.py"
+```
+
+Result: PASS.
+
+Run:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B "2026-06-24\diag_scripts\no_control_peak_segment_fd.py" --scenario peak_demand --rho-max 95.01964207118104 --out-dir "outputs\no_control_peak_segment_fd_rhocap95" --figure "reports\figures\fig_no_control_peak_segment_fd_rhocap95.png"
+```
+
+Generated:
+
+- `outputs/no_control_peak_segment_fd_rhocap95/segment_fd_timeseries.csv`
+- `outputs/no_control_peak_segment_fd_rhocap95/segment_fd_aggregate.csv`
+- `outputs/no_control_peak_segment_fd_rhocap95/segment_fd_summary.csv`
+- `outputs/no_control_peak_segment_fd_rhocap95/control_interval_summary.csv`
+- `reports/figures/fig_no_control_peak_segment_fd_rhocap95.png`
+
+Comparison to default `rho_max=180`:
+
+| metric | rho_max=180 | rho_max=95.020 | delta |
+|---|---:|---:|---:|
+| freeway TTT | 4895.503 | 6650.376 | +1754.873 |
+| urban TTT | 6759.336 | 7170.259 | +410.923 |
+| total TTT | 11654.839 | 13820.635 | +2165.796 |
+| final mainline origin queue | 2088.703 | 5292.279 | +3203.575 |
+| final ramp queue total | 720.000 | 720.000 | +0.000 |
+| accepted off-ramp arrivals | 950.397 | 642.807 | -307.589 |
+| rejected off-ramp arrivals | 0.000 | 0.000 | +0.000 |
+
+Segment summary with calibrated cap:
+
+| link | seg | max rho | final rho | mean flow | max flow | min speed | congested samples |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| FW_E | 0 | 93.2 | 93.2 | 2849 | 3056 | 7.6 | 609/720 |
+| FW_E | 1 | 93.2 | 93.2 | 1084 | 3291 | 5.0 | 625/720 |
+| FW_E | 2 | 92.4 | 92.4 | 1453 | 4781 | 5.1 | 679/720 |
+| FW_E | 3 | 90.0 | 90.0 | 1330 | 4157 | 5.0 | 669/720 |
+| FW_W | 0 | 93.2 | 93.2 | 2779 | 3056 | 7.1 | 561/720 |
+| FW_W | 1 | 93.2 | 93.2 | 1152 | 3291 | 5.0 | 578/720 |
+| FW_W | 2 | 92.4 | 92.4 | 1653 | 4762 | 5.1 | 652/720 |
+| FW_W | 3 | 90.0 | 90.0 | 1517 | 4165 | 5.0 | 634/720 |
+
+Interpretation:
+
+- The calibrated cap shifts the high-density boundary from `rho≈166-176` to
+  `rho≈90-93`, which matches the intended elbow region.
+- The no-control peak run becomes more externally queued: final mainline origin
+  queue increases by about `3204 veh`, while accepted off-ramp arrivals decrease
+  by about `308 veh`.
+- Total TTT increases because the reduced storage cap prevents freeway segments
+  from hiding demand as high internal density and pushes more vehicles into
+  origin/ramp waiting states.
+
+### No-Control Medium Segment FD With Calibrated Rho Cap
+
+I reran the same diagnostic for `medium_demand` with
+`rho_max=95.01964207118104`, no control, 7200 s, and the actual coupled plant.
+
+Run:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B "2026-06-24\diag_scripts\no_control_peak_segment_fd.py" --scenario medium_demand --rho-max 95.01964207118104 --out-dir "outputs\no_control_medium_segment_fd_rhocap95" --figure "reports\figures\fig_no_control_medium_segment_fd_rhocap95.png"
+```
+
+Generated:
+
+- `outputs/no_control_medium_segment_fd_rhocap95/segment_fd_timeseries.csv`
+- `outputs/no_control_medium_segment_fd_rhocap95/segment_fd_aggregate.csv`
+- `outputs/no_control_medium_segment_fd_rhocap95/segment_fd_summary.csv`
+- `outputs/no_control_medium_segment_fd_rhocap95/control_interval_summary.csv`
+- `reports/figures/fig_no_control_medium_segment_fd_rhocap95.png`
+
+Segment summary:
+
+| link | seg | max rho | final rho | mean flow | max flow | min speed | congested samples |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| FW_E | 0 | 93.2 | 93.2 | 2349 | 3056 | 5.0 | 293/720 |
+| FW_E | 1 | 93.2 | 93.2 | 1520 | 3291 | 5.0 | 313/720 |
+| FW_E | 2 | 92.4 | 92.4 | 2741 | 4778 | 5.1 | 443/720 |
+| FW_E | 3 | 90.0 | 90.0 | 2540 | 4173 | 5.0 | 410/720 |
+| FW_W | 0 | 12.6 | 8.7 | 1883 | 2301 | 88.5 | 0/720 |
+| FW_W | 1 | 18.0 | 10.3 | 1887 | 3291 | 64.1 | 0/720 |
+| FW_W | 2 | 32.7 | 15.6 | 3782 | 4749 | 65.3 | 0/720 |
+| FW_W | 3 | 29.4 | 16.3 | 3556 | 4113 | 65.8 | 0/720 |
+
+Final totals:
+
+- freeway TTT: `1192.032`
+- urban TTT: `971.080`
+- total TTT: `2163.112`
+- final mainline origin queue: `950.809 veh`
+- final ramp queue total: `362.136 veh`
+- accepted off-ramp arrivals: `1192.965 veh`
+- rejected off-ramp arrivals: `0.000 veh`
+
+Interpretation:
+
+- `FW_W` remains below `rho_crit` for all 720 samples and returns to low
+  density, so the calibrated cap is inactive in that direction.
+- `FW_E` crosses the tipping threshold and finishes at the `rho≈90-93` storage
+  boundary. The demand profile makes `FW_E` mainline demand 5% larger than
+  `FW_W`; with the reduced cap this small asymmetry is enough to produce
+  qualitatively different branches.
+- Therefore `medium_demand` is already a near-critical/bifurcation case under
+  `rho_max≈95`, while `peak_demand` saturates both freeway directions.
+## 2026-06-24 No-Control Medium Surge-Unloading FD Diagnostic
+
+### Purpose
+
+- Test whether the calibrated storage-cap METANET plant can exhibit a complete congestion loading and unloading trajectory under a medium-demand base scenario.
+- Separate the demand peak from the actual segment density peak and inspect segment-level hysteresis.
+
+### Implementation
+
+- Extended `2026-06-24/diag_scripts/no_control_peak_segment_fd.py` with a smooth demand-surge profile and configurable recovery demand.
+- Applied the same time-varying scale to freeway, ramp, and urban demands.
+- Classified each segment's loading and unloading branches using its own maximum-density time.
+- Preserved raw 10 s plant samples and generated 300 s aggregated FD branches.
+
+### Run command
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B "2026-06-24\diag_scripts\no_control_peak_segment_fd.py" --scenario medium_demand --total-sec 10800 --rho-max 95.01964207118104 --surge-start-sec 1200 --surge-peak-sec 2400 --surge-end-sec 3600 --surge-peak-scale 1.30 --recovery-scale 0.10 --aggregate-window-sec 300 --out-dir "outputs\no_control_medium_surge_unloading_fd_rhocap95" --figure "reports\figures\fig_no_control_medium_surge_unloading_fd_rhocap95.png"
+```
+
+### Result
+
+- Total horizon: 10,800 s.
+- Demand scale: 1.00 until 1,200 s, 1.30 at 2,400 s, and 0.10 from 3,600 s onward.
+- All eight freeway segments exceeded their critical density and later recovered below it.
+- Segment density peaks occurred at 2,740-3,040 s, after the input-demand peak.
+- Recovery below critical density occurred at 4,550-9,030 s; downstream segments 2-3 recovered substantially later than segments 0-1.
+- Final Total TTT: 1,997.151 veh-h (freeway 1,604.631; urban 392.520).
+- Final mainline origin queue: 0.000 veh.
+- Final ramp queue: 0.481 veh.
+- No rejected off-ramp arrivals were observed.
+
+The loading-minus-unloading flow gap was strongly positive for segments 0-2, showing clockwise hysteresis and capacity-drop behavior. Segment 3 had too little same-density overlap for a reliable branch-gap statistic.
+
+### Interpretation and limitations
+
+- A complete congestion-unloading loop is reproducible in the current plant.
+- Normal medium demand after saturation was not low enough to unload the network. A prolonged recovery tail at 10% of the configured medium demand was required.
+- This is therefore a plant-dynamics diagnostic rather than a representative medium-demand performance experiment.
+- The result indicates that the present `low/medium/peak` demand labels should be recalibrated against realized traffic regimes under the storage-cap plant.
+
+### Validation
+
+- `py_compile` passed for the modified diagnostic script.
+- Output preserved under `outputs/no_control_medium_surge_unloading_fd_rhocap95`.
+- Figure: `reports/figures/fig_no_control_medium_surge_unloading_fd_rhocap95.png`.
+
+### Proposed next modification
+
+- Recalibrate low, medium, and peak demand scenarios from no-control state targets: uncongested, near-critical/recoverable, and sustained congested/storage-constrained regimes.
+
+## 2026-06-24 Low/Medium/Peak No-Control Freeway FD Screening
+
+### Purpose
+
+- Run the configured `low_demand`, `medium_demand`, and `peak_demand` scenarios under identical short no-control conditions.
+- Check whether the three labels create meaningfully separated freeway traffic regimes in the calibrated storage-cap plant.
+
+### Common conditions
+
+- Controller: no-control.
+- Horizon: 1,800 s.
+- `rho_max`: 95.019642 veh/km/lane.
+- Raw FD sample interval: 10 s.
+- Display aggregation: 180 s.
+- Critical density: 33.5 veh/km/lane.
+
+### Run commands
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B "2026-06-24\diag_scripts\no_control_peak_segment_fd.py" --scenario low_demand --total-sec 1800 --rho-max 95.01964207118104 --aggregate-window-sec 180 --out-dir "outputs\no_control_low_fd_rhocap95_1800" --figure "reports\figures\fig_no_control_low_fd_rhocap95_1800.png"
+
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B "2026-06-24\diag_scripts\no_control_peak_segment_fd.py" --scenario medium_demand --total-sec 1800 --rho-max 95.01964207118104 --aggregate-window-sec 180 --out-dir "outputs\no_control_medium_fd_rhocap95_1800" --figure "reports\figures\fig_no_control_medium_fd_rhocap95_1800.png"
+
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B "2026-06-24\diag_scripts\no_control_peak_segment_fd.py" --scenario peak_demand --total-sec 1800 --rho-max 95.01964207118104 --aggregate-window-sec 180 --out-dir "outputs\no_control_peak_fd_rhocap95_1800" --figure "reports\figures\fig_no_control_peak_fd_rhocap95_1800.png"
+
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B "2026-06-24\diag_scripts\compare_three_scenario_fd.py"
+```
+
+### Results
+
+| Scenario | Total TTT (veh-h) | Max density | Congested FD samples | Final origin queue | Final ramp queue |
+|---|---:|---:|---:|---:|---:|
+| Low | 172.24 | 23.36 | 0.00% | 0.00 | 3.57 |
+| Medium | 242.61 | 38.18 | 4.79% | 0.00 | 4.66 |
+| Peak | 628.68 | 93.18 | 65.21% | 650.75 | 720.00 |
+
+### Interpretation
+
+- `low_demand` is fully uncongested in all freeway segments.
+- `medium_demand` is a useful near-critical regime: only FW_E segments 2-3 briefly exceed the critical density.
+- `peak_demand` is not a moderate next step above medium. It rapidly enters a storage-constrained collapse, with most FD samples congested and large unresolved origin and ramp queues.
+- The current labels therefore do not provide evenly separated low/medium/peak regimes. The major discontinuity is between medium and peak.
+
+### Outputs
+
+- Common-axis comparison: `reports/figures/fig_no_control_three_scenario_fd_rhocap95_1800.png`.
+- Vector comparison: `reports/figures/fig_no_control_three_scenario_fd_rhocap95_1800.svg`.
+- Combined summaries: `outputs/no_control_three_scenario_fd_rhocap95_1800`.
+- Scenario-specific raw and aggregated FD outputs are preserved in their corresponding output directories.
+
+### Validation
+
+- All three no-control simulations completed.
+- `py_compile` passed for both diagnostic scripts.
+- The comparison PNG was visually inspected; labels, common axes, direction encodings, and the critical-density reference are readable.
+
+### Proposed next modification
+
+- Sweep between the current medium and peak demand scales to find a sustained-but-recoverable peak regime, then lower or reshape medium only if a wider separation from low is desired.
+
+## 2026-06-24 Medium-to-Peak Demand Transition Sweep
+
+### Purpose
+
+- Evaluate the proposal to use the current `medium_demand` as the new low-demand case.
+- Find a new median-demand scale between the current medium and peak cases that visibly enters the freeway FD loading/congested branch without immediately saturating at the storage cap.
+
+### Method
+
+- No-control, 1,800 s, `rho_max=95.019642`.
+- Linearly interpolated the urban, freeway, and ramp demand scales between current medium `(1.00, 1.00, 1.00)` and current peak `(1.25, 1.20, 1.25)`.
+- Screened interpolation fractions 5%, 10%, 15%, 20%, 25%, 50%, and 75%.
+
+### Results
+
+| Medium-to-peak fraction | Urban/freeway/ramp scales | TTT (veh-h) | Max density | Congested samples | Congested segments | Final origin/ramp queue |
+|---:|---|---:|---:|---:|---:|---:|
+| 0% | 1.000 / 1.000 / 1.000 | 242.61 | 38.18 | 4.79% | 2 | 0.00 / 4.66 |
+| 5% | 1.0125 / 1.010 / 1.0125 | 247.56 | 41.26 | 9.44% | 2 | 0.00 / 4.73 |
+| 10% | 1.025 / 1.020 / 1.025 | 254.24 | 51.59 | 11.94% | 3 | 0.00 / 4.77 |
+| 15% | 1.0375 / 1.030 / 1.0375 | 264.44 | 78.38 | 15.90% | 4 | 0.00 / 4.80 |
+| 20% | 1.050 / 1.040 / 1.050 | 277.50 | 90.48 | 19.86% | 5 | 0.00 / 41.94 |
+| 25% | 1.0625 / 1.050 / 1.0625 | 292.31 | 93.18 | 24.51% | 6 | 19.22 / 108.34 |
+| 50% | 1.125 / 1.100 / 1.125 | 391.76 | 93.17 | 46.60% | 8 | 183.17 / 410.27 |
+| 75% | 1.1875 / 1.150 / 1.1875 | 513.01 | 93.18 | 57.85% | 8 | 449.86 / 661.50 |
+
+### Interpretation
+
+- The transition is highly nonlinear. A 25% interpolation already saturates some freeway segments near the storage cap.
+- The 10% interpolation is the cleanest short-run median candidate:
+  - it produces a visible FD loading and post-capacity branch;
+  - maximum density remains 51.59 veh/km/lane rather than approaching the 95 veh/km/lane storage cap;
+  - no mainline origin queue remains at 1,800 s;
+  - minimum speed remains 35.5 km/h, whereas the 15% candidate already reaches the 5 km/h floor in one or more segments.
+- Proposed provisional mapping:
+  - low: current medium `(1.00, 1.00, 1.00)`;
+  - median: `(1.025, 1.020, 1.025)`;
+  - peak: current peak `(1.25, 1.20, 1.25)`.
+
+### Outputs
+
+- Proposed regime comparison: `reports/figures/fig_proposed_low_median_peak_fd_rhocap95_1800.png`.
+- Vector figure: `reports/figures/fig_proposed_low_median_peak_fd_rhocap95_1800.svg`.
+- Candidate outputs: `outputs/demand_recalibration_alpha*_1800`.
+- Proposed combined summaries: `outputs/proposed_low_median_peak_fd_rhocap95_1800`.
+
+### Validation and next step
+
+- Both diagnostic scripts passed `py_compile`.
+- The proposed common-axis figure was visually inspected.
+- Do not update the canonical scenario configuration from this 1,800 s screening alone. Validate the 0%, 10%, and current-peak cases over 7,200 s because the built-in sinusoidal demand wave is normalized by the total simulation horizon.
+
+## 2026-06-24 Six-Scenario Canonical Demand Redesign
+
+### Implemented
+
+- Replaced the active scenario set with exactly six canonical scenarios:
+  - `low_demand`
+  - `medium_demand`
+  - `peak_demand`
+  - `medium_incident_east`
+  - `medium_urban_west_skew`
+  - `medium_surge`
+- Promoted the calibrated freeway receiving/jam density
+  `rho_max=95.01964207118104 veh/km/lane` to the canonical plant configuration.
+- Added time-dependent, link/segment-specific freeway lane closures to
+  `ScenarioConfig`, `DemandProfile`, `DemandStep`, the METANET plant, leader forecast
+  aggregation, distributed followers, and WU candidate generation.
+- Added a total-preserving west/east urban demand redistribution mode.
+- Added a triangular common demand-surge mode shared by freeway, ramp, and urban demand.
+
+### Canonical definitions
+
+| Scenario | Urban scale | Freeway scale | Ramp scale | Additional condition |
+|---|---:|---:|---:|---|
+| `low_demand` | 1.0000 | 1.0000 | 1.0000 | Former medium/base demand |
+| `medium_demand` | 1.0375 | 1.0300 | 1.0375 | Former medium-to-peak 15% interpolation |
+| `peak_demand` | 1.2500 | 1.2000 | 1.2500 | Existing peak |
+| `medium_incident_east` | 1.0375 | 1.0300 | 1.0375 | `FW_E` segment 3 loses one lane during 2400-4800 s |
+| `medium_urban_west_skew` | 1.0375 | 1.0300 | 1.0375 | West-side entry total = 2 x east-side entry total |
+| `medium_surge` | 1.0375 | 1.0300 | 1.0375 | Common scale 1.0 at 1800 s, 1.15 at 3000 s, 1.0 at 4200 s |
+
+`FW_W` remains fully open in `medium_incident_east`. This deliberately asymmetric
+incident tests directional coupling and controller redistribution rather than applying
+a network-wide capacity reduction.
+
+For the urban-skew case, the west-side entries are `in_A_left` and `in_D_left`;
+the east-side entries are `in_C_right` and `in_F_right`. At 3000 s:
+
+- medium total urban boundary demand: `10390.853427 veh/h`
+- skew total urban boundary demand: `10390.853427 veh/h`
+- west total: `2348.215464 veh/h`
+- east total: `1174.107732 veh/h`
+- west/east ratio: `2.000000`
+
+### Files changed
+
+- `src/config/default.yaml`
+- `src/config/scenarios.yaml`
+- `src/models/state.py`
+- `src/models/demand.py`
+- `src/models/metanet.py`
+- `src/controllers/leader.py`
+- `src/controllers/distributed_coordinator.py`
+- `src/controllers/wu_distributed.py`
+- `src/tests/test_demand_scenarios.py`
+- `docs/spec/05_simulation_pipeline.md`
+- `2026-06-24/diag_scripts/no_control_peak_segment_fd.py`
+- `2026-06-24/diag_scripts/compare_three_scenario_fd.py`
+
+### Standard 7200 s no-control screening
+
+All scenarios used the same seed, horizon, canonical plant, and no-control policy.
+The following totals come from the standard `run_closed_loop` path.
+
+| Scenario | Total TTT (veh-h) | Final boundary queue | Final movement queue | Final origin queue | Final ramp queue |
+|---|---:|---:|---:|---:|---:|
+| `low_demand` | 2168.827 | 234.311 | 1312.147 | 950.809 | 362.136 |
+| `medium_demand` | 3367.045 | 665.382 | 2640.138 | 1413.030 | 362.187 |
+| `peak_demand` | 13823.810 | 3403.766 | 9472.807 | 5292.279 | 720.000 |
+| `medium_incident_east` | 4608.675 | 1083.054 | 3643.401 | 1774.850 | 362.187 |
+| `medium_urban_west_skew` | 3394.702 | 662.156 | 2659.296 | 1417.098 | 362.196 |
+| `medium_surge` | 6583.652 | 1309.825 | 4904.428 | 3073.187 | 720.000 |
+
+The incident and surge scenarios therefore create distinct stress levels above medium.
+The urban-skew case intentionally preserves total demand, so its network-wide TTT stays
+near medium while the spatial queue distribution changes.
+
+### Surge calibration
+
+Additional 7200 s no-control probes used surge peaks `1.03`, `1.05`, `1.08`, and
+`1.15`. Even `1.03` moved the current storage-cap plant to the high-density attractor
+with a final mean freeway density near `92.17 veh/km/lane`. The canonical `1.15`
+therefore remains a tipping-point robustness case rather than a guaranteed unloading
+case. It is still substantially less severe than `peak_demand` by total TTT.
+
+### Validation
+
+- `py_compile`: passed for all modified Python modules and tests.
+- Scenario regression checks: 7 passed.
+- METANET equation and closed-loop smoke tests: 23 passed.
+- Targeted constraints tests: 3 passed.
+- Full constraints suite after the final scenario-schema extension: 87 passed.
+- Six 7200 s no-control simulations: completed.
+- Incident plant check: `FW_E seg3=1.0 lane`, all `FW_W` segments remain `2.0 lanes`.
+- Control validation and improvement rate: not applicable; this attempt redefines
+  scenarios and runs no-control screening only.
+
+### Acceptance status and next step
+
+- Controller acceptance: not evaluated.
+- Boundary queues are reported as scenario baselines, not pass/fail comparisons.
+- Next: run the four controller families against the same six canonical scenarios and
+  compare TTT, throughput, terminal vehicles, boundary balance, and computation cost.

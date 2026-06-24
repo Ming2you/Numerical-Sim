@@ -5,7 +5,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 
-from src.models.demand import DemandStep
+from src.models.demand import DemandStep, merge_freeway_lane_loss
 from src.models.state import ControlAction, ExperimentConfig, TrafficState
 from src.models.urban_queue_model import (
     estimate_onramp_green_release_flows,
@@ -62,6 +62,7 @@ class Leader:
             incident_capacity_factor=min(
                 float(getattr(s, "incident_capacity_factor", 1.0)) for s in steps
             ),
+            freeway_lane_loss=merge_freeway_lane_loss(steps),
         )
 
     def candidates(

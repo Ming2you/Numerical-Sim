@@ -123,6 +123,7 @@ def offramp_spillback_lambda_eff(
 def effective_lane_profile(
     state: TrafficState,
     cfg: ExperimentConfig,
+    demand: DemandStep | None = None,
 ) -> Tuple[Dict[str, List[float]], Dict[str, float]]:
     """현재 off-ramp storage 점유율에서 freeway segment별 effective lane profile을 계산한다."""
     net = cfg.network
@@ -133,42 +134,53 @@ def effective_lane_profile(
         for link in net.freeway_links
     }
     diagnostics: Dict[str, float] = {"capacity_drop_active": 0.0}
-    if not drop.enabled:
-        for link, lanes in profile.items():
-            if lanes:
-                diagnostics[f"lambda_eff_{link}_last"] = float(lanes[-1])
-                diagnostics[f"capacity_drop_lane_loss_{link}_last"] = 0.0
-        return profile, diagnostics
+    if drop.enabled:
+        for off_ramp in net.off_ramps:
+            link = net.off_ramp_from_freeway.get(off_ramp)
+            if link not in profile or not profile[link]:
+                continue
+            storage_link = net.off_ramp_storage_link.get(off_ramp)
+            capacity = float(net.urban_link_storage_veh.get(storage_link, 0.0))
+            available = float(state.urban_link_storage.get(storage_link, capacity))
+            occupancy = _clip(capacity - available, 0.0, capacity)
+            ratio = occupancy / max(capacity, 1.0e-9)
+            lambda_eff = offramp_spillback_lambda_eff(
+                occupancy,
+                capacity,
+                float(net.freeway_lanes),
+                float(drop.lane_reduction),
+                float(drop.gamma),
+                float(drop.b),
+            )
+            segment_idx = _configured_segment_index(
+                getattr(net, "off_ramp_segment_index", {}),
+                off_ramp,
+                len(profile[link]) - 1,
+                len(profile[link]),
+            )
+            profile[link][segment_idx] = min(profile[link][segment_idx], lambda_eff)
+            diagnostics[f"offramp_occupancy_ratio_{off_ramp}"] = float(ratio)
+            diagnostics[f"lambda_eff_{link}_seg{segment_idx}"] = float(profile[link][segment_idx])
+            diagnostics[f"capacity_drop_lane_loss_{link}_seg{segment_idx}"] = float(
+                max(0.0, net.freeway_lanes - profile[link][segment_idx])
+            )
 
-    for off_ramp in net.off_ramps:
-        link = net.off_ramp_from_freeway.get(off_ramp)
-        if link not in profile or not profile[link]:
+    diagnostics["incident_lane_closure_active"] = 0.0
+    lane_losses = getattr(demand, "freeway_lane_loss", {}) if demand is not None else {}
+    # Incident 차로 폐쇄와 off-ramp spillback이 겹치면 더 작은 effective lane 수를 적용한다.
+    for link, segment_losses in lane_losses.items():
+        if link not in profile:
             continue
-        storage_link = net.off_ramp_storage_link.get(off_ramp)
-        capacity = float(net.urban_link_storage_veh.get(storage_link, 0.0))
-        available = float(state.urban_link_storage.get(storage_link, capacity))
-        occupancy = _clip(capacity - available, 0.0, capacity)
-        ratio = occupancy / max(capacity, 1.0e-9)
-        lambda_eff = offramp_spillback_lambda_eff(
-            occupancy,
-            capacity,
-            float(net.freeway_lanes),
-            float(drop.lane_reduction),
-            float(drop.gamma),
-            float(drop.b),
-        )
-        segment_idx = _configured_segment_index(
-            getattr(net, "off_ramp_segment_index", {}),
-            off_ramp,
-            len(profile[link]) - 1,
-            len(profile[link]),
-        )
-        profile[link][segment_idx] = min(profile[link][segment_idx], lambda_eff)
-        diagnostics[f"offramp_occupancy_ratio_{off_ramp}"] = float(ratio)
-        diagnostics[f"lambda_eff_{link}_seg{segment_idx}"] = float(profile[link][segment_idx])
-        diagnostics[f"capacity_drop_lane_loss_{link}_seg{segment_idx}"] = float(
-            max(0.0, net.freeway_lanes - profile[link][segment_idx])
-        )
+        for segment, loss in segment_losses.items():
+            segment_idx = int(segment)
+            if not 0 <= segment_idx < len(profile[link]):
+                continue
+            incident_lanes = max(1.0e-9, float(net.freeway_lanes) - max(0.0, float(loss)))
+            profile[link][segment_idx] = min(profile[link][segment_idx], incident_lanes)
+            diagnostics["incident_lane_closure_active"] = 1.0
+            diagnostics[f"incident_lane_loss_{link}_seg{segment_idx}"] = float(
+                max(0.0, net.freeway_lanes - profile[link][segment_idx])
+            )
 
     for link, lanes in profile.items():
         if not lanes:
@@ -294,7 +306,7 @@ def freeway_substep(
             next_queue = state.ramp_queue.get(ramp, 0.0) + dt_h * (arrival - release)
             state.ramp_queue[ramp] = max(0.0, next_queue)
 
-    lane_now_by_link, lane_diag_start = effective_lane_profile(state, cfg)
+    lane_now_by_link, lane_diag_start = effective_lane_profile(state, cfg, demand)
     for link in net.freeway_links:
         rhos = list(state.freeway_density[link])
         speeds = list(state.freeway_speed[link])

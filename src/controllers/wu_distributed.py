@@ -433,6 +433,7 @@ class WuDistributedController:
         state: TrafficState,
         coupling: Mapping[str, float],
         previous: ControlAction,
+        demand: DemandStep,
     ) -> list[list[float]]:
         """Spec 17.5 WU relaxed VSL: Cartesian 열거 대신 pressure target 벡터만 만든다."""
         net = self.cfg.network
@@ -440,7 +441,7 @@ class WuDistributedController:
         vsl_max = float(max(ff.vsl_set))
         vsl_min = float(min(ff.vsl_set))
         densities = list(state.freeway_density.get(link, []))
-        profile, _ = effective_lane_profile(state, self.cfg)
+        profile, _ = effective_lane_profile(state, self.cfg, demand)
         lane_profile = profile.get(link, [net.freeway_lanes for _ in range(n_seg)])
         bottleneck_idx = {
             int(net.off_ramp_segment_index.get(o, n_seg - 1))
@@ -517,7 +518,7 @@ class WuDistributedController:
         prev_vec = [segment_vsl(previous, link, i, self.cfg) for i in range(n_seg)]
 
         candidates = (
-            self._relaxed_freeway_segment_candidates(link, n_seg, state, coupling, previous)
+            self._relaxed_freeway_segment_candidates(link, n_seg, state, coupling, previous, demand)
             if self.cfg.mpc.relaxed_quantized_controls
             else self._freeway_segment_candidates(link, n_seg, previous)
         )

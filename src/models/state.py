@@ -183,7 +183,7 @@ class NetworkConfig:
     freeway_lanes: int = 2
     v_free: float = 100.0
     rho_crit: float = 33.5
-    rho_max: float = 180.0
+    rho_max: float = 95.01964207118104
     freeway_capacity_veh_h: float = 3600.0
     ramps: List[str] = field(default_factory=lambda: ["R_D_W", "R_F_W", "R_D_E", "R_F_E"])
     ramp_to_freeway: Dict[str, str] = field(default_factory=lambda: {

@@ -14,6 +14,7 @@ class DemandStep:
     urban_boundary: Dict[str, float]
     ramp_arrival: Dict[str, float]
     incident_capacity_factor: float = 1.0
+    freeway_lane_loss: Dict[str, Dict[int, float]] = field(default_factory=dict)
 
 
 @dataclass
@@ -33,6 +34,13 @@ class ScenarioConfig:
     # 시나리오 한정 boundary_in 게이트별 가중치(공간 skew). 적용 후 총 urban 유입은 baseline과
     # 같도록 renormalize해 skew 효과를 demand 크기와 분리한다. None이면 기존 gradient 유지.
     urban_boundary_weight_override: Optional[Dict[str, float]] = None
+    urban_west_east_ratio: Optional[float] = None
+    freeway_lane_closures: list[Dict[str, float | str]] = field(default_factory=list)
+    surge_start_sec: Optional[float] = None
+    surge_peak_sec: Optional[float] = None
+    surge_end_sec: Optional[float] = None
+    surge_peak_scale: float = 1.0
+    surge_recovery_scale: float = 1.0
     metadata: Dict[str, float] = field(default_factory=dict)
 
     @classmethod
@@ -57,6 +65,25 @@ class ScenarioConfig:
             known["urban_boundary_weight_override"] = {
                 str(k): float(v) for k, v in weight_override.items()
             }
+        west_east_ratio = raw.get("urban_west_east_ratio")
+        if west_east_ratio is not None:
+            known["urban_west_east_ratio"] = float(west_east_ratio)
+        lane_closures = raw.get("freeway_lane_closures")
+        if isinstance(lane_closures, list):
+            known["freeway_lane_closures"] = [
+                {
+                    str(k): (str(v) if str(k) == "link" else float(v))
+                    for k, v in closure.items()
+                }
+                for closure in lane_closures
+                if isinstance(closure, Mapping)
+            ]
+        for key in ("surge_start_sec", "surge_peak_sec", "surge_end_sec"):
+            value = raw.get(key)
+            if value is not None:
+                known[key] = float(value)
+        known["surge_peak_scale"] = float(raw.get("surge_peak_scale", 1.0))
+        known["surge_recovery_scale"] = float(raw.get("surge_recovery_scale", 1.0))
         return cls(name=name, **known)
 
 
@@ -67,6 +94,21 @@ def load_scenarios(path: str | Path) -> Dict[str, ScenarioConfig]:
         name: ScenarioConfig.from_mapping(name, value)
         for name, value in scenarios.items()
     }
+
+
+def merge_freeway_lane_loss(steps: list[DemandStep]) -> Dict[str, Dict[int, float]]:
+    """Forecast 구간에서 발생하는 segment별 최대 incident lane loss를 합친다."""
+    merged: Dict[str, Dict[int, float]] = {}
+    for step in steps:
+        for link, segment_losses in step.freeway_lane_loss.items():
+            target = merged.setdefault(str(link), {})
+            for segment, loss in segment_losses.items():
+                segment_idx = int(segment)
+                target[segment_idx] = max(
+                    target.get(segment_idx, 0.0),
+                    max(0.0, float(loss)),
+                )
+    return merged
 
 
 def apply_scenario_network_overrides(
@@ -100,15 +142,54 @@ class DemandProfile:
         self.cfg = cfg
         self.scenario = scenario
 
+    def _surge_scale(self, time_sec: float) -> float:
+        # Medium surge는 기준 수요의 총 구성비를 유지하면서 모든 유입을 같은 배율로 증감한다.
+        start = self.scenario.surge_start_sec
+        peak_time = self.scenario.surge_peak_sec
+        end = self.scenario.surge_end_sec
+        if start is None or peak_time is None or end is None:
+            return 1.0
+        if not start < peak_time < end:
+            raise ValueError("scenario surge timing must satisfy start < peak < end")
+        peak_scale = max(0.0, self.scenario.surge_peak_scale)
+        recovery_scale = max(0.0, self.scenario.surge_recovery_scale)
+        if time_sec <= start:
+            return 1.0
+        if time_sec <= peak_time:
+            fraction = (time_sec - start) / max(peak_time - start, 1.0e-9)
+            return 1.0 + fraction * (peak_scale - 1.0)
+        if time_sec <= end:
+            fraction = (time_sec - peak_time) / max(end - peak_time, 1.0e-9)
+            return peak_scale + fraction * (recovery_scale - peak_scale)
+        return recovery_scale
+
+    def _active_lane_loss(self, time_sec: float) -> Dict[str, Dict[int, float]]:
+        # 차로 폐쇄는 DemandStep에 넣어 plant와 MPC forecast가 같은 incident 상태를 보게 한다.
+        lane_loss: Dict[str, Dict[int, float]] = {}
+        for closure in self.scenario.freeway_lane_closures:
+            link = str(closure.get("link", ""))
+            segment = int(float(closure.get("segment", -1.0)))
+            loss = max(0.0, float(closure.get("lane_loss", 0.0)))
+            start = float(closure.get("start_sec", 0.0))
+            end = float(closure.get("end_sec", float("inf")))
+            if not link or segment < 0 or loss <= 0.0 or not start <= time_sec < end:
+                continue
+            lane_loss.setdefault(link, {})[segment] = max(
+                lane_loss.get(link, {}).get(segment, 0.0),
+                loss,
+            )
+        return lane_loss
+
     def at(self, time_sec: float) -> DemandStep:
         sim = self.cfg.simulation
         net = self.cfg.network
         x = time_sec / max(sim.T_total, 1.0)
         peak = 1.0 + 0.22 * math.sin(math.pi * min(max(x, 0.0), 1.0))
 
-        freeway_base = 1650.0 * self.scenario.freeway_scale * peak
-        ramp_base = 560.0 * self.scenario.ramp_scale * peak
-        urban_base = 500.0 * self.scenario.urban_scale * peak
+        surge = self._surge_scale(time_sec)
+        freeway_base = 1650.0 * self.scenario.freeway_scale * peak * surge
+        ramp_base = 560.0 * self.scenario.ramp_scale * peak * surge
+        urban_base = 500.0 * self.scenario.urban_scale * peak * surge
 
         freeway = {
             link: freeway_base * (1.0 + 0.05 * idx)
@@ -127,6 +208,24 @@ class DemandProfile:
             w_total = sum(weighted.values())
             renorm = (base_total / w_total) if w_total > 1.0e-9 else 1.0
             in_base = {link: weighted[link] * renorm for link in weighted}
+        west_east_ratio = self.scenario.urban_west_east_ratio
+        if west_east_ratio is not None:
+            # 서/동 측면 진입의 합만 재배분하고 북측 진입과 전체 urban demand 합은 보존한다.
+            if west_east_ratio <= 0.0:
+                raise ValueError("urban_west_east_ratio must be positive")
+            west_links = [link for link in ("in_A_left", "in_D_left") if link in in_base]
+            east_links = [link for link in ("in_C_right", "in_F_right") if link in in_base]
+            west_total = sum(in_base[link] for link in west_links)
+            east_total = sum(in_base[link] for link in east_links)
+            side_total = west_total + east_total
+            target_west = side_total * west_east_ratio / (1.0 + west_east_ratio)
+            target_east = side_total / (1.0 + west_east_ratio)
+            west_factor = target_west / max(west_total, 1.0e-9)
+            east_factor = target_east / max(east_total, 1.0e-9)
+            for link in west_links:
+                in_base[link] *= west_factor
+            for link in east_links:
+                in_base[link] *= east_factor
         urban.update(in_base)
         for idx, link in enumerate(net.boundary_out_links):
             urban[link] = urban_base * (0.82 + 0.08 * idx)
@@ -139,6 +238,7 @@ class DemandProfile:
             urban_boundary=urban,
             ramp_arrival=ramp,
             incident_capacity_factor=self.scenario.incident_capacity_factor,
+            freeway_lane_loss=self._active_lane_loss(time_sec),
         )
 
     def horizon(self, start_time_sec: float, steps: int) -> list[DemandStep]:
