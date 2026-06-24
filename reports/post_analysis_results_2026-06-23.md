@@ -189,6 +189,45 @@ PFO 1,300**(P-Stack은 no-control 대비 −22 %, PFO 대비 −32 %). 특히 **
 ![Fig.13 network-level macro coupling](figures/fig13_coupling_macro.png)
 ![Fig.14 realized half-cap movement excess (3 controllers)](figures/fig14_accumulation.png)
 
+#### 4.2.1 leader는 왜 urban을 비우지 않나 — TTT 분해와 벌점 크기
+
+**(1) freeway/urban TTT 분해(heavy1.50, 누적 veh·h).** leader objective의 base는 follower TTT이고,
+이는 freeway·urban vehicle-time을 *같은 화폐*로 합산한다. 실현 누적 TTT를 쪼개면.
+
+| controller | total | freeway | urban |
+|---|---|---|---|
+| no-control | 4,228 | 2,260 | 1,968 |
+| PFO | 3,200 | 1,300 | 1,900 |
+| **P-Stack** | **2,796** | **738** | **2,058** |
+
+P-Stack vs no-control: **freeway −67 %(−1,522)**, **urban +4.6 %(+90)**, total −34 %. 즉 leader는
+**urban TTT를 약간(+90) 늘리는 대신 freeway TTT를 대폭(−1,522) 줄인다**(≈17:1). delay를 *싼 저장소*
+(urban/ramp)에 주차시켜 *비싼 저장소*(freeway)를 보호하는 perimeter 원리다.
+
+**(2) 그 trade는 half-cap 벌점이 약해서가 아니다.** half-cap 항은 `weight=1.0`이고 TTT와 **동일한
+호라이즌 시간적분**(×$T_{c,h}$는 단위맞춤 veh→veh·h)이라, over-half-cap urban vehicle-time에 대한
+**1:1 surcharge**(해당 차량은 자기 TTT + 동일 벌점 = 2배)다. P-Stack에서 이 벌점은 base TTT의
+**~33 %**(말기)까지 커진다 — 결코 약한 guard가 아니다. 그런데도 freeway 절감이 압도적이라 leader는
+이 surcharge를 감수하고 urban을 떠안는다.
+
+**(3) 임계값에 "묶지"는 않는다(setpoint 추종 아님).** 1.5× 수요에선 freeway·urban 모두 임계를 넘는다
+— 밀도 $\rho$는 $\rho_{\mathrm{crit}}=33.5$를 한참 초과(no-control 173 vs P-Stack 94, FigB), freeway
+flow는 고밀도에서 감소한다(METANET 평형 FD의 **혼잡 가지**, FigD). urban 총큐는 집계로는 half-cap의
+0.5–0.6배지만(FigC) 요소별 집중으로 벌점은 켜진다. 즉 컨트롤러는 임계값에 고정하는 게 아니라
+**overshoot를 줄일 뿐**이고, P-Stack은 freeway overshoot를 가장 크게 줄여(ρ 94 vs 173) TTT 이득을 얻는다.
+
+**(4) "freeway 차량이 비싼" 한계 기전 = 누적 증폭(capacity drop 아님).** 차량당 평균 체류는 위치 무관하게
+거의 동일하지만(W=TTT/N ≈ freeway 0.96, urban 1.05), **admission 한계비용**은 freeway가 크다. ρ가
+$\rho_{\mathrm{crit}}$를 넘으면 FD 혼잡 가지에서 flow(방출)가 줄어 같은 수요가 더 큰 누적을 만든다
+(평균 총누적 no-control 4,216 vs P-Stack 2,718, 차이 대부분 freeway 2,342 vs 766). 단 이는 METANET
+평형 FD의 단일값 혼잡 가지이지 **breakdown capacity drop(hysteresis)이 아니다** — 모델의 off-ramp
+lane-loss capacity-drop 항은 heavy1.50에서 무시할 수준(≤0.002 lane)이라 작동 인자가 아니다.
+
+![FigA leader-objective decomposition](figures/figA_objective_decomp.png)
+![FigB freeway density vs rho_crit](figures/figB_rho_vs_crit.png)
+![FigC urban storage vs half-cap line](figures/figC_urban_vs_halfcap.png)
+![FigD freeway FD congested branch](figures/figD_freeway_fd.png)
+
 ### 4.3 미시 결합 vs 거시 결합 — 핵심 차이 (PFO↔P-Stack)
 
 | 측면 | 미시(ramp-level) | 거시(network-level) |
@@ -269,8 +308,13 @@ equilibrium을 leader가 internalize**하는 Stackelberg 구조의 본질[5].
 | 15 | fig15_skew_balance | 4 | skew 하 경계균형 재분배 |
 | 16 | fig16_vsl | 3 | VSL 작동(incident) |
 | 17 | fig17_computation | 5 | 계산비용·real-time 비 |
+| A | figA_objective_decomp | 4.2.1 | leader objective 누적 성분분해(4컨트롤러) |
+| B | figB_rho_vs_crit | 4.2.1 | freeway 밀도 $\rho$ vs $\rho_{\mathrm{crit}}$ |
+| C | figC_urban_vs_halfcap | 4.2.1 | urban 총큐 vs half-cap/full-cap 라인 |
+| D | figD_freeway_fd | 4.2.1 | freeway flow–density(METANET FD 혼잡 가지) |
 
-(생성: `2026-06-23/diag_scripts/make_paper_figures_v2.py`, Times New Roman + mathtext)
+(생성: `2026-06-23/diag_scripts/make_paper_figures_v2.py` (1–17),
+`2026-06-24/diag_scripts/penalty_analysis_figs.py` (A–D), Times New Roman + mathtext)
 
 ---
 
