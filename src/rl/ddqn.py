@@ -276,7 +276,8 @@ class StackelbergDDQNTrainer:
                 "follower_a": follower_a,
                 "follower_r": {aid: step.follower_rewards.get(aid, 0.0) for aid in self.followers},
             }
-            self.global_step += 1
+            if train:
+                self.global_step += 1
 
             if train:
                 lloss = self.leader.train_batch(self.rng)

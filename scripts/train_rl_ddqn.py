@@ -41,6 +41,15 @@ _CSV_FIELDS = [
     "elapsed_sec",
 ]
 
+_EVAL_FIELDS = [
+    "episode",
+    "eval_episodes",
+    "mean_ttt",
+    "min_ttt",
+    "max_ttt",
+    "elapsed_sec",
+]
+
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Stackelberg 다중에이전트 DDQN 학습 run")
@@ -69,6 +78,12 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--max-seconds", type=float, default=None)
     p.add_argument("--checkpoint-every", type=int, default=50, help="N 에피소드마다 latest 체크포인트 저장.")
     p.add_argument("--resume", action="store_true", help="output-dir의 latest.pt에서 이어서 학습.")
+    p.add_argument("--eval-every", type=int, default=0)
+    p.add_argument("--eval-episodes", type=int, default=1)
+    p.add_argument("--early-stop-ttt-threshold", type=float, default=None)
+    p.add_argument("--early-stop-window", type=int, default=8)
+    p.add_argument("--early-stop-improvement-tol", type=float, default=0.005)
+    p.add_argument("--early-stop-min-episodes", type=int, default=0)
     return p.parse_args()
 
 
@@ -80,6 +95,66 @@ def _open_csv(path: Path):
         writer.writeheader()
         handle.flush()
     return handle, writer
+
+
+def _open_eval_csv(path: Path):
+    is_new = not (path.exists() and path.stat().st_size > 0)
+    handle = path.open("a", encoding="utf-8", newline="")
+    writer = csv.DictWriter(handle, fieldnames=_EVAL_FIELDS, extrasaction="ignore")
+    if is_new:
+        writer.writeheader()
+        handle.flush()
+    return handle, writer
+
+
+def _load_eval_history(path: Path) -> list[tuple[int, float]]:
+    if not path.exists() or path.stat().st_size == 0:
+        return []
+    with path.open(newline="", encoding="utf-8") as handle:
+        rows = csv.DictReader(handle)
+        history = []
+        for row in rows:
+            try:
+                history.append((int(row["episode"]), float(row["mean_ttt"])))
+            except (KeyError, TypeError, ValueError):
+                continue
+        return history
+
+
+def _mean(values: list[float]) -> float:
+    return sum(values) / max(1, len(values))
+
+
+def _early_stop_status(
+    history: list[tuple[int, float]],
+    threshold: float | None,
+    window: int,
+    improvement_tol: float,
+) -> dict:
+    if threshold is None:
+        return {"ready": False, "stop": False}
+    n = max(1, int(window))
+    if len(history) < 2 * n:
+        return {"ready": False, "stop": False, "needed_points": 2 * n}
+    values = [float(value) for _, value in history]
+    previous = _mean(values[-2 * n:-n])
+    recent = _mean(values[-n:])
+    improvement = (previous - recent) / max(abs(previous), 1.0)
+    return {
+        "ready": True,
+        "stop": recent <= threshold and abs(improvement) <= improvement_tol,
+        "previous_mean_ttt": previous,
+        "recent_mean_ttt": recent,
+        "relative_improvement": improvement,
+    }
+
+
+def _run_greedy_eval(trainer: StackelbergDDQNTrainer, episode: int, eval_episodes: int) -> list[float]:
+    values = []
+    for _ in range(max(1, int(eval_episodes))):
+        stats = trainer.run_episode(episode, train=False, greedy=True)
+        values.append(float(stats.episode_ttt))
+    return values
 
 
 def main() -> None:
@@ -124,6 +199,12 @@ def main() -> None:
         print(f"[train] resume: {latest} 에서 episode {start_episode}부터, global_step={trainer.global_step}", flush=True)
 
     handle, writer = _open_csv(out / "train_curve.csv")
+    eval_path = out / "eval_curve.csv"
+    eval_handle = None
+    eval_writer = None
+    eval_history = _load_eval_history(eval_path)
+    if args.eval_every > 0:
+        eval_handle, eval_writer = _open_eval_csv(eval_path)
 
     stop = {"flag": False}
 
@@ -174,6 +255,51 @@ def main() -> None:
                 trainer.save(latest)
                 meta_path.write_text(json.dumps({"next_episode": episode}), encoding="utf-8")
 
+            if args.eval_every > 0 and episode % max(1, args.eval_every) == 0:
+                eval_ttts = _run_greedy_eval(trainer, episode, args.eval_episodes)
+                eval_elapsed = time.time() - t0
+                eval_mean = _mean(eval_ttts)
+                eval_history.append((episode, eval_mean))
+                if eval_writer is not None and eval_handle is not None:
+                    eval_writer.writerow(
+                        {
+                            "episode": episode,
+                            "eval_episodes": max(1, int(args.eval_episodes)),
+                            "mean_ttt": round(eval_mean, 3),
+                            "min_ttt": round(min(eval_ttts), 3),
+                            "max_ttt": round(max(eval_ttts), 3),
+                            "elapsed_sec": round(eval_elapsed, 1),
+                        }
+                    )
+                    eval_handle.flush()
+                early = _early_stop_status(
+                    eval_history,
+                    args.early_stop_ttt_threshold,
+                    args.early_stop_window,
+                    args.early_stop_improvement_tol,
+                )
+                print(
+                    f"[eval ep {episode}] mean_ttt={eval_mean:.1f} "
+                    f"min={min(eval_ttts):.1f} max={max(eval_ttts):.1f}",
+                    flush=True,
+                )
+                if early.get("ready"):
+                    print(
+                        f"[early-stop check] recent={early['recent_mean_ttt']:.1f} "
+                        f"previous={early['previous_mean_ttt']:.1f} "
+                        f"rel_improve={early['relative_improvement']:.4f}",
+                        flush=True,
+                    )
+                if episode >= args.early_stop_min_episodes and early.get("stop"):
+                    print(
+                        "[early-stop] greedy eval TTT is below threshold and long-window "
+                        "improvement is near zero.",
+                        flush=True,
+                    )
+                    stop["flag"] = True
+                    trainer.save(latest)
+                    meta_path.write_text(json.dumps({"next_episode": episode}), encoding="utf-8")
+
             if args.max_seconds is not None and (time.time() - t0) >= args.max_seconds:
                 print(f"[train] max-seconds({args.max_seconds}s) 도달 -> 종료.", flush=True)
                 break
@@ -182,6 +308,9 @@ def main() -> None:
         meta_path.write_text(json.dumps({"next_episode": episode}), encoding="utf-8")
         handle.flush()
         handle.close()
+        if eval_handle is not None:
+            eval_handle.flush()
+            eval_handle.close()
 
     print(
         f"[train] 완료. episodes={episode - start_episode} global_step={trainer.global_step} "

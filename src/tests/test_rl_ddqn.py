@@ -55,6 +55,18 @@ class TestDDQNTrainer(unittest.TestCase):
         # min_buffer가 작아 학습이 실제로 수행됐어야 한다.
         self.assertGreater(trainer.leader.train_steps, 0)
 
+    def test_greedy_eval_does_not_advance_global_step(self):
+        trainer = _build_trainer()
+        trainer.run_episode(0, train=True)
+        global_step = trainer.global_step
+        leader_train_steps = trainer.leader.train_steps
+
+        stats = trainer.run_episode(1, train=False, greedy=True)
+
+        self.assertTrue(math.isfinite(stats.episode_ttt))
+        self.assertEqual(trainer.global_step, global_step)
+        self.assertEqual(trainer.leader.train_steps, leader_train_steps)
+
     def test_checkpoint_save_load_roundtrip(self):
         trainer = _build_trainer()
         trainer.run_episode(0, train=True)
