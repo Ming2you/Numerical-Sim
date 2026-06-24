@@ -394,10 +394,6 @@ class MPCConfig:
     stackelberg_inner_backend_when_outer_process: str = "thread"
     stackelberg_reuse_process_pool: bool = True
     stackelberg_allocation_mode: str = "direct"
-    # low_demand 회귀 수정(fix 2): PFO/no-control을 비대칭 가드가 아니라 순수 objective 후보로
-    # 항상 포함해 P-Stack objective <= PFO objective를 탐색 단계에서 보장(leader는 PFO를 못 이기면
-    # PFO를 고름). stackelberg_enable_fallback(비대칭 가드)와 독립.
-    leader_pfo_objective_floor: bool = True
 
 
 @dataclass

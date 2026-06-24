@@ -187,9 +187,6 @@ class StackelbergMPCController:
         search_mode = str(self.cfg.mpc.leader_search_mode)
         fallback_start_index = 1000000
         fallback_enabled = bool(self.cfg.mpc.stackelberg_enable_fallback)
-        pfo_objective_floor = bool(getattr(self.cfg.mpc, "leader_pfo_objective_floor", False))
-        # fix 2: objective floor가 켜지면 비대칭 가드가 꺼져 있어도 PFO/no-control 후보를 평가해
-        # 순수 objective 비교에 포함시킨다(P-Stack <= PFO 보장).
         fallback_evaluations = (
             self._evaluate_fallback_candidates(
                 state,
@@ -197,7 +194,7 @@ class StackelbergMPCController:
                 previous,
                 start_index=fallback_start_index,
             )
-            if (fallback_enabled or pfo_objective_floor)
+            if fallback_enabled
             else []
         )
         fallback_incumbent_obj = min(
@@ -252,16 +249,10 @@ class StackelbergMPCController:
             }
             for item in all_evaluations
         ]
-        if pfo_objective_floor:
-            best_eval, fallback_metadata = self._select_pfo_objective_floor(
-                full_evaluations,
-                fallback_evaluations,
-            )
-        else:
-            best_eval, fallback_metadata = self._select_with_fallback_guard(
-                full_evaluations,
-                fallback_evaluations,
-            )
+        best_eval, fallback_metadata = self._select_with_fallback_guard(
+            full_evaluations,
+            fallback_evaluations,
+        )
         metadata = dict(base_metadata)
         metadata.update(proxy_metadata)
         metadata.update(refined_proxy_metadata)
@@ -1040,35 +1031,6 @@ class StackelbergMPCController:
             "leader_fallback_guard_leader_completed_proxy_veh": leader_completed,
             "leader_fallback_guard_fallback_completed_proxy_veh": fallback_completed,
         }
-
-    def _select_pfo_objective_floor(
-        self,
-        leader_evaluations: list[_LeaderCandidateEvaluation],
-        fallback_evaluations: list[_LeaderCandidateEvaluation],
-    ) -> tuple[_LeaderCandidateEvaluation, Dict[str, float]]:
-        """fix 2: PFO/no-control을 순수 objective 후보로 포함해 min objective를 고른다.
-
-        비대칭 가드(terminal_severe 등) 없이 objective만 비교하므로, leader가 PFO를 못 이기면
-        PFO가 선택된다 → P-Stack objective <= PFO objective를 탐색 단계에서 보장한다.
-        """
-        if not leader_evaluations:
-            raise ValueError("Stackelberg leader produced no evaluated candidates.")
-        leader_best = min(leader_evaluations, key=lambda item: item.objective)
-        candidates = list(leader_evaluations) + list(fallback_evaluations)
-        best = min(candidates, key=lambda item: item.objective)
-        chose_fallback = best is not leader_best and str(best.stage).startswith("fallback")
-        metadata: Dict[str, float] = {
-            "leader_pfo_objective_floor_active": 1.0,
-            "leader_pfo_objective_floor_selected_fallback": float(chose_fallback),
-            "leader_pfo_objective_floor_selected_pfo": float(best.stage == "fallback_pfo"),
-            "leader_pfo_objective_floor_selected_no_control": float(best.stage == "fallback_no_control"),
-            "leader_pfo_objective_floor_leader_objective": float(leader_best.objective),
-            "leader_pfo_objective_floor_selected_objective": float(best.objective),
-            "leader_fallback_candidate_count": float(len(fallback_evaluations)),
-        }
-        for fallback in fallback_evaluations:
-            metadata[f"leader_{fallback.stage}_objective"] = float(fallback.objective)
-        return best, metadata
 
     def _select_with_fallback_guard(
         self,

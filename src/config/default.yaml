@@ -235,8 +235,6 @@ mpc:
   stackelberg_inner_backend_when_outer_process: thread
   stackelberg_reuse_process_pool: true
   stackelberg_allocation_mode: direct
-  # fix 2: PFO/no-control을 순수 objective 후보로 포함(P-Stack <= PFO 보장). 비대칭 가드와 독립.
-  leader_pfo_objective_floor: true
 leader:
   objective_mode: follower_ttt
   w_P: 1.0
