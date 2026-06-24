@@ -10634,3 +10634,118 @@ case. It is still substantially less severe than `peak_demand` by total TTT.
 - Boundary queues are reported as scenario baselines, not pass/fail comparisons.
 - Next: run the four controller families against the same six canonical scenarios and
   compare TTT, throughput, terminal vehicles, boundary balance, and computation cost.
+
+## 2026-06-24 - Medium-Demand 3600 s Controller Screening on Recalibrated Plant
+
+### Purpose
+
+Check whether the recalibrated plant and six-scenario demand definition still preserve
+controller benefits on the new canonical `medium_demand` setting before launching a
+longer all-scenario batch.
+
+### Commands
+
+Initial 4-controller attempt:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.all_scenarios_four_controller_comparison --scenario medium_demand --controllers WU-CD-F,PROPOSED-FOLLOWERS-ONLY,PROPOSED-STACKELBERG --T-total 3600 --output "outputs\canonical_medium_4controller_3600_2026_06_24"
+```
+
+This completed `NO-CONTROL`, `WU-CD-F`, and `PROPOSED-FOLLOWERS-ONLY`, but stopped
+before a completed `PROPOSED-STACKELBERG` summary was written. A follow-up
+P-Stackelberg run with the default continuous leader budget and thread grid backend
+completed only 8/20 steps within a 30 minute guard:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.all_scenarios_four_controller_comparison --scenario medium_demand --controllers PROPOSED-STACKELBERG --T-total 3600 --output "outputs\canonical_medium_pstack_3600_2026_06_24" --grid-parallel-backend thread --stackelberg-leader-parallel-backend thread
+```
+
+To finish the requested medium sanity comparison, a reduced continuous leader budget
+was used for P-Stackelberg while retaining process-parallel follower grid evaluation
+and the fallback guard:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.all_scenarios_four_controller_comparison --scenario medium_demand --controllers PROPOSED-STACKELBERG --T-total 3600 --output "outputs\canonical_medium_pstack_3600_fast_sanity_2026_06_24" --grid-parallel-backend process --stackelberg-leader-parallel-backend serial --leader-continuous-max-evals 1 --leader-continuous-seed-count 1 --leader-continuous-prefilter-samples 3 --leader-continuous-prefilter-top-k 1 --leader-continuous-local-iterations 0
+```
+
+### Results
+
+The table uses each controller's `progress_summary.csv` final row. `wall sec` and
+`compute sec` are sums over all 20 control steps.
+
+| Controller | Total TTT | Urban TTT | Freeway TTT | Improvement vs no-control | mean B_sum | terminal vehicles | wall sec | compute sec |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `NO-CONTROL` | 820.582 | 360.088 | 460.495 | 0.000% | 0.168012 | 1837.4 | 0.0 | 0.0 |
+| `WU-CD-F` | 573.933 | 382.922 | 191.011 | 30.058% | 0.197016 | 617.8 | 130.1 | 128.7 |
+| `PROPOSED-FOLLOWERS-ONLY` | 541.957 | 328.061 | 213.896 | 33.955% | 0.175935 | 516.5 | 208.2 | 206.7 |
+| `PROPOSED-STACKELBERG` | 541.957 | 328.061 | 213.896 | 33.955% | 0.175935 | 516.5 | 1078.5 | 1077.4 |
+
+### Diagnostics
+
+- The completed reduced-budget P-Stackelberg run selected the PFO fallback candidate
+  on all 20/20 steps, so its plant trajectory matches `PROPOSED-FOLLOWERS-ONLY`.
+- The partial default-budget P-Stackelberg attempt also selected `fallback_pfo` on
+  every completed step 0-7 before timing out, which is consistent with the completed
+  reduced-budget result.
+- Computation cost remains the main issue: the completed reduced-budget P-Stackelberg
+  run took about `1078.5 s` wall time for a `3600 s` simulation, while PFO took
+  about `208.2 s` and WU took about `130.1 s`.
+- Boundary balance is mildly degraded relative to no-control for all active
+  controllers in this 3600 s screening (`mean_B_sum` increases from `0.168012` to
+  `0.175935` for PFO/P-Stack and `0.197016` for WU).
+
+### Acceptance status and next step
+
+- The recalibrated medium plant still shows strong TTT improvement for WU and PFO.
+- P-Stackelberg does not yet demonstrate distinct benefit over PFO because the
+  fallback guard dominates the selected actions.
+- This is a screening result, not final acceptance: the P-Stackelberg row used a
+  reduced leader evaluation budget to finish the 3600 s run.
+- Next: diagnose why full-budget leader candidates do not beat the PFO fallback on
+  the recalibrated medium plant, then rerun P-Stackelberg without relying on the
+  reduced-budget sanity setting.
+
+## 2026-06-25 - Figure Design Guide Refactor
+
+### Purpose
+
+Refactor the external single-file mixed-network figure guide into a maintainable
+`docs/figure_design/` chapter structure. The main design goal is to keep stable
+plotting guidance separate from volatile controller and scenario definitions.
+
+### Files added
+
+- `docs/figure_design/README_index.md`
+- `docs/figure_design/00_global_style.md`
+- `docs/figure_design/01_controller_catalog.md`
+- `docs/figure_design/02_scenario_catalog.md`
+- `docs/figure_design/03_data_schema.md`
+- `docs/figure_design/04_main_text_figure_set.md`
+- `docs/figure_design/10_macro_performance.md`
+- `docs/figure_design/20_congestion_transfer.md`
+- `docs/figure_design/30_leader_feasibility.md`
+- `docs/figure_design/40_game_coupling.md`
+- `docs/figure_design/50_micro_control_behavior.md`
+- `docs/figure_design/60_computation_cost.md`
+- `docs/figure_design/70_appendix_figures.md`
+- `docs/figure_design/90_codex_plotting_prompt.md`
+
+### Content summary
+
+- Controller guidance was rewritten around this repository's active comparison:
+  `NO-CONTROL`, `WU-CD-F`, `PROPOSED-FOLLOWERS-ONLY`,
+  `PROPOSED-STACKELBERG`, and `PROPOSED-CENTRALIZED`.
+- Scenario guidance was rewritten to use a flexible registry with tags such as
+  `low`, `medium`, `peak`, `incident`, `surge`, `spatial-skew`, and
+  `spillback-risk` rather than hard-coding a fixed number of scenarios.
+- Stable figure chapters now refer back to the controller and scenario catalogs
+  instead of duplicating labels, controller authority, or scenario names.
+- The PFO fallback and P-Stack leader-feasibility diagnostics are explicitly
+  included in the leader and computation-cost figure chapters.
+
+### Validation
+
+- Confirmed `docs/figure_design/` contains 14 chapter files.
+- Searched the new guide for hard-coded five-scenario assumptions; only negative
+  instructions such as "do not assume exactly five or six scenarios" remain.
+- No code tests were run because this was a documentation-only refactor.
