@@ -5,6 +5,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 from src.models.state import ExperimentConfig
+from src.models.urban_queue_model import movement_storage_capacity
 from src.models.demand import DemandProfile, load_scenarios, apply_scenario_network_overrides
 
 plt.rcParams.update({
@@ -233,21 +234,30 @@ axB.set_xlabel("time (min)"); axB.set_ylabel("total on-ramp queue (veh)"); axB.s
 fig.suptitle("Network-level (macro) coupling response (heavy1.50)")
 fig.savefig(f"{OUT}/fig13_coupling_macro.png"); plt.close(fig)
 
-# ---- FIG14 half-cap storage excess: 실제 penalize되는 양만 (heavy_150) ----
-# N_P 누적은 leader objective가 직접 추종하지 않으므로 제거. leader가 벌점화하는 half-cap
-# storage 초과분(>=0)만 평가한다. 이 양은 leader가 있는 P-Stack에만 존재(no-control은 leader
-# 부재, PFO는 leader objective 부재 -> 이 벌점 항 자체가 없음).
+# ---- FIG14 realized half-cap movement excess, 3 controllers (heavy_150) ----
+# leader가 벌점화하는 half-cap 초과분을 *실제 시뮬 state*에서 컨트롤러별로 재계산해 비교한다.
+# (leader 진단값은 P-Stack에만 있고 horizon-합산이라 비교 불가 -> 동일 공식을 단일 state에 적용.)
+# 우상향 자체는 1.5x 수요의 oversaturation(모두 증가); 곡선 간 격차가 leader 통제 증거다.
+_thr=float(cfg0.leader.mfd_storage_threshold_ratio)
+_bcap=float(cfg0.leader.mfd_boundary_queue_capacity_veh)
+_cap={m:(_bcap if str(s.get("kind","")) in {"boundary_in","boundary_out"}
+         else max(float(movement_storage_capacity(cfg0,m,s)),1e-9))
+      for m,s in cfg0.network.urban_movements.items()}
+def _halfcap_excess(sc,c):
+    st=ts(sc,c,"state_timeseries.csv")
+    if not st: return None,None
+    t=[i*3 for i in range(len(st))]
+    ex=[sum(max(0.0,(fl(r.get(f"movement_queue_{m}")) or 0.0)-_thr*cap) for m,cap in _cap.items()) for r in st]
+    return t,ex
 fig,ax=plt.subplots(figsize=(7.8,4.2))
-dd=ts("heavy_demand_150","PROPOSED-STACKELBERG","decision_diagnostics.csv")
-if dd and "leader_mfd_storage_excess_veh" in dd[0]:
-    te=[int(float(r["step"]))*3 for r in dd]
-    ex=[fl(r.get("leader_mfd_storage_excess_veh")) for r in dd]
-    ax.plot(te,ex,color="#9467bd",marker="^",ms=4,label="half-cap storage excess (P-Stack leader, penalized)")
+for c in ["NO-CONTROL","PROPOSED-FOLLOWERS-ONLY","PROPOSED-STACKELBERG"]:
+    t,ex=_halfcap_excess("heavy_demand_150",c)
+    if t: ax.plot(t,ex,label=CLAB[c],color=COL[c],marker="o",ms=2)
 ax.set_ylim(bottom=0)  # 초과분은 >=0; 축 여백이 만드는 가짜 음수 눈금 제거
-ax.set_xlabel("time (min)"); ax.set_ylabel("half-cap storage excess (veh)")
+ax.set_xlabel("time (min)"); ax.set_ylabel("realized half-cap movement excess (veh)")
 ax.legend(fontsize=9,loc="upper left")
 ax1=ax  # 아래 공통 마무리 코드 호환
-ax1.set_title("Half-cap storage excess (leader-penalized quantity) — heavy1.50")
+ax1.set_title("Realized half-cap movement excess (heavy1.50): leader suppresses, not prevents")
 fig.savefig(f"{OUT}/fig14_accumulation.png"); plt.close(fig)
 
 # ---- FIG15 B_sum redistribution under skew ----

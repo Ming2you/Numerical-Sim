@@ -175,15 +175,19 @@ green 평균은 의미 없다(모든 신호 $g_{p1}+g_{p2}=$ cycle$-$lost로 고
 
 미시의 "본선 보호용 ramp 적체"가 4 ramp + 경계에서 동시에 일어나면, 거시적으로는 **지연을 본선에서
 ramp/도시 저장부로 옮겨 본선 throughput을 지키는** 현상이 된다(perimeter/MFD 원리 [1,3]). 이를
-leader가 실제로 벌점화하는 양 — **half-cap storage 초과분**(요소별 50 % storage 초과, $\ge 0$) — 으로
-평가한다. heavy1.50에서 이 초과분은 ~36분부터 engage해 6,300 veh까지 단조 증가한다(Fig.14). 즉
-고수요대에서 perimeter/MFD 기전이 작동한다. 이 항은 leader objective를 가진 P-Stack에만 존재한다
-(no-control은 leader 부재, PFO는 leader objective 부재). 참고로 보호영역 누적 $N_P$ 자체는 leader가
-직접 추종하지 않으므로(setpoint 항 off) 그림에서 제외했고, $N_{P,\mathrm{crit}}$은 production-정점
-참조값일 뿐이다.
+leader가 벌점화하는 양 — **half-cap movement 초과분**(요소별 50 % 용량 초과, $\ge 0$, 동일 공식을 실제
+시뮬 state에 적용) — 으로 컨트롤러별로 평가한다(Fig.14).
+
+**중요(해석 주의).** heavy1.50은 진성 oversaturation이라 **세 컨트롤러 모두 초과분이 단조 증가**한다
+(수요 > 방출용량이라 누구도 절대적 적체를 막지 못함). 따라서 우상향 자체는 *통제 실패가 아니라 regime*이고,
+leader의 가치는 **곡선 간 격차**로 나타난다. 후반 평균 초과분은 **P-Stack 886 veh < no-control 1,132 <
+PFO 1,300**(P-Stack은 no-control 대비 −22 %, PFO 대비 −32 %). 특히 **PFO가 no-control보다 나쁘다** —
+국소-탐욕 metering/green이 도시 movement를 더 적체시키기 때문이며, 이는 "국소 최적의 합 ≠ 네트워크 최적,
+그래서 leader가 필요하다"의 직접 증거다. (link 초과분은 state 로그에 컬럼이 없어 제외했으나 P-Stack에선
+0이었고, no-control은 더 컸을 가능성이 커 결론을 약화시키지 않는다.)
 
 ![Fig.13 network-level macro coupling](figures/fig13_coupling_macro.png)
-![Fig.14 half-cap storage excess (leader-penalized)](figures/fig14_accumulation.png)
+![Fig.14 realized half-cap movement excess (3 controllers)](figures/fig14_accumulation.png)
 
 ### 4.3 미시 결합 vs 거시 결합 — 핵심 차이 (PFO↔P-Stack)
 
@@ -261,7 +265,7 @@ equilibrium을 leader가 internalize**하는 Stackelberg 구조의 본질[5].
 | 11 | fig11_ramp_green | 3 | ramp-feeding green 차등 |
 | 12 | fig12_coupling_micro | 4 | ramp-level 미시 결합 |
 | 13 | fig13_coupling_macro | 4 | network-level 거시 결합 |
-| 14 | fig14_accumulation | 4 | half-cap storage 초과분(leader 벌점 양, P-Stack) |
+| 14 | fig14_accumulation | 4 | 실현 half-cap movement 초과분(3컨트롤러, P-Stack 최저) |
 | 15 | fig15_skew_balance | 4 | skew 하 경계균형 재분배 |
 | 16 | fig16_vsl | 3 | VSL 작동(incident) |
 | 17 | fig17_computation | 5 | 계산비용·real-time 비 |
