@@ -174,12 +174,16 @@ green 평균은 의미 없다(모든 신호 $g_{p1}+g_{p2}=$ cycle$-$lost로 고
 ### 4.2 Network-level (거시) — 시스템 현상
 
 미시의 "본선 보호용 ramp 적체"가 4 ramp + 경계에서 동시에 일어나면, 거시적으로는 **지연을 본선에서
-ramp/도시 저장부로 옮겨 본선 throughput을 지키는** 현상이 된다(perimeter/MFD 원리 [1,3]). heavy1.50에서
-$N_P$가 $N_{P,\mathrm{crit}}\approx509$를 넘는 ~35분부터 **half-cap penalty(요소별 50 % storage 초과)가 실제로
-engage**(excess 0→6000+, Fig.14) — 즉 고수요대에서 perimeter/MFD 기전이 작동한다.
+ramp/도시 저장부로 옮겨 본선 throughput을 지키는** 현상이 된다(perimeter/MFD 원리 [1,3]). 이를
+leader가 실제로 벌점화하는 양 — **half-cap storage 초과분**(요소별 50 % storage 초과, $\ge 0$) — 으로
+평가한다. heavy1.50에서 이 초과분은 ~36분부터 engage해 6,300 veh까지 단조 증가한다(Fig.14). 즉
+고수요대에서 perimeter/MFD 기전이 작동한다. 이 항은 leader objective를 가진 P-Stack에만 존재한다
+(no-control은 leader 부재, PFO는 leader objective 부재). 참고로 보호영역 누적 $N_P$ 자체는 leader가
+직접 추종하지 않으므로(setpoint 항 off) 그림에서 제외했고, $N_{P,\mathrm{crit}}$은 production-정점
+참조값일 뿐이다.
 
 ![Fig.13 network-level macro coupling](figures/fig13_coupling_macro.png)
-![Fig.14 accumulation & half-cap engagement](figures/fig14_accumulation.png)
+![Fig.14 half-cap storage excess (leader-penalized)](figures/fig14_accumulation.png)
 
 ### 4.3 미시 결합 vs 거시 결합 — 핵심 차이 (PFO↔P-Stack)
 
@@ -257,7 +261,7 @@ equilibrium을 leader가 internalize**하는 Stackelberg 구조의 본질[5].
 | 11 | fig11_ramp_green | 3 | ramp-feeding green 차등 |
 | 12 | fig12_coupling_micro | 4 | ramp-level 미시 결합 |
 | 13 | fig13_coupling_macro | 4 | network-level 거시 결합 |
-| 14 | fig14_accumulation | 4 | $N_P$·$N_{P,\mathrm{crit}}$·half-cap excess |
+| 14 | fig14_accumulation | 4 | half-cap storage 초과분(leader 벌점 양, P-Stack) |
 | 15 | fig15_skew_balance | 4 | skew 하 경계균형 재분배 |
 | 16 | fig16_vsl | 3 | VSL 작동(incident) |
 | 17 | fig17_computation | 5 | 계산비용·real-time 비 |

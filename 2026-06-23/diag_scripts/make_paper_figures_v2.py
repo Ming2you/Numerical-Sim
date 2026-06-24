@@ -5,7 +5,6 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 from src.models.state import ExperimentConfig
-from src.models.urban_queue_model import movement_storage_capacity
 from src.models.demand import DemandProfile, load_scenarios, apply_scenario_network_overrides
 
 plt.rcParams.update({
@@ -234,28 +233,21 @@ axB.set_xlabel("time (min)"); axB.set_ylabel("total on-ramp queue (veh)"); axB.s
 fig.suptitle("Network-level (macro) coupling response (heavy1.50)")
 fig.savefig(f"{OUT}/fig13_coupling_macro.png"); plt.close(fig)
 
-# ---- FIG14 accumulation + N_P,crit + half-cap (heavy_150) ----
-off=set(cfg0.network.off_ramp_storage_link.values())
-linkcap=sum(c for l,c in cfg0.network.urban_link_storage_veh.items() if l not in off)
-mvtcap=sum(movement_storage_capacity(cfg0,m,s) for m,s in specs.items() if str(s.get("kind",""))in{"internal","boundary_out","off_ramp"})
-ncrit=cfg0.leader.N_P_crit_veh
-fig,ax1=plt.subplots(figsize=(7.8,4.2))
-for c in ["NO-CONTROL","PROPOSED-FOLLOWERS-ONLY","PROPOSED-STACKELBERG"]:
-    t,acc=stcol("heavy_demand_150",c,"urban_protected_accumulation_veh")
-    if t: ax1.plot(t,acc,label=CLAB[c],color=COL[c])
-ax1.axhline(ncrit,color="k",ls="--",lw=0.9,label=r"$N_{P,\mathrm{crit}}\approx%d$ (MFD critical)"%round(ncrit))
-ax1.set_xlabel("time (min)"); ax1.set_ylabel(r"protected accumulation $N_P$ (veh)")
-# 실제 penalize되는 half-cap excess(요소별 0.5·cap 초과분, P-Stack leader diag)를 twin 축에.
+# ---- FIG14 half-cap storage excess: 실제 penalize되는 양만 (heavy_150) ----
+# N_P 누적은 leader objective가 직접 추종하지 않으므로 제거. leader가 벌점화하는 half-cap
+# storage 초과분(>=0)만 평가한다. 이 양은 leader가 있는 P-Stack에만 존재(no-control은 leader
+# 부재, PFO는 leader objective 부재 -> 이 벌점 항 자체가 없음).
+fig,ax=plt.subplots(figsize=(7.8,4.2))
 dd=ts("heavy_demand_150","PROPOSED-STACKELBERG","decision_diagnostics.csv")
-l2=[]; la2=[]
 if dd and "leader_mfd_storage_excess_veh" in dd[0]:
-    te=[int(float(r["step"]))*3 for r in dd]; ex=[fl(r.get("leader_mfd_storage_excess_veh")) for r in dd]
-    ax2=ax1.twinx(); ax2.grid(False)
-    ax2.plot(te,ex,color="#9467bd",marker="^",ms=3,label="half-cap excess (P-Stack, penalized)")
-    ax2.set_ylabel("half-cap excess (veh)",color="#9467bd"); ax2.tick_params(axis="y",labelcolor="#9467bd")
-    l2,la2=ax2.get_legend_handles_labels()
-l1,la1=ax1.get_legend_handles_labels(); ax1.legend(l1+l2,la1+la2,fontsize=8,loc="upper left")
-ax1.set_title(r"Protected accumulation $N_P$ and half-cap penalty engagement (heavy1.50)")
+    te=[int(float(r["step"]))*3 for r in dd]
+    ex=[fl(r.get("leader_mfd_storage_excess_veh")) for r in dd]
+    ax.plot(te,ex,color="#9467bd",marker="^",ms=4,label="half-cap storage excess (P-Stack leader, penalized)")
+ax.set_ylim(bottom=0)  # 초과분은 >=0; 축 여백이 만드는 가짜 음수 눈금 제거
+ax.set_xlabel("time (min)"); ax.set_ylabel("half-cap storage excess (veh)")
+ax.legend(fontsize=9,loc="upper left")
+ax1=ax  # 아래 공통 마무리 코드 호환
+ax1.set_title("Half-cap storage excess (leader-penalized quantity) — heavy1.50")
 fig.savefig(f"{OUT}/fig14_accumulation.png"); plt.close(fig)
 
 # ---- FIG15 B_sum redistribution under skew ----
@@ -296,5 +288,4 @@ print("=== |green split| at D,F (ramp) vs A,B,C ===")
 for sc in ["skew_heavy"]:
     for c in ["PROPOSED-FOLLOWERS-ONLY","PROPOSED-STACKELBERG"]:
         print(f"  {sc} {CLAB[c]}: DF={mean_green_split(sc,c,['D','F']):.1f}  ABC={mean_green_split(sc,c,['A','B','C']):.1f}")
-print(f"N_P,crit={ncrit:.0f}")
 print("DONE:", len(glob.glob(f"{OUT}/*.png")), "figs")
