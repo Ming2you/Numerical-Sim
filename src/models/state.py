@@ -261,6 +261,11 @@ class NetworkConfig:
     metanet_nu_km2_h: float = 65.0
     metanet_kappa_veh_km_lane: float = 40.0
     metanet_a_m: float = 1.867
+    # Capacity drop (Arora & Kattan modified METANET, eq 9): 혼잡 regime(ρ>ρ_crit)에서
+    # anticipation ν를 ν_cong로 전환해 속도·flow를 떨어뜨려 capacity drop을 표현한다.
+    # toggle off면 ν_free(=metanet_nu_km2_h) 단일값으로 기존 거동 그대로.
+    metanet_nu_cong_km2_h: float = 65.0
+    capacity_drop_anticipation: bool = False
     metanet_rho_eps: float = 0.001
     urban_Q_sat_veh_h: float = 1000.0
     urban_avg_vehicle_length_m: float = 6.0

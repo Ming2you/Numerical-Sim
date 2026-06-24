@@ -59,6 +59,18 @@ def metanet_speed_update_kmh(
     return float(max(v_min, speed + relaxation + convection + anticipation))
 
 
+def select_anticipation_nu(rho: float, net) -> float:
+    """Arora & Kattan modified METANET(eq 9): 혼잡 regime(ρ>ρ_crit)에서 anticipation ν를
+    ν_cong로 전환해 capacity drop을 표현. toggle off면 단일 ν_free.
+
+    anticipation 항은 음수(하류가 더 혼잡할 때 감속)이므로 ν_cong>ν_free면 혼잡 시 감속이 커져
+    속도·flow가 더 떨어진다(capacity drop 방향).
+    """
+    if getattr(net, "capacity_drop_anticipation", False) and rho > net.rho_crit:
+        return float(net.metanet_nu_cong_km2_h)
+    return float(net.metanet_nu_km2_h)
+
+
 def _clip(value: float, lower: float, upper: float) -> float:
     return min(max(value, lower), upper)
 
@@ -434,7 +446,7 @@ def freeway_substep(
                 dt_h,
                 net.freeway_segment_length_km,
                 net.metanet_tau_h,
-                net.metanet_nu_km2_h,
+                select_anticipation_nu(rho, net),
                 net.metanet_kappa_veh_km_lane,
                 net.v_min,
             )
