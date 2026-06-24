@@ -281,12 +281,71 @@ class StackelbergMPCController:
         best.metadata.update(self._candidate_evaluation_metadata(evaluations, best.control, best_eval))
         best.control.diagnostics.update(best.metadata)
         best.control.diagnostics["leader_objective"] = best.leader_objective
+        self._apply_output_closure(best, state, forecast)
         self.previous_control = best.control.copy()
         self.last_decision = best
         return best
 
+    def _realized_net_inflow_veh(
+        self,
+        control: ControlAction,
+        state: TrafficState,
+        forecast: list[DemandStep],
+    ) -> Optional[float]:
+        """committed control이 실제로 실현하는 보호영역 net-inflow[veh]를 계산한다.
+
+        production decide 경로의 control.diagnostics에는 이 값이 전파되지 않으므로(direct
+        feasible-set 경로에서만 생성), injection 진단과 동일하게 coordinator의 feasible-set
+        진단을 committed control에 직접 적용해 service(inflow−outflow)를 구한다.
+        distributed follower가 아니거나 키 부재 시 None(=닫기 보류)."""
+        if not isinstance(self.nash_solver, DistributedCoordinator):
+            return None
+        probe_leader = LeaderAction(float(control.N_P_star), float(control.N_UF_star))
+        diag = self.nash_solver._leader_direct_feasible_set_diagnostics(
+            state.copy(), control.copy(), list(forecast), probe_leader
+        )
+        if "distributed_grid_leader_projected_net_inflow_veh" not in diag:
+            return None
+        return float(diag["distributed_grid_leader_projected_net_inflow_veh"])
+
+    def _apply_output_closure(
+        self,
+        best: DecisionResult,
+        state: TrafficState,
+        forecast: list[DemandStep],
+    ) -> None:
+        """층1 출력 폐쇄: leader가 commit하는 N_P*/N_UF*를 follower가 실제 실현한 값으로
+        덮어쓴다(self-consistent Stackelberg, 2026-06-25).
+
+        leader 후보의 raw intent는 도달 불가일 수 있고, 보고값이 실현값과 다르면 정직하지
+        않다. follower가 실현한 net-inflow/metering을 committed action으로 닫는다. raw intent는
+        `leader_intent_*` 진단키로, 기존 `leader_selected_*`(=intent)도 그대로 보존해 추적성을 유지한다.
+        """
+        control = best.control
+        intent_np = float(control.N_P_star)
+        intent_nuf = float(control.N_UF_star)
+        # realized net-inflow[veh]: committed control의 service로 직접 계산(부재 시 intent 유지).
+        realized_net = self._realized_net_inflow_veh(control, state, forecast)
+        realized_np = intent_np if realized_net is None else realized_net
+        # realized metering[veh/h]: follower가 적용한 ramp metering 합(이미 공급/수용 상한에 사영됨).
+        realized_nuf = sum(float(v) for v in control.ramp_metering.values())
+        control.diagnostics["leader_intent_N_P_star"] = intent_np
+        control.diagnostics["leader_intent_N_UF_star"] = intent_nuf
+        control.diagnostics["leader_realized_N_P_star"] = realized_np
+        control.diagnostics["leader_realized_N_UF_star"] = realized_nuf
+        control.diagnostics["leader_output_closure_applied"] = 1.0 if realized_net is not None else 0.0
+        control.N_P_star = realized_np
+        control.N_UF_star = realized_nuf
+
     def _normalize_previous_leader_reference(self, previous: ControlAction) -> ControlAction:
         out = previous.copy()
+        # 층1 출력폐쇄가 적용된 previous는 commit값이 realized다. 다음 결정의 seeding은 raw
+        # intent를 써서 탐색 동역학을 폐쇄 이전과 동일하게(=TTT 불변) 유지한다. 보고/플롯은
+        # realized(commit), seed는 intent로 분리한다.
+        diag = getattr(out, "diagnostics", None) or {}
+        if float(diag.get("leader_output_closure_applied", 0.0)) >= 0.5:
+            out.N_P_star = float(diag.get("leader_intent_N_P_star", out.N_P_star))
+            out.N_UF_star = float(diag.get("leader_intent_N_UF_star", out.N_UF_star))
         if out.N_UF_star > 1.0e-9:
             return out
         net = self.cfg.network
