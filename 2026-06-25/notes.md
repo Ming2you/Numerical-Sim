@@ -57,6 +57,22 @@ P-Stack(leader)이 더 크게 이득을 보는 부하 지점을 찾는다.
   - **closure 분리 후 454.6068 = baseline 정확 일치 → TTT 불변 + closed=1 realized 보고**
 - 기존 unittest 3실패는 closure와 무관(allocation 미사용·VSL 선택, stash baseline 동일).
 
+## 층2 (N_P 박스 타이트닝) — 구현·검증·반증·롤백
+2-probe 실측 도달범위로 N_P 후보 박스를 좁히는 층2를 구현(leader transient slot +
+orchestrator 2-probe + flag)하고 sweet_128에서 검증했다.
+- 박스는 **기계적으로 정상 작동**: applied=1, [403,688]/[231,645]/... 측정·주입됨.
+- 그러나 **컨트롤러 동작 0 변화**: intent N_P 전 스텝 0(여전), realized 값·total_ttt가
+  층1과 **비트 단위 동일**(454.6068).
+- **가설 반증**: 평원이 leader를 가둔 게 아니다. leader는 박스와 무관하게 **PFO fallback(N_P=0)**
+  을 고른다. authority probe에서 N_P 권한이 보였던 건 그 probe가 `stackelberg_enable_fallback=False`
+  였기 때문 — 실제 컨트롤러(fallback ON)에선 **PFO가 N_P-active 후보를 이긴다.**
+- **진짜 병목 = fallback guard(PFO 우위) / leader objective 정렬**, 박스 아님.
+- 판정: 층2는 무익(스텝당 follower solve 2회만 추가, 결과 동일) → **전부 롤백.** 층1만 유지.
+- 다음 후보(원하면): PFO가 왜 N_P-active를 이기는지 — leader objective 가중/정렬 진단, 또는
+  fallback guard 임계 재검토. (박스가 아니라 여기가 N_P 활용의 관문.)
+
 ## 결론 / sweet spot
 - **sweet_128**이 임무 답(양쪽 jam 없음 + PFO 작동 + P-Stack +17.6%). T=3600 정밀 재실행으로 확정 예정.
-- 층1 완료(정직 보고, 불변). 층2 진행 결정(authority+plateau 확인).
+- 층1 완료(정직 보고, TTT 불변, 커밋 cb6fc8e). 층2 반증·롤백.
+- 미해결: (a) sweet_128/135 T=3600 full-budget 정밀 재실행, (b) default capacity-drop ON 커밋 여부,
+  (c) N_P 활용의 진짜 관문(fallback/leader-obj) 추적 여부.

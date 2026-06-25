@@ -44,6 +44,14 @@
   좁힌 박스 안에서도 잔차 ~수십~수백 veh. 정확 일치는 층1 몫. (앞서 "eps급"은 과장이었음)
 - eps급 intent 일치(fixed-point/hard equality)는 leader 지렛대를 깎아 **불채택**.
 
+## 층2 결과 (구현→반증→롤백, 2026-06-25)
+- 2-probe 실측 도달범위로 N_P 박스 타이트닝을 구현(leader transient slot + orchestrator
+  2-probe + `leader_empirical_np_box` flag)하고 sweet_128 검증.
+- 박스는 정상 적용되나 **컨트롤러 동작/ TTT 비트 동일(454.6068)** → 무익. **전부 롤백.**
+- **핵심 반증**: N_P가 안 쓰이는 건 평원 때문이 아니라 **leader가 PFO fallback(N_P=0)을 고르기**
+  때문. authority probe의 N_P 권한은 `fallback=False` 조건의 산물. 실제(fallback ON)에선 PFO 우위.
+- N_P 활용의 진짜 관문 = **fallback guard / leader objective 정렬**(박스 아님). 다음 후보.
+
 ## 미해결/주의
 - 층2 N_P 박스 교체 시 단순 echo(권한 소멸) 되지 않게 — probe 권한 확인이 전제.
 - capacity drop default ON(anticipation, nu_cong=250)은 미커밋 상태. leader 활성 regime이라 유지 중.
