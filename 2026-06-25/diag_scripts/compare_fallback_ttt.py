@@ -11,19 +11,20 @@ from src.simulation.simulator import MixedTrafficSimulator
 ap = argparse.ArgumentParser()
 ap.add_argument("--scenario", default="sweet_128")
 ap.add_argument("--steps", type=int, default=8)
+ap.add_argument("--w-boundary-in", type=float, default=None)
 args = ap.parse_args()
 
 
 def base_cfg(fallback: bool):
-    cfg = ExperimentConfig.from_file(
-        "src/config/default.yaml",
-        {"simulation": {"T_total": 180.0 * args.steps}, "mpc": {
-            "relaxed_quantized_controls": True,
-            "grid_parallel_backend": "serial",
-            "stackelberg_leader_parallel_backend": "serial",
-            "stackelberg_enable_fallback": fallback,
-        }},
-    )
+    overrides = {"simulation": {"T_total": 180.0 * args.steps}, "mpc": {
+        "relaxed_quantized_controls": True,
+        "grid_parallel_backend": "serial",
+        "stackelberg_leader_parallel_backend": "serial",
+        "stackelberg_enable_fallback": fallback,
+    }}
+    if args.w_boundary_in is not None:
+        overrides["leader"] = {"w_boundary_in": args.w_boundary_in}
+    cfg = ExperimentConfig.from_file("src/config/default.yaml", overrides)
     sc = load_scenarios("src/config/scenarios.yaml")[args.scenario]
     cfg = apply_scenario_network_overrides(cfg, sc)
     cfg.mpc.follower_solver_mode = "distributed"

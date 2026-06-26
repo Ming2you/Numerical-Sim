@@ -109,6 +109,17 @@ fallback을 끄고 PFO/fb-on/fb-off TTT를 직접 비교(sweet_128, 8스텝):
   margin 선택 트레이드오프 — lenient(동률 채택): 128 +13.7%, 115 −0.9% / margin≈0: 128 +5.7%, 115 0%.
   → **사용자 결정 lenient**(헤드라인 최대화, 저부하 −0.9% 수용).
 
+## (b) deep 과포화 over-metering — 진단: headroom 없음(근본 한계)
+- sweet_190 분해: leader가 freeway −20 개선하나 boundary_in 큐 +186 폭증 → urban +36 → net +16.5 악화.
+  (사용자 직관 "boundary 막힘" 메커니즘적으로 맞음.)
+- leader objective `w_boundary_in: 0.0`(주석은 "Total TTT에 포함되니 price하라"인데 값은 0 — 모순).
+  그러나 **pricing해도 무익**: w=1 비트동일(773.09), w=20 오히려 악화(777.74).
+  → 짧은 leader rollout이 경계 buildup(다스텝 누적)을 못 보고, 크게 켜면 leader가 과admit으로
+  도망가 interior가 더 터짐. **순이득 w 없음.**
+- 근본원인: 과포화(수요>용량)는 총지연 비가역. leader는 지연을 freeway↔boundary로 재배치만.
+- (a) guard가 sweet_190을 옳게 PFO로 defer → 회귀 없음. **deep 과포화는 leader 가치구간 아님(정상).**
+- (확정) leader 가치 = moderate 혼잡(sweet_128). (a)가 거기서 +13.7% 해금.
+
 ## 결론 / sweet spot
 - **sweet_128**이 임무 답. guard를 TTT로 고치니 production(fb-ON) 이득이 +4.8%→**+13.7%**.
 - 층1 완료(커밋 cb6fc8e). 층2(박스) 반증·롤백. **진짜 레버 = fallback guard 척도/ leader objective 정렬.**
