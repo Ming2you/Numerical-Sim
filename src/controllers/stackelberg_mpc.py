@@ -1046,6 +1046,14 @@ class StackelbergMPCController:
             diag.get("distributed_response_boundary_out_sink_veh", 0.0)
         )
 
+    def _evaluation_rollout_ttt(self, evaluation: _LeaderCandidateEvaluation) -> Optional[float]:
+        """후보의 realized rollout TTT[veh·h]. 결측이면 None(guard가 기존 obj 로직으로 fallback)."""
+        diag = dict(evaluation.nash.diagnostics)
+        diag.update(evaluation.nash.control.diagnostics)
+        if "distributed_response_rollout_ttt" not in diag:
+            return None
+        return float(diag["distributed_response_rollout_ttt"])
+
     def _fallback_guard_rejects(
         self,
         leader_best: _LeaderCandidateEvaluation,
@@ -1067,14 +1075,36 @@ class StackelbergMPCController:
         objective_gain = max(0.0, fallback_obj - leader_obj)
         required_gain = 0.05 * max(abs(fallback_obj), 1.0)
         insufficient_gain = objective_gain < required_gain
-        reject = bool(
-            objective_worse
-            or terminal_severe
-            or completed_severe
-            or ((terminal_worse or completed_worse) and insufficient_gain)
-        )
+        # guard 비교 척도: realized rollout-TTT(기본) vs penalized objective(레거시).
+        # penalized obj는 mfd/density/boundary 벌점이 실제 TTT와 어긋나 TTT 좋은 leader를
+        # 잘못 기각했다(sweet_128 +13.5% 손실, 2026-06-25). rollout_ttt 결측 시 obj 로직으로 안전 fallback.
+        use_ttt = bool(getattr(self.cfg.mpc, "stackelberg_fallback_guard_use_rollout_ttt", False))
+        leader_ttt = self._evaluation_rollout_ttt(leader_best)
+        fallback_ttt = self._evaluation_rollout_ttt(fallback_best)
+        ttt_available = use_ttt and leader_ttt is not None and fallback_ttt is not None
+        if ttt_available:
+            # leader가 PFO보다 예측 rollout-TTT 기준 (margin 넘게) 나쁘면 기각, 동률·개선이면 채택.
+            # per-step 예측은 128(복리 이득)과 115(근소 손해)를 거의 구분 못 하므로 동률을 채택해
+            # 128의 누적 이득(+13.7%)을 전부 살린다. 대가로 저혼잡(115)에서 PFO 대비 ~0.9% 회귀가
+            # 있으나, leader 가치를 주장하지 않는 저부하라 수용한다(2026-06-25 사용자 결정).
+            ttt_margin = max(1.0, 1.0e-3 * max(fallback_ttt, 1.0))
+            ttt_worse = leader_ttt > fallback_ttt + ttt_margin
+            # 1차 기각을 TTT로. 잔류/완료 severe는 throughput 안전장치로 유지.
+            reject = bool(ttt_worse or terminal_severe or completed_severe)
+        else:
+            ttt_worse = False
+            reject = bool(
+                objective_worse
+                or terminal_severe
+                or completed_severe
+                or ((terminal_worse or completed_worse) and insufficient_gain)
+            )
         return reject, {
             "leader_fallback_guard_rejected_leader": float(reject),
+            "leader_fallback_guard_metric_ttt": float(ttt_available),
+            "leader_fallback_guard_leader_rollout_ttt": float(leader_ttt) if leader_ttt is not None else 0.0,
+            "leader_fallback_guard_fallback_rollout_ttt": float(fallback_ttt) if fallback_ttt is not None else 0.0,
+            "leader_fallback_guard_ttt_worse": float(ttt_worse),
             "leader_fallback_guard_terminal_worse": float(terminal_worse),
             "leader_fallback_guard_terminal_severe": float(terminal_severe),
             "leader_fallback_guard_completed_worse": float(completed_worse),

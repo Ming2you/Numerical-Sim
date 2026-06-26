@@ -389,6 +389,9 @@ class MPCConfig:
     stackelberg_fallback_full_refresh_sec: float = 1800.0
     stackelberg_fallback_use_cached_pfo: bool = True
     stackelberg_enable_fallback: bool = True
+    # fallback guard의 leader vs PFO 비교 척도를 penalized objective 대신 realized rollout-TTT로.
+    # (penalized obj는 TTT와 어긋나 sweet_128 등에서 TTT 좋은 leader를 잘못 기각했다, 2026-06-25.)
+    stackelberg_fallback_guard_use_rollout_ttt: bool = True
     stackelberg_leader_parallel_backend: str = "thread"
     stackelberg_leader_parallel_max_workers: int = 4
     stackelberg_inner_backend_when_outer_process: str = "thread"

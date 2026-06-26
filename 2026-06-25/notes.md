@@ -71,8 +71,46 @@ orchestrator 2-probe + flag)하고 sweet_128에서 검증했다.
 - 다음 후보(원하면): PFO가 왜 N_P-active를 이기는지 — leader objective 가중/정렬 진단, 또는
   fallback guard 임계 재검토. (박스가 아니라 여기가 N_P 활용의 관문.)
 
+## ★ 핵심 발견: fallback guard가 N_P 개선(~9%)을 억누름 (사용자 지적 적중)
+fallback을 끄고 PFO/fb-on/fb-off TTT를 직접 비교(sweet_128, 8스텝):
+| | total_ttt | vs PFO | N_P |
+|---|---|---|---|
+| PFO | 370.65 | — | — |
+| P-Stack **fb-ON**(현 production) | 352.88 | +4.8% | maxN_P=0 (N_UF만) |
+| P-Stack **fb-OFF** | **320.75** | **+13.5%** | **maxN_P=497** |
+
+- **fb-OFF가 fb-ON보다 32 TTT(~9%) 더 좋다.** fallback guard가 진짜 개선을 버리고 있었음.
+- N_P는 redundant 아님 — leader 가치를 +17.8→+49.9(≈3배)로 키움.
+- **근본원인**: leader objective의 TTT 어긋남(벌점 mfd/density/boundary). N_P-active leader는
+  실제 TTT가 좋은데 penalized obj가 높아, guard가 penalized obj로 PFO와 비교→기각. 게다가
+  fallback incumbent가 탐색을 pruning해 fb-ON에선 searchBest=0(N_P 안 보임).
+- **앞선 "N_P 구조적 redundant" 결론은 틀림** — fallback pruning 아티팩트를 오독한 것. 사용자가
+  fallback 끄라고 끝까지 민 것이 이 ~9%를 드러냄.
+
+### 진단 경로(반증의 반증 기록)
+- np_authority_probe(fallback=False): N_P 권한 있음(TTT 142→134).
+- 층2 박스 타이트닝: 무익(fb-ON에선 fallback이 막아 박스 무관).
+- np_activation_vs_demand(fb-ON): N_P intent=0 → "demand/구조" 오결론 유발.
+- np_search_vs_fallback(fb-ON): searchBest=0 → fallback pruning 아티팩트.
+- reverse_pfo_in_box: PFO점 box 안(box 문제 아님), objective가 TTT와 어긋남(N_P=643 vs TTT N_P~457).
+- **compare_fallback_ttt(fb-OFF): 결정타 — fb-OFF가 PFO/fb-ON 압도(+13.5%/+9%).**
+
+## (a) guard를 rollout-TTT 비교로 수정 — 구현·검증 완료
+- `_fallback_guard_rejects`: 1차 기각을 penalized obj 대신 **realized rollout-TTT**로
+  (`leader_ttt > fallback_ttt + margin`이면 기각). flag `stackelberg_fallback_guard_use_rollout_ttt`
+  (기본 true), rollout_ttt 결측 시 기존 obj 로직 fallback. terminal/completed severe는 유지.
+- 검증(8스텝, fb-ON):
+  | 시나리오 | 수정 전 | 수정 후 | PFO |
+  |---|---|---|---|
+  | sweet_128 | 352.88 (+4.8%) | **319.9 (+13.7%)** | 370.65 |
+  | sweet_115 | 246.82 (=PFO) | 248.97 (−0.9%) | 246.82 |
+  | sweet_190 | 756.59 (=PFO) | 756.59 (=PFO) | 756.59 |
+- **per-step rollout 예측 한계**: 128(복리이득)/115(근소손해)를 per-step으론 구분 못 함.
+  margin 선택 트레이드오프 — lenient(동률 채택): 128 +13.7%, 115 −0.9% / margin≈0: 128 +5.7%, 115 0%.
+  → **사용자 결정 lenient**(헤드라인 최대화, 저부하 −0.9% 수용).
+
 ## 결론 / sweet spot
-- **sweet_128**이 임무 답(양쪽 jam 없음 + PFO 작동 + P-Stack +17.6%). T=3600 정밀 재실행으로 확정 예정.
-- 층1 완료(정직 보고, TTT 불변, 커밋 cb6fc8e). 층2 반증·롤백.
-- 미해결: (a) sweet_128/135 T=3600 full-budget 정밀 재실행, (b) default capacity-drop ON 커밋 여부,
-  (c) N_P 활용의 진짜 관문(fallback/leader-obj) 추적 여부.
+- **sweet_128**이 임무 답. guard를 TTT로 고치니 production(fb-ON) 이득이 +4.8%→**+13.7%**.
+- 층1 완료(커밋 cb6fc8e). 층2(박스) 반증·롤백. **진짜 레버 = fallback guard 척도/ leader objective 정렬.**
+- 다음: (a) fb-OFF가 항상 좋은지(sweet_190/115 비교 진행중) → guard 비활성 vs guard를 rollout-TTT로
+  비교하게 수정 결정, (b) sweet_128 T=3600 정밀 재실행, (c) capacity-drop ON 커밋 여부.
