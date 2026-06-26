@@ -525,8 +525,8 @@ class ExperimentConfig:
 
     def validate(self) -> None:
         self.simulation.validate()
-        if self.mpc.follower_solver_mode not in {"two_block", "distributed"}:
-            raise ValueError("mpc.follower_solver_mode must be two_block or distributed.")
+        if self.mpc.follower_solver_mode not in {"two_block", "distributed", "wu_style"}:
+            raise ValueError("mpc.follower_solver_mode must be two_block, distributed, or wu_style.")
         if self.mpc.leader_search_mode not in {"grid", "continuous"}:
             raise ValueError("mpc.leader_search_mode must be grid or continuous.")
         if self.mpc.leader_candidate_count <= 0:

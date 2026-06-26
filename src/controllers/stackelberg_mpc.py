@@ -81,6 +81,9 @@ class StackelbergMPCController:
             pass
 
     def _make_follower_solver(self, cfg: ExperimentConfig):
+        if cfg.mpc.follower_solver_mode == "wu_style":
+            from src.controllers.wu_style_follower import WuStyleStackelbergFollower
+            return WuStyleStackelbergFollower(cfg)
         if cfg.mpc.follower_solver_mode == "distributed":
             return DistributedCoordinator(cfg)
         return NashSolver(cfg)

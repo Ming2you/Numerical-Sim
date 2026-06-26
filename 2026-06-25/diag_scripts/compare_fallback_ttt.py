@@ -12,13 +12,14 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--scenario", default="sweet_128")
 ap.add_argument("--steps", type=int, default=8)
 ap.add_argument("--w-boundary-in", type=float, default=None)
+ap.add_argument("--backend", choices=["serial", "process", "thread"], default="serial")
 args = ap.parse_args()
 
 
 def base_cfg(fallback: bool):
     overrides = {"simulation": {"T_total": 180.0 * args.steps}, "mpc": {
         "relaxed_quantized_controls": True,
-        "grid_parallel_backend": "serial",
+        "grid_parallel_backend": args.backend,
         "stackelberg_leader_parallel_backend": "serial",
         "stackelberg_enable_fallback": fallback,
     }}
