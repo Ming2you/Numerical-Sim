@@ -112,10 +112,16 @@ fallback을 끄고 PFO/fb-on/fb-off TTT를 직접 비교(sweet_128, 8스텝):
 ## (b) deep 과포화 over-metering — 진단: headroom 없음(근본 한계)
 - sweet_190 분해: leader가 freeway −20 개선하나 boundary_in 큐 +186 폭증 → urban +36 → net +16.5 악화.
   (사용자 직관 "boundary 막힘" 메커니즘적으로 맞음.)
-- leader objective `w_boundary_in: 0.0`(주석은 "Total TTT에 포함되니 price하라"인데 값은 0 — 모순).
-  그러나 **pricing해도 무익**: w=1 비트동일(773.09), w=20 오히려 악화(777.74).
-  → 짧은 leader rollout이 경계 buildup(다스텝 누적)을 못 보고, 크게 켜면 leader가 과admit으로
-  도망가 interior가 더 터짐. **순이득 w 없음.**
+- (정정 2026-06-26) **boundary는 이미 leader penalty에 들어가 있다** — `_urban_halfcap_excess`가
+  boundary_in/out movement를 `mfd_boundary_queue_capacity_veh=220`의 50%(110/gate) 초과분으로
+  가격책정(`mfd_storage_weight=1.0`, `mfd_penalty_mode=all_urban_halfcap` 활성). 별도 `w_boundary_in`
+  (=0.0)은 redundant 항. 즉 "boundary 누락"은 틀린 진단.
+- **진짜 병목 = leader 예측 호라이즌이 9분(horizon_steps=3 × control_interval=180s)** 인데 boundary
+  buildup은 ~24분(8 control step)에 걸쳐 621까지 감. leader는 누적 초반만 봐서 과metering 대가를
+  과소평가 → half-cap도 w_boundary_in도 예측창에서 안 물림. (w=1 무효=예측 boundary≈작음, w=20에서야
+  반응=작은 예측치 증폭. 게다가 621이 7게이트 분산 시 ~89/gate라 110 임계 미달이기도.)
+- 근본 해결은 가중치가 아니라 **horizon_steps 확장**(다스텝 누적을 보게) — 후보당 rollout 비용↑.
+  (사용자: 현 개선으로 충분, 미착수.)
 - 근본원인: 과포화(수요>용량)는 총지연 비가역. leader는 지연을 freeway↔boundary로 재배치만.
 - (a) guard가 sweet_190을 옳게 PFO로 defer → 회귀 없음. **deep 과포화는 leader 가치구간 아님(정상).**
 - (확정) leader 가치 = moderate 혼잡(sweet_128). (a)가 거기서 +13.7% 해금.
