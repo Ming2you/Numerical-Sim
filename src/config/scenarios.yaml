@@ -1,5 +1,15 @@
 {
   "scenarios": {
+    "sweet_115": { "urban_scale": 1.15, "freeway_scale": 1.15, "ramp_scale": 1.15, "incident_capacity_factor": 1.0, "required": false },
+    "sweet_122": { "urban_scale": 1.22, "freeway_scale": 1.22, "ramp_scale": 1.22, "incident_capacity_factor": 1.0, "required": false },
+    "sweet_128": { "urban_scale": 1.28, "freeway_scale": 1.28, "ramp_scale": 1.28, "incident_capacity_factor": 1.0, "required": false },
+    "sweet_135": { "urban_scale": 1.35, "freeway_scale": 1.35, "ramp_scale": 1.35, "incident_capacity_factor": 1.0, "required": false },
+    "sweet_142": { "urban_scale": 1.42, "freeway_scale": 1.42, "ramp_scale": 1.42, "incident_capacity_factor": 1.0, "required": false },
+    "sweet_148": { "urban_scale": 1.48, "freeway_scale": 1.48, "ramp_scale": 1.48, "incident_capacity_factor": 1.0, "required": false },
+    "sweet_155": { "urban_scale": 1.55, "freeway_scale": 1.55, "ramp_scale": 1.55, "incident_capacity_factor": 1.0, "required": false },
+    "sweet_170": { "urban_scale": 1.70, "freeway_scale": 1.70, "ramp_scale": 1.70, "incident_capacity_factor": 1.0, "required": false },
+    "sweet_190": { "urban_scale": 1.90, "freeway_scale": 1.90, "ramp_scale": 1.90, "incident_capacity_factor": 1.0, "required": false },
+    "sweet_220": { "urban_scale": 2.20, "freeway_scale": 2.20, "ramp_scale": 2.20, "incident_capacity_factor": 1.0, "required": false },
     "low_demand": {
       "urban_scale": 1.0,
       "freeway_scale": 1.0,

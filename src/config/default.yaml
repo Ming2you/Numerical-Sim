@@ -159,8 +159,8 @@ network:
   metanet_a_m: 1.867
   # capacity drop (Arora & Kattan modified METANET, eq 9): 혼잡 regime anticipation ν_cong + toggle.
   # 기본 off라 기존 결과 불변. step 2에서 ν_cong 튜닝으로 drop 크기 보정.
-  metanet_nu_cong_km2_h: 65.0
-  capacity_drop_anticipation: false
+  metanet_nu_cong_km2_h: 250.0
+  capacity_drop_anticipation: true
   metanet_rho_eps: 0.001
   urban_Q_sat_veh_h: 1000.0
   urban_avg_vehicle_length_m: 6.0
@@ -232,6 +232,8 @@ mpc:
   stackelberg_fallback_full_refresh_sec: 1800.0
   stackelberg_fallback_use_cached_pfo: true
   stackelberg_enable_fallback: true
+  # guard의 leader vs PFO 비교를 rollout-TTT로(2026-06-25). false면 기존 penalized-objective.
+  stackelberg_fallback_guard_use_rollout_ttt: true
   stackelberg_leader_parallel_backend: serial
   stackelberg_leader_parallel_max_workers: 4
   stackelberg_inner_backend_when_outer_process: thread

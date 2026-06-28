@@ -60,10 +60,6 @@ class _ControllerAdapter:
             # spec 16.8: proposed Stackelberg의 follower는 distributed player 구조다.
             cfg.mpc.follower_solver_mode = "distributed"
             self._impl = StackelbergMPCController(cfg)
-        elif controller_id == "PROPOSED-STACKELBERG-WU":
-            # 동일 leader, follower만 Wu식 국소분해(O(n) 목표, 2026-06-27).
-            cfg.mpc.follower_solver_mode = "wu_style"
-            self._impl = StackelbergMPCController(cfg)
         elif controller_id == "PROPOSED-CENTRALIZED":
             self._impl = CentralizedMPC(cfg, mode="proposed")
         else:

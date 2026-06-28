@@ -858,17 +858,11 @@ class WuDistributedController:
             total_evals += evals
             sim_state = state.copy()
             states: List[TrafficState] = []
-            rollout_ttt = 0.0
             for demand in forecast[: self.cfg.mpc.horizon_steps]:
-                result = run_coupled_interval(sim_state, control, demand, self.cfg)
-                rollout_ttt += float(result.urban_ttt + result.freeway_ttt)
+                run_coupled_interval(sim_state, control, demand, self.cfg)
                 sim_state.time_sec += self.cfg.simulation.control_interval
                 states.append(sim_state.copy())
-            # leader 후보는 realized rollout-TTT로 선택한다. 기존 _system_objective(누적 n_p+n_f)는
-            # TTT와 어긋나 "망을 비우는" 과-gating 후보를 골라 throughput을 붕괴시켰다(0% 회귀,
-            # P-Stack fallback guard와 동일한 proxy-vs-TTT 버그, 2026-06-27). 누적은 진단으로만 보존.
-            accumulation_proxy = self._system_objective(states)
-            obj = rollout_ttt
+            obj = self._system_objective(states)
             total_evals += len(states)
             if best is None or obj < best[0]:
                 best = (obj, control, action, iters, converged, residual)
