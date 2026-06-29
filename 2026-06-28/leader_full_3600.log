@@ -1,0 +1,44 @@
+scenario=sweet_128 T_total=3600
+=== no_control ===
+=== metering-PFO alone ===
+=== leader + metering-PFO ===
+step 1/20 cum_ttt=20.684 N_P=-462 N_UF=6000 meter=6000 solve=29986ms
+step 2/20 cum_ttt=48.769 N_P=-516 N_UF=4750 meter=5100 solve=36391ms
+step 3/20 cum_ttt=79.927 N_P=-558 N_UF=3458 meter=4200 solve=44697ms
+step 4/20 cum_ttt=113.683 N_P=-558 N_UF=4200 meter=4800 solve=45259ms
+step 5/20 cum_ttt=150.679 N_P=-558 N_UF=4800 meter=4500 solve=53505ms
+step 6/20 cum_ttt=191.575 N_P=-558 N_UF=4500 meter=4125 solve=53189ms
+step 7/20 cum_ttt=237.035 N_P=-558 N_UF=4125 meter=4125 solve=53549ms
+step 8/20 cum_ttt=287.301 N_P=-558 N_UF=4125 meter=3750 solve=54638ms
+step 9/20 cum_ttt=342.905 N_P=-558 N_UF=3750 meter=3750 solve=54504ms
+step 10/20 cum_ttt=403.803 N_P=-558 N_UF=3750 meter=3750 solve=54197ms
+step 11/20 cum_ttt=470.365 N_P=-796 N_UF=6000 meter=3750 solve=63168ms
+step 12/20 cum_ttt=542.351 N_P=-796 N_UF=3750 meter=3750 solve=54336ms
+step 13/20 cum_ttt=620.055 N_P=-796 N_UF=3750 meter=3750 solve=53994ms
+step 14/20 cum_ttt=704.467 N_P=-796 N_UF=3750 meter=3750 solve=52232ms
+step 15/20 cum_ttt=796.183 N_P=-796 N_UF=3750 meter=3750 solve=52300ms
+step 16/20 cum_ttt=894.787 N_P=-796 N_UF=3750 meter=3750 solve=43584ms
+step 17/20 cum_ttt=999.933 N_P=-796 N_UF=3750 meter=3750 solve=44437ms
+step 18/20 cum_ttt=1110.934 N_P=-796 N_UF=3750 meter=3750 solve=43828ms
+step 19/20 cum_ttt=1227.444 N_P=-778 N_UF=3750 meter=3750 solve=44375ms
+step 20/20 cum_ttt=1349.081 N_P=-778 N_UF=3750 meter=3750 solve=36049ms
+
+========== SUMMARY ==========
+no_control total_ttt = 3089.532
+PFO    total_ttt = 1339.914  impr vs no_control = +56.63%
+leader total_ttt = 1349.081  impr vs no_control = +56.33%
+leader MARGINAL vs PFO = -0.30pp  (ttt delta = -9.167)
+
+N_P*:  min=-796 max=-462 mean=-668
+N_UF*: min=3458 max=6000 mean=4160
+metering sum[veh/h]: min=3750 max=6000 mean=4080
+
+-- green p1 (leader), balanced=56 --
+  A: min=56.0 max=56.0 mean=56.00
+  B: min=56.0 max=56.0 mean=56.00
+  C: min=56.0 max=56.0 mean=56.00
+  D: min=55.0 max=56.0 mean=55.45
+  F: min=53.0 max=62.0 mean=58.15
+
+leader solve/step (ms): mean=48411 max=63168
+PFO    solve/step (ms): mean=8164 max=10166

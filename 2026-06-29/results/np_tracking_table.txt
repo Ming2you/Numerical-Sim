@@ -1,0 +1,8 @@
+  N_P_star realized_Sigma_nin      lambda*    evals  note
+    1600.0             1550.5       0.0000      790  baseline (slack region)
+    1385.0             1235.5       0.0191     2260  follows target down
+    1300.0             1235.5       0.0191     2260  follows target down
+    1200.0             1203.0       0.0245     2260  follows target down
+    1108.0             1105.1       0.0720     2260  follows target down
+    1050.0             1054.7      10.0000      986  clamped @ floor (~1055)
+     900.0             1054.7      10.0000      986  clamped @ floor (~1055)
