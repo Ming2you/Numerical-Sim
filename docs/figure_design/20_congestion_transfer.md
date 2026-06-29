@@ -59,12 +59,17 @@ For representative `peak`, `medium`, or `onramp-risk` scenarios, use aligned
 time-series panels:
 
 1. freeway density near ramp;
-2. metering rate;
+2. metering rate or actual ramp release;
 3. ramp queue;
-4. adjacent urban queue;
-5. actual ramp discharge.
+4. adjacent urban or ramp-feeding movement queue;
+5. actual ramp discharge;
+6. cumulative total or freeway TTT saved when the panel is used for slides.
 
 Add threshold lines for critical density and ramp storage when configured.
+
+For directional ramp systems, split upstream and downstream ramps instead of
+plotting only one network average. The incident presentation figure should show
+`D -> FW_E` and `F -> FW_E` metering commands and ramp queues separately.
 
 ## Fig. 2E. Off-Ramp Mechanism Panel
 
@@ -94,3 +99,16 @@ CTI_{U \rightarrow F} =
 
 Use this only if the underlying queue and threshold definitions are documented in
 the caption.
+
+## Interpretation Guardrails
+
+Do not conclude that a controller is "hiding vehicles" from ramp queue alone.
+Check completed vehicles and terminal vehicles in the same scenario. A controller
+can deliberately hold ramp traffic while still improving network performance if
+it increases completed vehicles, reduces terminal burden, and reduces both urban
+and freeway TTT.
+
+Boundary-balance indices and boundary-queue magnitudes answer different
+questions. A balance index can worsen when the remaining queue is unevenly
+distributed even though the total queue amount is much lower. Report both when
+the fairness claim matters.

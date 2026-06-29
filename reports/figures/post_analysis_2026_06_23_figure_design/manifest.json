@@ -1,0 +1,171 @@
+{
+  "source_report": "reports\\post_analysis_results_2026-06-23.md",
+  "source_script": "2026-06-23\\diag_scripts\\make_paper_figures_v2.py",
+  "raw_inputs_expected_by_source_script": [
+    "outputs/analysis_matrix_3600",
+    "outputs/analysis_matrix_3600_extra"
+  ],
+  "raw_inputs_present_in_current_workspace": {
+    "outputs/analysis_matrix_3600": false,
+    "outputs/analysis_matrix_3600_extra": false
+  },
+  "raw_inputs_present_in_desktop_clone": {
+    "workspace": "C:\\Users\\alsrj\\Desktop\\Numerical-Sim",
+    "outputs/analysis_matrix_3600": true,
+    "outputs/analysis_matrix_3600_extra": true
+  },
+  "scenario_coverage_from_report": [
+    "medium",
+    "peak",
+    "heavy1.40",
+    "heavy1.50",
+    "oversaturated",
+    "incident",
+    "skew-peak",
+    "skew-heavy"
+  ],
+  "requested_focus_scenarios": [
+    "median/medium",
+    "peak",
+    "peak_skew/skew-peak",
+    "incident"
+  ],
+  "figures": [
+    {
+      "status": "copied",
+      "group": "00_scenario_demand",
+      "filename": "fig01_demand_profiles.png",
+      "description": "Demand profiles across 6/23 scenarios",
+      "source": "reports\\figures\\fig01_demand_profiles.png",
+      "target": "reports\\figures\\post_analysis_2026_06_23_figure_design\\00_scenario_demand\\fig01_demand_profiles.png"
+    },
+    {
+      "status": "copied",
+      "group": "00_scenario_demand",
+      "filename": "fig02_demand_composition.png",
+      "description": "Demand composition by source",
+      "source": "reports\\figures\\fig02_demand_composition.png",
+      "target": "reports\\figures\\post_analysis_2026_06_23_figure_design\\00_scenario_demand\\fig02_demand_composition.png"
+    },
+    {
+      "status": "copied",
+      "group": "00_scenario_demand",
+      "filename": "fig03_skew_demand.png",
+      "description": "Spatial demand skew, total preserved",
+      "source": "reports\\figures\\fig03_skew_demand.png",
+      "target": "reports\\figures\\post_analysis_2026_06_23_figure_design\\00_scenario_demand\\fig03_skew_demand.png"
+    },
+    {
+      "status": "copied",
+      "group": "01_macro_performance",
+      "filename": "fig04_improvement.png",
+      "description": "TTT improvement vs no-control",
+      "source": "reports\\figures\\fig04_improvement.png",
+      "target": "reports\\figures\\post_analysis_2026_06_23_figure_design\\01_macro_performance\\fig04_improvement.png"
+    },
+    {
+      "status": "copied",
+      "group": "01_macro_performance",
+      "filename": "fig05_pstack_pfo_gap.png",
+      "description": "P-Stack minus PFO improvement gap",
+      "source": "reports\\figures\\fig05_pstack_pfo_gap.png",
+      "target": "reports\\figures\\post_analysis_2026_06_23_figure_design\\01_macro_performance\\fig05_pstack_pfo_gap.png"
+    },
+    {
+      "status": "copied",
+      "group": "01_macro_performance",
+      "filename": "fig06_throughput_terminal.png",
+      "description": "Completed and terminal vehicles",
+      "source": "reports\\figures\\fig06_throughput_terminal.png",
+      "target": "reports\\figures\\post_analysis_2026_06_23_figure_design\\01_macro_performance\\fig06_throughput_terminal.png"
+    },
+    {
+      "status": "copied",
+      "group": "01_macro_performance",
+      "filename": "fig07_freeway_urban.png",
+      "description": "Freeway and urban TTT decomposition",
+      "source": "reports\\figures\\fig07_freeway_urban.png",
+      "target": "reports\\figures\\post_analysis_2026_06_23_figure_design\\01_macro_performance\\fig07_freeway_urban.png"
+    },
+    {
+      "status": "copied",
+      "group": "03_leader_feasibility",
+      "filename": "fig08_leader_targets.png",
+      "description": "P-Stack leader target trajectories",
+      "source": "reports\\figures\\fig08_leader_targets.png",
+      "target": "reports\\figures\\post_analysis_2026_06_23_figure_design\\03_leader_feasibility\\fig08_leader_targets.png"
+    },
+    {
+      "status": "copied",
+      "group": "03_leader_feasibility",
+      "filename": "fig09_step_ttt.png",
+      "description": "Step TTT divergence over time",
+      "source": "reports\\figures\\fig09_step_ttt.png",
+      "target": "reports\\figures\\post_analysis_2026_06_23_figure_design\\03_leader_feasibility\\fig09_step_ttt.png"
+    },
+    {
+      "status": "copied",
+      "group": "05_micro_controls",
+      "filename": "fig10_green_queue_align.png",
+      "description": "Green split and queue split alignment",
+      "source": "reports\\figures\\fig10_green_queue_align.png",
+      "target": "reports\\figures\\post_analysis_2026_06_23_figure_design\\05_micro_controls\\fig10_green_queue_align.png"
+    },
+    {
+      "status": "copied",
+      "group": "05_micro_controls",
+      "filename": "fig11_ramp_green.png",
+      "description": "Ramp-feeding green differentiation",
+      "source": "reports\\figures\\fig11_ramp_green.png",
+      "target": "reports\\figures\\post_analysis_2026_06_23_figure_design\\05_micro_controls\\fig11_ramp_green.png"
+    },
+    {
+      "status": "copied",
+      "group": "04_game_coupling",
+      "filename": "fig12_coupling_micro.png",
+      "description": "Ramp-level micro coupling",
+      "source": "reports\\figures\\fig12_coupling_micro.png",
+      "target": "reports\\figures\\post_analysis_2026_06_23_figure_design\\04_game_coupling\\fig12_coupling_micro.png"
+    },
+    {
+      "status": "copied",
+      "group": "04_game_coupling",
+      "filename": "fig13_coupling_macro.png",
+      "description": "Network-level macro coupling",
+      "source": "reports\\figures\\fig13_coupling_macro.png",
+      "target": "reports\\figures\\post_analysis_2026_06_23_figure_design\\04_game_coupling\\fig13_coupling_macro.png"
+    },
+    {
+      "status": "copied",
+      "group": "04_game_coupling",
+      "filename": "fig14_accumulation.png",
+      "description": "Half-cap movement excess",
+      "source": "reports\\figures\\fig14_accumulation.png",
+      "target": "reports\\figures\\post_analysis_2026_06_23_figure_design\\04_game_coupling\\fig14_accumulation.png"
+    },
+    {
+      "status": "copied",
+      "group": "04_game_coupling",
+      "filename": "fig15_skew_balance.png",
+      "description": "Boundary balance under spatial skew",
+      "source": "reports\\figures\\fig15_skew_balance.png",
+      "target": "reports\\figures\\post_analysis_2026_06_23_figure_design\\04_game_coupling\\fig15_skew_balance.png"
+    },
+    {
+      "status": "copied",
+      "group": "05_micro_controls",
+      "filename": "fig16_vsl.png",
+      "description": "Incident VSL activation",
+      "source": "reports\\figures\\fig16_vsl.png",
+      "target": "reports\\figures\\post_analysis_2026_06_23_figure_design\\05_micro_controls\\fig16_vsl.png"
+    },
+    {
+      "status": "copied",
+      "group": "06_computation_cost",
+      "filename": "fig17_computation.png",
+      "description": "Computation cost and real-time ratio",
+      "source": "reports\\figures\\fig17_computation.png",
+      "target": "reports\\figures\\post_analysis_2026_06_23_figure_design\\06_computation_cost\\fig17_computation.png"
+    }
+  ]
+}

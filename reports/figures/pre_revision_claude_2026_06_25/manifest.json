@@ -1,0 +1,143 @@
+{
+  "source_roots": [
+    "post_analysis/stage1/medium_demand_s42",
+    "post_analysis/stage1/peak_demand_s42",
+    "post_analysis/stage1/incident_or_capacity_drop_s42",
+    "reports/figures/fig03_skew_demand.png",
+    "reports/figures/fig15_skew_balance.png"
+  ],
+  "scenarios_generated_from_csv": [
+    "medium_demand",
+    "peak_demand",
+    "incident_or_capacity_drop"
+  ],
+  "scenario_aliases": {
+    "median": "medium_demand",
+    "peak": "peak_demand",
+    "incident": "incident_or_capacity_drop",
+    "peak_skew": "reused existing skew figures only; raw run CSV not found"
+  },
+  "controllers": [
+    "PROPOSED-CENTRALIZED",
+    "PROPOSED-FOLLOWERS-ONLY",
+    "PROPOSED-STACKELBERG",
+    "WU-CC-F",
+    "WU-CD-F",
+    "WU-MATCHED-STACKELBERG"
+  ],
+  "run_file_count": 18,
+  "figures": [
+    {
+      "status": "generated",
+      "png": "reports\\figures\\pre_revision_claude_2026_06_25\\01_macro_performance\\fig01_macro_ttt_decomposition.png",
+      "pdf": "reports\\figures\\pre_revision_claude_2026_06_25\\01_macro_performance\\fig01_macro_ttt_decomposition.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\pre_revision_claude_2026_06_25\\01_macro_performance\\fig02_delay_att_throughput.png",
+      "pdf": "reports\\figures\\pre_revision_claude_2026_06_25\\01_macro_performance\\fig02_delay_att_throughput.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\pre_revision_claude_2026_06_25\\01_macro_performance\\fig03_terminal_and_evaluations.png",
+      "pdf": "reports\\figures\\pre_revision_claude_2026_06_25\\01_macro_performance\\fig03_terminal_and_evaluations.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\pre_revision_claude_2026_06_25\\01_macro_performance\\fig04_urban_freeway_burden_scatter.png",
+      "pdf": "reports\\figures\\pre_revision_claude_2026_06_25\\01_macro_performance\\fig04_urban_freeway_burden_scatter.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\pre_revision_claude_2026_06_25\\01_macro_performance\\fig05_medium_demand_ttt_timeseries.png",
+      "pdf": "reports\\figures\\pre_revision_claude_2026_06_25\\01_macro_performance\\fig05_medium_demand_ttt_timeseries.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\pre_revision_claude_2026_06_25\\01_macro_performance\\fig05_peak_demand_ttt_timeseries.png",
+      "pdf": "reports\\figures\\pre_revision_claude_2026_06_25\\01_macro_performance\\fig05_peak_demand_ttt_timeseries.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\pre_revision_claude_2026_06_25\\01_macro_performance\\fig05_incident_or_capacity_drop_ttt_timeseries.png",
+      "pdf": "reports\\figures\\pre_revision_claude_2026_06_25\\01_macro_performance\\fig05_incident_or_capacity_drop_ttt_timeseries.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\pre_revision_claude_2026_06_25\\02_congestion_transfer\\fig01_queue_exposure_summary.png",
+      "pdf": "reports\\figures\\pre_revision_claude_2026_06_25\\02_congestion_transfer\\fig01_queue_exposure_summary.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\pre_revision_claude_2026_06_25\\02_congestion_transfer\\fig02_medium_demand_queue_timeseries.png",
+      "pdf": "reports\\figures\\pre_revision_claude_2026_06_25\\02_congestion_transfer\\fig02_medium_demand_queue_timeseries.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\pre_revision_claude_2026_06_25\\02_congestion_transfer\\fig02_peak_demand_queue_timeseries.png",
+      "pdf": "reports\\figures\\pre_revision_claude_2026_06_25\\02_congestion_transfer\\fig02_peak_demand_queue_timeseries.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\pre_revision_claude_2026_06_25\\02_congestion_transfer\\fig02_incident_or_capacity_drop_queue_timeseries.png",
+      "pdf": "reports\\figures\\pre_revision_claude_2026_06_25\\02_congestion_transfer\\fig02_incident_or_capacity_drop_queue_timeseries.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\pre_revision_claude_2026_06_25\\03_leader_feasibility\\fig01_medium_demand_leader_targets.png",
+      "pdf": "reports\\figures\\pre_revision_claude_2026_06_25\\03_leader_feasibility\\fig01_medium_demand_leader_targets.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\pre_revision_claude_2026_06_25\\03_leader_feasibility\\fig01_peak_demand_leader_targets.png",
+      "pdf": "reports\\figures\\pre_revision_claude_2026_06_25\\03_leader_feasibility\\fig01_peak_demand_leader_targets.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\pre_revision_claude_2026_06_25\\03_leader_feasibility\\fig01_incident_or_capacity_drop_leader_targets.png",
+      "pdf": "reports\\figures\\pre_revision_claude_2026_06_25\\03_leader_feasibility\\fig01_incident_or_capacity_drop_leader_targets.pdf"
+    },
+    {
+      "status": "skipped",
+      "figure": "game_coupling",
+      "reason": "missing Nash diagnostics"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\pre_revision_claude_2026_06_25\\05_micro_controls\\fig01_medium_demand_micro_controls.png",
+      "pdf": "reports\\figures\\pre_revision_claude_2026_06_25\\05_micro_controls\\fig01_medium_demand_micro_controls.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\pre_revision_claude_2026_06_25\\05_micro_controls\\fig01_peak_demand_micro_controls.png",
+      "pdf": "reports\\figures\\pre_revision_claude_2026_06_25\\05_micro_controls\\fig01_peak_demand_micro_controls.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\pre_revision_claude_2026_06_25\\05_micro_controls\\fig01_incident_or_capacity_drop_micro_controls.png",
+      "pdf": "reports\\figures\\pre_revision_claude_2026_06_25\\05_micro_controls\\fig01_incident_or_capacity_drop_micro_controls.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\pre_revision_claude_2026_06_25\\06_computation_cost\\fig01_computation_cost_summary.png",
+      "pdf": "reports\\figures\\pre_revision_claude_2026_06_25\\06_computation_cost\\fig01_computation_cost_summary.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\pre_revision_claude_2026_06_25\\06_computation_cost\\fig02_performance_compute_tradeoff.png",
+      "pdf": "reports\\figures\\pre_revision_claude_2026_06_25\\06_computation_cost\\fig02_performance_compute_tradeoff.pdf"
+    },
+    {
+      "status": "reused",
+      "source": "reports\\figures\\fig03_skew_demand.png",
+      "target": "reports\\figures\\pre_revision_claude_2026_06_25\\reused_skew_peak\\fig03_skew_demand.png",
+      "reason": "peak_skew raw run CSV not found; copied existing post-analysis figure"
+    },
+    {
+      "status": "reused",
+      "source": "reports\\figures\\fig15_skew_balance.png",
+      "target": "reports\\figures\\pre_revision_claude_2026_06_25\\reused_skew_peak\\fig15_skew_balance.png",
+      "reason": "peak_skew raw run CSV not found; copied existing post-analysis figure"
+    }
+  ]
+}

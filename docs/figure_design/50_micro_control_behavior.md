@@ -20,11 +20,12 @@ Cross-scenario panels:
 
 Representative time-series panels:
 
-1. freeway density near ramp;
-2. metering rate;
-3. ramp queue;
-4. adjacent urban movement queue;
-5. actual ramp discharge.
+1. metering command or actual ramp release;
+2. upstream and downstream ramp queues, kept separate when directional;
+3. freeway density and speed near the merge;
+4. cumulative freeway or total TTT saved;
+5. terminal vehicles or terminal vehicles avoided if the slide needs an outcome
+   check.
 
 Scatter diagnostics:
 
@@ -53,6 +54,11 @@ Recommended figures:
 - fundamental diagram colored by VSL state.
 
 For incident scenarios, shade the incident period and mark the incident segment.
+
+When VSL is plotted with RM, do not interpret VSL activation alone as the
+mechanism. In the current effect-oriented incident figure, WU/PFO visibly lower
+VSL, while P-Stack mainly improves the freeway state through RM/signal/leader
+coordination. State this distinction explicitly when it appears in the data.
 
 ## Green Time
 
@@ -97,6 +103,19 @@ Representative figures:
 If vehicle trajectories are unavailable, use movement discharge and signal bands
 instead of inventing trajectories.
 
+## Signal And Offset Effect Chain
+
+For slide figures, use aligned time-series panels:
+
+1. mean green-time adjustment from fixed-time baseline;
+2. mean offset change from fixed-time baseline;
+3. urban departures or movement service;
+4. movement queue proxy.
+
+Interpret urban departures as an internal movement/service rate, not as network
+completed vehicles. Use completed/terminal figures for network-level throughput
+claims.
+
 ## Activation Interpretation
 
 Activation should be defined consistently:
@@ -106,3 +125,7 @@ Activation should be defined consistently:
 - VSL active when posted speed is below free-flow speed.
 - Green active when split differs from fixed-time baseline beyond a tolerance.
 - Offset active when offset differs from fixed-time baseline beyond a tolerance.
+
+Activation plots are not enough for a paper claim. Every actuator-activation
+figure should be paired with at least one response metric such as queue, density,
+speed, departure rate, TTT saved, completed vehicles, or terminal vehicles.

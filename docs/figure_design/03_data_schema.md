@@ -46,8 +46,11 @@ freeway_ttt
 total_delay
 average_travel_time
 completed_vehicles
+completed_vehicle_gain_vs_no_control
 throughput_veh_h
 terminal_total_vehicles
+terminal_vehicles_vs_no_control
+terminal_vehicle_reduction_vs_no_control
 boundary_queue_mean
 boundary_queue_max
 onramp_queue_mean
@@ -63,6 +66,11 @@ controller_compute_total_sec
 nash_iterations_mean
 leader_candidate_count_mean
 ```
+
+Use absolute completed vehicles and absolute terminal vehicles for the main
+network-effect figure when no-control is included. Gain/reduction fields are
+allowed as companion diagnostics, but do not plot a "gain" bar for no-control
+unless it is explicitly zero and the axis label says so.
 
 ## `df_timeseries`
 
@@ -90,6 +98,7 @@ freeway_density_max
 freeway_speed_mean
 terminal_total_vehicles
 controller_compute_time_sec
+control_interval_sec
 ```
 
 ## `df_controls`
@@ -139,6 +148,11 @@ freeway_speed_near_ramp
 is_metering_active
 is_spillback
 ```
+
+Ramp-level figures should retain directional ramp IDs such as `R_D_E` and
+`R_F_E` instead of averaging all ramps by default. For on-ramp mechanism figures,
+keep upstream and downstream ramp metering rates and ramp queues in separate
+panels or facets when the scenario is directional.
 
 ## `df_vsl`
 
@@ -231,3 +245,25 @@ is_feasible
 is_selected
 best_objective_so_far
 ```
+
+## `df_topology_demand`
+
+Scenario-level demand snapshot used for topology maps.
+
+```text
+scenario
+scenario_display_name
+time_sec
+entity_type              # urban_boundary, freeway_entry, ramp_bound
+entity_id
+direction
+node_id
+x
+y
+demand_veh_h
+scenario_tags
+note
+```
+
+Topology maps should use this table instead of embedding demand numbers in the
+plotting code whenever possible.

@@ -50,6 +50,37 @@ scenario list changes, update only this table and the notes below.
 | `medium_urban_west_skew` | Medium demand with west-heavy urban entries | `medium`, `spatial-skew`, `urban-heavy` | Does coordination handle asymmetric urban demand without hiding queues? |
 | `medium_surge` | Medium demand with temporary surge | `medium`, `surge`, `spillback-risk` | Does the controller recover after a temporary demand shock? |
 
+## Historical Or Focus Figure Sets
+
+Some existing presentation figures were generated from a frozen 2026-06-23 focus
+set rather than the current canonical six-scenario registry:
+
+| Historical ID | Display name in figures | Suggested tags |
+|---|---|---|
+| `medium_demand` | Median | `medium`, `baseline` |
+| `peak_demand` | Peak | `peak`, `spillback-risk`, `capacity-drop-risk` |
+| `skew_peak` | Peak skew | `peak`, `spatial-skew`, `urban-heavy` |
+| `incident_or_capacity_drop` | Incident | `incident`, `capacity-drop-risk`, `spillback-risk` |
+
+For such figure sets, read the scenario list from the figure manifest or output
+directory and map each scenario to tags. Do not rename historical figures unless
+the source runs are regenerated.
+
+## Demand Topology Figure Convention
+
+Scenario-demand overview figures should place exogenous demand on the mixed
+network topology:
+
+- urban boundary entries near their boundary intersection;
+- freeway upstream entries at the first freeway boundary segment;
+- ramp-bound demand near the upstream urban intersection feeding the ramp, not
+  directly on the physical ramp link.
+
+Use this wording in captions: "values indicate exogenous inflow rates in veh/h
+at the plotted demand snapshot." If ramp-bound demand is shown, make clear that
+it is a demand stream approaching the ramp through the boundary/intersection
+system, not vehicles magically generated on the ramp.
+
 ## Event Window Convention
 
 Use event windows from scenario configuration or diagnostics:

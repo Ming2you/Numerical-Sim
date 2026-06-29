@@ -41,14 +41,22 @@ Prefer aligned panels because urban and freeway burden shifts are easier to see.
 
 ## Fig. 1C. Delay, Average Travel Time, And Throughput
 
-Use three aligned panels:
+Use two or three aligned panels depending on the message:
 
-1. total delay;
-2. average travel time;
-3. completed vehicles or throughput.
+1. completed vehicles or throughput;
+2. terminal vehicles;
+3. optional average-travel-time or `TTT / completed` proxy.
 
-This figure is important when a controller increases throughput while also
-increasing raw TTT.
+When no-control is included, prefer absolute completed vehicles and absolute
+terminal vehicles. Label the axes as "higher is better" for completed vehicles
+and "lower is better" for terminal vehicles. Use gain/reduction versions only
+when the figure intentionally excludes no-control or clearly labels no-control as
+the zero reference.
+
+This figure is important when a controller changes throughput. A higher Total
+TTT is not automatically worse if many more vehicles complete and terminal
+burden falls; use the average-travel-time proxy and terminal vehicles to avoid
+that ambiguity.
 
 ## Fig. 1D. Terminal-State Burden
 
@@ -60,6 +68,15 @@ Grouped bars or dot plots:
 - terminal ramp vehicles if available.
 
 Interpret this as residual burden, not as a standalone performance objective.
+
+## Slide Interpretation Rule
+
+For presentation slides, pair Fig. 1A and Fig. 1B:
+
+- Fig. 1A gives the headline Total TTT reduction.
+- Fig. 1B shows whether urban and freeway TTT both improve.
+- Completed/terminal bars then verify that the controller did not obtain the TTT
+  gain by serving fewer vehicles or pushing congestion beyond the horizon.
 
 ## Fig. 2. Scenario Time-Series Package
 

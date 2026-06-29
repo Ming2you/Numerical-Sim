@@ -36,15 +36,56 @@ Figure requirements:
 8. Include source output directory and simulation horizon in the figure metadata
    or companion log.
 9. Do not claim controller acceptance from figures alone.
+10. For slide figures, remove or shorten titles when they collide with legends;
+    put the interpretation in slide text instead.
+11. When a network-effect summary includes no-control, plot absolute completed
+    vehicles and absolute terminal vehicles rather than gains only.
+12. If demand is shown on a topology map, place ramp-bound demand near the
+    boundary/intersection approach, not directly on the ramp link.
 
 Primary figure package:
-- Macro performance: total/urban/freeway TTT, delay, ATT, throughput, terminal
-  vehicles.
+- Scenario demand map: directional urban boundary, freeway entry, and ramp-bound
+  demand.
+- Macro performance: total/urban/freeway TTT, ATT or TTT/completed proxy,
+  completed vehicles, terminal vehicles.
 - Congestion transfer: on-ramp, off-ramp, boundary queue exposure and spillback.
 - Leader feasibility: N_P_star, N_UF_star, actual response, candidate objectives,
   fallback selection.
 - Game coupling: Nash convergence, coupling sensitivity, predicted objective vs
   realized plant TTT.
-- Micro behavior: RM, VSL, green time, offset.
-- Computation cost: runtime per step, candidate evaluations, budget sensitivity.
+- Micro behavior: RM/VSL/green/offset effect chains that connect control inputs
+  to queues, freeway density/speed, departures, TTT saved, completed vehicles, or
+  terminal vehicles.
+- Operating-point diagnostics: FD/MFD plots, but treat them as preliminary when
+  the numerical simulator does not form clean empirical loops.
+- Computation cost: runtime per step with the control-interval reference line,
+  candidate evaluations, budget sensitivity.
+
+Current effect-oriented output directory to inspect when available:
+
+reports/figures/effect_oriented_2026_06_23/
+
+Important current figures:
+
+- 00_scenario_demand/Scenario_topology_directional_demand
+- 01_time_aligned_effects/EffectChain_RM_queue_TTT_*
+- 01_time_aligned_effects/EffectChain_signal_service_queue_*
+- 01_time_aligned_effects/EffectChain_VSL_RM_speed_density_incident_or_capacity_drop
+- 02_operating_point_shift/FD_operating_point_shift_*
+- 02_operating_point_shift/Urban_MFD_operating_point_shift_*
+- 04_network_effect_summary/Network_effect_summary
+- 05_computation_time/Computation_time_per_step
+
+Interpretation discipline:
+
+- Do not write "control was activated" as the main claim. Explain what state or
+  outcome changed after activation.
+- To argue that TTT improvement is not transferred to one subsystem, cite both
+  urban/freeway TTT decomposition and completed/terminal outcome bars.
+- To argue that RM is beneficial, show metering/release, ramp queue, freeway
+  density/speed, and cumulative TTT or terminal response on the same time axis.
+- To argue that signal or offset matters, show green/offset change together with
+  urban departures and movement queue response.
+- To discuss FD/MFD, state the numerical-simulation caveat and avoid strong
+  empirical FD/MFD claims unless the plant has been separately validated.
 ```

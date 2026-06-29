@@ -14,6 +14,12 @@ Start with these three files:
 
 Then choose the analysis chapter that matches the figure to generate.
 
+For slide or seminar material, also read `04_main_text_figure_set.md` and
+`90_codex_plotting_prompt.md`. These files contain the current preferred
+effect-oriented package: scenario demand map, macro TTT bars, urban/freeway
+burden decomposition, completed/terminal outcome bars, control-to-state effect
+chains, FD/MFD caveat figures, and computation-time bars.
+
 Most future edits should touch only:
 
 - `01_controller_catalog.md` when controller definitions, labels, or authority
@@ -52,6 +58,11 @@ chapter needs scenario-specific logic, use scenario tags such as `baseline`,
 
 Do not duplicate controller authority throughout the figure guide. Use the
 controller catalog as the source of truth.
+
+When a generated figure set uses a historical or focus-scenario subset, do not
+rewrite every chapter. Record the subset in the figure manifest and scenario
+catalog note, then keep chapter logic tag-based. This avoids hard-coding the
+6/23 focus set or any future scenario revision into stable analysis guidance.
 
 ## Source Note
 

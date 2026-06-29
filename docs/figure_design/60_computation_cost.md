@@ -20,12 +20,18 @@ explain where computation time is spent.
 
 ## Fig. 6A. Runtime Per Control Step
 
-Boxplot or violin plot:
+Bar, boxplot, or violin plot:
 
-- x-axis: controller;
-- y-axis: runtime per control step (s);
-- color: scenario or scenario tag;
-- horizontal line: real-time threshold if defined.
+- x-axis: active scenario;
+- hue: controller;
+- y-axis: mean runtime or compute time per control step (s);
+- horizontal line: control interval, currently 180 s when the experiment uses
+  180 s rolling-horizon updates.
+
+For the current 3600 s focus figures, compute step cost as
+`computation_time_sec / number_of_control_steps` where
+`number_of_control_steps = horizon_sec / control_interval_sec`. The reference
+line is not a target to optimize against; it is the real-time feasibility budget.
 
 ## Fig. 6B. Candidate Evaluation Budget
 
@@ -48,6 +54,18 @@ Scatter plot:
 
 This is the key figure for comparing PFO/P-Stack against WU and centralized
 reference.
+
+## Current Presentation Interpretation
+
+Use this wording for the current 2026-06-23 effect-oriented figures:
+
+- WU-CD-F and PFO are comfortably below the 180 s control interval.
+- P-Stack is much more expensive because it evaluates leader targets and follower
+  responses, but it remains below the 180 s online decision budget in these
+  runs.
+- P-Stack's computation cost is therefore feasible for this simplified numerical
+  simulator, but scalability remains a practical trade-off before microscopic or
+  larger-network deployment.
 
 ## Fig. 6D. Budget Sensitivity
 

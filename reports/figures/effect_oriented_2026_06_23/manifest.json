@@ -1,0 +1,138 @@
+{
+  "purpose": "Effect-oriented figures inspired by control literature: control input, state response, operating-point shift, and network outcome are plotted together.",
+  "source_raw": [
+    "C:\\Users\\alsrj\\Desktop\\Numerical-Sim\\outputs\\analysis_matrix_3600",
+    "C:\\Users\\alsrj\\Desktop\\Numerical-Sim\\outputs\\analysis_matrix_3600_extra"
+  ],
+  "controllers": [
+    "NO-CONTROL",
+    "WU-CD-F",
+    "PROPOSED-FOLLOWERS-ONLY",
+    "PROPOSED-STACKELBERG"
+  ],
+  "scenarios": [
+    {
+      "id": "medium_demand",
+      "label": "Median",
+      "root": "C:\\Users\\alsrj\\Desktop\\Numerical-Sim\\outputs\\analysis_matrix_3600"
+    },
+    {
+      "id": "peak_demand",
+      "label": "Peak",
+      "root": "C:\\Users\\alsrj\\Desktop\\Numerical-Sim\\outputs\\analysis_matrix_3600"
+    },
+    {
+      "id": "skew_peak",
+      "label": "Peak skew",
+      "root": "C:\\Users\\alsrj\\Desktop\\Numerical-Sim\\outputs\\analysis_matrix_3600_extra"
+    },
+    {
+      "id": "incident_or_capacity_drop",
+      "label": "Incident",
+      "root": "C:\\Users\\alsrj\\Desktop\\Numerical-Sim\\outputs\\analysis_matrix_3600"
+    }
+  ],
+  "generated_count": 20,
+  "figures": [
+    {
+      "status": "generated",
+      "png": "reports\\figures\\effect_oriented_2026_06_23\\00_scenario_demand\\Scenario_topology_directional_demand.png",
+      "pdf": "reports\\figures\\effect_oriented_2026_06_23\\00_scenario_demand\\Scenario_topology_directional_demand.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\effect_oriented_2026_06_23\\01_time_aligned_effects\\EffectChain_RM_queue_TTT_peak_demand.png",
+      "pdf": "reports\\figures\\effect_oriented_2026_06_23\\01_time_aligned_effects\\EffectChain_RM_queue_TTT_peak_demand.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\effect_oriented_2026_06_23\\01_time_aligned_effects\\EffectChain_RM_queue_TTT_incident_or_capacity_drop.png",
+      "pdf": "reports\\figures\\effect_oriented_2026_06_23\\01_time_aligned_effects\\EffectChain_RM_queue_TTT_incident_or_capacity_drop.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\effect_oriented_2026_06_23\\01_time_aligned_effects\\EffectChain_RM_queue_TTT_skew_peak.png",
+      "pdf": "reports\\figures\\effect_oriented_2026_06_23\\01_time_aligned_effects\\EffectChain_RM_queue_TTT_skew_peak.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\effect_oriented_2026_06_23\\01_time_aligned_effects\\EffectChain_VSL_speed_density_incident_or_capacity_drop.png",
+      "pdf": "reports\\figures\\effect_oriented_2026_06_23\\01_time_aligned_effects\\EffectChain_VSL_speed_density_incident_or_capacity_drop.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\effect_oriented_2026_06_23\\01_time_aligned_effects\\EffectChain_VSL_RM_speed_density_incident_or_capacity_drop.png",
+      "pdf": "reports\\figures\\effect_oriented_2026_06_23\\01_time_aligned_effects\\EffectChain_VSL_RM_speed_density_incident_or_capacity_drop.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\effect_oriented_2026_06_23\\02_operating_point_shift\\FD_operating_point_shift_peak_demand.png",
+      "pdf": "reports\\figures\\effect_oriented_2026_06_23\\02_operating_point_shift\\FD_operating_point_shift_peak_demand.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\effect_oriented_2026_06_23\\02_operating_point_shift\\Urban_MFD_operating_point_shift_peak_demand.png",
+      "pdf": "reports\\figures\\effect_oriented_2026_06_23\\02_operating_point_shift\\Urban_MFD_operating_point_shift_peak_demand.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\effect_oriented_2026_06_23\\02_operating_point_shift\\FD_operating_point_shift_skew_peak.png",
+      "pdf": "reports\\figures\\effect_oriented_2026_06_23\\02_operating_point_shift\\FD_operating_point_shift_skew_peak.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\effect_oriented_2026_06_23\\02_operating_point_shift\\Urban_MFD_operating_point_shift_skew_peak.png",
+      "pdf": "reports\\figures\\effect_oriented_2026_06_23\\02_operating_point_shift\\Urban_MFD_operating_point_shift_skew_peak.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\effect_oriented_2026_06_23\\02_operating_point_shift\\FD_operating_point_shift_incident_or_capacity_drop.png",
+      "pdf": "reports\\figures\\effect_oriented_2026_06_23\\02_operating_point_shift\\FD_operating_point_shift_incident_or_capacity_drop.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\effect_oriented_2026_06_23\\02_operating_point_shift\\Urban_MFD_operating_point_shift_incident_or_capacity_drop.png",
+      "pdf": "reports\\figures\\effect_oriented_2026_06_23\\02_operating_point_shift\\Urban_MFD_operating_point_shift_incident_or_capacity_drop.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\effect_oriented_2026_06_23\\01_time_aligned_effects\\EffectChain_signal_service_queue_peak_demand.png",
+      "pdf": "reports\\figures\\effect_oriented_2026_06_23\\01_time_aligned_effects\\EffectChain_signal_service_queue_peak_demand.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\effect_oriented_2026_06_23\\01_time_aligned_effects\\EffectChain_signal_service_queue_skew_peak.png",
+      "pdf": "reports\\figures\\effect_oriented_2026_06_23\\01_time_aligned_effects\\EffectChain_signal_service_queue_skew_peak.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\effect_oriented_2026_06_23\\01_time_aligned_effects\\EffectChain_signal_service_queue_incident_or_capacity_drop.png",
+      "pdf": "reports\\figures\\effect_oriented_2026_06_23\\01_time_aligned_effects\\EffectChain_signal_service_queue_incident_or_capacity_drop.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\effect_oriented_2026_06_23\\03_leader_candidate_effect\\Leader_candidate_objective_surface_peak_demand.png",
+      "pdf": "reports\\figures\\effect_oriented_2026_06_23\\03_leader_candidate_effect\\Leader_candidate_objective_surface_peak_demand.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\effect_oriented_2026_06_23\\03_leader_candidate_effect\\Leader_candidate_objective_surface_skew_peak.png",
+      "pdf": "reports\\figures\\effect_oriented_2026_06_23\\03_leader_candidate_effect\\Leader_candidate_objective_surface_skew_peak.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\effect_oriented_2026_06_23\\03_leader_candidate_effect\\Leader_candidate_objective_surface_incident_or_capacity_drop.png",
+      "pdf": "reports\\figures\\effect_oriented_2026_06_23\\03_leader_candidate_effect\\Leader_candidate_objective_surface_incident_or_capacity_drop.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\effect_oriented_2026_06_23\\04_network_effect_summary\\Network_effect_summary.png",
+      "pdf": "reports\\figures\\effect_oriented_2026_06_23\\04_network_effect_summary\\Network_effect_summary.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\effect_oriented_2026_06_23\\05_computation_time\\Computation_time_per_step.png",
+      "pdf": "reports\\figures\\effect_oriented_2026_06_23\\05_computation_time\\Computation_time_per_step.pdf"
+    }
+  ]
+}

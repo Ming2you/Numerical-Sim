@@ -1,0 +1,236 @@
+{
+  "purpose": "New figure set generated from docs/figure_design guidance, not a copy of the old 6/23 figures.",
+  "source_raw": [
+    "C:\\Users\\alsrj\\Desktop\\Numerical-Sim\\outputs\\analysis_matrix_3600",
+    "C:\\Users\\alsrj\\Desktop\\Numerical-Sim\\outputs\\analysis_matrix_3600_extra"
+  ],
+  "focus_scenarios": [
+    {
+      "id": "medium_demand",
+      "label": "Median",
+      "tags": [
+        "medium",
+        "baseline"
+      ]
+    },
+    {
+      "id": "peak_demand",
+      "label": "Peak",
+      "tags": [
+        "peak",
+        "spillback-risk"
+      ]
+    },
+    {
+      "id": "skew_peak",
+      "label": "Peak skew",
+      "tags": [
+        "peak",
+        "spatial-skew"
+      ]
+    },
+    {
+      "id": "incident_or_capacity_drop",
+      "label": "Incident",
+      "tags": [
+        "incident",
+        "capacity-drop-risk"
+      ]
+    }
+  ],
+  "controllers": [
+    "NO-CONTROL",
+    "WU-CD-F",
+    "PROPOSED-FOLLOWERS-ONLY",
+    "PROPOSED-STACKELBERG"
+  ],
+  "generated_count": 37,
+  "skipped": [],
+  "figures": [
+    {
+      "status": "generated",
+      "png": "reports\\figures\\figure_design_2026_06_23_redraw\\01_macro_performance\\Fig1A_total_ttt_cross_scenario.png",
+      "pdf": "reports\\figures\\figure_design_2026_06_23_redraw\\01_macro_performance\\Fig1A_total_ttt_cross_scenario.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\figure_design_2026_06_23_redraw\\01_macro_performance\\Fig1B_urban_freeway_ttt_decomposition.png",
+      "pdf": "reports\\figures\\figure_design_2026_06_23_redraw\\01_macro_performance\\Fig1B_urban_freeway_ttt_decomposition.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\figure_design_2026_06_23_redraw\\01_macro_performance\\Fig1C_delay_att_throughput.png",
+      "pdf": "reports\\figures\\figure_design_2026_06_23_redraw\\01_macro_performance\\Fig1C_delay_att_throughput.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\figure_design_2026_06_23_redraw\\01_macro_performance\\Fig1D_terminal_state_burden.png",
+      "pdf": "reports\\figures\\figure_design_2026_06_23_redraw\\01_macro_performance\\Fig1D_terminal_state_burden.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\figure_design_2026_06_23_redraw\\01_macro_performance\\Fig2_timeseries_medium_demand.png",
+      "pdf": "reports\\figures\\figure_design_2026_06_23_redraw\\01_macro_performance\\Fig2_timeseries_medium_demand.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\figure_design_2026_06_23_redraw\\01_macro_performance\\Fig2_timeseries_peak_demand.png",
+      "pdf": "reports\\figures\\figure_design_2026_06_23_redraw\\01_macro_performance\\Fig2_timeseries_peak_demand.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\figure_design_2026_06_23_redraw\\01_macro_performance\\Fig2_timeseries_skew_peak.png",
+      "pdf": "reports\\figures\\figure_design_2026_06_23_redraw\\01_macro_performance\\Fig2_timeseries_skew_peak.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\figure_design_2026_06_23_redraw\\01_macro_performance\\Fig2_timeseries_incident_or_capacity_drop.png",
+      "pdf": "reports\\figures\\figure_design_2026_06_23_redraw\\01_macro_performance\\Fig2_timeseries_incident_or_capacity_drop.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\figure_design_2026_06_23_redraw\\02_congestion_transfer\\Fig2A_spillback_summary.png",
+      "pdf": "reports\\figures\\figure_design_2026_06_23_redraw\\02_congestion_transfer\\Fig2A_spillback_summary.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\figure_design_2026_06_23_redraw\\02_congestion_transfer\\Fig2B_queue_exposure_summary.png",
+      "pdf": "reports\\figures\\figure_design_2026_06_23_redraw\\02_congestion_transfer\\Fig2B_queue_exposure_summary.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\figure_design_2026_06_23_redraw\\02_congestion_transfer\\Fig2C_offramp_acceptance_ratio.png",
+      "pdf": "reports\\figures\\figure_design_2026_06_23_redraw\\02_congestion_transfer\\Fig2C_offramp_acceptance_ratio.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\figure_design_2026_06_23_redraw\\02_congestion_transfer\\Fig2D_onramp_mechanism_peak_demand.png",
+      "pdf": "reports\\figures\\figure_design_2026_06_23_redraw\\02_congestion_transfer\\Fig2D_onramp_mechanism_peak_demand.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\figure_design_2026_06_23_redraw\\02_congestion_transfer\\Fig2D_onramp_mechanism_incident_or_capacity_drop.png",
+      "pdf": "reports\\figures\\figure_design_2026_06_23_redraw\\02_congestion_transfer\\Fig2D_onramp_mechanism_incident_or_capacity_drop.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\figure_design_2026_06_23_redraw\\03_leader_feasibility\\Fig3A_leader_targets_response_medium_demand.png",
+      "pdf": "reports\\figures\\figure_design_2026_06_23_redraw\\03_leader_feasibility\\Fig3A_leader_targets_response_medium_demand.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\figure_design_2026_06_23_redraw\\03_leader_feasibility\\Fig3A_leader_targets_response_peak_demand.png",
+      "pdf": "reports\\figures\\figure_design_2026_06_23_redraw\\03_leader_feasibility\\Fig3A_leader_targets_response_peak_demand.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\figure_design_2026_06_23_redraw\\03_leader_feasibility\\Fig3A_leader_targets_response_skew_peak.png",
+      "pdf": "reports\\figures\\figure_design_2026_06_23_redraw\\03_leader_feasibility\\Fig3A_leader_targets_response_skew_peak.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\figure_design_2026_06_23_redraw\\03_leader_feasibility\\Fig3A_leader_targets_response_incident_or_capacity_drop.png",
+      "pdf": "reports\\figures\\figure_design_2026_06_23_redraw\\03_leader_feasibility\\Fig3A_leader_targets_response_incident_or_capacity_drop.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\figure_design_2026_06_23_redraw\\03_leader_feasibility\\Fig3CD_fallback_tracking_error.png",
+      "pdf": "reports\\figures\\figure_design_2026_06_23_redraw\\03_leader_feasibility\\Fig3CD_fallback_tracking_error.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\figure_design_2026_06_23_redraw\\03_leader_feasibility\\Fig3B_logged_best_candidate_locations.png",
+      "pdf": "reports\\figures\\figure_design_2026_06_23_redraw\\03_leader_feasibility\\Fig3B_logged_best_candidate_locations.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\figure_design_2026_06_23_redraw\\04_game_coupling\\Fig4A_nash_response_diagnostics.png",
+      "pdf": "reports\\figures\\figure_design_2026_06_23_redraw\\04_game_coupling\\Fig4A_nash_response_diagnostics.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\figure_design_2026_06_23_redraw\\04_game_coupling\\Fig4B_coupling_response_matrix.png",
+      "pdf": "reports\\figures\\figure_design_2026_06_23_redraw\\04_game_coupling\\Fig4B_coupling_response_matrix.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\figure_design_2026_06_23_redraw\\04_game_coupling\\Fig4D_predicted_vs_realized_selected.png",
+      "pdf": "reports\\figures\\figure_design_2026_06_23_redraw\\04_game_coupling\\Fig4D_predicted_vs_realized_selected.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\figure_design_2026_06_23_redraw\\04_game_coupling\\Fig4E_objective_coverage_audit.png",
+      "pdf": "reports\\figures\\figure_design_2026_06_23_redraw\\04_game_coupling\\Fig4E_objective_coverage_audit.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\figure_design_2026_06_23_redraw\\05_micro_controls\\ramp_metering\\Fig5A_RM_mean_metering_rate.png",
+      "pdf": "reports\\figures\\figure_design_2026_06_23_redraw\\05_micro_controls\\ramp_metering\\Fig5A_RM_mean_metering_rate.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\figure_design_2026_06_23_redraw\\05_micro_controls\\ramp_metering\\Fig5A_RM_activation_fraction.png",
+      "pdf": "reports\\figures\\figure_design_2026_06_23_redraw\\05_micro_controls\\ramp_metering\\Fig5A_RM_activation_fraction.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\figure_design_2026_06_23_redraw\\05_micro_controls\\vsl\\Fig5B_VSL_reduction.png",
+      "pdf": "reports\\figures\\figure_design_2026_06_23_redraw\\05_micro_controls\\vsl\\Fig5B_VSL_reduction.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\figure_design_2026_06_23_redraw\\05_micro_controls\\vsl\\Fig5B_VSL_activation.png",
+      "pdf": "reports\\figures\\figure_design_2026_06_23_redraw\\05_micro_controls\\vsl\\Fig5B_VSL_activation.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\figure_design_2026_06_23_redraw\\05_micro_controls\\green_time\\Fig5C_green_adjustment.png",
+      "pdf": "reports\\figures\\figure_design_2026_06_23_redraw\\05_micro_controls\\green_time\\Fig5C_green_adjustment.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\figure_design_2026_06_23_redraw\\05_micro_controls\\green_time\\Fig5C_green_activation.png",
+      "pdf": "reports\\figures\\figure_design_2026_06_23_redraw\\05_micro_controls\\green_time\\Fig5C_green_activation.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\figure_design_2026_06_23_redraw\\05_micro_controls\\offset\\Fig5D_offset_change.png",
+      "pdf": "reports\\figures\\figure_design_2026_06_23_redraw\\05_micro_controls\\offset\\Fig5D_offset_change.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\figure_design_2026_06_23_redraw\\05_micro_controls\\offset\\Fig5D_offset_activation.png",
+      "pdf": "reports\\figures\\figure_design_2026_06_23_redraw\\05_micro_controls\\offset\\Fig5D_offset_activation.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\figure_design_2026_06_23_redraw\\05_micro_controls\\Fig5_mechanism_panel_peak_demand.png",
+      "pdf": "reports\\figures\\figure_design_2026_06_23_redraw\\05_micro_controls\\Fig5_mechanism_panel_peak_demand.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\figure_design_2026_06_23_redraw\\05_micro_controls\\Fig5_mechanism_panel_incident_or_capacity_drop.png",
+      "pdf": "reports\\figures\\figure_design_2026_06_23_redraw\\05_micro_controls\\Fig5_mechanism_panel_incident_or_capacity_drop.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\figure_design_2026_06_23_redraw\\05_micro_controls\\Fig5_mechanism_panel_skew_peak.png",
+      "pdf": "reports\\figures\\figure_design_2026_06_23_redraw\\05_micro_controls\\Fig5_mechanism_panel_skew_peak.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\figure_design_2026_06_23_redraw\\06_computation_cost\\Fig6A_runtime_per_control_step.png",
+      "pdf": "reports\\figures\\figure_design_2026_06_23_redraw\\06_computation_cost\\Fig6A_runtime_per_control_step.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\figure_design_2026_06_23_redraw\\06_computation_cost\\Fig6B_candidate_evaluation_budget.png",
+      "pdf": "reports\\figures\\figure_design_2026_06_23_redraw\\06_computation_cost\\Fig6B_candidate_evaluation_budget.pdf"
+    },
+    {
+      "status": "generated",
+      "png": "reports\\figures\\figure_design_2026_06_23_redraw\\06_computation_cost\\Fig6C_performance_compute_tradeoff.png",
+      "pdf": "reports\\figures\\figure_design_2026_06_23_redraw\\06_computation_cost\\Fig6C_performance_compute_tradeoff.pdf"
+    }
+  ]
+}
