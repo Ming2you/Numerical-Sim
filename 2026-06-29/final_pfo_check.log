@@ -1,0 +1,39 @@
+scenario = sweet_128  T_total = 3600
+=== no_control baseline ===
+=== WuFaithfulFollower ===
+step 1/20 cum_ttt=20.684 step_ttt=20.684 evals=517 solve=1769.5ms
+step 2/20 cum_ttt=48.619 step_ttt=27.935 evals=533 solve=2035.1ms
+step 3/20 cum_ttt=79.039 step_ttt=30.421 evals=551 solve=2946.6ms
+step 4/20 cum_ttt=111.837 step_ttt=32.798 evals=550 solve=2477.1ms
+step 5/20 cum_ttt=148.013 step_ttt=36.176 evals=566 solve=3005.7ms
+step 6/20 cum_ttt=188.095 step_ttt=40.082 evals=544 solve=2222.8ms
+step 7/20 cum_ttt=232.859 step_ttt=44.764 evals=549 solve=3246.4ms
+step 8/20 cum_ttt=282.424 step_ttt=49.565 evals=552 solve=2508.3ms
+step 9/20 cum_ttt=337.263 step_ttt=54.839 evals=555 solve=2313.1ms
+step 10/20 cum_ttt=397.548 step_ttt=60.285 evals=557 solve=2379.0ms
+step 11/20 cum_ttt=463.555 step_ttt=66.008 evals=550 solve=2101.3ms
+step 12/20 cum_ttt=535.072 step_ttt=71.517 evals=551 solve=2560.4ms
+step 13/20 cum_ttt=612.285 step_ttt=77.213 evals=549 solve=2469.3ms
+step 14/20 cum_ttt=696.322 step_ttt=84.037 evals=554 solve=2427.7ms
+step 15/20 cum_ttt=787.944 step_ttt=91.622 evals=555 solve=2044.6ms
+step 16/20 cum_ttt=886.480 step_ttt=98.536 evals=538 solve=2861.7ms
+step 17/20 cum_ttt=991.486 step_ttt=105.006 evals=556 solve=2173.6ms
+step 18/20 cum_ttt=1102.310 step_ttt=110.824 evals=539 solve=1931.3ms
+step 19/20 cum_ttt=1218.611 step_ttt=116.301 evals=543 solve=2852.5ms
+step 20/20 cum_ttt=1339.914 step_ttt=121.303 evals=542 solve=2181.8ms
+
+========== SUMMARY ==========
+no_control  total_ttt = 3089.532 (urban 1251.794 / fw 1837.738)
+follower    total_ttt = 1339.914 (urban 859.011 / fw 480.903)
+improvement vs no_control = +56.63%
+
+-- green p1 per signal (min / max / mean), balanced = 56.0 --
+  A: min=56.0 max=56.0 mean=56.00 off56=no
+  B: min=56.0 max=56.0 mean=56.00 off56=no
+  C: min=56.0 max=56.0 mean=56.00 off56=no
+  D: min=55.0 max=56.0 mean=55.45 off56=YES
+  F: min=54.0 max=62.0 mean=58.05 off56=YES
+
+evals/step: min=517 max=566 mean=547.5
+solve time/step (ms): min=1769.5 max=3246.4 mean=2425.4
+wall time/step incl plant (ms): mean=2500.7

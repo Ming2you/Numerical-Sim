@@ -194,6 +194,66 @@ def rollout_local_tts(
     return float(cost)
 
 
+def rollout_local_tts_phased(
+    model: LocalSignalModel,
+    q0: Mapping[str, float],
+    arr_by_substep: Mapping[str, List[float]],
+    gf_by_substep: Mapping[str, List[float]],
+    s_eff0: Mapping[str, float],
+    substeps: int,
+    dt_h: float,
+) -> float:
+    """PHASE-RESOLVED + PLATOON-AWARE 국소 rollout — 자기 TTS proxy 누적 반환(non-ramp 신호용).
+
+    `rollout_local_tts`(cycle-평균 green/cycle + 균일 도착)의 충실도 상향판. 두 가지만 다르다:
+    1. 서비스 = `gf_by_substep[m][sub]`(offset-aware `_phase_green_fraction(urban_step_index=sub)`)를
+       cap_flow에 곱한다. 즉 substep별 green window 겹침으로 서비스 → offset이 동역학에 들어간다.
+    2. 도착 = `arr_by_substep[m][sub]`(상류 신호 green+offset discharge를 τ 지연해 재구성한
+       시간분해 platoon profile, phase 예산 보존). 균일 상수 도착이 아니다.
+    나머지 spillback/receiving S_eff/큐 차감 회계는 `rollout_local_tts`와 동일(깨지면 안 됨).
+    호출처(follower)가 gf·arr 프로파일을 미리 계산해 넘긴다(여기는 순수 큐 전진만)."""
+    q: Dict[str, float] = {m: max(0.0, float(q0.get(m, 0.0))) for m in model.movements}
+    own_origin_links = {model.origin_of[m] for m in model.movements if model.origin_of[m]}
+    s_eff: Dict[str, float] = {link: max(0.0, float(v)) for link, v in s_eff0.items()}
+
+    cost = 0.0
+    for sub in range(substeps):
+        # 1) platoon 도착 주입(시간분해, τ 지연·예산 보존).
+        for m in model.movements:
+            prof = arr_by_substep.get(m)
+            if prof:
+                q[m] += prof[sub] * dt_h
+        # 2) receiving 링크별 intended service(offset-aware green fraction) → S_eff 게이트.
+        intended_by_link: Dict[str, Dict[str, float]] = {}
+        no_link_intended: Dict[str, float] = {}
+        for m in model.movements:
+            gf = gf_by_substep[m][sub]
+            intended = min(q[m], dt_h * gf * model.cap_flow_of[m])
+            if intended < 0.0:
+                intended = 0.0
+            recv = model.receiving_of[m]
+            if recv and recv in s_eff:
+                intended_by_link.setdefault(recv, {})[m] = intended
+            else:
+                no_link_intended[m] = intended
+        actual: Dict[str, float] = dict(no_link_intended)
+        for link, intended in intended_by_link.items():
+            actual.update(_allocate_receiving_counts(
+                model.receiving_space_rule, intended, s_eff.get(link, 0.0),
+            ))
+        # 3) 큐 차감 + 자기 내부 링크 S_eff 점유 갱신(이웃/sink 링크 고정).
+        for m in model.movements:
+            departed = min(q[m], max(0.0, actual.get(m, 0.0)))
+            if departed <= 0.0:
+                continue
+            q[m] -= departed
+            recv = model.receiving_of[m]
+            if recv in own_origin_links and recv in s_eff:
+                s_eff[recv] = max(0.0, s_eff[recv] - departed)
+        cost += sum(q.values()) * dt_h
+    return float(cost)
+
+
 def rollout_local_tts_ramp_aware(
     model: LocalSignalModel,
     q0: Mapping[str, float],

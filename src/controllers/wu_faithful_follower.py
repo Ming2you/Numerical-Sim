@@ -28,6 +28,7 @@ from src.controllers.local_freeway_plant import (
 from src.controllers.local_signal_plant import (
     build_local_model,
     rollout_local_tts,
+    rollout_local_tts_phased,
     rollout_local_tts_ramp_aware,
 )
 from src.controllers.nash_solver import NashResult
@@ -39,7 +40,12 @@ from src.controllers.wu_distributed import WuDistributedController, _split_link_
 from src.models.demand import DemandStep
 from src.models.metanet import compute_ramp_release_flows
 from src.models.state import ControlAction, ExperimentConfig, TrafficState, segment_vsl
-from src.models.urban_queue_model import _effective_available_space
+from src.models.urban_queue_model import (
+    _effective_available_space,
+    _link_delay_steps,
+    _phase_green_fraction,
+    _urban_step_index,
+)
 
 # 보호영역 net-inflow 분류(inflow_outflow_allocation.py와 동일). 리더 N_P 정의와 일치시킨다.
 _INFLOW_KINDS = {"boundary_in", "off_ramp"}
@@ -49,8 +55,25 @@ _OUTFLOW_KINDS = {"boundary_out", "on_ramp"}
 class WuFaithfulFollower:
     """Wu §IV-D 충실 분산 follower(PFO 모드 우선)."""
 
-    def __init__(self, cfg: ExperimentConfig):
+    def __init__(self, cfg: ExperimentConfig, authority: str = "proposed"):
         self.cfg = cfg
+        # ---------- AUTHORITY 설정(어떤 액추에이터가 활성인지) ----------
+        # "proposed"(기본): urban GREEN + OFFSET + ramp METERING + freeway VSL(전체 제안 follower).
+        #   기존 거동 보존 — +56.63%(+offset 효과). default이라 기존 런 미영향.
+        # "wu": urban GREEN + freeway VSL만. ramp metering은 capacity 고정(metering OFF),
+        #   OFFSET 없음(0 고정). Wu 충실 green+VSL 분산 baseline — metering 부재라 약함(≈−1%대).
+        authority = str(authority).lower()
+        if authority not in ("proposed", "wu"):
+            raise ValueError(f"authority must be 'proposed' or 'wu', got {authority!r}")
+        self.authority = authority
+        # 액추에이터 게이트 플래그(authority가 결정).
+        self.metering_enabled = authority == "proposed"
+        # offset은 per-signal로 끈다(2026-06-29 검증): offset(green wave)은 *joint·coordinated* 양이라
+        # per-signal selfish 최적화는 corridor를 오히려 de-coordinate해 무가치/해롭다(대칭·양방향·one-way
+        # 모두 음수). global TTT로 *joint* 채점하면 양수지만 이 망에선 ~+0.2%로 미미(짧은 corridor·metering
+        # 지배). 따라서 offset은 follower 레버가 아니라 향후 leader-coordinated 레버로 둔다.
+        # phase-resolved 서비스 + platoon 도착 인프라(_solve_offset_local 등)는 그 leader 레버용으로 보존.
+        self.offset_enabled = False
         # 결합·freeway·토폴로지 재사용용 내부 인스턴스(기존 파일 미변경, 조합만).
         self._wu = WuDistributedController(cfg, leader_enabled=False)
         self._specs = self._wu._specs
@@ -74,6 +97,15 @@ class WuFaithfulFollower:
         # freeway agent가 탐색할 ramp metering 후보 분율(×capacity). +41.8% 검증 최적(≈0.5)을
         # 중심으로 0.25~1.0을 덮는다. cap=100%(=metering off)부터 강한 metering 25%까지.
         self.ramp_metering_fractions: tuple[float, ...] = (1.0, 0.7, 0.5, 0.35, 0.25)
+        # 신호별 offset 후보 분율(×cycle_length). [0, cycle) 안의 작은 후보집합으로 국소 탐색.
+        # 0.0은 현 baseline(offset off). 0~7/8 cycle을 8등분(끝점 cycle 제외).
+        self.offset_fractions: tuple[float, ...] = (
+            0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875,
+        )
+        # offset corridor 가드 마진(상대): realized horizon TTT가 offset-0 대비 이만큼 이상
+        # 개선될 때만 offset을 commit한다. horizon proxy는 closed-loop의 불완전 대리라, 미세
+        # 개선은 offset 전환 transient로 실제 손해가 되므로 noise-level flip을 차단한다.
+        self.offset_keep_margin: float = 0.005
         # 직전 step 수렴 결합값(warm-start).
         self._prev_coupling: Optional[Dict[str, float]] = None
         # ---------- 듀얼 분해(dual decomposition) N_P 추적용 상태 ----------
@@ -348,6 +380,7 @@ class WuFaithfulFollower:
         lambda_p: float = 0.0,
         forecast_arrivals: Optional[Mapping[str, float]] = None,
         horizon_h: float = 1.0,
+        demand: Optional[DemandStep] = None,
     ) -> tuple[float, float, int, float]:
         """green p1 후보 탐색 — 반환 (p1*, 자기 TTS objective, evaluations, nin_i*).
 
@@ -419,6 +452,21 @@ class WuFaithfulFollower:
             if model.receiving_of[m]
         }
 
+        # ---------- PHASE-RESOLVED + PLATOON 셋업(non-ramp 신호; Task-B) ----------
+        # non-ramp 신호는 cycle-평균 균일 도착 대신 phase-resolved 서비스 + platoon 도착으로
+        # 채점한다. platoon profile은 상류 신호(snapshot 동결)에만 의존하므로 후보 green 루프
+        # **밖에서 1회** 계산한다(green/offset에 불변). gf만 후보별로 갱신한다.
+        # ramp-aware(D/F)는 storage 동역학이 복잡해 기존 cycle-평균 경로 유지(Task-B 범위 밖).
+        use_phased = (not model.has_ramps) and demand is not None
+        start_idx = _urban_step_index(state, self.cfg)
+        # green search 동안 offset은 snapshot 값(직전 best-response)으로 동결한다.
+        offset_for_green = float(previous.offsets.get(signal, 0.0))
+        arr_by_substep: Dict[str, List[float]] = {}
+        if use_phased:
+            arr_by_substep = self._platoon_arrival_profiles(
+                signal, state, previous, demand, arr_mv, substeps, start_idx,
+            )
+
         prev_p1 = float(previous.green_times.get(f"{signal}_p1", total / 2.0))
         # pressure 중심 + 주변 후보(완화 양자화). 기존 _solve_urban_agent와 같은 후보 구성 철학.
         p1_pressure = q0_sum(q0, model, "p1") + arr_phase["p1"] * dt_h * substeps
@@ -479,6 +527,15 @@ class WuFaithfulFollower:
                     freeway_congestion, self.ramp_metering_weight,
                     p1, p2, substeps, dt_h,
                 )
+            elif use_phased:
+                # phase-resolved 서비스(offset-aware) + platoon 도착. offset은 green search 동안
+                # snapshot 값으로 동결(offset best-response는 _solve_offset_local에서 별도).
+                gf_by_substep = self._offset_green_fractions(
+                    signal, p1, offset_for_green, substeps, start_idx,
+                )
+                cost = rollout_local_tts_phased(
+                    model, q0, arr_by_substep, gf_by_substep, s_eff0, substeps, dt_h,
+                )
             else:
                 cost = rollout_local_tts(
                     model, q0, arr_mv, s_eff0, p1, p2, substeps, dt_h,
@@ -495,6 +552,211 @@ class WuFaithfulFollower:
             if cost < best_obj:
                 best_obj, best_p1, best_nin = cost, float(p1), float(nin)
         return best_p1, best_obj, evals, best_nin
+
+    # ---------- PLATOON 도착 재구성 + offset-aware service (Task-B 핵심) ----------
+
+    def _platoon_arrival_profiles(
+        self,
+        signal: str,
+        state: TrafficState,
+        snapshot: ControlAction,
+        demand: DemandStep,
+        arr_movement: Mapping[str, float],
+        substeps: int,
+        start_idx: int,
+    ) -> Dict[str, List[float]]:
+        """신호 i의 movement별 시간분해 도착 profile arr[m][sub][veh/h] — PLATOON 재구성.
+
+        `_per_movement_arrivals`(상수)를 TIME으로 재분배한다(총량 보존, 분포만 변경):
+          (a) exogenous 항(boundary_in 수요·on_ramp·off_ramp): 상류 신호 platoon이 없으므로
+              균일(uniform) — 매 substep 동일.
+          (b) upstream 항(β_m × Σ_{producer p→origin(m)} leaving_rate(p)): 상류 신호 p가 자기
+              green+offset window에서 방출하는 시간분해 discharge를 재구성한다. producer profile
+              d_p(sub) = leaving_rate(p) × gf_p(start+sub)/mean(gf_p)  (예산 보존: mean=leaving_rate).
+              gf_p = `_phase_green_fraction(snapshot p control, urban_step_index=start+sub)`(offset-aware).
+              origin 링크 L별로 producer를 합쳐 D_L(sub), travel τ_L=`_link_delay_steps(L)` 만큼 지연한
+              뒤 β_m로 split. τ 지연으로 horizon 끝에서 빠져나간 mass는 profile을 원래 총량으로
+              **재정규화**해 정확히 보존한다(예산 불변, 분포만 platoon).
+        반환 arr[m] = 길이 substeps의 리스트(균일 exogenous + platoon upstream).
+        offset이 동역학에 들어가는 두 통로 중 도착 쪽(서비스 쪽은 gf_by_substep)이다."""
+        wu = self._wu
+        model = self._local_models[signal]
+
+        # --- (1) origin 링크별 상류 producer의 시간분해 discharge profile D_L(sub) ---
+        # 각 producer p: 상수 leaving_rate(p)에 offset-aware green window shape를 곱하고
+        # mean으로 나눠 정규화(총량=leaving_rate(p) 보존).
+        link_profile: Dict[str, List[float]] = {}
+        for phase_id in ("p1", "p2"):
+            key = f"{signal}_{phase_id}"
+            for up_signal, up_movement, _agg_beta in wu._upstream_leaving_map.get(key, []):
+                origin_link = str(wu._specs[up_movement].get("destination", ""))
+                if not origin_link:
+                    continue
+                rate = wu._signal_leaving_rate(up_signal, up_movement, snapshot, state, demand)
+                if rate <= 1.0e-12:
+                    continue
+                up_spec = wu._specs[up_movement]
+                gf = [
+                    _phase_green_fraction(
+                        snapshot, self.cfg, up_spec, urban_step_index=start_idx + sub,
+                    )
+                    for sub in range(substeps)
+                ]
+                gf_mean = sum(gf) / max(len(gf), 1)
+                prof = link_profile.setdefault(origin_link, [0.0] * substeps)
+                if gf_mean > 1.0e-9:
+                    for sub in range(substeps):
+                        prof[sub] += rate * gf[sub] / gf_mean
+                else:
+                    # green window가 horizon에 전혀 안 걸리면 균일 fallback(총량 보존).
+                    for sub in range(substeps):
+                        prof[sub] += rate
+
+        # --- (2) travel τ_L 지연 적용(빈 링크일수록 통과시간↑) ---
+        delayed_link_profile: Dict[str, List[float]] = {}
+        for link, prof in link_profile.items():
+            tau = _link_delay_steps(state, self.cfg, link)
+            delayed = [0.0] * substeps
+            for sub in range(substeps):
+                src = sub - tau
+                if 0 <= src < substeps:
+                    delayed[sub] = prof[src]
+            delayed_link_profile[link] = delayed
+
+        # --- (3) movement별 profile = 균일 exogenous + β-split platoon(upstream), 예산 재정규화 ---
+        arr_prof: Dict[str, List[float]] = {}
+        for phase_id in ("p1", "p2"):
+            for movement in self._phase_movements[signal][phase_id]:
+                spec = self._specs[movement]
+                kind = str(spec.get("kind", ""))
+                beta = float(spec.get("beta", 0.0))
+                origin = str(spec.get("origin", ""))
+                total_rate = max(0.0, float(arr_movement.get(movement, 0.0)))
+                # upstream 기여(예산 target) = β_m × Σ_p leaving_rate(p) on origin. PRE-DELAY
+                # link_profile 평균(=Σ leaving_rate)으로 잡아 τ 지연으로 horizon 밖에 나간 mass도
+                # platoon으로 보존한다(flat exogenous로 새지 않게). exogenous = total − upstream.
+                pre = link_profile.get(origin)
+                up_total_rate = (
+                    beta * sum(pre) / max(substeps, 1) if pre is not None else 0.0
+                )
+                exo_rate = max(0.0, total_rate - up_total_rate)
+                prof = [exo_rate] * substeps
+                dl = delayed_link_profile.get(origin)
+                if dl is not None and beta > 0.0:
+                    # 지연 후 profile을 PRE-DELAY 총량(up_total_rate)으로 재정규화 → τ 손실 보존.
+                    cur_mean = beta * sum(dl) / max(substeps, 1)
+                    scale = (up_total_rate / cur_mean) if cur_mean > 1.0e-12 else 0.0
+                    for sub in range(substeps):
+                        prof[sub] += beta * dl[sub] * scale
+                arr_prof[movement] = prof
+        return arr_prof
+
+    def _offset_green_fractions(
+        self,
+        signal: str,
+        green_p1: float,
+        offset: float,
+        substeps: int,
+        start_idx: int,
+    ) -> Dict[str, List[float]]:
+        """movement별 offset-aware green fraction gf[m][sub] — service가 substep window 겹침."""
+        net = self.cfg.network
+        model = self._local_models[signal]
+        total = net.effective_green_total
+        green_p2 = total - green_p1
+        probe = ControlAction.uncontrolled(self.cfg)
+        probe.green_times = {f"{signal}_p1": float(green_p1), f"{signal}_p2": float(green_p2)}
+        probe.offsets = {signal: float(offset)}
+        probe.inflow_outflow_allocation = {}
+        gf: Dict[str, List[float]] = {}
+        # phase별 fraction은 movement 무관(같은 phase면 동일) → phase 단위로 1회 계산해 공유.
+        phase_gf: Dict[str, List[float]] = {}
+        for m in model.movements:
+            pid = model.phase_of[m]
+            if pid not in phase_gf:
+                spec = model.specs[m]
+                phase_gf[pid] = [
+                    _phase_green_fraction(probe, self.cfg, spec, urban_step_index=start_idx + sub)
+                    for sub in range(substeps)
+                ]
+            gf[m] = phase_gf[pid]
+        return gf
+
+    # ---------- per-signal 국소 OFFSET 탐색 (PLATOON-AWARE, "proposed" authority 전용) ----------
+
+    def _solve_offset_local(
+        self,
+        signal: str,
+        green_p1: float,
+        state: TrafficState,
+        coupling: Mapping[str, float],
+        arr_movement: Mapping[str, float],
+        s_eff_frozen: Mapping[str, float],
+        snapshot: ControlAction,
+        demand: DemandStep,
+    ) -> tuple[float, int]:
+        """신호 i의 offset 후보집합을 훑어 자기 국소 objective 최소 offset을 반환 — (offset*, evals).
+
+        Task-B: offset의 corridor 이득은 PLATOON 정렬에서 나온다. 따라서 offset 채점은
+        `rollout_local_tts_phased`(phase-resolved 서비스 + platoon 도착)로 한다. 상류 신호 green+
+        offset(snapshot 동결)에서 재구성한 platoon profile은 offset에 불변이므로 **1회** 계산하고,
+        후보 offset마다 offset-aware gf만 갱신해 채점한다. offset이 platoon 도착 window와 자기 green
+        window를 정렬할수록 stop-delay(자기 TTS)가 낮아져 비용 최소 offset이 선택된다.
+
+        ramp-aware(D/F) 신호는 offset 탐색 대상에서 제외(storage 동역학 복잡) → offset 0."""
+        net = self.cfg.network
+        sim = self.cfg.simulation
+        model = self._local_models[signal]
+        if model.has_ramps:
+            return 0.0, 0
+        cycle = max(net.cycle_length, 1.0e-9)
+        substeps = max(1, self.cfg.mpc.horizon_steps) * max(1, sim.K_cu)
+        dt_h = sim.T_u_h
+        start_idx = _urban_step_index(state, self.cfg)
+
+        # phase 단위 고정 도착(frozen 결합) → movement별 재정규화(_solve_urban_agent_local과 동일).
+        arr_phase = {pid: float(coupling.get(f"arr_{signal}_{pid}", 0.0)) for pid in ("p1", "p2")}
+        arr_mv: Dict[str, float] = {}
+        for pid in ("p1", "p2"):
+            phase_movements = [
+                m for m in model.movements
+                if model.phase_of[m] == pid and model.kind_of[m] != "off_ramp"
+            ]
+            raw_sum = sum(max(0.0, float(arr_movement.get(m, 0.0))) for m in phase_movements)
+            target = max(0.0, arr_phase[pid])
+            if raw_sum > 1.0e-12:
+                scale = target / raw_sum
+                for m in phase_movements:
+                    arr_mv[m] = max(0.0, float(arr_movement.get(m, 0.0))) * scale
+            else:
+                for m in phase_movements:
+                    arr_mv[m] = 0.0
+
+        q0 = {m: max(0.0, float(state.urban_movement_queue.get(m, 0.0))) for m in model.movements}
+        s_eff0 = {
+            model.receiving_of[m]: float(s_eff_frozen.get(model.receiving_of[m], 0.0))
+            for m in model.movements
+            if model.receiving_of[m]
+        }
+        # platoon profile(상류 snapshot 의존, offset 불변) — 1회 계산.
+        arr_by_substep = self._platoon_arrival_profiles(
+            signal, state, snapshot, demand, arr_mv, substeps, start_idx,
+        )
+
+        best_off, best_obj = 0.0, float("inf")
+        evals = 0
+        for frac in self.offset_fractions:
+            offset = (frac * cycle) % cycle
+            gf_by_substep = self._offset_green_fractions(
+                signal, green_p1, offset, substeps, start_idx,
+            )
+            obj = rollout_local_tts_phased(
+                model, q0, arr_by_substep, gf_by_substep, s_eff0, substeps, dt_h,
+            )
+            evals += 1
+            if obj < best_obj - 1.0e-9:
+                best_obj, best_off = obj, float(offset)
+        return best_off, evals
 
     # ---------- freeway agent: 진짜 per-link 국소 METANET rollout (핵심 신규) ----------
 
@@ -887,7 +1149,7 @@ class WuFaithfulFollower:
             _, _, e, nin_i = self._solve_urban_agent_local(
                 signal, state, coupling, arr_movement, s_eff_frozen,
                 reservoir_drain, freeway_congestion, snapshot, leader,
-                lambda_p, forecast_arrivals, horizon_h,
+                lambda_p, forecast_arrivals, horizon_h, demand,
             )
             total_nin += nin_i
             e_total += e
@@ -1089,7 +1351,7 @@ class WuFaithfulFollower:
                 p1, _, e, nin_i = self._solve_urban_agent_local(
                     signal, state, coupling, arr_movement, s_eff_frozen,
                     reservoir_drain, freeway_congestion, snapshot, leader,
-                    lambda_p, forecast_arrivals, horizon_h,
+                    lambda_p, forecast_arrivals, horizon_h, demand,
                 )
                 new_green[f"{signal}_p1"] = p1
                 new_green[f"{signal}_p2"] = net.effective_green_total - p1
@@ -1150,17 +1412,44 @@ class WuFaithfulFollower:
                 p1, _, e, nin_i = self._solve_urban_agent_local(
                     signal, state, coupling, arr_movement, s_eff_frozen,
                     reservoir_drain, freeway_congestion, commit_snapshot, leader,
-                    lambda_p, forecast_arrivals, horizon_h,
+                    lambda_p, forecast_arrivals, horizon_h, demand,
                 )
                 final_green[f"{signal}_p1"] = p1
                 final_green[f"{signal}_p2"] = net.effective_green_total - p1
                 sum_nin += nin_i
                 evals += e
             control.green_times.update(final_green)
+        # ---- per-signal OFFSET 국소 탐색(PLATOON-AWARE, "proposed" authority 전용, step당 1회) ----
+        # 수렴된 green/결합값을 고정한 뒤, 각 신호가 자기 corridor objective를 최소화하는 offset을
+        # 탐색해 control.offsets에 commit한다. offset 채점은 phase-resolved 서비스 + 상류 platoon
+        # 도착(`_solve_offset_local`)으로 한다 — offset이 platoon 도착 window와 자기 green을 정렬할수록
+        # 자기 TTS가 낮아진다. snapshot=control(모든 신호 green+offset 동결)로 상류 platoon을 재구성한다.
+        # "wu" authority(offset_enabled=False)면 offset 0 유지.
+        # Jacobi 순서 의존성 주의: A의 offset 탐색은 D/B의 offset이 아직 commit되기 전(0) snapshot을
+        # 본다(corridor 정렬은 상류 green window 위상이 주효과라 1-pass로 충분; 반복은 비용만↑).
+        offset_evals = 0
+        offsets_off_zero = 0
+        if self.offset_enabled:
+            offset_snapshot = dict(control.green_times)
+            for signal in net.signals:
+                green_p1 = float(offset_snapshot.get(
+                    f"{signal}_p1", net.effective_green_total / 2.0
+                ))
+                arr_movement = self._per_movement_arrivals(signal, state, control, demand)
+                off, e = self._solve_offset_local(
+                    signal, green_p1, state, coupling, arr_movement, s_eff_frozen,
+                    control, demand,
+                )
+                control.offsets[signal] = float(off)
+                offset_evals += e
+                if abs(off) > 1.0e-6:
+                    offsets_off_zero += 1
+            evals += offset_evals
         # ---- freeway agent ramp_metering 좌표하강(step당 1회, 수렴된 결합값 기준) ----
         # metering 탐색은 비싸므로(VSL probe sweep ×5분율) Jacobi 루프 밖에서 1회만 돈다.
         # 입력 snapshot = 합의 종료 control(최신 urban green·VSL). coupling['u_on_ramp']은
         # 수렴값이라 reservoir 적재가 안정적이고, metering이 own-TTS에서 창발한다.
+        # "wu" authority(metering_enabled=False)면 metering 탐색을 건너뛰고 capacity 고정(=metering OFF).
         meter_snapshot = ControlAction(
             ramp_metering=dict(control.ramp_metering),
             vsl=dict(control.vsl),
@@ -1169,12 +1458,46 @@ class WuFaithfulFollower:
             inflow_outflow_allocation={},
         )
         for link in net.freeway_links:
-            vsl_dict, meter_dict, e = self._solve_freeway_agent_metered(
-                link, state, coupling, demand, meter_snapshot, leader,
-            )
+            if self.metering_enabled:
+                vsl_dict, meter_dict, e = self._solve_freeway_agent_metered(
+                    link, state, coupling, demand, meter_snapshot, leader,
+                )
+                control.ramp_metering.update(meter_dict)
+            else:
+                # "wu" authority: metering OFF — ramp metering을 capacity로 고정하고 VSL만 푼다.
+                for ramp in net.ramps:
+                    if net.ramp_to_freeway.get(ramp) == link:
+                        control.ramp_metering[ramp] = float(net.ramp_capacity_veh_h[ramp])
+                vsl_dict, _, e = self._solve_freeway_agent_local(
+                    link, state, coupling, demand, meter_snapshot,
+                )
             control.vsl.update(vsl_dict)
-            control.ramp_metering.update(meter_dict)
             evals += e
+        # ---- OFFSET corridor 검증 가드(closed-loop, method rule 충실) ----
+        # per-signal 국소 offset은 자기 TTS를 줄이지만 selfish라 corridor 전체(realized full-plant
+        # 결합)에선 손해일 수 있다(downstream de-align). offset의 가치는 본질적으로 multi-signal
+        # corridor 효과이므로, offset을 commit하기 전에 realized horizon TTT(offset-on vs offset-0)를
+        # 같은 `run_coupled_interval`로 비교해 **개선될 때만** 유지한다(아니면 0으로 되돌림). 이는
+        # offset을 actuator로 두되 그 효과를 closed-loop으로 검증하는 것으로, decisive check와 정합.
+        offsets_kept = offsets_off_zero
+        if (
+            self.offset_enabled
+            and offsets_off_zero > 0
+            and forecast is not None
+        ):
+            ttt_on, _, _ = self._rollout_horizon_ttt(state, control, forecast)
+            zero_control = control.copy()
+            zero_control.offsets = {s: 0.0 for s in control.offsets}
+            ttt_off, _, _ = self._rollout_horizon_ttt(state, zero_control, forecast)
+            # 가드 마진: horizon-TTT는 closed-loop(매 step replan)의 불완전 proxy라, 미세 개선은
+            # 실제로는 offset 전환 transient(platoon 구조 교란)로 손해가 된다(검증: 무마진 가드는
+            # sweet_128서 56.33% < 56.63%). 따라서 **유의한** 상대 개선(≥ offset_keep_margin)일
+            # 때만 offset을 유지한다. 기본 0.5%면 noise-level 개선은 0으로 되돌려 회귀를 막는다.
+            if ttt_off <= ttt_on * (1.0 + self.offset_keep_margin) + 1.0e-9:
+                control.offsets = dict(zero_control.offsets)
+                offsets_kept = 0
+            control.diagnostics["wu_faithful_offset_ttt_on"] = float(ttt_on)
+            control.diagnostics["wu_faithful_offset_ttt_off"] = float(ttt_off)
         # 다음 step warm-start용 수렴 결합값 저장.
         self._prev_coupling = dict(coupling)
         # 듀얼 N_P 추적: 수렴 λ를 다음 step warm-start로 저장 + realized Σnin/λ를 진단 노출.
@@ -1183,6 +1506,10 @@ class WuFaithfulFollower:
         control.diagnostics["wu_faithful_sum_nin"] = float(sum_nin)
         control.diagnostics["wu_faithful_lambda_P"] = float(lambda_p)
         control.diagnostics["wu_faithful_np_target"] = float(n_p_star)
+        # offset 진단: 탐색에서 0이 아닌 offset을 고른 신호 수 + 가드 후 실제 유지된 수.
+        control.diagnostics["wu_faithful_offsets_off_zero"] = float(offsets_kept)
+        control.diagnostics["wu_faithful_offsets_searched_off_zero"] = float(offsets_off_zero)
+        control.diagnostics["wu_faithful_offset_evals"] = float(offset_evals)
         control.diagnostics.update(self._wu._repair_diagnostics)
         return control, iteration, converged, float(residual), evals
 
@@ -1231,7 +1558,7 @@ class WuFaithfulFollower:
             else ControlAction.uncontrolled(self.cfg)
         )
         control, iteration, converged, residual, evals = self._solve_followers(
-            state, first_demand, previous, leader,
+            state, first_demand, previous, leader, forecast,
         )
         # leader가 commit하는 setpoint를 control에 기록(leader=None이면 0).
         control.N_P_star = float(getattr(leader, "N_P_star", 0.0)) if leader is not None else 0.0
