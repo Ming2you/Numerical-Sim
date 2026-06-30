@@ -306,6 +306,9 @@ freeway_follower:
   horizon_beam_width: 2
   horizon_ramp_candidate_limit: 3
   horizon_vsl_candidate_limit_per_link: 3
+  vsl_sequence_search: true
+  vsl_sequence_horizon_steps: 4
+  vsl_sequence_candidate_limit: 12
   ramp_metering_rate_min: 0.2
   ramp_metering_rate_max: 1.0
   vsl_min_km_h: 60.0

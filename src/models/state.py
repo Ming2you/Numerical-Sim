@@ -454,6 +454,9 @@ class FreewayFollowerConfig:
     horizon_beam_width: int = 2
     horizon_ramp_candidate_limit: int = 3
     horizon_vsl_candidate_limit_per_link: int = 3
+    vsl_sequence_search: bool = True
+    vsl_sequence_horizon_steps: int = 4
+    vsl_sequence_candidate_limit: int = 12
     ramp_metering_rate_min: float = 0.2
     ramp_metering_rate_max: float = 1.0
     vsl_min_km_h: float = 60.0
@@ -640,6 +643,10 @@ class ExperimentConfig:
             raise ValueError("leader.non_convergence_objective_residual_scale must be positive.")
         if self.leader.non_convergence_control_residual_scale <= 0.0:
             raise ValueError("leader.non_convergence_control_residual_scale must be positive.")
+        if self.freeway_follower.vsl_sequence_horizon_steps <= 0:
+            raise ValueError("freeway_follower.vsl_sequence_horizon_steps must be positive.")
+        if self.freeway_follower.vsl_sequence_candidate_limit <= 0:
+            raise ValueError("freeway_follower.vsl_sequence_candidate_limit must be positive.")
         if self.urban_follower.allocation_pso_particles <= 0:
             raise ValueError("urban_follower.allocation_pso_particles must be positive.")
         if self.urban_follower.allocation_pso_iterations <= 0:

@@ -20,6 +20,7 @@ from src.controllers.stackelberg_mpc import StackelbergMPCController, _LeaderCan
 from src.controllers.structured_grid import sensitivity_probe_candidates, structured_grid_candidates
 from src.controllers.urban_follower import UrbanFollower
 from src.controllers.wu_distributed import WuDistributedController, _wu_fixed_control
+from src.controllers.wu_faithful_follower import WuFaithfulFollower
 from src.evaluation.metrics import validate_controls
 from src.models.demand import DemandProfile, DemandStep, ScenarioConfig
 from src.models.metanet import effective_lane_profile
@@ -2020,6 +2021,66 @@ class ConstraintTests(unittest.TestCase):
             )
 
         self.assertIn(60.0, second_step_vsl_values)
+
+    def test_wu_faithful_vsl_sequence_reaches_lower_future_values(self):
+        cfg = ExperimentConfig.from_file(
+            "src/config/default.yaml",
+            {
+                "freeway_follower": {
+                    "vsl_set": [50, 60, 70, 80, 90, 100],
+                    "max_vsl_step": 20.0,
+                    "vsl_sequence_search": True,
+                    "vsl_sequence_horizon_steps": 4,
+                    "vsl_sequence_candidate_limit": 128,
+                },
+            },
+        )
+        follower = WuFaithfulFollower(cfg)
+        previous = ControlAction.fixed(cfg)
+        link = cfg.network.freeway_links[0]
+        n_seg = cfg.network.freeway_segments_per_link
+        sequences = follower._freeway_vsl_sequence_candidates(
+            link,
+            n_seg,
+            previous,
+            [[max(cfg.freeway_follower.vsl_set)] * n_seg],
+            horizon=4,
+        )
+        vsl_set = {float(value) for value in cfg.freeway_follower.vsl_set}
+        bottleneck_idx = {
+            int(cfg.network.off_ramp_segment_index.get(off_ramp, n_seg - 1))
+            for off_ramp in cfg.network.off_ramps
+            if cfg.network.off_ramp_from_freeway.get(off_ramp) == link
+        } or {n_seg - 1}
+        upstream_control_idx = {i for i in range(max(0, min(bottleneck_idx)))}
+        vsl_max = float(max(cfg.freeway_follower.vsl_set))
+        self.assertTrue(sequences)
+        self.assertTrue(
+            any(
+                sequence[0][0] == 80.0
+                and sequence[1][0] == 60.0
+                and sequence[2][0] == 50.0
+                for sequence in sequences
+            ),
+            "Wu-faithful VSL sequence search did not include 100->80->60->50 prevention path",
+        )
+        for sequence in sequences:
+            for vec in sequence:
+                self.assertTrue(all(value in vsl_set for value in vec))
+                self.assertTrue(
+                    all(
+                        value == vsl_max
+                        for index, value in enumerate(vec)
+                        if index not in upstream_control_idx
+                    )
+                )
+            for before, after in zip(sequence, sequence[1:]):
+                self.assertTrue(
+                    all(
+                        abs(after[i] - before[i]) <= cfg.freeway_follower.max_vsl_step + 1.0e-9
+                        for i in range(len(after))
+                    )
+                )
 
     def test_freeway_follower_handles_capacity_drop_with_valid_vsl(self):
         cfg = ExperimentConfig.from_file(

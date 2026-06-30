@@ -15,10 +15,12 @@ from src.analysis.authority import (
     check_control_authority,
 )
 from src.analysis.free_flow_reference import FreeFlowReference, compute_free_flow_reference
+from src.controllers.classical_hierarchical import ClassicalHierarchicalController
 from src.controllers.centralized_mpc import CentralizedMPC
 from src.controllers.distributed_coordinator import DistributedCoordinator
-from src.controllers.stackelberg_mpc import StackelbergMPCController
+from src.controllers.stackelberg_wu_metered import StackelbergWuMeteredController
 from src.controllers.wu_distributed import WuDistributedController
+from src.controllers.wu_faithful_follower import WuFaithfulFollower
 from src.models.demand import (
     DemandProfile,
     ScenarioConfig,
@@ -48,27 +50,51 @@ class _ControllerAdapter:
         self.cfg = cfg
         self.controller_id = controller_id
         self.previous: Optional[ControlAction] = None
-        if controller_id == "WU-CD-F":
+        if controller_id == "NO-CONTROL":
+            self._impl = None
+        elif controller_id == "WU-CD-F":
             self._impl = DistributedCoordinator(cfg, ablation="WU_GREEN_VSL_ONLY_TTT")
         elif controller_id == "WU-MATCHED-STACKELBERG":
             self._impl = WuDistributedController(cfg, leader_enabled=True)
         elif controller_id == "WU-CC-F":
             self._impl = CentralizedMPC(cfg, mode="wu")
         elif controller_id == "PROPOSED-FOLLOWERS-ONLY":
-            self._impl = DistributedCoordinator(cfg)
+            self._impl = WuFaithfulFollower(cfg)
         elif controller_id == "PROPOSED-STACKELBERG":
             # spec 16.8: proposed Stackelberg의 follower는 distributed player 구조다.
-            cfg.mpc.follower_solver_mode = "distributed"
-            self._impl = StackelbergMPCController(cfg)
+            self._impl = StackelbergWuMeteredController(cfg)
         elif controller_id == "PROPOSED-CENTRALIZED":
             self._impl = CentralizedMPC(cfg, mode="proposed")
+        elif controller_id == "CLASSICAL-HIERARCHICAL":
+            self._impl = ClassicalHierarchicalController(cfg)
         else:
             raise ValueError(f"Unknown controller id: {controller_id}")
 
     def decide(self, state, forecast) -> tuple[ControlAction, Dict[str, float]]:
         start = time.perf_counter()
         diag: Dict[str, float] = {}
-        if self.controller_id == "WU-MATCHED-STACKELBERG":
+        if self.controller_id == "NO-CONTROL":
+            control = ControlAction.uncontrolled(self.cfg)
+            diag = {
+                "solver_evaluations": 0.0,
+                "solver_converged": 1.0,
+                "coordination_iterations": 0.0,
+                "leader_candidate_count": 0.0,
+                "classical_hierarchical_baseline": 0.0,
+                "no_control_baseline": 1.0,
+            }
+        elif self.controller_id == "CLASSICAL-HIERARCHICAL":
+            control = self._impl.decide(state.copy(), forecast, self.previous)
+            diag = {
+                "solver_evaluations": 1.0,
+                "solver_converged": 1.0,
+                "coordination_iterations": 0.0,
+                "leader_candidate_count": 0.0,
+                "classical_hierarchical_baseline": 1.0,
+                "classical_stackelberg_used": float(control.diagnostics.get("classical_stackelberg_used", 0.0)),
+                "classical_follower_nash_used": float(control.diagnostics.get("classical_follower_nash_used", 0.0)),
+            }
+        elif self.controller_id == "WU-MATCHED-STACKELBERG":
             info = self._impl.decide_with_info(state, forecast, self.previous)
             control = info.control
             diag = {
@@ -433,6 +459,8 @@ APPENDIX_COMPARISONS = [
     ("WuLeaderValue", "WU-CD-F", "WU-MATCHED-STACKELBERG"),
     ("WuCentralizationGap", "WU-CD-F", "WU-CC-F"),
     ("LeaderPackageDifference", "WU-MATCHED-STACKELBERG", "PROPOSED-STACKELBERG"),
+    ("ClassicalFollowerGap", "CLASSICAL-HIERARCHICAL", "PROPOSED-FOLLOWERS-ONLY"),
+    ("ClassicalStackelbergGap", "CLASSICAL-HIERARCHICAL", "PROPOSED-STACKELBERG"),
 ]
 
 
@@ -479,7 +507,7 @@ FIDELITY_MATRIX_MD = """# Stage 1 fidelity matrix (plan §2.4)
 | WU-MATCHED-STACKELBERG | 동일 | 동일 | local + w·pos(n_pred−ω·target) conditioning | 동일 | follower=위와 동일, leader=후보 열거+coupled 예측 | 동일 | leader 후보 9개 고정 그리드 — conditioning이 binding하지 않으면 WU-CD-F와 동일해질 수 있음 |
 | WU-CC-F | 동일 | 동일(green+VSL) | J_WU_global(TTS+Δu) | 동일 | seeded random search(budget 보고) | 없음 | 보장된 전역최적 아님 — 동일 budget 수치 참조 |
 | PROPOSED-FOLLOWERS-ONLY | 동일 | green 자유탐색([green_min,green_max] 후보)+offset+metering+VSL (allocation 無) | agent local 잔여 큐+Δgreen (전역 target 無) | 동일 | 신호별 green 후보탐색 + leaderless metering 국소 후보선택 | coupling iteration | allocation 비제어 — movement service는 plant 포화유율 fallback(Wu와 동일) |
-| PROPOSED-STACKELBERG | 동일 | 동일 full | leader J_L(16.8)+follower 휴리스틱 | 동일 | leader 후보×distributed Nash | coupling iteration | 기존 검증된 controller |
+| PROPOSED-STACKELBERG | 동일 | 동일 full | leader J_L + Wu-faithful follower response | 동일 | leader 후보×WuFaithfulFollower response | leader target search + follower local response | 현재 modified PFO에 leader만 붙인 비교 경로 |
 | PROPOSED-CENTRALIZED | 동일 | 동일 full | J_PROPOSED_SYSTEM(TTS+초과+Δu) | 동일 | seeded random search | 없음 | allocation을 게이트 service level로 매개변수화(차원 축소 근사) |
 
 공통: Wu off-ramp spillback(식22 차로수 감소)은 본 plant의 storage-cap 방식으로 대응(효과 등가,

@@ -35,6 +35,7 @@ from src.controllers.nash_solver import NashResult
 from src.controllers.relaxed_quantization import (
     queue_pressure_green_target,
     repair_green_pair,
+    repair_vsl_value,
 )
 from src.controllers.wu_distributed import WuDistributedController, _split_link_offramp_flow
 from src.models.demand import DemandStep
@@ -837,6 +838,133 @@ class WuFaithfulFollower:
                 recv_intake[recv_link] = recv_intake.get(recv_link, 0.0) + rate
         return drain, recv_intake
 
+    def _freeway_vsl_sequence_candidates(
+        self,
+        link: str,
+        n_seg: int,
+        previous: ControlAction,
+        base_candidates: list[list[float]],
+        horizon: int,
+    ) -> list[list[list[float]]]:
+        """Build bounded VSL sequences for the Wu-faithful freeway probe.
+
+        The previous probe fixed one VSL vector over the whole horizon. With
+        `max_vsl_step=20`, it could evaluate the first 100->80 move but could
+        not see a later 80->60->50 preventive sequence. This helper keeps the
+        plant commit to the first vector while letting the local rollout score
+        bounded future VSL trajectories.
+        """
+        ff = self.cfg.freeway_follower
+        horizon = max(1, int(horizon))
+        sequences: list[list[list[float]]] = []
+        seen: set[tuple[tuple[float, ...], ...]] = set()
+
+        def add_sequence(sequence: list[list[float]]) -> None:
+            normalized = [
+                [float(v) for v in vec]
+                for vec in (sequence + [sequence[-1]] * max(0, horizon - len(sequence)))
+            ][:horizon]
+            key = tuple(tuple(round(v, 6) for v in vec) for vec in normalized)
+            if key not in seen:
+                seen.add(key)
+                sequences.append(normalized)
+
+        if not ff.vsl_sequence_search:
+            for vec in base_candidates:
+                add_sequence([[float(v) for v in vec]])
+            return sequences
+
+        vsl_set = sorted(float(v) for v in ff.vsl_set)
+        if not vsl_set:
+            return sequences
+        vsl_max = max(vsl_set)
+        max_step = max(0.0, float(ff.max_vsl_step))
+        sequence_steps = max(1, min(horizon, int(ff.vsl_sequence_horizon_steps)))
+        net = self.cfg.network
+        bottleneck_idx = {
+            int(net.off_ramp_segment_index.get(off_ramp, n_seg - 1))
+            for off_ramp in net.off_ramps
+            if net.off_ramp_from_freeway.get(off_ramp) == link
+        } or {n_seg - 1}
+        upstream_control_idx = {i for i in range(max(0, min(bottleneck_idx)))}
+
+        def sanitize_base_vector(vec: list[float]) -> list[float]:
+            sanitized: list[float] = []
+            for index in range(n_seg):
+                value = float(vec[index]) if index < len(vec) else segment_vsl(previous, link, index, self.cfg)
+                if index not in upstream_control_idx:
+                    prev = segment_vsl(previous, link, index, self.cfg)
+                    value = repair_vsl_value(vsl_max, prev, self.cfg).value
+                sanitized.append(float(value))
+            return sanitized
+
+        for vec in base_candidates:
+            add_sequence([sanitize_base_vector([float(v) for v in vec])])
+        limit = max(len(sequences), int(ff.vsl_sequence_candidate_limit))
+
+        def segment_sequences(index: int) -> list[list[float]]:
+            prev = segment_vsl(previous, link, index, self.cfg)
+            if index not in upstream_control_idx:
+                repaired = repair_vsl_value(vsl_max, prev, self.cfg).value
+                return [[float(repaired)] * sequence_steps]
+
+            first_values = [
+                value
+                for value in vsl_set
+                if value <= prev + 1.0e-9 and prev - value <= max_step + 1.0e-9
+            ]
+            if not first_values:
+                first_values = [repair_vsl_value(prev, prev, self.cfg).value]
+
+            out: list[list[float]] = []
+
+            def extend(prefix: list[float]) -> None:
+                if len(prefix) >= sequence_steps:
+                    out.append([float(v) for v in prefix])
+                    return
+                current = prefix[-1]
+                next_values = [
+                    value
+                    for value in vsl_set
+                    if value <= current + 1.0e-9
+                    and current - value <= max_step + 1.0e-9
+                ]
+                for value in sorted(set(next_values), reverse=True):
+                    extend(prefix + [float(value)])
+
+            for value in sorted(set(first_values), reverse=True):
+                extend([float(value)])
+            return out
+
+        per_segment = [segment_sequences(i) for i in range(n_seg)]
+        segment_combinations: list[list[list[float]]] = [[]]
+        for options in per_segment:
+            segment_combinations = [
+                partial + [option]
+                for partial in segment_combinations
+                for option in options
+            ]
+
+        generated: list[list[list[float]]] = []
+        for combo in segment_combinations:
+            generated.append([
+                [float(combo[seg][step]) for seg in range(n_seg)]
+                for step in range(sequence_steps)
+            ])
+
+        def sequence_score(sequence: list[list[float]]) -> tuple[float, float, float]:
+            flat = [v for vec in sequence for v in vec]
+            first = sum(sequence[0]) / max(len(sequence[0]), 1)
+            terminal = sum(sequence[-1]) / max(len(sequence[-1]), 1)
+            mean = sum(flat) / max(len(flat), 1)
+            return (mean, terminal, first)
+
+        for sequence in sorted(generated, key=sequence_score):
+            if len(sequences) >= limit:
+                break
+            add_sequence(sequence)
+        return sequences
+
     def _solve_freeway_agent_local(
         self,
         link: str,
@@ -868,6 +996,9 @@ class WuFaithfulFollower:
             self._wu._relaxed_freeway_segment_candidates(link, n_seg, state, coupling, previous, demand)
             if self.cfg.mpc.relaxed_quantized_controls
             else self._wu._freeway_segment_candidates(link, n_seg, previous)
+        )
+        vsl_sequences = self._freeway_vsl_sequence_candidates(
+            link, n_seg, previous, candidates, horizon,
         )
 
         # 후보 무관 초기 스냅샷(이 link 권역만).
@@ -904,7 +1035,7 @@ class WuFaithfulFollower:
         best_vec, best_obj = list(prev_vec), float("inf")
         best_offramp_flow: Dict[str, float] = {o: 0.0 for o in model.owned_offramps}
         evals = 0
-        for vec in candidates:
+        for sequence in vsl_sequences:
             candidate_control = ControlAction(
                 ramp_metering=dict(previous.ramp_metering),
                 vsl=dict(previous.vsl),
@@ -912,7 +1043,8 @@ class WuFaithfulFollower:
                 offsets=dict(previous.offsets),
                 inflow_outflow_allocation={},
             )
-            for i, v in enumerate(vec):
+            first_vec = sequence[0] if sequence else list(prev_vec)
+            for i, v in enumerate(first_vec):
                 candidate_control.vsl[f"{link}__seg{i}"] = float(v)
             # 국소 상태 복사(후보별 독립).
             rhos = list(rhos0)
@@ -925,7 +1057,12 @@ class WuFaithfulFollower:
             cost = 0.0
             first_offramp_flow = dict(best_offramp_flow)
             first_substep = True
-            for _ in range(horizon):
+            for horizon_idx in range(horizon):
+                current_vec = sequence[min(horizon_idx, len(sequence) - 1)]
+                # Sequence MPC: score the bounded VSL trajectory inside the
+                # horizon, but commit only first_vec to the plant controller.
+                for i, v in enumerate(current_vec):
+                    candidate_control.vsl[f"{link}__seg{i}"] = float(v)
                 for _ in range(sim.K_cf):
                     # urban->freeway coupling[veh/h]을 ramp reservoir에 적재.
                     for ramp in model.owned_ramps:
@@ -976,10 +1113,16 @@ class WuFaithfulFollower:
                     link_ramp_queue = sum(max(0.0, ramp_q.get(r, 0.0)) for r in model.owned_ramps)
                     link_offramp_storage = sum(occ.get(o, 0.0) for o in model.owned_offramps)
                     cost += (link_vehicles + link_ramp_queue + link_offramp_storage) * dt_h
-            cost += smooth_w * sum(abs(v - prev_vec[i]) for i, v in enumerate(vec))
+            smooth = sum(abs(first_vec[i] - prev_vec[i]) for i in range(min(n_seg, len(first_vec))))
+            for prev_step, next_step in zip(sequence, sequence[1:]):
+                smooth += sum(
+                    abs(next_step[i] - prev_step[i])
+                    for i in range(min(len(prev_step), len(next_step), n_seg))
+                )
+            cost += smooth_w * smooth
             evals += 1
             if cost < best_obj:
-                best_obj, best_vec = cost, list(vec)
+                best_obj, best_vec = cost, list(first_vec)
                 best_offramp_flow = dict(first_offramp_flow)
         # 선택 후보 VSL의 off-ramp 유출 캐시(coupling freeway→urban 재사용).
         if best_obj < float("inf"):

@@ -11268,3 +11268,324 @@ instructions match the revised presentation figures and interpretations.
 
 - Markdown-only update; no simulation rerun was required.
 - Reviewed the diff for the figure-design chapters.
+
+## 2026-06-29 Claude-Style Sweet-190 Five-Controller Screening
+
+### Purpose
+
+After pulling `origin/main` commit `28ae3a2`, rerun the requested sweet_190
+screening with a direct Claude-style closed-loop runner rather than the heavier
+six-controller experiment wrapper. The goal was to verify that the current
+P-Stack path is actually `StackelbergWuMeteredController + WuFaithfulFollower`
+and to compare no-control, WU, Wu-faithful PFO, P-Stack, and the local
+classical hierarchical baseline under the same 3600 s scenario.
+
+### Files / Artifacts
+
+- Added temporary runner: `work/run_claude_style_five_controller.py`
+- Output directory: `outputs/claude_style_sweet190_3600_20260629`
+- Summary CSV: `outputs/claude_style_sweet190_3600_20260629/summary.csv`
+- Per-controller `run_log.csv`, `control_timeseries.csv`,
+  `state_timeseries.csv`, and `decision_diagnostics.csv` were written under the
+  output directory.
+
+### Verification
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m py_compile work/run_claude_style_five_controller.py src/controllers/classical_hierarchical.py src/controllers/wu_faithful_follower.py src/controllers/stackelberg_wu_metered.py
+```
+
+Passed.
+
+### Run Command
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B work/run_claude_style_five_controller.py --scenario sweet_190 --T-total 3600 --output outputs/claude_style_sweet190_3600_20260629
+```
+
+Runner configuration followed the Claude local runner style:
+
+- `relaxed_quantized_controls=true`
+- `leader_search_mode=grid`
+- `grid_parallel_backend=serial`
+- `stackelberg_leader_parallel_backend=serial`
+- direct simulator loop, not `six_controller_comparison.py`
+
+### Results
+
+| controller | Total TTT | Urban TTT | Freeway TTT | Total delay | TTT improvement vs no-control | Completed veh | Terminal veh | Mean solve / step |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| NO-CONTROL | 7166.467 | 3655.845 | 3510.623 | 6292.226 | 0.000% | 7646.8 | 15025.2 | 0.000 s |
+| WU-CD-F | 6827.417 | 3505.329 | 3322.087 | 5953.175 | 4.731% | 8029.9 | 14640.7 | 13.127 s |
+| WU-FAITHFUL-FOLLOWER | 4814.155 | 3697.527 | 1116.627 | 3939.913 | 32.824% | 12203.7 | 10460.2 | 2.464 s |
+| P-STACK-WU-FAITHFUL | 4812.513 | 3725.321 | 1087.192 | 3938.271 | 32.847% | 12234.7 | 10429.2 | 9.058 s |
+| CLASSICAL-HIERARCHICAL | 7090.540 | 3646.228 | 3444.312 | 6216.299 | 1.059% | 7774.0 | 14898.0 | 0.002 s |
+
+### Interpretation
+
+- The latest pulled Wu-faithful follower is fast again: PFO averaged about
+  2.46 s/step and P-Stack averaged about 9.06 s/step.
+- This confirms the previous 70-325 s/step P-Stack run was not representative
+  of the pulled Claude state. It was run before pulling `28ae3a2` and included
+  heavier local offset/joint-search experiment code plus serial heavy candidate
+  evaluation.
+- In sweet_190, P-Stack is almost tied with Wu-faithful PFO:
+  `4812.513` vs `4814.155` veh-h, a marginal `+0.023 pp` Total TTT gain over
+  PFO. It slightly lowers freeway TTT and terminal vehicles but raises urban
+  TTT relative to PFO.
+- Classical hierarchical control is computationally negligible but improves
+  only `1.059%` over no-control, far behind WU-CD-F and the Wu-faithful proposed
+  follower. This is useful as a low-cost hierarchical/gating baseline, not as a
+  competitive controller in this scenario.
+
+### Caveats / Next Step
+
+- `CLASSICAL-HIERARCHICAL` is currently a local untracked controller file in
+  this working tree; results should be treated as local-screening evidence until
+  the implementation is reviewed and committed.
+- This run used sweet_190 only. To evaluate robustness, repeat the same direct
+  runner on sweet_220 or the final six demand scenarios.
+
+## 2026-06-29 Claude-Style Sweet-220 Five-Controller Screening
+
+### Purpose
+
+Repeat the direct Claude-style five-controller comparison on `sweet_220` to
+test whether the leader value becomes larger under the more saturated demand
+level, as suggested by the archived Claude log
+`2026-06-29/leader_sweet220_3600.log`.
+
+### Verification
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m py_compile work/run_claude_style_five_controller.py
+```
+
+Passed.
+
+### Run Command
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B work/run_claude_style_five_controller.py --scenario sweet_220 --T-total 3600 --output outputs/claude_style_sweet220_3600_20260629
+```
+
+### Results
+
+| controller | Total TTT | Urban TTT | Freeway TTT | Total delay | TTT improvement vs no-control | Completed veh | Terminal veh | Mean solve / step |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| NO-CONTROL | 8800.579 | 4716.835 | 4083.744 | 7788.299 | 0.000% | 7898.2 | 18309.4 | 0.000 s |
+| WU-CD-F | 8496.749 | 4509.986 | 3986.763 | 7484.470 | 3.452% | 8133.0 | 18073.1 | 9.536 s |
+| WU-FAITHFUL-FOLLOWER | 7161.238 | 4806.667 | 2354.572 | 6148.959 | 18.628% | 9986.8 | 16220.0 | 1.986 s |
+| P-STACK-WU-FAITHFUL | 6435.117 | 5066.189 | 1368.928 | 5422.837 | 26.878% | 11698.5 | 14512.2 | 9.790 s |
+| CLASSICAL-HIERARCHICAL | 8768.950 | 4707.365 | 4061.585 | 7756.671 | 0.359% | 7914.2 | 18293.5 | 0.002 s |
+
+### Interpretation
+
+- Unlike `sweet_190`, `sweet_220` shows a clear leader value:
+  P-Stack improves Total TTT from `7161.238` to `6435.117` veh-h relative to
+  Wu-faithful PFO, a marginal gain of about `8.25 pp` vs no-control.
+- The gain comes mostly from freeway TTT reduction:
+  freeway TTT drops from `2354.572` to `1368.928` veh-h, while urban TTT
+  increases from `4806.667` to `5066.189` veh-h. This is a deliberate
+  urban-freeway tradeoff, not no-action.
+- Throughput and terminal burden also improve under P-Stack:
+  completed vehicles increase from `9986.8` to `11698.5`, and terminal vehicles
+  decrease from `16220.0` to `14512.2`.
+- P-Stack computation remains in the Claude-style range:
+  mean `9.790 s/step`, max `13.123 s/step`.
+- The archived Claude sweet_220 log reported a stronger P-Stack result
+  (`6154.839` veh-h). Re-running the original script
+  `2026-06-28/run_leader_wu_metered.py sweet_220 3600` under the current pulled
+  code also returns `6435.117` for P-Stack, with no-control `8800.579` and PFO
+  `7161.238`. Therefore the archived stronger number should be treated as a
+  previous-code/config-state result, not the current reproducible result.
+
+### Leader Penalty Activity
+
+Current `sweet_220` P-Stack selected candidates used nonzero penalties:
+
+- `leader_mfd_storage_penalty`: mean `456.99`, max `1210.69`
+- `leader_density_penalty`: mean `22.29`, max `70.60`
+- `leader_target_penalty`: `0`
+- `leader_boundary_in_queue_penalty`: `0`
+- `leader_smoothness_penalty`: `0`
+
+Thus the leader is not pure follower TTT, but the active penalty structure is
+mainly all-urban half-cap storage pressure plus freeway density pressure.
+
+## 2026-06-29 Sweet-190 vs Sweet-220 Leader Marginal Effect Diagnostic
+
+### Purpose
+
+Compare `WU-FAITHFUL-FOLLOWER` and `P-STACK-WU-FAITHFUL` under `sweet_190` and
+`sweet_220` to explain why adding the leader is nearly neutral at `190`, but
+substantially beneficial at `220`.
+
+### Diagnostic Command
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B work\analyze_leader_190_220.py
+```
+
+This command post-processes existing run outputs:
+
+- `outputs/claude_style_sweet190_3600_20260629`
+- `outputs/claude_style_sweet220_3600_20260629`
+
+### Key Results
+
+| scenario | Delta Total TTT, P-Stack - PFO | Delta Urban TTT | Delta Freeway TTT | Delta completed veh | Delta terminal veh |
+|---|---:|---:|---:|---:|---:|
+| sweet_190 | -1.642 | +27.794 | -29.435 | +31.0 | -31.0 |
+| sweet_220 | -726.121 | +259.522 | -985.644 | +1711.7 | -1707.8 |
+
+Fallback guard columns existed in the diagnostics, but were not selected in
+either run:
+
+- `leader_fallback_guard_selected`: `0`
+- `leader_fallback_guard_selected_pfo`: `0`
+- `leader_fallback_guard_selected_no_control`: `0`
+- `leader_fallback_guard_rejected_leader`: `0`
+
+Therefore these two comparisons reflect the leader-selected candidates, not a
+PFO/no-control fallback outcome.
+
+### Control / State Explanation
+
+At `sweet_190`, the follower-only solution is already close to the leader's
+preferred operating region. P-Stack reduces total ramp metering command from
+about `2246.2` to `1540.1` veh/h and slightly shifts greens, but the realized
+freeway state barely changes: mean freeway densities are `53.68/26.57` for PFO
+and `53.58/26.17` for P-Stack. The leader saves `29.435` veh-h on the freeway
+but adds `27.794` veh-h in the urban network, so the net gain is only
+`1.642` veh-h.
+
+At `sweet_220`, the follower-only solution over-admits into the freeway
+bottleneck regime. PFO's total ramp metering command averages `3870.0` veh/h,
+while P-Stack lowers it to `1271.6` veh/h and strongly reallocates boundary
+greens. This moves freeway mean density/speed from `68.98/66.59` veh/km and
+`29.45/31.41` km/h under PFO to `49.69/43.58` veh/km and `45.95/52.56` km/h
+under P-Stack. The urban burden increases by `259.522` veh-h, but freeway TTT
+falls by `985.644` veh-h, producing a large net improvement.
+
+### Interpretation
+
+The leader value is demand-regime dependent. At `sweet_190`, the system is near
+the controllable shoulder of congestion, so the leader mostly creates a small
+urban-freeway redistribution. At `sweet_220`, the same local follower logic
+crosses a nonlinear freeway congestion threshold; the leader's global
+objective and active storage/density penalties select a much stricter
+metering/perimeter operating point, preventing freeway breakdown and improving
+throughput.
+
+## 2026-06-29 Bounded VSL Sequence Search Diagnostic
+
+### Purpose
+
+Test whether VSL was inactive because the follower only evaluated a single
+near-term VSL value near the previous `100 km/h` setting. In the prior local
+search, the first feasible reduction was commonly `100 -> 80`, but `80 km/h`
+does not necessarily bind flow in the near-critical density range. Therefore
+the controller could miss the useful preventive sequence
+`100 -> 80 -> 60 -> 50`.
+
+### Implementation
+
+Changed `src/controllers/wu_faithful_follower.py` so the freeway follower can
+evaluate bounded VSL sequences over the local prediction horizon while still
+applying only the first VSL vector to the plant. The sequence search respects
+the configured discrete VSL set and `max_vsl_step`. It also sanitizes
+bottleneck/downstream segments to the maximum VSL and only lowers upstream
+segments, avoiding accidental downstream discharge suppression.
+
+Added configuration fields in `src/models/state.py` and
+`src/config/default.yaml`:
+
+- `freeway_follower.vsl_sequence_search: true`
+- `freeway_follower.vsl_sequence_horizon_steps: 4`
+- `freeway_follower.vsl_sequence_candidate_limit: 12`
+
+Added `src/tests/test_constraints.py::test_wu_faithful_vsl_sequence_reaches_lower_future_values`
+to verify that the candidate generator includes the bounded future path and
+respects the VSL step bound.
+
+### Verification Commands
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m py_compile src\controllers\wu_faithful_follower.py src\models\state.py src\tests\test_constraints.py
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m unittest src.tests.test_constraints.ConstraintTests.test_wu_faithful_vsl_sequence_reaches_lower_future_values
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m unittest src.tests.test_constraints.ConstraintTests.test_freeway_follower_expands_time_varying_vsl_sequence
+```
+
+All three commands passed.
+
+One unrelated targeted WU distributed test was also checked:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m unittest src.tests.test_six_controller_comparison.WuDistributedFixesTests.test_c_capacity_drop_wired_and_upstream_vsl_available
+```
+
+It failed with `FW_W: upstream plain segment VSL was not selected`. This test
+targets `WuDistributedController`, not the modified `WuFaithfulFollower` path,
+so it is recorded as an existing/adjacent WU-CD-F issue rather than evidence
+against the bounded sequence implementation.
+
+### Smoke Run
+
+Final bounded-sequence smoke command:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B work\run_claude_style_five_controller.py --scenario sweet_220 --T-total 1800 --controllers NO-CONTROL,WU-FAITHFUL-FOLLOWER,P-STACK-WU-FAITHFUL --output outputs\bounded_vsl_sequence_sweet220_1800_limit12_20260629
+```
+
+| controller | Total TTT | delay | improvement vs no-control | completed veh | terminal veh | mean solve s/step |
+|---|---:|---:|---:|---:|---:|---:|
+| NO-CONTROL | 2091.134 | 1590.218 | 0.00% | 4541.1 | 8692.4 | 0.000 |
+| WU-FAITHFUL-FOLLOWER | 1595.636 | 1094.720 | 23.70% | 6587.0 | 6645.8 | 3.649 |
+| P-STACK-WU-FAITHFUL | 1565.932 | 1065.016 | 25.12% | 7253.8 | 5962.8 | 21.426 |
+
+### VSL Activation Result
+
+The bounded sequence search did activate VSL:
+
+- `WU-FAITHFUL-FOLLOWER`: active in 9 of 10 logged control steps, minimum VSL
+  `50 km/h`, mean VSL about `88.2 km/h`.
+- `P-STACK-WU-FAITHFUL`: active in 4 of 10 logged control steps, minimum VSL
+  `50 km/h`, mean VSL about `94.8 km/h`.
+
+Therefore the previous lack of VSL activation was partly a search-horizon
+issue: a locally evaluated one-step VSL move could not see the future
+`100 -> 80 -> 60 -> 50` path.
+
+### Regression Against Previous No-Sequence Behavior
+
+Comparing the first 1800 s of the existing no-sequence run
+`outputs/claude_style_sweet220_3600_20260629` against the bounded sequence
+run:
+
+| controller | old no-sequence first 1800 s Total TTT | bounded sequence Total TTT | delta |
+|---|---:|---:|---:|
+| WU-FAITHFUL-FOLLOWER | 1484.847 | 1595.636 | +110.788 |
+| P-STACK-WU-FAITHFUL | 1474.109 | 1565.932 | +91.823 |
+
+This means bounded VSL sequence search fixed the activation barrier, but it did
+not improve realized Total TTT in the `sweet_220` early-horizon smoke case.
+The plant/global objective still appears to prefer the previous RM/green-heavy
+solution without VSL activation for this scenario window.
+
+### Interpretation / Next Modification
+
+Do not treat this bounded-sequence result as an accepted performance
+improvement. It is a diagnostic improvement for search coverage: VSL can now
+be found when the only useful action is a bounded future sequence. However,
+the realized 1800 s TTT increased relative to the prior no-sequence behavior.
+
+Recommended next step if bounded VSL sequence is retained:
+
+- Add a VSL commit guard that evaluates the best bounded VSL sequence against
+  a max-VSL reference under the same RM/green/offset/leader context and only
+  applies VSL when it improves the local rollout objective and a short realized
+  plant proxy.
+- Alternatively, keep `vsl_sequence_search` disabled for production
+  comparison runs and reserve it for incident/VSL-specific sensitivity tests
+  until the guard is implemented.

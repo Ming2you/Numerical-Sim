@@ -7,10 +7,11 @@ from src.models.state import ExperimentConfig
 
 WU_GROUP = {"WU-CD-F", "WU-MATCHED-STACKELBERG", "WU-CC-F"}
 PROPOSED_GROUP = {"PROPOSED-FOLLOWERS-ONLY", "PROPOSED-STACKELBERG", "PROPOSED-CENTRALIZED"}
-LEADER_ENABLED = {"WU-MATCHED-STACKELBERG", "PROPOSED-STACKELBERG"}
+CLASSICAL_GROUP = {"CLASSICAL-HIERARCHICAL", "NO-CONTROL"}
+LEADER_ENABLED = {"WU-MATCHED-STACKELBERG", "PROPOSED-STACKELBERG", "CLASSICAL-HIERARCHICAL"}
 CENTRALIZED = {"WU-CC-F", "PROPOSED-CENTRALIZED"}
 # 2026-06-13 재정의(spec 16.7): P-FO는 allocation 비제어 — Wu group과 같은 fallback.
-NO_ALLOCATION = WU_GROUP | {"PROPOSED-FOLLOWERS-ONLY"}
+NO_ALLOCATION = WU_GROUP | CLASSICAL_GROUP | {"PROPOSED-FOLLOWERS-ONLY"}
 # 주 비교군(spec 16.1, 2026-06-13 개정). 나머지 둘은 보조 참고군.
 PRIMARY_CONTROLLERS = [
     "WU-CD-F",
@@ -19,12 +20,14 @@ PRIMARY_CONTROLLERS = [
     "PROPOSED-CENTRALIZED",
 ]
 CONTROLLER_IDS = [
+    "NO-CONTROL",
     "WU-CD-F",
     "WU-MATCHED-STACKELBERG",
     "WU-CC-F",
     "PROPOSED-FOLLOWERS-ONLY",
     "PROPOSED-STACKELBERG",
     "PROPOSED-CENTRALIZED",
+    "CLASSICAL-HIERARCHICAL",
 ]
 
 
@@ -72,7 +75,9 @@ def check_control_authority(
         violations.append("hidden leader target present")
     return {
         "controller_id": controller_id,
-        "authority_group": "wu" if controller_id in WU_GROUP else "proposed",
+        "authority_group": "wu" if controller_id in WU_GROUP else (
+            "classical" if controller_id in CLASSICAL_GROUP else "proposed"
+        ),
         "leader_enabled": controller_id in LEADER_ENABLED,
         "centralized": controller_id in CENTRALIZED,
         "violations": violations,
