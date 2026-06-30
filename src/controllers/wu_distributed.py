@@ -443,11 +443,11 @@ class WuDistributedController:
         densities = list(state.freeway_density.get(link, []))
         profile, _ = effective_lane_profile(state, self.cfg, demand)
         lane_profile = profile.get(link, [net.freeway_lanes for _ in range(n_seg)])
-        bottleneck_idx = {
-            int(net.off_ramp_segment_index.get(o, n_seg - 1))
-            for o in net.off_ramps
-            if net.off_ramp_from_freeway.get(o) == link
-        } or {n_seg - 1}
+        # 2026-06-30: VSL-mod default 'pin off'. 옛 코드는 off-ramp 병목 segment를 vsl_max로 고정했으나
+        # (단일 실험상 TTT 효과 0), default로 핀을 끄고 전 segment가 pressure 휴리스틱을 쓰게 한다.
+        # 주의: 이론상 병목 자체를 늦추면 discharge가 줄 수 있어 약손해 가능 — 되돌리려면 아래를
+        # `{off_ramp_segment_index...} or {n_seg-1}`로 복원.
+        bottleneck_idx: set = set()
         downstream_pressure = max(0.0, float(coupling.get(f"p_down_{link}", 0.0)))
         target_vec: list[float] = []
         neutral_vec: list[float] = []

@@ -53,7 +53,10 @@ class _ControllerAdapter:
         if controller_id == "NO-CONTROL":
             self._impl = None
         elif controller_id == "WU-CD-F":
-            self._impl = DistributedCoordinator(cfg, ablation="WU_GREEN_VSL_ONLY_TTT")
+            # 2026-06-30: wu 컨트롤러 default를 WuFaithfulFollower(authority="wu")로 교체.
+            # 옛 DistributedCoordinator 경로는 분석에서 미사용(archive). green+VSL만(metering=용량,
+            # offset 고정) — decide()의 {"WU-CD-F","PROPOSED-FOLLOWERS-ONLY"} 공통 solve 경로 사용.
+            self._impl = WuFaithfulFollower(cfg, authority="wu")
         elif controller_id == "WU-MATCHED-STACKELBERG":
             self._impl = WuDistributedController(cfg, leader_enabled=True)
         elif controller_id == "WU-CC-F":

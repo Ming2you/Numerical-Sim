@@ -121,10 +121,10 @@ network:
     F_R_W: 180.0
     D_R_E: 180.0
     F_R_E: 180.0
-    OR_D_W_storage: 120.0
-    OR_F_W_storage: 120.0
-    OR_D_E_storage: 120.0
-    OR_F_E_storage: 120.0
+    OR_D_W_storage: 60.0
+    OR_F_W_storage: 60.0
+    OR_D_E_storage: 60.0
+    OR_F_E_storage: 60.0
   off_ramps:
   - OR_D_W
   - OR_F_W
@@ -146,10 +146,10 @@ network:
     OR_D_E: OR_D_E_storage
     OR_F_E: OR_F_E_storage
   off_ramp_split_ratio:
-    OR_D_W: 0.06
-    OR_F_W: 0.06
-    OR_D_E: 0.06
-    OR_F_E: 0.06
+    OR_D_W: 0.2
+    OR_F_W: 0.2
+    OR_D_E: 0.2
+    OR_F_E: 0.2
   v_min: 5.0
   alpha_vsl: 0.0
   metanet_tau_h: 0.005
@@ -169,7 +169,10 @@ network:
   green_max_fraction: 0.8
 freeway_offramp_capacity_drop:
   enabled: true
-  lane_reduction: 0.35
+  # 2026-06-30: VSL-mod default. off-ramp spillback을 Wu eq22 수준(full 1 lane)으로 강화 →
+  # VSL이 의미를 갖는 plant. (이전 0.35는 약해 VSL이 무력했음. off_ramp_split 0.06→0.4·storage
+  # 120→60과 함께 urban-freeway coupling 강화.)
+  lane_reduction: 1.0
   gamma: 0.5
   b: 2.0
 mpc:
@@ -268,7 +271,11 @@ leader:
   #   --output outputs/step_e_n_p_crit_recalibration_2026_06_17
   # MFD argmax: production 33868.583 veh/h @ N_P=509.449 veh
   # (urban_scale=3.0, t=720 s). 이전 556.081은 off-ramp storage 재귀속 전 값이라 폐기.
-  N_P_crit_veh: 509.448830418254
+  # 2026-06-30 재보정(off_ramp_split 0.2 plant): MFD argmax production 41524.179 veh/h @ N_P=1142.058 veh.
+  #   command: calibrate_setpoints --scenario peak_demand --urban-scales 0.5..4.0 --T-total 3600
+  #   옛 509는 split 0.06 plant 값. split 0.2서 보호영역 누적이 더 커(off-ramp 유입↑) 임계 상향.
+  #   leader·hierarchical·centralized의 perimeter 기준을 동시에 정정(P-Stack N_P 진동 해결).
+  N_P_crit_veh: 1142.058
   N_P_candidate_lower_factor: 0.40
   N_P_candidate_upper_factor: 1.35
   N_P_star_unit: veh

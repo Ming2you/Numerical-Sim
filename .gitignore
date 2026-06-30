@@ -12,3 +12,6 @@ results/
 !20??-??-??/results/**
 .DS_Store
 
+
+# run outputs (regenerable)
+post_analysis/
