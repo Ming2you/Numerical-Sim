@@ -365,6 +365,59 @@ class WuFaithfulFollower:
         )
         return float(inflow_veh - outflow_veh)
 
+    # ---------- per-signal green 후보 구성 (solver·feasible-range 공용) ----------
+
+    def _urban_green_candidates(
+        self,
+        signal: str,
+        state: TrafficState,
+        coupling: Mapping[str, float],
+        snapshot: ControlAction,
+    ) -> List[float]:
+        # _solve_urban_agent_local의 green-p1 후보 구성을 그대로 떼어낸 공용 헬퍼 — solver와
+        # _np_feasible_range가 **동일한** 후보집합을 보도록 한다(PFO/WU green 거동 불변).
+        net = self.cfg.network
+        sim = self.cfg.simulation
+        model = self._local_models[signal]
+        total = net.effective_green_total
+        horizon = max(1, self.cfg.mpc.horizon_steps)
+        substeps = horizon * max(1, sim.K_cu)
+        dt_h = sim.T_u_h
+        q0 = {m: max(0.0, state.urban_movement_queue.get(m, 0.0)) for m in model.movements}
+        arr_phase = {pid: float(coupling.get(f"arr_{signal}_{pid}", 0.0)) for pid in ("p1", "p2")}
+
+        prev_p1 = float(snapshot.green_times.get(f"{signal}_p1", total / 2.0))
+        # pressure 중심 + 주변 후보(완화 양자화). 기존 _solve_urban_agent와 같은 후보 구성 철학.
+        p1_pressure = q0_sum(q0, model, "p1") + arr_phase["p1"] * dt_h * substeps
+        p2_pressure = q0_sum(q0, model, "p2") + arr_phase["p2"] * dt_h * substeps
+        pressure_center = queue_pressure_green_target(p1_pressure, p2_pressure, self.cfg)
+        raw_candidates = [total / 2.0, prev_p1, pressure_center]
+        if self.cfg.mpc.relaxed_quantized_controls:
+            raw_candidates.extend([
+                pressure_center - 1.0, pressure_center + 1.0,
+                pressure_center - 2.0, pressure_center + 2.0,
+                pressure_center - 5.0, pressure_center + 5.0,
+            ])
+        # 진짜 국소 rollout은 신호 1개만 돌아 싸므로 전 green 범위를 굵게 훑어 실제 국소
+        # 최적을 찾는다(pressure-center 밴드는 옛 집계모델용이라 좁아 56을 못 벗어났다 —
+        # 의도적 deviation, SPEC §2의 "argmin J_i,local" 충실). 후보 폭발 없음(13점/신호).
+        raw_candidates.extend(float(v) for v in np.linspace(net.green_min, net.green_max, 13))
+
+        candidates: List[float] = []
+        for raw in raw_candidates:
+            if self.cfg.mpc.relaxed_quantized_controls:
+                p1_value = repair_green_pair(float(raw), self.cfg).p1
+            else:
+                p1_value = float(np.clip(raw, net.green_min, net.green_max))
+                p2_value = total - p1_value
+                if p2_value < net.green_min:
+                    p1_value = total - net.green_min
+                if p2_value > net.green_max:
+                    p1_value = total - net.green_max
+            if not any(abs(p1_value - existing) <= 1.0e-9 for existing in candidates):
+                candidates.append(float(p1_value))
+        return candidates
+
     # ---------- per-signal 국소 agent solve (핵심 신규) ----------
 
     def _solve_urban_agent_local(
@@ -469,35 +522,7 @@ class WuFaithfulFollower:
             )
 
         prev_p1 = float(previous.green_times.get(f"{signal}_p1", total / 2.0))
-        # pressure 중심 + 주변 후보(완화 양자화). 기존 _solve_urban_agent와 같은 후보 구성 철학.
-        p1_pressure = q0_sum(q0, model, "p1") + arr_phase["p1"] * dt_h * substeps
-        p2_pressure = q0_sum(q0, model, "p2") + arr_phase["p2"] * dt_h * substeps
-        pressure_center = queue_pressure_green_target(p1_pressure, p2_pressure, self.cfg)
-        raw_candidates = [total / 2.0, prev_p1, pressure_center]
-        if self.cfg.mpc.relaxed_quantized_controls:
-            raw_candidates.extend([
-                pressure_center - 1.0, pressure_center + 1.0,
-                pressure_center - 2.0, pressure_center + 2.0,
-                pressure_center - 5.0, pressure_center + 5.0,
-            ])
-        # 진짜 국소 rollout은 신호 1개만 돌아 싸므로 전 green 범위를 굵게 훑어 실제 국소
-        # 최적을 찾는다(pressure-center 밴드는 옛 집계모델용이라 좁아 56을 못 벗어났다 —
-        # 의도적 deviation, SPEC §2의 "argmin J_i,local" 충실). 후보 폭발 없음(13점/신호).
-        raw_candidates.extend(float(v) for v in np.linspace(net.green_min, net.green_max, 13))
-
-        candidates: List[float] = []
-        for raw in raw_candidates:
-            if self.cfg.mpc.relaxed_quantized_controls:
-                p1_value = repair_green_pair(float(raw), self.cfg).p1
-            else:
-                p1_value = float(np.clip(raw, net.green_min, net.green_max))
-                p2_value = total - p1_value
-                if p2_value < net.green_min:
-                    p1_value = total - net.green_min
-                if p2_value > net.green_max:
-                    p1_value = total - net.green_max
-            if not any(abs(p1_value - existing) <= 1.0e-9 for existing in candidates):
-                candidates.append(float(p1_value))
+        candidates = self._urban_green_candidates(signal, state, coupling, previous)
 
         # Leader N_P 추적. 두 모드:
         #  (A) use_dual_np=True(기본, 듀얼 분해): 후보 비용에 + λ_P·nin_i(green)을 더한다.
@@ -1333,53 +1358,123 @@ class WuFaithfulFollower:
             )
 
         evals = 0
-        # 1) slack 검사: λ=0에서 이미 target 이하면 가격 불필요.
+        # 0) 자연(λ=0) net-inflow. signed target 부호로 어느 쪽 λ를 탐색할지 가른다.
         nin0, e = sigma(0.0)
         evals += e
-        if n_p_star >= nin0 - 1.0e-9:
+        # target이 자연값과 사실상 같으면 가격 불필요.
+        if abs(n_p_star - nin0) <= 1.0e-9:
             return 0.0, float(nin0), evals
 
-        # 2) λ_max를 키워 바닥(floor)에 닿게 한다. Σnin이 직전 대비 사실상 안 줄면 멈춘다.
-        lambda_max = 1.0
-        nin_max = nin0
+        if n_p_star < nin0:
+            # ---- target < 자연 inflow: inflow를 줄여야 함 → λ>0 (기존 양수 분기 그대로). ----
+            # 1) λ_max를 키워 바닥(floor)에 닿게 한다. Σnin이 직전 대비 사실상 안 줄면 멈춘다.
+            lambda_max = 1.0
+            nin_max = nin0
+            prev_nin = nin0
+            for _ in range(8):  # 1,10,…,1e7까지 — 진단상 응답 임계 ~1, 바닥은 λ≈10에서 도달.
+                nin_max, e = sigma(lambda_max)
+                evals += e
+                # target이 이 λ에서의 Σnin 이상이면 [현 lo, lambda_max] 안에 교차점 존재 → 멈춘다.
+                if n_p_star >= nin_max - 1.0e-9:
+                    break
+                # Σnin이 더 이상 안 줄면(바닥) target 도달 불가 → 더 키워도 무의미.
+                if prev_nin - nin_max <= 1.0e-9:
+                    break
+                prev_nin = nin_max
+                lambda_max *= 10.0
+
+            # target이 바닥보다 낮으면(실현 불가) λ*=λ_max로 바닥까지 추적 후 clamp.
+            if n_p_star <= nin_max + 1.0e-9:
+                return float(lambda_max), float(nin_max), evals
+
+            # 2) [lo, hi]=[0, lambda_max]에서 이분. Σnin(lo)=nin0>N_P>nin_max=Σnin(hi).
+            lo, hi = 0.0, lambda_max
+            nin_at_lo = nin0
+            for _ in range(18):
+                if hi - lo <= 1.0e-4:
+                    break
+                mid = 0.5 * (lo + hi)
+                nin_mid, e = sigma(mid)
+                evals += e
+                if nin_mid > n_p_star:
+                    # 아직 inflow가 target보다 많다 → 더 눌러야 함 → 가격↑.
+                    lo, nin_at_lo = mid, nin_mid
+                else:
+                    # target 이하로 내려옴 → 가격을 더 낮춰도 되는지 본다 → 상한 당김.
+                    hi, nin_max = mid, nin_mid
+            # 구간 양끝 중 realized Σnin이 target에 더 가까운 쪽을 commit(조각상수 대비).
+            if abs(nin_at_lo - n_p_star) <= abs(nin_max - n_p_star):
+                return float(lo), float(nin_at_lo), evals
+            return float(hi), float(nin_max), evals
+
+        # ---- target > 자연 inflow: inflow를 늘려야 함 → λ<0 (신규 음수 분기). ----
+        # Σnin은 λ에 단조 비증가이므로, λ를 음수로 내릴수록 Σnin이 커진다(천장까지).
+        # 1) lambda_min을 -1,-10,…로 키워(절댓값) target에 닿거나 천장 saturate까지 늘린다.
+        lambda_min = -1.0
+        nin_min = nin0
         prev_nin = nin0
-        for _ in range(8):  # 1,10,…,1e7까지 — 진단상 응답 임계 ~1, 바닥은 λ≈10에서 도달.
-            nin_max, e = sigma(lambda_max)
+        for _ in range(8):  # -1,-10,…,-1e7. 이산 green이라 첫 span은 무응답일 수 있음 → 끝까지 넓힌다.
+            nin_min, e = sigma(lambda_min)
             evals += e
-            # target이 이 λ에서의 Σnin 이상이면 [현 lo, lambda_max] 안에 교차점 존재 → 멈춘다.
-            if n_p_star >= nin_max - 1.0e-9:
+            # target이 이 λ에서의 Σnin 이하면 [lambda_min, 0] 안에 교차점 존재 → 멈춘다.
+            if n_p_star <= nin_min + 1.0e-9:
                 break
-            # Σnin이 더 이상 안 줄면(바닥) target 도달 불가 → 더 키워도 무의미.
-            if prev_nin - nin_max <= 1.0e-9:
+            # Σnin이 더 이상 안 늘면(천장) target 도달 불가 → 더 내려도 무의미.
+            if nin_min - prev_nin <= 1.0e-9:
                 break
-            prev_nin = nin_max
-            lambda_max *= 10.0
+            prev_nin = nin_min
+            lambda_min *= 10.0
 
-        # target이 바닥보다 낮으면(실현 불가) λ*=λ_max로 바닥까지 추적 후 clamp.
-        if n_p_star <= nin_max + 1.0e-9:
-            return float(lambda_max), float(nin_max), evals
+        # target이 천장보다 높으면(실현 불가) λ*=lambda_min로 천장까지 추적.
+        if n_p_star >= nin_min - 1.0e-9:
+            return float(lambda_min), float(nin_min), evals
 
-        # 3) [lo, hi]=[0, lambda_max]에서 이분. Σnin(lo)=nin0>N_P>nin_max=Σnin(hi).
-        lo, hi = 0.0, lambda_max
-        nin_at_lo = nin0
-        best_lambda, best_nin = hi, nin_max
+        # 2) [lo, hi]=[lambda_min, 0]에서 이분. Σnin(lo)=nin_min>N_P>nin0=Σnin(hi).
+        # 단조 비증가: 더 음수인 lo가 더 큰 Σnin. nin_mid>target이면 가격을 덜 음수로(hi=mid).
+        lo, hi = lambda_min, 0.0
+        nin_at_lo = nin_min
+        nin_at_hi = nin0
         for _ in range(18):
             if hi - lo <= 1.0e-4:
                 break
             mid = 0.5 * (lo + hi)
             nin_mid, e = sigma(mid)
             evals += e
-            best_lambda, best_nin = mid, nin_mid
             if nin_mid > n_p_star:
-                # 아직 inflow가 target보다 많다 → 더 눌러야 함 → 가격↑.
-                lo, nin_at_lo = mid, nin_mid
+                # inflow가 target보다 많다 → 가격을 덜 음수로(억제 약화) → 상한 당김.
+                hi, nin_at_hi = mid, nin_mid
             else:
-                # target 이하로 내려옴 → 가격을 더 낮춰도 되는지 본다 → 상한 당김.
-                hi, nin_max = mid, nin_mid
+                # inflow가 target보다 적다 → 더 음수로(보상 강화) → 하한 올림.
+                lo, nin_at_lo = mid, nin_mid
         # 구간 양끝 중 realized Σnin이 target에 더 가까운 쪽을 commit(조각상수 대비).
-        if abs(nin_at_lo - n_p_star) <= abs(nin_max - n_p_star):
+        if abs(nin_at_lo - n_p_star) <= abs(nin_at_hi - n_p_star):
             return float(lo), float(nin_at_lo), evals
-        return float(hi), float(nin_max), evals
+        return float(hi), float(nin_at_hi), evals
+
+    def _np_feasible_range(
+        self,
+        state: TrafficState,
+        coupling: Mapping[str, float],
+        snapshot: ControlAction,
+        forecast_arrivals: Mapping[str, float],
+        horizon_h: float,
+    ) -> tuple[float, float]:
+        # 리더 N_P target을 follower가 만들 수 있는 Σnin 범위로 투영 — 단위 [veh/horizon].
+        # solver가 실제로 보는 동일 green 후보집합(_urban_green_candidates)에서 신호별 nin의
+        # min/max를 합산해 (sigma_min, sigma_max)를 구한다. _agent_net_inflow_veh와 같은 정의·단위.
+        sigma_min = 0.0
+        sigma_max = 0.0
+        for signal in self.cfg.network.signals:
+            candidates = self._urban_green_candidates(signal, state, coupling, snapshot)
+            nin_vals = [
+                self._agent_net_inflow_veh(signal, p1, state, forecast_arrivals, horizon_h)
+                for p1 in candidates
+            ]
+            if not nin_vals:
+                continue
+            sigma_min += min(nin_vals)
+            sigma_max += max(nin_vals)
+        return float(sigma_min), float(sigma_max)
 
     def _measure_dual_gain(
         self,
@@ -1533,7 +1628,10 @@ class WuFaithfulFollower:
         # 합의 루프는 warm-start λ로 green을 정했다. 이제 수렴 결합/스냅샷에서 Σnin(λ)=N_P_star를
         # 푸는 λ*를 이분법으로 찾고(아래), λ*에서 urban agent를 한 번 더 sweep해 green을 확정한다.
         # leader=None/use_dual_np=False면 dual_active=False라 이 블록 전체를 건너뛴다(PFO 무영향).
-        if dual_active and n_p_star > 0.0:
+        projected_target = 0.0
+        sigma_min = 0.0
+        sigma_max = 0.0
+        if dual_active:
             commit_snapshot = ControlAction(
                 ramp_metering=dict(control.ramp_metering),
                 vsl=dict(control.vsl),
@@ -1541,8 +1639,14 @@ class WuFaithfulFollower:
                 offsets=dict(control.offsets),
                 inflow_outflow_allocation={},
             )
+            # 리더 target을 follower가 실제로 만들 수 있는 Σnin 범위로 투영한 뒤 그 PROJECTED
+            # target을 추적한다(plant control은 clip하지 않는다 — target만 투영).
+            sigma_min, sigma_max = self._np_feasible_range(
+                state, coupling, commit_snapshot, forecast_arrivals, horizon_h,
+            )
+            projected_target = min(max(n_p_star, sigma_min), sigma_max)
             lambda_p, _, e_bis = self._bisect_lambda_for_np(
-                n_p_star, state, coupling, s_eff_frozen, reservoir_drain,
+                projected_target, state, coupling, s_eff_frozen, reservoir_drain,
                 freeway_congestion, commit_snapshot, leader, forecast_arrivals,
                 horizon_h, demand,
             )
@@ -1649,6 +1753,17 @@ class WuFaithfulFollower:
         control.diagnostics["wu_faithful_sum_nin"] = float(sum_nin)
         control.diagnostics["wu_faithful_lambda_P"] = float(lambda_p)
         control.diagnostics["wu_faithful_np_target"] = float(n_p_star)
+        # N_P 투영 진단: 리더 의도(original)·실현가능범위로 투영한 target·잔차. dual path에서만
+        # 유의값, leader=None이면 모두 0(default). plant/run-log가 읽는 rate는 PROJECTED target.
+        control.diagnostics["wu_faithful_np_original_target"] = float(n_p_star)
+        control.diagnostics["wu_faithful_np_projected_target"] = float(projected_target)
+        control.diagnostics["wu_faithful_np_feasible_min"] = float(sigma_min)
+        control.diagnostics["wu_faithful_np_feasible_max"] = float(sigma_max)
+        control.diagnostics["wu_faithful_np_projection_residual"] = float(n_p_star - projected_target)
+        control.diagnostics["wu_faithful_np_target_error"] = float(sum_nin - projected_target)
+        control.diagnostics["urban_net_inflow_target_veh_h"] = float(
+            projected_target / max(horizon_h, 1.0e-9)
+        )
         # offset 진단: 탐색에서 0이 아닌 offset을 고른 신호 수 + 가드 후 실제 유지된 수.
         control.diagnostics["wu_faithful_offsets_off_zero"] = float(offsets_kept)
         control.diagnostics["wu_faithful_offsets_searched_off_zero"] = float(offsets_off_zero)
