@@ -576,10 +576,12 @@ class Leader:
         for state in states:
             for movement, spec in net.urban_movements.items():
                 kind = str(spec.get("kind", ""))
+                # 2026-06-30 실험: internal-only 0.5-cap. 경계 movement(boundary_in/out)는 제외한다 —
+                # gating이 차를 경계에 잡아두는 건 *의도된* 비용이라 base TTS가 보면 충분하고, 0.5-cap은
+                # *내부* oversaturation만 막아야 gating이 페널티를 줄이는 방향이 된다(저수요 admit은 TTS가 담당).
                 if kind in {"boundary_in", "boundary_out"}:
-                    capacity = self.cfg.leader.mfd_boundary_queue_capacity_veh
-                else:
-                    capacity = movement_storage_capacity(self.cfg, movement, spec)
+                    continue
+                capacity = movement_storage_capacity(self.cfg, movement, spec)
                 capacity = max(float(capacity), 1.0e-9)
                 queue = max(0.0, state.urban_movement_queue.get(movement, 0.0))
                 movement_excess += max(0.0, queue - threshold * capacity)
