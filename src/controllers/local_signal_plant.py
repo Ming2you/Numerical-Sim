@@ -369,9 +369,9 @@ def rollout_local_tts_ramp_aware(
                 if actual <= 0.0:
                     continue
                 released_total += actual
-                # 하류 링크 점유 갱신(자기 origin 링크면 S_eff↑, 즉 점유↓).
+                # 하류 링크 점유 갱신(자기 origin 링크면 점유↑, 즉 S_eff↓).
                 if recv in own_origin_links and recv in s_eff:
-                    s_eff[recv] = s_eff.get(recv, 0.0) + actual
+                    s_eff[recv] = max(0.0, s_eff[recv] - actual)
             occ[off_ramp] = max(0.0, occupancy - released_total)
 
         # (c) off-ramp storage 유입(동결): freeway→off-ramp 유출, storage cap으로 clamp.
