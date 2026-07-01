@@ -354,6 +354,9 @@ def run_controller(
             "leader_selected_stage_fallback_no_control": float(
                 diag.get("leader_selected_stage_fallback_no_control", 0.0)
             ),
+            "leader_pfo_incumbent_selected": float(diag.get("leader_pfo_incumbent_selected", 0.0)),
+            "leader_pfo_incumbent_N_P_star": float(diag.get("leader_pfo_incumbent_N_P_star", 0.0)),
+            "leader_pfo_incumbent_N_UF_star": float(diag.get("leader_pfo_incumbent_N_UF_star", 0.0)),
             "leader_fallback_guard_selected": float(diag.get("leader_fallback_guard_selected", 0.0)),
             "leader_mfd_storage_penalty": float(diag.get("leader_mfd_storage_penalty", 0.0)),
             "leader_mfd_storage_excess_veh": float(diag.get("leader_mfd_storage_excess_veh", 0.0)),
@@ -547,6 +550,10 @@ def main(argv: Optional[List[str]] = None) -> None:
     parser.add_argument("--leader-continuous-seed-count", type=int, default=None)
     parser.add_argument("--leader-continuous-prefilter-samples", type=int, default=None)
     parser.add_argument("--leader-continuous-prefilter-top-k", type=int, default=None)
+    parser.add_argument("--leader-continuous-local-max-evals", type=int, default=None)
+    parser.add_argument("--leader-continuous-local-seed-count", type=int, default=None)
+    parser.add_argument("--leader-continuous-local-prefilter-samples", type=int, default=None)
+    parser.add_argument("--leader-continuous-local-prefilter-top-k", type=int, default=None)
     parser.add_argument("--disable-leader-continuous-hard-precheck", action="store_true")
     parser.add_argument("--leader-continuous-precheck-spillback-tolerance-veh", type=float, default=None)
     parser.add_argument("--disable-leader-continuous-parallel-multistart", action="store_true")
@@ -565,11 +572,28 @@ def main(argv: Optional[List[str]] = None) -> None:
     parser.add_argument("--stackelberg-prefilter-local-top-k", type=int, default=None)
     parser.add_argument("--stackelberg-fallback-full-refresh-sec", type=float, default=None)
     parser.add_argument("--disable-stackelberg-fallback", action="store_true")
+    parser.add_argument("--disable-stackelberg-pfo-incumbent", action="store_true")
     parser.add_argument("--disable-stackelberg-pfo-fallback-cache", action="store_true")
     parser.add_argument("--disable-stackelberg-process-pool-reuse", action="store_true")
     parser.add_argument("--stackelberg-leader-parallel-backend", choices=["serial", "thread", "process"], default=None)
     parser.add_argument("--stackelberg-leader-parallel-max-workers", type=int, default=None)
     parser.add_argument("--stackelberg-inner-backend-when-outer-process", choices=["serial", "thread"], default=None)
+    parser.add_argument(
+        "--wu-faithful-np-predictor-mode",
+        choices=[
+            "legacy",
+            "storage_guard",
+            "storage_aware",
+            "arrival_limited",
+            "current_interval",
+            "phase_substep",
+            "combined",
+        ],
+        default=None,
+    )
+    parser.add_argument("--wu-np-storage-guard", action="store_true")
+    parser.add_argument("--wu-np-arrival-mode", choices=["horizon", "current_interval"], default=None)
+    parser.add_argument("--wu-np-phase-substep", action="store_true")
     args = parser.parse_args(argv)
 
     overrides: Dict[str, Any] = {}
@@ -598,6 +622,22 @@ def main(argv: Optional[List[str]] = None) -> None:
     if args.leader_continuous_prefilter_top_k is not None:
         overrides.setdefault("mpc", {})["leader_continuous_prefilter_top_k"] = (
             args.leader_continuous_prefilter_top_k
+        )
+    if args.leader_continuous_local_max_evals is not None:
+        overrides.setdefault("mpc", {})["leader_continuous_local_max_evals"] = (
+            args.leader_continuous_local_max_evals
+        )
+    if args.leader_continuous_local_seed_count is not None:
+        overrides.setdefault("mpc", {})["leader_continuous_local_seed_count"] = (
+            args.leader_continuous_local_seed_count
+        )
+    if args.leader_continuous_local_prefilter_samples is not None:
+        overrides.setdefault("mpc", {})["leader_continuous_local_prefilter_samples"] = (
+            args.leader_continuous_local_prefilter_samples
+        )
+    if args.leader_continuous_local_prefilter_top_k is not None:
+        overrides.setdefault("mpc", {})["leader_continuous_local_prefilter_top_k"] = (
+            args.leader_continuous_local_prefilter_top_k
         )
     if args.disable_leader_continuous_hard_precheck:
         overrides.setdefault("mpc", {})["leader_continuous_hard_precheck"] = False
@@ -647,6 +687,8 @@ def main(argv: Optional[List[str]] = None) -> None:
         )
     if args.disable_stackelberg_fallback:
         overrides.setdefault("mpc", {})["stackelberg_enable_fallback"] = False
+    if args.disable_stackelberg_pfo_incumbent:
+        overrides.setdefault("mpc", {})["stackelberg_enable_pfo_incumbent"] = False
     if args.disable_stackelberg_pfo_fallback_cache:
         overrides.setdefault("mpc", {})["stackelberg_fallback_use_cached_pfo"] = False
     if args.disable_stackelberg_process_pool_reuse:
@@ -663,6 +705,16 @@ def main(argv: Optional[List[str]] = None) -> None:
         overrides.setdefault("mpc", {})["stackelberg_inner_backend_when_outer_process"] = (
             args.stackelberg_inner_backend_when_outer_process
         )
+    if args.wu_faithful_np_predictor_mode is not None:
+        overrides.setdefault("mpc", {})["wu_faithful_np_predictor_mode"] = (
+            args.wu_faithful_np_predictor_mode
+        )
+    if args.wu_np_storage_guard:
+        overrides.setdefault("mpc", {})["wu_np_storage_guard"] = True
+    if args.wu_np_arrival_mode is not None:
+        overrides.setdefault("mpc", {})["wu_np_arrival_mode"] = args.wu_np_arrival_mode
+    if args.wu_np_phase_substep:
+        overrides.setdefault("mpc", {})["wu_np_phase_substep"] = True
     base_cfg = ExperimentConfig.from_file(args.config, overrides)
     scenarios = load_scenarios(args.scenarios_config)
     if args.scenario == "all":

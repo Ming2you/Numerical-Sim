@@ -11589,3 +11589,1239 @@ Recommended next step if bounded VSL sequence is retained:
 - Alternatively, keep `vsl_sequence_search` disabled for production
   comparison runs and reserve it for incident/VSL-specific sensitivity tests
   until the guard is implemented.
+
+## 2026-06-30 Theoretical Controller Complexity Scaling
+
+### Purpose
+
+Prepared a theoretical scaling explanation for the six-controller comparison,
+with `n` defined as the number of distributed follower players. The goal is to
+support the presentation argument that P-Stack is not a full centralized joint
+search: it evaluates low-dimensional leader coupling targets and delegates the
+detailed actuator decisions to distributed follower responses.
+
+### Outputs
+
+- `reports/theoretical_controller_complexity_scaling.md`
+- `scripts/plot_theoretical_controller_complexity.py`
+- `reports/figures/theoretical_complexity/controller_complexity_scaling.png`
+- `reports/figures/theoretical_complexity/controller_complexity_scaling.pdf`
+- `reports/figures/theoretical_complexity/controller_complexity_scaling.csv`
+
+### Summary
+
+Under fixed local candidate budgets, fixed Nash/Jacobi iteration count, fixed
+horizon length, and fixed leader candidate budgets:
+
+- `WU-CD-F`: `O(n)`
+- `WU-MATCHED-STACKELBERG`: `O(n)` with a larger leader-candidate constant
+- `PROPOSED-FOLLOWERS-ONLY`: `O(n)`
+- `PROPOSED-STACKELBERG`: `O(n)` with the largest distributed-response constant
+- exact `WU-CC-F` / `PROPOSED-CENTRALIZED`: exponential in `n` because exact
+  joint action search scales as a Cartesian product of local action sets
+- budgeted centralized implementations: `O(n)` only because the number of
+  sampled/evaluated joint actions is capped, so they are approximate references
+  rather than exact centralized optima.
+
+### Verification
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B scripts\plot_theoretical_controller_complexity.py
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m py_compile scripts\plot_theoretical_controller_complexity.py
+```
+
+Both commands completed successfully.
+
+## 2026-06-30 sweet_190 3600 s PFO vs P-Stack Gridlock-Penalty Check
+
+### Purpose
+
+The user raised a plausible interpretation: the P-Stack leader's urban
+storage/MFD penalty may slightly worsen short-horizon TTT while preventing
+urban gridlock and improving longer-horizon network performance. I tested this
+by extending the `sweet_190` comparison from 1800 s to 3600 s.
+
+### Commands
+
+The preceding fair 1800 s six-controller run was allowed to complete without
+interruption:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.six_controller_comparison --scenario sweet_190 --T-total 1800 --controllers NO-CONTROL,WU-CD-F,CLASSICAL-HIERARCHICAL,PROPOSED-FOLLOWERS-ONLY,PROPOSED-STACKELBERG,PROPOSED-CENTRALIZED --output outputs\actual_controller_compute_time_sweet190_1800_20260630
+```
+
+Then the longer PFO/P-Stack check was run with no-control and WU context:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.six_controller_comparison --scenario sweet_190 --T-total 3600 --controllers NO-CONTROL,WU-CD-F,PROPOSED-FOLLOWERS-ONLY,PROPOSED-STACKELBERG --output outputs\pfo_pstack_sweet190_3600_gridlock_penalty_check_20260630
+```
+
+### 1800 s computation context
+
+The 1800 s full run completed. `PROPOSED-CENTRALIZED` used the new SLSQP path
+and was much more expensive than the distributed/Stackelberg controllers:
+
+| controller | Total TTT | completed vehicles | terminal vehicles | compute time sec | solver evaluations |
+|---|---:|---:|---:|---:|---:|
+| NO-CONTROL | 1676.556 | 4451.1 | 7015.8 | 0.00 | 0 |
+| WU-CD-F | 1564.171 | 4865.0 | 6600.6 | 50.17 | 1150 |
+| CLASSICAL-HIERARCHICAL | 1655.038 | 4522.7 | 6944.3 | 0.02 | 10 |
+| PROPOSED-FOLLOWERS-ONLY | 1191.760 | 7007.2 | 4445.0 | 45.28 | 350 |
+| PROPOSED-STACKELBERG | 1202.656 | 6924.9 | 4540.2 | 179.27 | 1385 |
+| PROPOSED-CENTRALIZED | 1287.234 | 6328.1 | 5134.3 | 4280.49 | 27513 |
+
+### 3600 s results
+
+| controller | Total TTT | total delay | completed vehicles | terminal vehicles | throughput veh/h | compute time sec |
+|---|---:|---:|---:|---:|---:|---:|
+| NO-CONTROL | 7166.467 | 6292.226 | 7646.8 | 15025.2 | 7646.8 | 0.00 |
+| WU-CD-F | 6827.417 | 5953.175 | 8029.9 | 14640.7 | 8029.9 | 94.35 |
+| PROPOSED-FOLLOWERS-ONLY | 4814.107 | 3939.866 | 12203.7 | 10460.2 | 12203.7 | 82.33 |
+| PROPOSED-STACKELBERG | 5013.465 | 4139.224 | 11836.6 | 10828.2 | 11836.6 | 275.61 |
+
+### Queue / throughput diagnostics
+
+| controller | mean ramp q | mean on-ramp approach q | mean boundary-in | end boundary-in | mean urban vehicles | urban departures sum | mainline exit sum | ramp releases sum |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| NO-CONTROL | 609.9 | 1873.5 | 1202.7 | 2885.5 | 3859.1 | 16639.4 | 49835.2 | 1250.2 |
+| WU-CD-F | 575.3 | 1869.1 | 1025.1 | 2617.0 | 3700.2 | 17505.6 | 53715.1 | 1297.0 |
+| PROPOSED-FOLLOWERS-ONLY | 661.8 | 1921.8 | 1063.6 | 2808.7 | 3897.1 | 17502.5 | 133762.3 | 1423.1 |
+| PROPOSED-STACKELBERG | 629.8 | 1837.4 | 1241.3 | 2922.9 | 3910.7 | 17552.3 | 126925.1 | 1440.7 |
+
+### Interpretation
+
+The longer 3600 s run does not support the hypothesis that the P-Stack
+urban/MFD penalty recovers the short-horizon TTT loss in this `sweet_190`
+case. P-Stack was slightly better than PFO early in the horizon, but after
+control step 10 the cumulative gap grew monotonically against P-Stack. At the
+end:
+
+- P-Stack Total TTT is `199.358 veh*h` worse than PFO.
+- P-Stack completed `367.1` fewer vehicles than PFO.
+- P-Stack terminal burden is `368.0` vehicles higher than PFO.
+- P-Stack has lower mean ramp queue and lower on-ramp approach queue than PFO,
+  but higher mean/end boundary-in queue and lower mainline exit throughput.
+
+The leader penalty did become active: `leader_mfd_storage_penalty` grew from
+near zero early to `833.8` by step 19, and `leader_boundary_in_queue_veh`
+increased to `9435.0`. However, this did not translate into better realized
+long-horizon Total TTT. The likely issue is not that the urban gridlock penalty
+is absent; it is that the leader's proxy/penalty trade-off and/or feasible-set
+conditioning still does not guarantee a realized-global-TTT improvement over
+the leaderless PFO response.
+
+### Next diagnostic
+
+Compare PFO's realized control sequence against the P-Stack leader-conditioned
+feasible set at steps 10-19. If PFO's action is not feasible under the selected
+leader targets, then the leader is over-constraining the follower. If it is
+feasible but not selected, then the leader response objective/proxy is still
+misranking realized plant TTT.
+
+## 2026-06-30 sweet_220 3600 s PFO vs P-Stack Gridlock-Penalty Check
+
+### Purpose
+
+The user asked to repeat the 3600 s gridlock-penalty check at the heavier
+`sweet_220` demand level. This tests whether P-Stack's leader penalty/target
+structure becomes beneficial once demand pressure is high enough that
+short-term TTT sacrifices can prevent larger downstream/terminal burden.
+
+### Command
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.six_controller_comparison --scenario sweet_220 --T-total 3600 --controllers NO-CONTROL,WU-CD-F,PROPOSED-FOLLOWERS-ONLY,PROPOSED-STACKELBERG --output outputs\pfo_pstack_sweet220_3600_gridlock_penalty_check_20260630
+```
+
+The first attempt used a 30 s shell timeout and stopped mid-run; the command was
+rerun with a longer timeout and completed.
+
+### Results
+
+| controller | Total TTT | total delay | completed vehicles | terminal vehicles | throughput veh/h | compute time sec |
+|---|---:|---:|---:|---:|---:|---:|
+| NO-CONTROL | 8800.579 | 7788.299 | 7898.2 | 18309.4 | 7898.2 | 0.00 |
+| WU-CD-F | 8496.749 | 7484.470 | 8133.0 | 18073.1 | 8133.0 | 103.74 |
+| PROPOSED-FOLLOWERS-ONLY | 7162.880 | 6150.600 | 9986.8 | 16220.0 | 9986.8 | 71.84 |
+| PROPOSED-STACKELBERG | 6388.258 | 5375.979 | 13738.2 | 12451.7 | 13738.2 | 298.41 |
+
+### Queue / throughput diagnostics
+
+| controller | mean ramp q | mean on-ramp approach q | mean boundary-in | end boundary-in | mean urban vehicles | urban departures sum | mainline exit sum | ramp releases sum |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| NO-CONTROL | 624.9 | 2334.0 | 1759.0 | 4052.7 | 4972.0 | 16899.2 | 48702.7 | 1175.4 |
+| WU-CD-F | 605.8 | 2334.7 | 1473.9 | 3818.9 | 4759.2 | 17634.8 | 50654.6 | 1199.6 |
+| PROPOSED-FOLLOWERS-ONLY | 674.8 | 2421.1 | 1640.3 | 4131.6 | 5069.4 | 16923.8 | 88528.2 | 1086.6 |
+| PROPOSED-STACKELBERG | 675.2 | 2351.6 | 2167.7 | 4455.3 | 5469.1 | 17021.9 | 160547.6 | 1196.5 |
+
+### Interpretation
+
+Unlike `sweet_190`, the heavier `sweet_220` case supports the user's
+gridlock-prevention interpretation. P-Stack was worse than PFO through the
+first half of the horizon, but it began improving step TTT relative to PFO at
+step 10 and overtook cumulative TTT at step 14. By the end:
+
+- P-Stack Total TTT is `774.622 veh*h` better than PFO.
+- P-Stack completed `3751.4` more vehicles than PFO.
+- P-Stack terminal burden is `3768.3` vehicles lower than PFO.
+- P-Stack has higher boundary-in and mean urban vehicles, so it does not reduce
+  every queue metric; instead, it appears to keep more demand moving through
+  the freeway/urban interface and strongly improves mainline throughput.
+
+This suggests the leader/MFD penalty may be beneficial only once demand is high
+enough for the follower-only policy to accumulate a large long-horizon burden.
+At moderate-heavy `sweet_190`, the same structure did not recover its cost; at
+heavier `sweet_220`, it did.
+
+### Next diagnostic
+
+Run the same 3600 s check over an ordered demand sweep (`sweet_170`,
+`sweet_190`, `sweet_220`, and possibly `sweet_240`) and locate the regime where
+P-Stack crosses from worse-than-PFO to better-than-PFO. The key analysis should
+track the crossover step, terminal vehicles, mainline exit flow, boundary-in
+load, and ramp/on-ramp queue distribution.
+
+## 2026-06-30 P-Stack Leader Search-Area Expansion
+
+### Purpose
+
+The user asked to revise the P-Stack leader search area for the current
+scenario set. The previous bounds used a narrow current-availability
+movement-reachability window. After the plant/scenario updates, this could keep
+the leader from evaluating broad feasible target regions in stress cases.
+
+### Implementation
+
+Changed files:
+
+- `src/controllers/leader.py`
+- `src/controllers/stackelberg_mpc.py`
+- `src/tests/test_constraints.py`
+- `src/tests/test_forecast_awareness.py`
+- `reports/codex_run_report.md`
+
+Main changes:
+
+- `Leader._candidate_bounds()` now summarizes the full forecast horizon before
+  building bounds.
+- `N_P_star` bounds blend from current availability reachability toward a
+  physical movement-capacity envelope as demand/density/ramp-queue/urban-storage
+  or incident stress increases.
+- `N_UF_star` upper bounds and anchors now include ramp-arrival and queue-drain
+  targets, not only the conservative rho-critical headroom estimate.
+- Grid/refined/continuous leader search now receives explicit stress anchors.
+- Diagnostics now log `leader_search_*`, `leader_np_capacity_*`,
+  `leader_nuf_arrival_target`, and `leader_nuf_queue_drain_target`.
+
+### Verification commands
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m py_compile src/controllers/leader.py src/controllers/stackelberg_mpc.py src/tests/test_constraints.py src/tests/test_forecast_awareness.py
+
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m unittest src.tests.test_constraints.ConstraintTests.test_default_leader_np_grid_covers_feasible_net_inflow_range src.tests.test_constraints.ConstraintTests.test_leader_np_candidates_use_feasible_net_inflow_range src.tests.test_constraints.ConstraintTests.test_leader_search_area_expands_under_high_stress src.tests.test_forecast_awareness.ForecastAwarenessTests.test_leader_candidates_reflect_forecast_summary
+```
+
+Result: `4 tests OK`.
+
+### Smoke run
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.six_controller_comparison --scenario sweet_220 --T-total 360 --controllers NO-CONTROL,PROPOSED-STACKELBERG --output outputs\pstack_leader_search_area_sweet220_smoke_20260630
+```
+
+| controller | Total TTT | delay | selected leader targets |
+|---|---:|---:|---|
+| NO-CONTROL | 91.780 | -9.2 | none |
+| PROPOSED-STACKELBERG | 94.329 | -6.7 | `N_P_star=3500`, `N_UF_star=4320` |
+
+This smoke is not an acceptance run. It only confirms that the expanded leader
+search area is active and that closed-loop P-Stack still runs.
+
+### Search-area diagnostics from smoke
+
+For `sweet_220`, P-Stack logged:
+
+- `leader_search_stress_index = 1.0`
+- `leader_np_movement_upper ~= 1752 veh`
+- `leader_np_capacity_upper ~= 5635 veh`
+- `leader_np_bound_upper = 3500 veh`
+- `leader_nuf_bound_upper = 6000 veh/h`
+- `leader_nuf_arrival_target ~= 6463 veh/h`
+- `leader_nuf_queue_drain_target = 6000 veh/h`
+
+So the leader is no longer restricted to the movement-only upper bound in a
+high-stress case; it can evaluate the configured global/capacity side of the
+target space. The next performance step is to rerun the ordered scenario set
+and compare PFO vs P-Stack after this broader search-area change.
+
+## 2026-06-30 PFO vs P-Stack 3600 s: `fwy_peak` and `urban_peak`
+
+### Purpose
+
+The user asked to run only PFO and P-Stack for the freeway-peak and urban-peak
+stress scenarios after the leader search-area expansion.
+
+### Commands
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.six_controller_comparison --scenario fwy_peak --T-total 3600 --controllers PROPOSED-FOLLOWERS-ONLY,PROPOSED-STACKELBERG --output outputs\pfo_pstack_fwy_peak_3600_search_area_20260630
+
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.six_controller_comparison --scenario urban_peak --T-total 3600 --controllers PROPOSED-FOLLOWERS-ONLY,PROPOSED-STACKELBERG --output outputs\pfo_pstack_urban_peak_3600_search_area_20260630
+```
+
+### Results
+
+| scenario | controller | Total TTT | delay | urban TTT | freeway TTT | completed | terminal | avg delay / completed | compute sec |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `fwy_peak` | PFO | 1631.289 | 960.533 | 1168.176 | 463.113 | 13198.7 | 3195.5 | 0.072775 | 80.34 |
+| `fwy_peak` | P-Stack | 1503.443 | 832.687 | 1006.457 | 496.986 | 13652.4 | 2750.3 | 0.060992 | 218.78 |
+| `urban_peak` | PFO | 1674.832 | 750.711 | 1368.994 | 305.837 | 16959.7 | 2490.1 | 0.044264 | 84.96 |
+| `urban_peak` | P-Stack | 1711.893 | 787.773 | 1363.320 | 348.573 | 16691.8 | 2760.1 | 0.047195 | 221.79 |
+
+### P-Stack vs PFO deltas
+
+| scenario | Total TTT change | TTT change % | completed change | terminal change | interpretation |
+|---|---:|---:|---:|---:|---|
+| `fwy_peak` | -127.846 | +7.84% better | +453.7 | -445.2 | P-Stack improves network outcome. It trades slightly higher freeway TTT for much lower urban TTT and lower terminal burden. |
+| `urban_peak` | +37.061 | -2.21% worse | -267.9 | +270.0 | P-Stack worsens total outcome. Urban TTT falls only slightly, while freeway TTT and terminal burden increase. |
+
+### Leader diagnostics
+
+For `fwy_peak`, P-Stack selected average `N_P_star ~= 1327.9` and
+`N_UF_star ~= 4803.0`; `leader_search_stress_index` averaged `0.402`.
+
+For `urban_peak`, P-Stack selected average `N_P_star ~= 1741.0` and
+`N_UF_star ~= 5662.5`; `leader_search_stress_index` averaged `0.687`.
+
+Both scenarios had `leader_nuf_bound_upper = 6000 veh/h`, so the ramp-release
+side was open. However, the continuous search evaluated only about `3.7` full
+leader candidates per step on average, reflecting the active local/top-K
+lightweight budget. If `urban_peak` remains important, the next diagnostic is
+to increase the local continuous eval budget/top-K for that scenario and check
+whether the worsening is a true leader-objective choice or a search-budget
+artifact.
+
+## 2026-06-30 PFO vs P-Stack 3600 s: `urban_med`
+
+### Purpose
+
+The user asked to also check the urban-median case. The configured scenario
+name is `urban_med`.
+
+### Command
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.six_controller_comparison --scenario urban_med --T-total 3600 --controllers PROPOSED-FOLLOWERS-ONLY,PROPOSED-STACKELBERG --output outputs\pfo_pstack_urban_med_3600_search_area_20260630
+```
+
+### Results
+
+| scenario | controller | Total TTT | delay | urban TTT | freeway TTT | completed | terminal | avg delay / completed | compute sec |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| `urban_med` | PFO | 998.635 | 231.123 | 742.730 | 255.905 | 15663.1 | 1201.6 | 0.014756 | 86.04 |
+| `urban_med` | P-Stack | 1148.707 | 381.196 | 865.832 | 282.875 | 15433.0 | 1431.3 | 0.024700 | 227.84 |
+
+### P-Stack vs PFO delta
+
+| Total TTT change | TTT change % | completed change | terminal change | interpretation |
+|---:|---:|---:|---:|---|
+| +150.072 | -15.03% worse | -230.1 | +229.7 | P-Stack worsens both urban and freeway TTT in this scenario. |
+
+### Leader diagnostics
+
+P-Stack selected average `N_P_star ~= 1232.7` and `N_UF_star ~= 5700.0`.
+`leader_search_stress_index` averaged only `0.242`, while the leader still
+often selected high ramp-release targets (`N_UF_star` 5250-6000). The average
+full leader candidate count was again about `3.7` per step.
+
+Interpretation: unlike `fwy_peak`, the urban-median case does not benefit from
+the broader leader search area. The leader layer appears to add coordination
+cost without producing enough downstream benefit. Next diagnostic should check
+whether high `N_UF_star` in `urban_med` is being chosen because the leader
+proxy underprices urban-side burden, or because the local continuous search
+budget is too narrow.
+
+### Additional diagnosis, excluding fallback guard
+
+The user clarified that fallback should not be used as the explanation. The
+P-Stack run should therefore be interpreted directly as the leader-conditioned
+solution.
+
+Key step-log differences (`P-Stack - PFO`):
+
+| metric | mean step delta | cumulative/step-sum delta | last-step delta |
+|---|---:|---:|---:|
+| urban TTT | +6.155 | +123.103 | +4.805 |
+| freeway TTT | +1.348 | +26.970 | +6.364 |
+| ramp queue | +50.589 veh | +1011.786 veh | +190.025 veh |
+| urban total vehicles | +124.502 veh | +2490.049 veh | +103.832 veh |
+| urban departures | -5.245 veh/h | -104.909 veh/h | -20.347 veh/h |
+| mainline exit flow | -121.178 veh/h | -2423.568 veh/h | -130.326 veh/h |
+
+Control interpretation:
+
+- VSL stayed neutral at `100 km/h`; offset stayed zero; mean green remained
+  `56 s`. The bad outcome is not an offset/VSL artifact.
+- PFO kept total ramp-metering command near capacity on average
+  (`~5977.5 veh/h`), while P-Stack averaged `~5700 veh/h` and dropped to
+  `5250 veh/h` in later steps.
+- P-Stack selected `N_UF_star` near the upper end (`5250-6000 veh/h`) even
+  though the actual command became lower than PFO, increasing ramp queue and
+  terminal on-ramp burden.
+- P-Stack also selected positive `N_P_star` after step 10 (`~2464 veh`), which
+  increased urban accumulation without enough departure/throughput benefit.
+
+Conclusion: in `urban_med`, PFO is already close to a low-congestion local
+solution. The leader-conditioned solution adds a perimeter/ramp target that
+reduces freeway residual burden in some places but stores more vehicles in the
+urban/on-ramp side and lowers completed vehicles. This is a leader search /
+leader-objective alignment issue under moderate urban demand, not a fallback
+selection issue.
+
+## 2026-06-30 P-Stack deep leader-search probe: `urban_med`
+
+### Purpose
+
+The user asked whether the `urban_med` P-Stack degradation is caused by a too
+shallow leader search. This run increases the leader continuous search budget
+and disables fallback so the result reflects the leader-conditioned solution
+only.
+
+### Implementation
+
+Added CLI overrides to `src/experiments/six_controller_comparison.py` for:
+
+- `--leader-continuous-local-max-evals`
+- `--leader-continuous-local-seed-count`
+- `--leader-continuous-local-prefilter-samples`
+- `--leader-continuous-local-prefilter-top-k`
+
+Syntax check:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m py_compile "src\experiments\six_controller_comparison.py"
+```
+
+### Command
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.six_controller_comparison --scenario urban_med --T-total 3600 --controllers PROPOSED-STACKELBERG --output "outputs\pstack_urban_med_3600_leader_deep_search_20260630" --disable-stackelberg-fallback --leader-continuous-max-evals 40 --leader-continuous-seed-count 20 --leader-continuous-prefilter-samples 101 --leader-continuous-prefilter-top-k 20 --leader-continuous-local-max-evals 30 --leader-continuous-local-seed-count 20 --leader-continuous-local-prefilter-samples 61 --leader-continuous-local-prefilter-top-k 15 --leader-continuous-min-np-step-veh 20 --leader-continuous-min-nuf-step-veh-h 50 --leader-continuous-local-iterations 6
+```
+
+### Result
+
+| run | Total TTT | urban TTT | freeway TTT | completed | terminal | compute sec | solver evals |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| PFO previous | 998.635 | 742.730 | 255.905 | 15663.1 | 1201.6 | 86.04 | 700 |
+| P-Stack previous | 1148.707 | 865.832 | 282.875 | 15433.0 | 1431.3 | 227.84 | 2812 |
+| P-Stack deep search | 1410.062 | 1162.102 | 247.960 | 15352.3 | 1513.0 | 1687.31 | 14056 |
+
+### Diagnostics
+
+| run | mean full leader evals | mean proxy evals | mean `N_P_star` | mean `N_UF_star` | mean ramp command | mean ramp queue | mean urban vehicles |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| P-Stack previous | 3.7 | 23.9 | 1232.7 | 5700.0 | 5700.0 | 68.2 | 880.0 |
+| P-Stack deep search | 28.7 | 78.5 | 1272.6 | 5921.7 | 5921.7 | 20.9 | 1180.4 |
+
+Increasing the search budget did not recover the PFO-like solution. It selected
+even higher `N_UF_star` and similar/high `N_P_star`, reduced ramp queue, and
+improved freeway TTT slightly, but it loaded the urban side much more heavily:
+urban TTT increased to `1162.102 veh-h`, completed vehicles fell, and terminal
+vehicles increased. This indicates that the `urban_med` degradation is not
+primarily caused by insufficient leader candidate search. The next issue is the
+leader objective / rollout fidelity under moderate urban demand: the leader is
+finding a solution that is better for its current predicted/follower-response
+criterion than for realized plant Total TTT.
+
+### PFO reverse-`N_P` search-space check
+
+The user asked whether the PFO behavior, reversed into an equivalent
+`N_P_star`, lies in the leader search space. The run logs record plant
+`net_inflow` in veh/h, while `N_P_star` is a horizon vehicle target. From the
+P-Stack logs, `urban_net_inflow_target_veh_h = N_P_star / 0.15 h`, so the PFO
+reverse target was computed as:
+
+```text
+PFO_reverse_N_P_veh = PFO_run_log.net_inflow_veh_h * 0.15 h
+```
+
+Result:
+
+| check | inside count | interpretation |
+|---|---:|---|
+| PFO reverse `N_P` inside leader base envelope `diag_leader_np_bound_*` | 20 / 20 | The broad leader candidate envelope covers the PFO-like target. |
+| PFO reverse `N_P` inside actual continuous search bounds `diag_leader_continuous_search_bound_np_*` | 2 / 20 | The local continuous search around the previous leader target excludes the PFO-like target in most steps. |
+| Deep P-Stack selected `N_P` inside actual continuous search bounds | 20 / 20 | The deep run is internally consistent with its local search bounds. |
+
+PFO reverse `N_P` summary:
+
+| metric | mean | min | max | last |
+|---|---:|---:|---:|---:|
+| PFO reverse `N_P` from plant `net_inflow` | -224.4 | -457.1 | 674.3 | -457.1 |
+| P-Stack deep selected `N_P_star` | 1272.6 | -157.0 | 2623.8 | 2569.8 |
+| actual continuous search width | 401.2 | 0.0 | 4505.0 | 0.0 |
+| base envelope width | 4016.8 | 2505.4 | 4843.7 | 3829.6 |
+
+Interpretation: PFO is not outside the leader's broad feasible envelope, but it
+is outside the actual local continuous search region in 18 of 20 control steps.
+The deep-search run therefore did not test "can the leader choose PFO-like
+`N_P` at each step"; it mostly evaluated more candidates near the previous
+leader target. At the global-refresh steps where the actual search was broad
+(steps 0 and 10), the PFO-like target was inside the search region, but the
+leader still selected the high/upper-side target. This points to a two-part
+problem:
+
+1. local incumbent search traps the leader away from the PFO-like region after
+   an early choice;
+2. at broad-refresh steps, the leader objective still prefers a high
+   `N_P_star` solution under `urban_med`, so objective/rollout fidelity remains
+   a separate issue.
+
+### Urban signal-distributor / `N_P_star` feasibility diagnosis
+
+The user asked whether the urban-agent signal distributor added for feasibility
+could be malfunctioning. The stored deep-search logs indicate a strong mismatch
+between the leader `N_P_star` target, the Wu-faithful follower's predicted
+urban net-inflow response, and the realized plant net inflow.
+
+For the P-Stack deep-search run:
+
+| metric | mean | min | max | last |
+|---|---:|---:|---:|---:|
+| leader `N_P_star` target [veh] | 1272.6 | -157.0 | 2623.8 | 2569.8 |
+| follower `wu_faithful_sum_nin` [veh] | 615.4 | 427.4 | 927.8 | 438.1 |
+| plant reverse `N_P = net_inflow * 0.15h` [veh] | -165.0 | -562.3 | 674.3 | -562.3 |
+| plant tracking error, horizon-scaled [veh] | 1512.8 | 13.8 | 3132.1 | 3132.1 |
+
+Representative late steps:
+
+| step | target `N_P` | follower `sum_nin` | plant reverse `N_P` | lambda |
+|---:|---:|---:|---:|---:|
+| 10 | 2623.8 | 830.4 | 58.2 | 0.0 |
+| 15 | 2569.8 | 539.7 | -430.9 | 0.0 |
+| 19 | 2569.8 | 438.1 | -562.3 | 0.0 |
+
+Code-level cause candidate:
+
+- `src/controllers/wu_faithful_follower.py` adds the dual term as
+  `cost += lambda_p * nin`. Positive `lambda_p` can only discourage higher
+  net inflow.
+- `_bisect_lambda_for_np` returns `lambda=0` when `N_P_star >= nin(0)`, so a
+  high positive `N_P_star` becomes slack rather than an equality target.
+- The final dual commit is gated by `if dual_active and n_p_star > 0.0`, so
+  negative net-inflow targets are not actively enforced either.
+
+Interpretation: the current Wu-faithful urban signal distributor is not
+implementing the current intended meaning of `N_P_star` as a signed/equality
+net-inflow target. It behaves more like a one-sided upper-bound/cap mechanism:
+it can suppress net inflow when the target is below the unconstrained response,
+but it cannot encourage additional inflow when the leader selects a high
+target, and it ignores negative targets in the final dual commit. This explains
+why the leader can select high `N_P_star` while the realized plant net inflow
+remains negative.
+
+## 2026-06-30 WuFaithfulFollower `N_P_star` Signed Equality Fix
+
+### 援ы쁽 ?댁슜
+
+- `src/controllers/wu_faithful_follower.py`?먯꽌 `N_P_star`瑜?one-sided cap???꾨땲??  signed/equality net-inflow target[veh over horizon]?쇰줈 異붿쟻?섎룄濡??섏젙?덈떎.
+- ?꾩옱 state/forecast? green feasible set 湲곗??쇰줈 follower媛 留뚮뱾 ???덈뒗
+  `誇nin_min/max`瑜?`_agent_net_inflow_veh`? 媛숈? ?⑥쐞/?뺤쓽[veh]濡?怨꾩궛?섎뒗 helper瑜?異붽??덈떎.
+- 理쒖쥌 dual commit 吏곸쟾??follower ?덉륫 ?곹깭?먯꽌 leader ??target??  `[誇nin_min, 誇nin_max]`濡??ъ쁺?섍퀬, plant control??臾쇰━?곸쑝濡?clipping?섏? ?딅뒗??
+- `貫<0`? ?????쒖쑀?? `貫>0`? ???묒? ?쒖쑀?낆쓣 ?좊룄?섎룄濡?signed bracket怨?bisection/nearest
+  response ?좏깮???ъ슜?쒕떎.
+- `n_p_star > 0` final commit gate瑜??쒓굅??negative target??dual commit 寃쎈줈瑜??꾨떎.
+- diagnostics 異붽?:
+  - `wu_faithful_np_original_target`
+  - `wu_faithful_np_projected_target`
+  - `wu_faithful_np_feasible_min`
+  - `wu_faithful_np_feasible_max`
+  - `wu_faithful_np_projection_residual`
+  - `wu_faithful_sum_nin`
+  - `wu_faithful_np_target_error`
+
+### 蹂寃??뚯씪
+
+- `src/controllers/wu_faithful_follower.py`
+- `reports/codex_run_report.md`
+
+### ?ㅽ뻾 紐낅졊
+
+Baseline run command: ?대쾲 ?⑥튂??follower ?대? 踰꾧렇 ?섏젙?대ŉ full baseline simulation? ?ㅽ뻾?섏? ?딆븯??
+
+Proposed-controller run command: full proposed simulation? ?ㅽ뻾?섏? ?딆븯??
+
+寃利?紐낅졊:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m py_compile src/controllers/wu_faithful_follower.py
+
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m unittest src.tests.test_constraints.ConstraintTests.test_wu_faithful_vsl_sequence_reaches_lower_future_values -v
+```
+
+異붽? smoke:
+
+```text
+urban_med, T_total=180, horizon_steps=1, max_nash_iter=1,
+LeaderAction(N_P_star=9999.0, N_UF_star=1000.0)
+-> original=9999.0, projected=391.1, feasible=[315.675, 391.1],
+   projection_residual=9607.9, sum_nin=391.1, target_error=0.0
+
+LeaderAction(N_P_star=-9999.0, N_UF_star=1000.0)
+-> original=-9999.0, projected=315.675, feasible=[315.675, 391.1],
+   projection_residual=-10314.675, sum_nin=315.675, target_error=0.0,
+   lambda_P=1.027069
+```
+
+### 寃곌낵
+
+- Baseline Total TTT/TTS: N/A, full baseline simulation 誘몄떎??
+- Proposed Total TTT/TTS: N/A, full proposed simulation 誘몄떎??
+- Improvement rate: N/A.
+- Boundary queue balancing result: N/A, closed-loop 鍮꾧탳 誘몄떎??
+- Control validation summary:
+  - `py_compile`: PASS
+  - 湲곗〈 WuFaithful follower VSL sequence ?⑥쐞 ?뚯뒪?? PASS
+  - 吏㏃? signed target smoke: PASS, original/projected/sum_nin/target_error diagnostics ?뺤씤.
+
+### ?ㅽ뙣 湲곗? 諛??ㅼ쓬 ?섏젙
+
+- Full acceptance???꾩쭅 ?먮떒?섏? ?딆븯?? unit smoke留??섑뻾?덉쑝硫?closed-loop smoke?
+  baseline/proposed ?숈씪-demand 鍮꾧탳??誘몄떎?됱씠??
+- ?ㅼ쓬 ?④퀎??`urban_med` P-Stack deep/search run???ъ떎?됲빐 projected target怨?plant realized
+  net inflow 李⑥씠瑜?遺꾨━?댁꽌 ?뺤씤?섎뒗 寃껋씠?? Projection? follower predicted feasibility留?蹂댁옣?섎?濡?
+  plant realized net inflow mismatch媛 ?⑥쑝硫?rollout fidelity ?먮뒗 leader objective 履쎌쓣 蹂꾨룄濡?吏꾨떒?쒕떎.
+## 2026-06-30 Urban-Med 1800 s PFO vs P-Stack After Signed `N_P_star` Projection Fix
+
+### Implementation / Verification Summary
+
+- Fixed the Wu-faithful urban follower's Stackelberg `N_P_star` handling so the leader target is treated as a signed/equality net-inflow target in vehicles over the MPC horizon, not as a one-sided cap.
+- Added a follower-predicted feasible range `[sum_nin_min, sum_nin_max]` and projected raw leader `N_P_star` into that range before the final urban follower commit.
+- Added signed dual search so `lambda_P < 0` can encourage higher net inflow and `lambda_P > 0` can discourage net inflow.
+- Preserved the raw leader target in `control.N_P_star` while passing the projected target to plant/logging diagnostics through `urban_net_inflow_target_veh`.
+- Added a targeted constraints test for high/low infeasible `N_P_star` projection and matching `sum_nin`.
+
+Changed files:
+
+- `src/controllers/wu_faithful_follower.py`
+- `src/models/urban_queue_model.py`
+- `src/tests/test_constraints.py`
+- `src/experiments/six_controller_comparison.py`
+- `reports/codex_run_report.md`
+
+Validation commands:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m py_compile src/controllers/wu_faithful_follower.py src/models/urban_queue_model.py src/experiments/six_controller_comparison.py src/tests/test_constraints.py
+
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m unittest src.tests.test_constraints.ConstraintTests.test_wu_faithful_np_target_projects_to_signed_feasible_range src.tests.test_constraints.ConstraintTests.test_wu_faithful_vsl_sequence_reaches_lower_future_values -v
+```
+
+Verification result:
+
+- `py_compile`: PASS.
+- Targeted constraint tests: PASS.
+- Direct high/low target smoke: PASS. Raw `N_P_star` remains logged, projected target lies inside the follower feasible range, and `sum_nin` matches the projected target within tolerance.
+
+### 1800 s Problem-Scenario Run
+
+Scenario: `urban_med`
+
+Command:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.six_controller_comparison --scenario urban_med --T-total 1800 --controllers PROPOSED-FOLLOWERS-ONLY,PROPOSED-STACKELBERG --output "outputs\pfo_pstack_urban_med_1800_np_projection_20260630" --disable-stackelberg-fallback
+```
+
+Results:
+
+| Controller | Total TTT (veh-h) | Urban TTT | Freeway TTT | Delay | Completed | Terminal | Compute (s) |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| PFO | 422.280 | 302.978 | 119.302 | 44.552 | 7603.7 | 942.7 | 42.78 |
+| P-Stack | 457.313 | 338.389 | 118.924 | 79.584 | 7460.0 | 1074.3 | 232.30 |
+
+P-Stack vs PFO:
+
+- Total TTT is worse by `+35.033 veh-h`.
+- Urban TTT is worse by `+35.411 veh-h`.
+- Freeway TTT is slightly better by `-0.378 veh-h`.
+- Completed vehicles are lower by about `143.7 veh`.
+- Terminal vehicles are higher by about `131.6 veh`.
+- Computation time ratio is about `5.43x` PFO.
+
+### Diagnostics
+
+The follower-internal feasibility bug is largely fixed:
+
+- Raw/original `N_P_star` mean: `838.202 veh`.
+- Projected `N_P_star` mean: `827.006 veh`.
+- Follower feasible range mean: `[580.601, 917.607] veh`.
+- Follower `sum_nin` mean: `826.405 veh`.
+- Mean follower target error: `-0.601 veh`.
+
+However, the plant-realized net inflow still does not match the projected follower target:
+
+- Plant realized net inflow mean: `-701.252 veh/h`.
+- Horizon-scaled realized plant `N_P` mean: about `-105.19 veh`.
+- Projected plant target mean: `827.006 veh`.
+- Mean target-vs-realized tracking error: about `6214.627 veh/h`.
+- P-Stack urban vehicles mean: `700.676`, while PFO is `627.157`.
+- P-Stack on-ramp approach queue mean: `212.272`, while PFO is `144.608`.
+
+Interpretation:
+
+- The previous coding issue, where high `N_P_star` was not enforced inside the follower response, is fixed at the follower prediction layer.
+- The remaining issue is a prediction/plant fidelity mismatch: the urban follower's predicted `sum_nin` can be made to match the projected target, but the coupled plant dynamics realize much lower or even negative net inflow.
+- Therefore the current P-Stack run is still not accepted as an improvement. The next correction should align the follower candidate net-inflow calculation with the same phase/service/storage dynamics used by the plant, or constrain leader `N_P_star` using a realized-plant feasible envelope rather than only the follower-predicted envelope.
+
+Next modification:
+
+- Compare `_agent_net_inflow_veh` against plant-realized net inflow step by step.
+- Replace or calibrate the follower's net-inflow feasibility model with a plant-faithful phase/service calculation.
+- Re-run `urban_med` 1800 s PFO vs P-Stack after the plant-fidelity fix.
+
+## 2026-06-30 Wu-Faithful `N_P` Predictor 원인분리 Variant 실험
+
+### 구현 내용
+
+P-Stack `urban_med`에서 follower 내부 `wu_faithful_sum_nin`은 projected
+`N_P_star`를 맞추지만 plant realized `net_inflow`가 크게 어긋나는 문제를 세 가설로
+분리하기 위해 Wu-faithful follower의 `N_P` predictor를 mode화했다.
+
+- `legacy`: 기존 served-count predictor.
+- `storage_aware`: receiving-space allocation, `_effective_available_space`, off-ramp storage
+  occupancy/cap을 predictor에 반영.
+- `current_interval`: horizon 전체 forecast arrivals를 현재 green으로 즉시 처리 가능한
+  차량으로 보지 않도록 current control interval arrival만 predictor에 사용.
+- `phase_substep`: cycle-average service 대신 5초 `_phase_green_fraction` 기반 local
+  substep predictor 사용.
+
+기본값은 `legacy`로 유지했다. 이 mode들은 성능 fix가 아니라 원인분리용 diagnostic
+switch이며, projected target은 follower-predicted feasibility일 뿐 plant feasibility
+보장이 아님을 diagnostics와 보고서에 명시한다.
+
+변경 파일:
+
+- `src/controllers/wu_faithful_follower.py`
+- `src/models/state.py`
+- `src/config/default.yaml`
+- `src/tests/test_constraints.py`
+- `reports/codex_run_report.md`
+
+### 검증 명령
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m py_compile src/controllers/wu_faithful_follower.py src/models/state.py src/tests/test_constraints.py src/experiments/six_controller_comparison.py
+
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m unittest src.tests.test_constraints.ConstraintTests.test_wu_faithful_np_target_projects_to_signed_feasible_range src.tests.test_constraints.ConstraintTests.test_wu_faithful_np_predictor_modes_project_in_vehicle_units src.tests.test_constraints.ConstraintTests.test_wu_faithful_storage_predictor_caps_blocked_receiving_space -v
+```
+
+결과:
+
+- `py_compile`: PASS.
+- targeted unittest 3개: PASS.
+
+### 1800 s `urban_med` Run
+
+공통 조건:
+
+- scenario: `urban_med`
+- horizon: `1800 s`
+- fallback: off
+- PFO reference는 같은 run에서 재생성.
+
+명령:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.six_controller_comparison --scenario urban_med --T-total 1800 --controllers PROPOSED-FOLLOWERS-ONLY,PROPOSED-STACKELBERG --output "outputs\pfo_pstack_urban_med_1800_np_predictor_legacy_20260630" --disable-stackelberg-fallback --wu-faithful-np-predictor-mode legacy
+
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.six_controller_comparison --scenario urban_med --T-total 1800 --controllers PROPOSED-STACKELBERG --output "outputs\pstack_urban_med_1800_np_predictor_storage_aware_20260630" --disable-stackelberg-fallback --wu-faithful-np-predictor-mode storage_aware
+
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.six_controller_comparison --scenario urban_med --T-total 1800 --controllers PROPOSED-STACKELBERG --output "outputs\pstack_urban_med_1800_np_predictor_current_interval_20260630" --disable-stackelberg-fallback --wu-faithful-np-predictor-mode current_interval
+
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.six_controller_comparison --scenario urban_med --T-total 1800 --controllers PROPOSED-STACKELBERG --output "outputs\pstack_urban_med_1800_np_predictor_phase_substep_20260630" --disable-stackelberg-fallback --wu-faithful-np-predictor-mode phase_substep
+```
+
+요약 결과:
+
+| Controller / predictor | Total TTT | Urban TTT | Freeway TTT | Completed | Terminal | Compute |
+|---|---:|---:|---:|---:|---:|---:|
+| PFO | 422.280 | 302.978 | 119.302 | 7603.7 | 942.7 | 50.73 |
+| P-Stack legacy | 457.313 | 338.389 | 118.924 | 7460.0 | 1074.3 | 265.20 |
+| P-Stack storage_aware | 588.309 | 476.717 | 111.592 | 6853.5 | 1688.0 | 247.97 |
+| P-Stack current_interval | 514.344 | 407.682 | 106.662 | 6953.7 | 1597.6 | 229.06 |
+| P-Stack phase_substep | 559.484 | 448.229 | 111.255 | 7028.0 | 1490.4 | 882.50 |
+
+Follower predictor/plant mismatch:
+
+| Predictor | projected `N_P` mean [veh] | `sum_nin` mean [veh] | plant `net_inflow` mean [veh/h] | tracking error mean [veh/h] |
+|---|---:|---:|---:|---:|
+| legacy | 827.006 | 826.405 | -701.252 | 6214.627 |
+| storage_aware | 434.503 | 434.299 | -498.085 | 3394.769 |
+| current_interval | 555.415 | 555.415 | -65.156 | 3767.924 |
+| phase_substep | 775.963 | 775.963 | -113.919 | 5287.003 |
+
+Operational side effects:
+
+| Controller / predictor | mean urban vehicles | mean urban departures | mean on-ramp approach queue | mean ramp queue | mean mainline exit flow |
+|---|---:|---:|---:|---:|---:|
+| PFO | 627.16 | 1375.26 | 144.61 | 16.03 | 8031.38 |
+| P-Stack legacy | 700.68 | 1351.13 | 212.27 | 24.91 | 7829.96 |
+| P-Stack storage_aware | 1007.13 | 1179.47 | 152.86 | 15.12 | 7879.75 |
+| P-Stack current_interval | 871.39 | 1210.94 | 277.84 | 11.47 | 7365.03 |
+| P-Stack phase_substep | 940.51 | 1246.53 | 354.56 | 12.27 | 7360.70 |
+
+### 진단 결론
+
+세 predictor variant 모두 follower 내부에서는 projected target과 `sum_nin`을 맞춘다. 따라서
+이전 bug였던 "leader target이 follower에서 무시됨" 문제는 재발하지 않았다.
+
+하지만 모든 variant에서 P-Stack은 PFO보다 나빠졌다. 특히:
+
+- `storage_aware`는 realized tracking error를 줄였지만 Total TTT는 `588.309`로 가장 크게
+  악화됐다.
+- `current_interval`은 plant `net_inflow` 평균을 `-65.156 veh/h`까지 끌어올려 mismatch를
+  줄였지만, completed vehicles가 크게 줄고 terminal vehicles가 늘어 Total TTT가 악화됐다.
+- `phase_substep`은 계산비용이 `882.50 s`로 커졌고 성능도 PFO/legacy보다 나빴다.
+
+따라서 현재 증거로는 세 가설 중 어느 하나가 단독 주원인이라고 보기 어렵다. predictor fidelity를
+높이는 보정은 follower 내부 projection의 해석을 명확히 하지만, leader가 여전히 PFO보다 나쁜
+follower response를 objective상 좋은 후보로 ranking한다. 다음 원인은 leader objective/ranking의
+terminal-throughput pricing 또는 follower response objective와 realized plant TTT 간 fidelity에
+있을 가능성이 더 크다.
+
+### Failed Criteria / Next Modification
+
+- Acceptance: FAIL. P-Stack이 PFO보다 Total TTT, completed, terminal 모두 악화.
+- Boundary/queue: 일부 variant는 tracking error를 줄였지만 urban vehicles와 terminal burden을 키움.
+- Computation: `phase_substep`은 비용이 커서 기본 경로로 쓰기 어렵다.
+
+다음 수정 방향:
+
+1. Predictor mode를 default fix로 채택하지 않는다. `legacy` default 유지.
+2. leader candidate별 `leader_follower_ttt_base`, terminal vehicles, completed vehicles,
+   realized rollout TTT를 같은 표로 까서 왜 PFO보다 나쁜 후보가 ranking되는지 확인한다.
+3. leader objective에 terminal/throughput shortfall을 직접 넣는 방식과, follower response
+   objective를 realized plant rollout TTT에 더 가깝게 바꾸는 방식 중 어느 쪽이 더 일관적인지
+   360/1800 s ablation으로 비교한다.
+
+## 2026-06-30 Wu-Faithful `N_P` Predictor Three-Way Cause Isolation
+
+### 紐⑹쟻
+
+`urban_med`?먯꽌 P-Stack follower ?대???`wu_faithful_sum_nin`? projected
+`N_P_star`瑜???異붿쟻?섏?留? plant realized `net_inflow`???ш쾶 ?닿툔?щ떎. ?대?
+??媛?ㅻ줈 ?섎늻???뺤씤?덈떎.
+
+1. receiving storage / spillback / ramp reservoir ?쒖빟 誘몃컲??2. horizon ?꾩껜 forecast arrivals瑜?利됱떆 service 媛?λ웾?쇰줈 蹂대뒗 怨쇰??됯?
+3. 5珥?phase/substep plant order ???cycle-average service瑜??곕뒗 mismatch
+
+### 援ы쁽
+
+蹂寃??뚯씪:
+
+- `src/models/state.py`
+- `src/config/default.yaml`
+- `src/controllers/wu_faithful_follower.py`
+- `src/experiments/six_controller_comparison.py`
+- `src/tests/test_constraints.py`
+- `reports/codex_run_report.md`
+
+異붽? config/CLI:
+
+- `mpc.wu_faithful_np_predictor_mode`
+  - `legacy`
+  - `storage_aware` / `storage_guard`
+  - `current_interval` / `arrival_limited`
+  - `phase_substep`
+  - `combined`
+- `mpc.wu_np_storage_guard`
+- `mpc.wu_np_arrival_mode`
+- `mpc.wu_np_phase_substep`
+- CLI:
+  - `--wu-faithful-np-predictor-mode`
+  - `--wu-np-storage-guard`
+  - `--wu-np-arrival-mode`
+  - `--wu-np-phase-substep`
+
+援ы쁽 ?댁슜:
+
+- `legacy`: 湲곗〈 horizon-arrival + cycle-average served predictor ?좎?.
+- `storage_aware`: downstream receiving space, off-ramp storage acceptance,
+  ramp reservoir space瑜?candidate served 怨꾩궛??諛섏쁺.
+- `current_interval`: horizon ?꾩껜 demand瑜?利됱떆 service 媛?λ웾?쇰줈 蹂댁? ?딄퀬,
+  first control interval arrivals留?predictor available demand濡??ъ슜.
+- `phase_substep`: 5珥?phase window 湲곕컲 local predictor瑜??ъ슜. ?꾩껜 coupled
+  plant rollout? ?꾨땲吏留? service timing? `_phase_green_fraction`???곕Ⅸ??
+
+臾몄옄??diagnostics??CSV ?덉젙?깆쓣 ?꾪빐 ?곗? ?딄퀬 numeric code/flag濡?湲곕줉?덈떎.
+
+### 寃利?紐낅졊
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m py_compile src\controllers\wu_faithful_follower.py src\models\state.py src\experiments\six_controller_comparison.py src\tests\test_constraints.py
+
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m unittest src.tests.test_constraints.ConstraintTests.test_wu_faithful_np_predictor_modes_project_in_vehicle_units src.tests.test_constraints.ConstraintTests.test_wu_faithful_storage_predictor_caps_blocked_receiving_space -v
+```
+
+寃곌낵:
+
+- `py_compile`: PASS.
+- targeted tests: PASS.
+
+### 360 s ?먯씤遺꾨━ smoke
+
+怨듯넻 command ?뺥깭:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.six_controller_comparison --scenario urban_med --T-total 360 --controllers PROPOSED-STACKELBERG --output <output_dir> --disable-stackelberg-fallback --wu-faithful-np-predictor-mode <mode>
+```
+
+| mode | Total TTT | completed | terminal | compute s | selected raw `N_P` | projected `N_P` | plant reverse `N_P` | tracking error |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| legacy | 60.208 | 1032.5 | 786.2 | 82.78 | 2367.1 | 953.8 | 447.4 | 3375.7 |
+| storage_aware | 60.474 | 1024.6 | 826.2 | 84.25 | -1348.6 | 547.7 | 255.5 | 1947.9 |
+| current_interval | 58.250 | 1091.8 | 747.3 | 57.37 | 2367.1 | 640.2 | 349.9 | 1935.4 |
+| phase_substep | 59.507 | 1054.6 | 797.7 | 319.27 | 2367.1 | 900.7 | 446.9 | 3025.4 |
+
+360珥?愿李?
+
+- `storage_aware`??feasible envelope瑜??ш쾶 以꾩씠怨?raw `N_P` ?좏깮??諛붽엥??
+- `current_interval`? tracking error瑜??ш쾶 以꾩?怨?360珥?TTT??媛????븯??
+- `phase_substep`? raw `N_P` ?좏깮??諛붽씀吏 紐삵뻽怨?怨꾩궛鍮꾩슜???ш쾶 利앷??덈떎.
+
+### 1800 s ?뺤씤
+
+湲곗〈 legacy 1800珥?寃곌낵:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.six_controller_comparison --scenario urban_med --T-total 1800 --controllers PROPOSED-FOLLOWERS-ONLY,PROPOSED-STACKELBERG --output "outputs\pfo_pstack_urban_med_1800_np_projection_20260630" --disable-stackelberg-fallback
+```
+
+異붽? ?뺤씤:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.six_controller_comparison --scenario urban_med --T-total 1800 --controllers PROPOSED-STACKELBERG --output outputs\pstack_np_predictor_urban_med_1800_storage_aware_20260630 --disable-stackelberg-fallback --wu-faithful-np-predictor-mode storage_aware
+
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.six_controller_comparison --scenario urban_med --T-total 1800 --controllers PROPOSED-STACKELBERG --output outputs\pstack_np_predictor_urban_med_1800_current_interval_20260630 --disable-stackelberg-fallback --wu-faithful-np-predictor-mode current_interval
+```
+
+| mode | Total TTT | delay | completed | terminal | compute s | raw `N_P` | projected `N_P` | plant reverse `N_P` | tracking error | urban veh | on-ramp approach q |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| legacy | 457.313 | 79.584 | 7460.0 | 1074.3 | 232.30 | 838.2 | 827.0 | -105.2 | 6214.6 | 700.7 | 212.3 |
+| storage_aware | 588.309 | 210.580 | 6853.5 | 1688.0 | 258.60 | -30.1 | 434.5 | -74.7 | 3394.8 | 1007.1 | 152.9 |
+| current_interval | 514.344 | 136.615 | 6953.7 | 1597.6 | 222.23 | 1929.2 | 555.4 | -9.8 | 3767.9 | 871.4 | 277.8 |
+
+PFO reference from the same legacy comparison:
+
+| controller | Total TTT | completed | terminal |
+|---|---:|---:|---:|
+| PFO | 422.280 | 7603.7 | 942.7 |
+
+### ?댁꽍
+
+- ??媛??以?plant-fidelity mismatch瑜?媛???ш쾶 ?ㅻ챸?섎뒗 寃껋? 1踰덇낵 2踰덉씠??
+  `storage_aware`? `current_interval` 紐⑤몢 net-inflow tracking error瑜??ш쾶 以꾩???
+- 洹몃윭??tracking error瑜?以꾩씠??寃껊쭔?쇰줈 ?깅뒫? 媛쒖꽑?섏? ?딆븯??
+  `storage_aware`???덈Т 蹂댁닔?곸쑝濡??묐룞?섏뿬 throughput???ш쾶 ?껋뿀怨?
+  `current_interval`??terminal burden??以꾩씠吏 紐삵뻽??
+- 3踰?`phase_substep`? 360珥덉뿉??raw `N_P` ?좏깮??諛붽씀吏 紐삵뻽怨?怨꾩궛鍮꾩슜??  ??4諛??댁긽 而ㅼ죱?? ?⑤룆 二쇱썝?몄쑝濡?蹂닿린???대졄??
+- ?곕씪???꾩옱 臾몄젣???⑥닚??`N_P` feasibility predictor瑜?蹂댁닔?곸쑝濡?留뚮뱶??臾몄젣媛 ?꾨땲??
+  ???뺥솗?덈뒗:
+  1. 湲곗〈 predictor??plant feasible envelope瑜?怨쇰??됯??쒕떎.
+  2. ?섏?留?怨쇰??됯?瑜??쒓굅?섎㈃ leader媛 demand瑜?怨쇰룄?섍쾶 留됱븘 terminal burden??而ㅼ쭊??
+  3. P-Stack??PFO蹂대떎 ?섏걶 ?듭떖? `N_P` predictor ?섎굹媛 ?꾨땲??leader objective媛
+     throughput/terminal burden怨?urban-freeway service tradeoff瑜??쒕?濡?ranking?섏? 紐삵븯?????덈떎.
+
+### ?ㅼ쓬 ?섏젙 ?꾨낫
+
+- `N_P` target???⑥닚 projected served target?쇰줈留??곗? 留먭퀬, leader objective?먯꽌
+  terminal vehicles / throughput shortfall ?먮뒗 realized plant reverse `N_P` mismatch瑜?  吏곸젒 蹂닿쾶 ?댁빞 ?쒕떎.
+- `storage_aware`??hard replacement媛 ?꾨땲??feasibility diagnostic ?먮뒗 soft guard濡?  ?곕뒗 ?몄씠 ?덉쟾?섎떎.
+- `phase_substep`? production search ?덉そ???ｊ린?먮뒗 鍮꾩떥?? ?꾩슂?섎㈃ cheap prefilter??  selected candidate post-evaluation ?⑸룄濡??쒗븳?댁빞 ?쒕떎.
+- ?ㅼ쓬 acceptance run ?꾩뿉 P-Stack leader candidate ranking?먯꽌 PFO蹂대떎 terminal burden??  而ㅼ????꾨낫媛 ???좏깮?섎뒗吏 ?꾨낫蹂?objective table???ㅼ떆 源뚯빞 ?쒕떎.
+
+
+## 2026-07-01 P-Stack PFO Incumbent Patch Candidate
+
+### 구현 내용
+
+- `StackelbergWuMeteredController`에서 control step 시작 시 `WuFaithfulFollower.solve(state, None, forecast, pfo_previous)`를 한 번 평가해 `fallback_pfo` 후보로 등록했다.
+- PFO response의 `N_P` equivalent는 `wu_faithful_sum_nin`, `N_UF` equivalent는 `sum(ramp_metering)`으로 역산하고 leader bounds 안으로 clip한다.
+- 역산한 `(N_P, N_UF)`를 `leader_pfo_incumbent_*` diagnostics로 남기고, leader local/continuous search의 previous seed/center로 사용한다.
+- `stackelberg_enable_pfo_incumbent` flag를 추가했다. 기본값은 `true`이며, `stackelberg_enable_fallback=false`여도 Wu-metered P-Stack의 PFO incumbent는 평가된다.
+- 기존 no-control fallback과 혼동하지 않도록 `StackelbergWuMeteredController`의 fallback candidate override는 PFO 후보만 반환한다.
+
+### 변경 파일
+
+- `src/controllers/stackelberg_mpc.py`
+- `src/controllers/stackelberg_wu_metered.py`
+- `src/models/state.py`
+- `src/config/default.yaml`
+- `src/experiments/six_controller_comparison.py`
+- `src/tests/test_constraints.py`
+- `reports/codex_run_report.md`
+
+### 검증 명령
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m py_compile "src\controllers\stackelberg_mpc.py" "src\controllers\stackelberg_wu_metered.py" "src\models\state.py" "src\experiments\six_controller_comparison.py" "src\tests\test_constraints.py"
+
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m unittest src.tests.test_constraints.ConstraintTests.test_stackelberg_wu_pfo_incumbent_can_be_selected_when_leader_is_worse src.tests.test_constraints.ConstraintTests.test_stackelberg_wu_pfo_incumbent_flag_can_disable_candidate -v
+
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -c "<StackelbergWuMeteredController one-step decide smoke>"
+```
+
+결과:
+
+- `py_compile`: PASS.
+- targeted unit tests 2개: PASS.
+- one-step decide smoke: PASS. 출력 `leader_fallback_enabled=0.0`, `leader_pfo_incumbent_enabled=1.0`, `leader_pfo_incumbent_active=1.0`, `N_P=367.5`, `N_UF=6000.0`.
+
+### Acceptance 항목
+
+- Baseline run command: not run in this patch-candidate step.
+- Proposed-controller run command: not run in this patch-candidate step.
+- Baseline Total TTT/TTS: not measured.
+- Proposed Total TTT/TTS: not measured.
+- Improvement rate: not measured.
+- Boundary queue balancing result: not measured.
+- Control validation summary: compile + targeted unit/smoke only.
+- Failed criteria: full closed-loop baseline/proposed acceptance was not run.
+
+### Follow-up tie-break and computation note
+
+After review, PFO incumbent is also used as a strict safety candidate:
+if a leader-conditioned replay has the same objective as the evaluated
+leaderless PFO response, `StackelbergWuMeteredController` now keeps the actual
+`fallback_pfo` control. This avoids treating the aggregate `(N_P, N_UF)` match
+as equivalent to the PFO `ControlAction`.
+
+Additional validation:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -m unittest src.tests.test_constraints.ConstraintTests.test_stackelberg_fallback_guard_rejects_terminal_worse_leader src.tests.test_constraints.ConstraintTests.test_stackelberg_wu_pfo_incumbent_can_be_selected_when_leader_is_worse src.tests.test_constraints.ConstraintTests.test_stackelberg_wu_pfo_incumbent_flag_can_disable_candidate
+
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.six_controller_comparison --scenario urban_med --controllers PROPOSED-STACKELBERG --T-total 180 --output outputs/pfo_incumbent_smoke3_urban_med_180_20260701 --stackelberg-leader-parallel-backend serial
+```
+
+Results:
+
+- `py_compile`: PASS after the tie-break patch.
+- Targeted fallback/PFO incumbent unit tests: PASS (`3 tests`, `OK`).
+- 180 s `urban_med` P-Stack smoke: completed.
+- Diagnostics: `leader_pfo_incumbent_active=1.0`,
+  `leader_pfo_incumbent_selected=1.0`,
+  `leader_pfo_incumbent_tie_break_selected=1.0`,
+  `leader_selected_stage_fallback_pfo=1.0`.
+- PFO equivalent target in smoke: `N_P=917.45 veh`,
+  `N_UF=6000.0 veh/h`.
+- Total TTT in smoke: `22.692190286956883 veh-h`.
+- Computation note: deep leader search is not removed. The smoke still
+  evaluated `10` full leader candidates plus `56` proxy candidates and took
+  `54.24033649999183 s` for the P-Stack decision. The patch improves the
+  safety floor and search centering; any computation reduction must be
+  evaluated separately via top-K/local-budget tuning.
+
+## 2026-07-01 PFO-Anchor Hybrid Search, Density-Rollout Fix, and Target Runs
+
+### Implemented
+
+- Added PFO-anchor hybrid leader search to `StackelbergWuMeteredController`.
+  - P-Stack evaluates the PFO-equivalent point as a strict incumbent.
+  - Global-refresh search is centered around the PFO-equivalent `(N_P_star, N_UF_star)`.
+  - A cheap full-range scout is retained, but only a small number of distant scout candidates are full-evaluated.
+- Confirmed Claude's concern in the base `DistributedCoordinator._response_tts_objective`.
+  - The old density penalty used current `state.freeway_density`, so ramp-release candidates did not change the density-excess penalty.
+  - Added candidate-dependent density rollout via `_estimate_freeway_density_excess_tts`.
+  - The response objective now charges density-excess TTS after pushing ramp release into the merge segment.
+  - Note: the active Wu-faithful P-Stack path already has its own local density rollout, so this mainly fixes the base distributed response objective and diagnostics.
+
+### Changed Files
+
+- `src/controllers/stackelberg_wu_metered.py`
+- `src/controllers/stackelberg_mpc.py`
+- `src/controllers/distributed_coordinator.py`
+- `src/tests/test_constraints.py`
+- `reports/codex_run_report.md`
+
+### Validation
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -m py_compile src/controllers/distributed_coordinator.py src/controllers/stackelberg_wu_metered.py src/controllers/stackelberg_mpc.py src/tests/test_constraints.py
+
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -m unittest src.tests.test_constraints.ConstraintTests.test_distributed_response_density_rollout_charges_ramp_release src.tests.test_constraints.ConstraintTests.test_distributed_response_objective_rewards_ramp_service src.tests.test_constraints.ConstraintTests.test_stackelberg_wu_pfo_incumbent_can_be_selected_when_leader_is_worse
+```
+
+Results:
+
+- `py_compile`: PASS.
+- Targeted tests: PASS (`3 tests`, `OK`).
+
+### 180 s Smoke
+
+Command:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.six_controller_comparison --scenario urban_med --controllers PROPOSED-STACKELBERG --T-total 180 --output outputs/pfo_anchor_hybrid_smoke_urban_med_180_20260701 --stackelberg-leader-parallel-backend serial
+```
+
+Results:
+
+- Total TTT: `22.692190286956883 veh-h`.
+- Hybrid search diagnostics:
+  - `leader_pfo_anchor_global_hybrid_active=1.0`
+  - `leader_pfo_anchor_local_full_evaluated_count=3.0`
+  - `leader_pfo_anchor_scout_full_evaluated_count=1.0`
+  - `leader_pfo_anchor_total_full_evaluated_count=4.0`
+  - `leader_candidate_full_evaluated_count=4.0`
+  - `leader_pfo_incumbent_selected=1.0`
+  - `leader_pfo_incumbent_tie_break_selected=1.0`
+- Computation comparison against `outputs/pfo_incumbent_smoke3_urban_med_180_20260701`:
+  - Previous: `10` full leader evaluations, `56` proxy candidates, `54.24033649999183 s`.
+  - Hybrid: `4` full leader evaluations, `21.38388649999979 s`.
+
+### 1800 s urban_med Comparison
+
+Command:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.six_controller_comparison --scenario urban_med --controllers NO-CONTROL,PROPOSED-FOLLOWERS-ONLY,PROPOSED-STACKELBERG --T-total 1800 --output outputs\urban_med_nocontrol_pfo_pstack_1800_20260701 --stackelberg-leader-parallel-backend serial
+```
+
+Results:
+
+| controller | total TTT | urban TTT | freeway TTT | delay | completed | terminal | compute |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| NO-CONTROL | 419.499 | 299.552 | 119.947 | 41.771 | 7614.3 | 922.2 | 0.00 s |
+| PROPOSED-FOLLOWERS-ONLY | 422.280 | 302.978 | 119.302 | 44.552 | 7603.7 | 942.7 | 48.85 s |
+| PROPOSED-STACKELBERG | 422.280 | 302.978 | 119.302 | 44.552 | 7603.7 | 942.7 | 202.41 s |
+
+Interpretation:
+
+- P-Stack selected the PFO incumbent in all 10 steps.
+- P-Stack therefore exactly matched PFO.
+- Both controlled variants were slightly worse than no-control in this light `urban_med` 1800 s diagnostic run.
+
+### 1800 s sweet_155 Comparison
+
+Command:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.six_controller_comparison --scenario sweet_155 --controllers NO-CONTROL,PROPOSED-FOLLOWERS-ONLY,PROPOSED-STACKELBERG --T-total 1800 --output outputs\sweet155_nocontrol_pfo_pstack_1800_20260701 --stackelberg-leader-parallel-backend serial
+```
+
+Results:
+
+| controller | total TTT | urban TTT | freeway TTT | delay | completed | terminal | compute |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| NO-CONTROL | 518.411 | 385.865 | 132.547 | 96.522 | 8037.2 | 1308.1 | 0.00 s |
+| PROPOSED-FOLLOWERS-ONLY | 529.421 | 398.413 | 131.009 | 107.532 | 7977.5 | 1380.4 | 41.11 s |
+| PROPOSED-STACKELBERG | 528.180 | 399.200 | 128.980 | 106.290 | 7964.9 | 1401.6 | 195.95 s |
+
+Interpretation:
+
+- P-Stack improves over PFO by `1.241 veh-h` (`0.234%`).
+- P-Stack is still worse than no-control by `9.769 veh-h` (`-1.884%`).
+- P-Stack improves freeway TTT relative to PFO (`128.980` vs `131.009`) but shifts burden toward urban TTT (`399.200` vs `398.413`) and leaves more terminal vehicles.
+- The leader selected the PFO incumbent in 9 of 10 steps; only one step selected a non-PFO leader candidate.
+
+### Acceptance Status
+
+- Baseline and proposed runs used the same scenario, demand, seed, and 1800 s horizon inside each comparison.
+- These are diagnostic runs, not full 7200 s acceptance runs.
+- The default 8% improvement threshold is not met in `urban_med` or `sweet_155`.
+- Boundary queue balancing was not separately summarized in this quick comparison; run-level CSVs are preserved for follow-up diagnostics.
+
+## 2026-07-01 Local-Info Distributed Controller Fidelity Review
+
+### Context
+
+The user asked for a code review of the local-info distributed controller after
+`PROPOSED-FOLLOWERS-ONLY` and Wu-faithful P-Stack became worse than no-control
+in recent `urban_med` and `sweet_155` runs. The review intentionally does not
+recommend no-control guards as the main fix. If PFO truly minimizes a
+TTT-compatible objective, it should not need a no-control guard.
+
+Standalone report:
+
+- `reports/local_info_distributed_controller_review_20260701.md`
+
+### Leader Controller Changes Already Present
+
+- `StackelbergWuMeteredController` now uses a PFO-equivalent anchor for leader
+  search.
+- Global search is hybrid:
+  - local refinement around PFO-equivalent `(N_P_star, N_UF_star)`;
+  - limited full-range scout candidates.
+- The PFO incumbent is a leader-search anchor/tie-break candidate, not a
+  no-control guard.
+- Prior smoke result: 180 s `urban_med` P-Stack full leader evaluations reduced
+  from `10` to `4`; wall time reduced from about `54.24 s` to `21.38 s`.
+
+### Findings
+
+1. Urban local rollout is not plant-TTT compatible.
+   - `rollout_local_tts` and `rollout_local_tts_phased` charge mostly
+     `sum(q.values()) * dt_h`.
+   - The plant charges urban movement queues plus storage occupancy.
+   - Therefore a local candidate can look good after moving vehicles out of the
+     current movement queue even when the plant still holds those vehicles in
+     storage or terminal burden.
+
+2. Ramp-aware local off-ramp drain likely has a sign mismatch.
+   - Local ramp-aware rollout increases downstream available space after
+     off-ramp drainage.
+   - The plant consumes downstream receiving space for the same movement.
+   - This can make off-ramp/green choices look artificially good locally.
+
+3. Ramp release reaches freeway density in the plant, but local timing differs.
+   - The plant computes ramp metering release from the current reservoir before
+     urban green release enters the reservoir.
+   - The local freeway scorer can add same-step urban-to-ramp arrivals before
+     metering release.
+   - This can invert ramp metering candidate ranking.
+
+4. One-step `sweet_155` probe confirmed a ranking problem.
+   - No-control full coupled horizon TTT: `104.097684`.
+   - PFO-selected action full coupled horizon TTT: `104.652236`.
+   - A same-state F-signal green sweep found `F_p1=62 s` gives
+     `103.672590`, while PFO selected `F_p1=50 s`.
+   - Feasible better candidates existed; the local scorer chose the wrong one
+     under plant TTT.
+
+5. Wu-metered P-Stack prefilter is action-blind for the Wu-faithful follower.
+   - The cheap prefilter uses a current-state proxy before full evaluation.
+   - Different `(N_P_star, N_UF_star)` candidates can get nearly identical
+     proxy scores.
+   - This is secondary to local follower fidelity, but should be revisited
+     after PFO scoring is corrected.
+
+6. P-Stack fallback/PFO-anchor rows may carry post-hoc `N_P_star/N_UF_star`
+   labels.
+   - A leaderless PFO solve can be relabeled with PFO-equivalent leader targets
+     afterward.
+   - Those labels are useful as anchors, but they were not active constraints
+     during the leaderless PFO solve.
+
+### Recommended Next Modification
+
+1. Fix `rollout_local_tts_ramp_aware` downstream storage sign.
+2. Add storage/terminal-compatible vehicle accounting to ordinary/phased urban
+   local rollout cost.
+3. Align local freeway ramp-release timing with the coupled plant ordering.
+4. Add a rank-inversion regression test comparing local candidate ranking
+   against full `run_coupled_interval` rollout ranking on the same copied state.
+5. Then revisit Wu-metered P-Stack prefilter so top-K pruning is
+   candidate-dependent.
+
+### Validation
+
+- Static review: completed with three independent sub-agent reviews.
+- Read-only one-step probes: completed for `urban_med` and `sweet_155`.
+- Source code changed in this step: no controller code changed; report only.
+- Full acceptance run: not run in this report step.
+
+### 다음 수정/검증
+
+- 메인 에이전트가 이 패치 후보를 채택하면 `PROPOSED-FOLLOWERS-ONLY` vs `PROPOSED-STACKELBERG` 동일 scenario/demand/horizon closed-loop run으로 PFO incumbent가 P-Stack 악화를 실제로 줄이는지 확인해야 한다.

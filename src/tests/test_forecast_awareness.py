@@ -237,6 +237,9 @@ class ForecastAwarenessTests(unittest.TestCase):
             "leader_candidate_objective_spread",
             "leader_selected_N_P_star",
             "leader_selected_N_UF_star",
+            "leader_search_stress_index",
+            "leader_np_bound_lower",
+            "leader_np_bound_upper",
         ]
         for key in required_keys:
             self.assertIn(key, low.metadata)
@@ -272,7 +275,15 @@ class ForecastAwarenessTests(unittest.TestCase):
             round(high.metadata["N_UF_max"], 6),
             round(high.metadata["leader_candidate_count"], 6),
         )
-        self.assertEqual(low_candidate_set, high_candidate_set)
+        self.assertNotEqual(low_candidate_set, high_candidate_set)
+        self.assertGreaterEqual(
+            high.metadata["leader_search_stress_index"],
+            low.metadata["leader_search_stress_index"],
+        )
+        self.assertGreaterEqual(
+            high.metadata["leader_np_bound_upper"] - high.metadata["leader_np_bound_lower"],
+            low.metadata["leader_np_bound_upper"] - low.metadata["leader_np_bound_lower"],
+        )
 
         # 후보 N_UF 집합이 같아도 평가값, top-2 ranking, selected action 중 하나가 달라지면
         # leader가 forecast-sensitive 평가를 수행한다고 본다.

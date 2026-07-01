@@ -373,6 +373,8 @@ class MPCConfig:
     urban_freeway_tts_weight_alpha: float = 1.0
     optimizer_maxiter: int = 40
     optimizer_n_starts: int = 2
+    centralized_solver_mode: str = "slsqp"
+    centralized_slsqp_ftol: float = 1.0e-3
     relaxed_quantized_controls: bool = False
     relaxed_green_quantum_sec: float = 1.0
     relaxed_vsl_quantum_km_h: float = 10.0
@@ -389,6 +391,7 @@ class MPCConfig:
     stackelberg_fallback_full_refresh_sec: float = 1800.0
     stackelberg_fallback_use_cached_pfo: bool = True
     stackelberg_enable_fallback: bool = True
+    stackelberg_enable_pfo_incumbent: bool = True
     # fallback guard의 leader vs PFO 비교 척도를 penalized objective 대신 realized rollout-TTT로.
     # (penalized obj는 TTT와 어긋나 sweet_128 등에서 TTT 좋은 leader를 잘못 기각했다, 2026-06-25.)
     stackelberg_fallback_guard_use_rollout_ttt: bool = True
@@ -397,6 +400,10 @@ class MPCConfig:
     stackelberg_inner_backend_when_outer_process: str = "thread"
     stackelberg_reuse_process_pool: bool = True
     stackelberg_allocation_mode: str = "direct"
+    wu_np_storage_guard: bool = False
+    wu_np_arrival_mode: str = "horizon"
+    wu_np_phase_substep: bool = False
+    wu_faithful_np_predictor_mode: str = "legacy"
 
 
 @dataclass
@@ -532,6 +539,10 @@ class ExperimentConfig:
             raise ValueError("mpc.follower_solver_mode must be two_block or distributed.")
         if self.mpc.leader_search_mode not in {"grid", "continuous"}:
             raise ValueError("mpc.leader_search_mode must be grid or continuous.")
+        if self.mpc.centralized_solver_mode not in {"structured_grid", "slsqp"}:
+            raise ValueError("mpc.centralized_solver_mode must be structured_grid or slsqp.")
+        if self.mpc.centralized_slsqp_ftol <= 0.0:
+            raise ValueError("mpc.centralized_slsqp_ftol must be positive.")
         if self.mpc.leader_candidate_count <= 0:
             raise ValueError("mpc.leader_candidate_count must be positive.")
         if self.mpc.leader_refinement_candidate_count <= 0:
@@ -602,6 +613,18 @@ class ExperimentConfig:
             raise ValueError("mpc.stackelberg_inner_backend_when_outer_process must be serial or thread.")
         if self.mpc.stackelberg_allocation_mode not in {"direct", "simplified", "pso"}:
             raise ValueError("mpc.stackelberg_allocation_mode must be direct, simplified, or pso.")
+        if self.mpc.wu_faithful_np_predictor_mode not in {
+            "legacy",
+            "storage_aware",
+            "current_interval",
+            "phase_substep",
+        }:
+            raise ValueError(
+                "mpc.wu_faithful_np_predictor_mode must be legacy, storage_aware, "
+                "current_interval, or phase_substep."
+            )
+        if self.mpc.wu_np_arrival_mode not in {"horizon", "current_interval"}:
+            raise ValueError("mpc.wu_np_arrival_mode must be horizon or current_interval.")
         cap_drop = self.freeway_offramp_capacity_drop
         if cap_drop.lane_reduction < 0.0:
             raise ValueError("freeway_offramp_capacity_drop.lane_reduction must be non-negative.")

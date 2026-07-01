@@ -1162,7 +1162,12 @@ def aggregate_urban_diagnostics(
     out["net_inflow"] = float(net_inflow)
     out["net_inflow_target"] = float(net_inflow_target)
     out["urban_net_inflow_target_veh_h"] = float(net_inflow_target)
-    out["urban_net_inflow_target_veh"] = float(control.N_P_star)
+    # Wu-faithful P-Stack은 raw leader intent와 follower-feasible projected target을 분리해
+    # 기록한다. plant tracking 진단에는 실제 제어가 추적한 projected horizon target[veh]을 우선 사용한다.
+    out["urban_net_inflow_target_veh"] = float(control.diagnostics.get(
+        "urban_net_inflow_target_veh",
+        control.N_P_star,
+    ))
     out["urban_accumulation_target_disabled"] = 1.0
     out["urban_net_inflow_tracking_error_veh_h"] = float(net_inflow_error)
     out["net_inflow_tracking_error"] = float(net_inflow_error)

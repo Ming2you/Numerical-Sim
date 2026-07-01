@@ -27,12 +27,24 @@ class LeaderCandidateBounds:
     nuf_lower: float
     nuf_upper: float
     heuristic_nuf: float
+    nuf_arrival_target: float
+    nuf_queue_drain_target: float
     movement_min_net_flow_veh_h: float
     movement_max_net_flow_veh_h: float
     movement_np_lower: float
     movement_np_upper: float
+    movement_capacity_min_net_flow_veh_h: float
+    movement_capacity_max_net_flow_veh_h: float
+    movement_capacity_np_lower: float
+    movement_capacity_np_upper: float
     movement_np_lower_active: bool
     movement_np_upper_active: bool
+    demand_stress: float
+    density_stress: float
+    ramp_queue_stress: float
+    urban_storage_stress: float
+    incident_stress: float
+    stress_index: float
 
 
 class Leader:
@@ -72,7 +84,6 @@ class Leader:
         demand: Optional[DemandStep] = None,
         forecast: Optional[list[DemandStep]] = None,
     ) -> List[LeaderAction]:
-        leader = self.cfg.leader
         # forecast가 주어지면 horizon 수요 요약으로 후보를 생성한다(진단 문서 §4). None이면
         # 기존 first-demand 동작(하위 호환). boundary 비용은 건드리지 않는다 — 후보 생성만.
         if forecast:
@@ -83,26 +94,13 @@ class Leader:
         bounds = self._candidate_bounds(state, previous, demand, forecast)
         np_lower, np_upper = bounds.np_lower, bounds.np_upper
         np_values = set(float(v) for v in np.linspace(np_lower, np_upper, n_np))
-        np_values.add(float(np.clip(0.0, np_lower, np_upper)))
-        np_values.add(float(np.clip(bounds.movement_np_lower, np_lower, np_upper)))
-        np_values.add(float(np.clip(bounds.movement_np_upper, np_lower, np_upper)))
-        density_ratio = self._density_ratio(state)
-        feasible_nuf = self._feasible_nuf_capacity(state, previous, demand)
+        np_values.update(self._np_anchor_values(bounds, previous))
         # 자유류(평균밀도 ≤ metering 활성화 임계)에서는 T_f 단위 feasible 추정이
         # metering을 강제하지 않도록 후보 상한을 ramp 총용량까지 열어둔다.
         # (feasible은 다음 T_f에 추적가능한 유량 추정이라 지속 수요를 과소평가 —
         # 이를 ceiling으로 쓰면 본선이 한가해도 w_r에 순수 대기손실이 쌓인다.)
-        if density_ratio <= leader.metering_activation_density_ratio:
-            feasible_nuf = max(feasible_nuf, self.cfg.network.total_ramp_capacity)
-        nuf_physical_lower = self._minimum_nuf_target()
-        nuf_lower = max(float(leader.N_UF_star_range[0]), nuf_physical_lower)
-        nuf_upper = min(leader.N_UF_star_range[1], feasible_nuf)
-        nuf_upper = max(nuf_lower, nuf_upper)
-        heuristic_nuf = min(self._heuristic_nuf_target(state, previous, demand), nuf_upper)
-        if density_ratio <= leader.metering_activation_density_ratio:
             # 자유류에서는 N_UF=0 corner가 사실상 ramp 완전 폐쇄라 병적이다.
             # 격자는 넓게 유지하되, 0 유입 corner 대신 feasible release 근처를 하한으로 둔다.
-            nuf_lower = min(nuf_upper, max(nuf_lower, 0.75 * heuristic_nuf))
         nuf_values = set(float(v) for v in np.linspace(bounds.nuf_lower, bounds.nuf_upper, n_nuf))
         # coarse grid가 성기더라도 혼잡 인식 target 주변 metering 후보를 반드시 포함한다.
         for scale in (0.75, 1.0, 1.25):
@@ -111,6 +109,7 @@ class Leader:
                 bounds.nuf_lower,
                 bounds.nuf_upper,
             )))
+        nuf_values.update(self._nuf_anchor_values(bounds, previous))
         nuf_values = sorted(nuf_values)
         np_values = sorted(np_values)
         grid = [LeaderAction(float(np_), float(nuf)) for np_ in np_values for nuf in nuf_values]
@@ -139,6 +138,17 @@ class Leader:
         def add_unique(action: LeaderAction) -> None:
             if action not in selected and len(selected) < budget:
                 selected.append(action)
+
+        for np_anchor in self._np_anchor_values(bounds, previous):
+            required.append(LeaderAction(
+                float(np.clip(np_anchor, np_lower, np_upper)),
+                float(min(nuf_values, key=lambda value: abs(value - bounds.heuristic_nuf))),
+            ))
+        for nuf_anchor in self._nuf_anchor_values(bounds, previous):
+            required.append(LeaderAction(
+                float(np.clip(0.0, np_lower, np_upper)),
+                float(np.clip(nuf_anchor, nuf_values[0], nuf_values[-1])),
+            ))
 
         for action in required:
             add_unique(action)
@@ -196,8 +206,10 @@ class Leader:
         np_values.add(float(np.clip(0.0, bounds.np_lower, bounds.np_upper)))
         np_values.add(float(np.clip(bounds.movement_np_lower, bounds.np_lower, bounds.np_upper)))
         np_values.add(float(np.clip(bounds.movement_np_upper, bounds.np_lower, bounds.np_upper)))
+        np_values.update(self._np_anchor_values(bounds, previous))
         nuf_values.add(float(np.clip(center.N_UF_star, bounds.nuf_lower, bounds.nuf_upper)))
         nuf_values.add(float(np.clip(bounds.heuristic_nuf, bounds.nuf_lower, bounds.nuf_upper)))
+        nuf_values.update(self._nuf_anchor_values(bounds, previous))
         if previous is not None:
             np_values.add(float(np.clip(previous.N_P_star, bounds.np_lower, bounds.np_upper)))
             nuf_values.add(float(np.clip(self._previous_nuf_target(previous), bounds.nuf_lower, bounds.nuf_upper)))
@@ -242,12 +254,24 @@ class Leader:
             "leader_nuf_bound_lower": bounds.nuf_lower,
             "leader_nuf_bound_upper": bounds.nuf_upper,
             "leader_nuf_heuristic_target": bounds.heuristic_nuf,
+            "leader_nuf_arrival_target": bounds.nuf_arrival_target,
+            "leader_nuf_queue_drain_target": bounds.nuf_queue_drain_target,
             "leader_np_movement_min_net_flow_veh_h": bounds.movement_min_net_flow_veh_h,
             "leader_np_movement_max_net_flow_veh_h": bounds.movement_max_net_flow_veh_h,
             "leader_np_movement_lower": bounds.movement_np_lower,
             "leader_np_movement_upper": bounds.movement_np_upper,
+            "leader_np_capacity_min_net_flow_veh_h": bounds.movement_capacity_min_net_flow_veh_h,
+            "leader_np_capacity_max_net_flow_veh_h": bounds.movement_capacity_max_net_flow_veh_h,
+            "leader_np_capacity_lower": bounds.movement_capacity_np_lower,
+            "leader_np_capacity_upper": bounds.movement_capacity_np_upper,
             "leader_np_movement_lower_active": float(bounds.movement_np_lower_active),
             "leader_np_movement_upper_active": float(bounds.movement_np_upper_active),
+            "leader_search_demand_stress": bounds.demand_stress,
+            "leader_search_density_stress": bounds.density_stress,
+            "leader_search_ramp_queue_stress": bounds.ramp_queue_stress,
+            "leader_search_urban_storage_stress": bounds.urban_storage_stress,
+            "leader_search_incident_stress": bounds.incident_stress,
+            "leader_search_stress_index": bounds.stress_index,
         }
 
     def _candidate_bounds(
@@ -259,12 +283,29 @@ class Leader:
     ) -> LeaderCandidateBounds:
         leader = self.cfg.leader
         forecast_steps = list(forecast) if forecast else []
+        if forecast_steps:
+            demand = self._forecast_demand_summary(forecast_steps)
         density_ratio = self._density_ratio(state)
+        stress = self._leader_search_stress(state, demand)
         feasible_nuf = self._feasible_nuf_capacity(state, previous, demand)
         if density_ratio <= leader.metering_activation_density_ratio:
             feasible_nuf = max(feasible_nuf, self.cfg.network.total_ramp_capacity)
         nuf_lower = max(float(leader.N_UF_star_range[0]), self._minimum_nuf_target())
-        nuf_upper = min(leader.N_UF_star_range[1], feasible_nuf)
+        nuf_arrival_target = self._nuf_arrival_target(demand)
+        nuf_queue_drain_target = self._nuf_queue_drain_target(state, demand)
+        stress_fraction = float(np.clip(stress["stress_index"], 0.0, 1.0))
+        stress_nuf_upper = (
+            self.cfg.network.total_ramp_capacity * (0.45 + 0.55 * stress_fraction)
+            if stress_fraction > 1.0e-9
+            else feasible_nuf
+        )
+        nuf_upper_target = max(
+            feasible_nuf,
+            nuf_arrival_target,
+            nuf_queue_drain_target,
+            stress_nuf_upper,
+        )
+        nuf_upper = min(leader.N_UF_star_range[1], nuf_upper_target)
         nuf_upper = max(nuf_lower, nuf_upper)
         heuristic_nuf = min(self._heuristic_nuf_target(state, previous, demand), nuf_upper)
         # fix 1: 저혼잡에서 N_UF* 하한을 heuristic의 일정비율로 강제하던 clamp. 기본 0.0(강제 없음)이라
@@ -280,13 +321,21 @@ class Leader:
             forecast_steps,
             nuf_upper,
         )
+        (
+            capacity_np_lower,
+            capacity_np_upper,
+            capacity_min_net,
+            capacity_max_net,
+        ) = self._movement_capacity_np_bounds(forecast_steps, nuf_upper)
         # N_P_star는 보호영역 누적의 setpoint이지 한 step에서 반드시 도달 가능한 상태가 아니다.
         # movement reachability는 진단/anchor로만 쓰고, PFO식 낮은 누적 운전점도 탐색한다.
         # Proposed Stackelberg N_P_star is a direct net-inflow target [veh] over
         # the follower evaluation horizon. Bound it by movement-level
         # inflow-minus-outflow reachability, not by N_P_crit.
-        np_lower = max(base_np_lower, movement_np_lower)
-        np_upper = min(base_np_upper, movement_np_upper)
+        widened_np_lower = movement_np_lower + stress_fraction * (capacity_np_lower - movement_np_lower)
+        widened_np_upper = movement_np_upper + stress_fraction * (capacity_np_upper - movement_np_upper)
+        np_lower = max(base_np_lower, min(movement_np_lower, widened_np_lower))
+        np_upper = min(base_np_upper, max(movement_np_upper, widened_np_upper))
         if np_lower > np_upper:
             if base_np_upper < movement_np_lower:
                 np_lower = np_upper = movement_np_lower
@@ -301,18 +350,195 @@ class Leader:
             nuf_lower=float(nuf_lower),
             nuf_upper=float(nuf_upper),
             heuristic_nuf=float(heuristic_nuf),
+            nuf_arrival_target=float(nuf_arrival_target),
+            nuf_queue_drain_target=float(nuf_queue_drain_target),
             movement_min_net_flow_veh_h=float(min_net),
             movement_max_net_flow_veh_h=float(max_net),
             movement_np_lower=float(movement_np_lower),
             movement_np_upper=float(movement_np_upper),
+            movement_capacity_min_net_flow_veh_h=float(capacity_min_net),
+            movement_capacity_max_net_flow_veh_h=float(capacity_max_net),
+            movement_capacity_np_lower=float(capacity_np_lower),
+            movement_capacity_np_upper=float(capacity_np_upper),
             movement_np_lower_active=float(np_lower) > float(base_np_lower) + 1.0e-9,
             movement_np_upper_active=float(np_upper) < float(base_np_upper) - 1.0e-9,
+            demand_stress=float(stress["demand_stress"]),
+            density_stress=float(stress["density_stress"]),
+            ramp_queue_stress=float(stress["ramp_queue_stress"]),
+            urban_storage_stress=float(stress["urban_storage_stress"]),
+            incident_stress=float(stress["incident_stress"]),
+            stress_index=float(stress["stress_index"]),
         )
 
     def _np_target_horizon_h(self, forecast: list[DemandStep]) -> float:
         steps = forecast[: max(1, self.cfg.mpc.horizon_steps)] if forecast else []
         count = len(steps) if steps else max(1, int(self.cfg.mpc.horizon_steps))
         return float(max(self.cfg.simulation.T_c_h * count, 1.0e-9))
+
+    def _np_anchor_values(
+        self,
+        bounds: LeaderCandidateBounds,
+        previous: Optional[ControlAction] = None,
+    ) -> set[float]:
+        lower, upper = bounds.np_lower, bounds.np_upper
+        span = max(upper - lower, 0.0)
+        anchors = {
+            float(np.clip(0.0, lower, upper)),
+            float(np.clip(bounds.movement_np_lower, lower, upper)),
+            float(np.clip(bounds.movement_np_upper, lower, upper)),
+            float(np.clip(bounds.movement_capacity_np_lower, lower, upper)),
+            float(np.clip(bounds.movement_capacity_np_upper, lower, upper)),
+        }
+        fractions = [0.25, 0.5, 0.75]
+        if bounds.stress_index >= 0.35:
+            fractions.extend([0.125, 0.375, 0.625, 0.875])
+        for fraction in fractions:
+            anchors.add(float(lower + fraction * span))
+        if previous is not None:
+            anchors.add(float(np.clip(previous.N_P_star, lower, upper)))
+        return anchors
+
+    def _nuf_anchor_values(
+        self,
+        bounds: LeaderCandidateBounds,
+        previous: Optional[ControlAction] = None,
+    ) -> set[float]:
+        lower, upper = bounds.nuf_lower, bounds.nuf_upper
+        anchors = {
+            float(np.clip(lower, lower, upper)),
+            float(np.clip(upper, lower, upper)),
+            float(np.clip(bounds.heuristic_nuf, lower, upper)),
+            float(np.clip(bounds.nuf_arrival_target, lower, upper)),
+            float(np.clip(bounds.nuf_queue_drain_target, lower, upper)),
+        }
+        total_cap = max(float(self.cfg.network.total_ramp_capacity), 1.0e-9)
+        fractions = [0.5, 0.75, 0.9, 1.0]
+        if bounds.stress_index >= 0.35:
+            fractions.extend([0.25, 0.6, 0.8, 0.95])
+        for fraction in fractions:
+            anchors.add(float(np.clip(fraction * total_cap, lower, upper)))
+        if previous is not None:
+            anchors.add(float(np.clip(self._previous_nuf_target(previous), lower, upper)))
+        return anchors
+
+    def _nuf_arrival_target(self, demand: Optional[DemandStep]) -> float:
+        if demand is None:
+            return 0.0
+        return float(sum(max(0.0, value) for value in demand.ramp_arrival.values()))
+
+    def _nuf_queue_drain_target(self, state: TrafficState, demand: Optional[DemandStep]) -> float:
+        queue_flow = sum(max(0.0, value) for value in state.ramp_queue.values()) / max(
+            self.cfg.simulation.T_c_h,
+            1.0e-9,
+        )
+        return float(min(
+            self.cfg.network.total_ramp_capacity,
+            self._nuf_arrival_target(demand) + queue_flow,
+        ))
+
+    def _leader_search_stress(
+        self,
+        state: TrafficState,
+        demand: Optional[DemandStep],
+    ) -> Dict[str, float]:
+        net = self.cfg.network
+        demand_stress = 0.0
+        incident_stress = 0.0
+        if demand is not None:
+            mainline_cap = max(net.freeway_capacity_veh_h * max(len(net.freeway_links), 1), 1.0e-9)
+            ramp_cap = max(net.total_ramp_capacity, 1.0e-9)
+            boundary_cap = max(
+                len(net.boundary_in_links)
+                * (net.green_max / max(net.cycle_length, 1.0e-9))
+                * net.movement_capacity_veh_h,
+                1.0e-9,
+            )
+            mainline_ratio = sum(max(0.0, value) for value in demand.freeway_mainline.values()) / mainline_cap
+            ramp_ratio = sum(max(0.0, value) for value in demand.ramp_arrival.values()) / ramp_cap
+            boundary_ratio = sum(
+                max(0.0, demand.urban_boundary.get(link, 0.0))
+                for link in net.boundary_in_links
+            ) / boundary_cap
+            demand_stress = float(np.clip((max(mainline_ratio, ramp_ratio, boundary_ratio) - 0.75) / 0.75, 0.0, 1.0))
+            lane_loss = sum(
+                max(0.0, float(value))
+                for by_segment in demand.freeway_lane_loss.values()
+                for value in by_segment.values()
+            )
+            incident_stress = float(np.clip(
+                lane_loss / max(net.freeway_lanes * max(len(net.freeway_links), 1), 1.0),
+                0.0,
+                1.0,
+            ))
+            incident_stress = max(
+                incident_stress,
+                float(np.clip(1.0 - float(getattr(demand, "incident_capacity_factor", 1.0)), 0.0, 1.0)),
+            )
+        density_stress = float(np.clip((self._density_ratio(state) - 0.75) / 0.50, 0.0, 1.0))
+        ramp_queue_stress = self._ramp_queue_pressure(state)
+        urban_ratio = state.protected_accumulation_veh(net) / max(float(self.cfg.leader.N_P_crit_veh), 1.0e-9)
+        urban_storage_stress = float(np.clip((urban_ratio - 0.50) / 0.75, 0.0, 1.0))
+        stress_index = max(
+            demand_stress,
+            density_stress,
+            ramp_queue_stress,
+            urban_storage_stress,
+            incident_stress,
+        )
+        return {
+            "demand_stress": float(demand_stress),
+            "density_stress": float(density_stress),
+            "ramp_queue_stress": float(ramp_queue_stress),
+            "urban_storage_stress": float(urban_storage_stress),
+            "incident_stress": float(incident_stress),
+            "stress_index": float(stress_index),
+        }
+
+    def _movement_capacity_np_bounds(
+        self,
+        forecast: list[DemandStep],
+        nuf_upper: float,
+    ) -> tuple[float, float, float, float]:
+        min_net, max_net = self._movement_capacity_net_flow_bounds(nuf_upper)
+        horizon_h = self._np_target_horizon_h(forecast)
+        return (
+            float(min_net * horizon_h),
+            float(max_net * horizon_h),
+            float(min_net),
+            float(max_net),
+        )
+
+    def _movement_capacity_net_flow_bounds(self, nuf_upper: float) -> tuple[float, float]:
+        net = self.cfg.network
+        flow_max = float(net.green_max) / max(float(net.cycle_length), 1.0e-9) * float(net.movement_capacity_veh_h)
+        total_ramp_cap = max(float(net.total_ramp_capacity), 1.0e-9)
+        ramp_counts: Dict[str, int] = {}
+        for spec in net.urban_movements.values():
+            if str(spec.get("kind", "")) != "on_ramp":
+                continue
+            ramp = str(spec.get("ramp", ""))
+            if ramp:
+                ramp_counts[ramp] = ramp_counts.get(ramp, 0) + 1
+        inflow_cap = 0.0
+        outflow_cap = 0.0
+        for spec in net.urban_movements.values():
+            kind = str(spec.get("kind", ""))
+            if kind not in {"boundary_in", "off_ramp", "boundary_out", "on_ramp"}:
+                continue
+            cap_flow = flow_max
+            if kind == "on_ramp":
+                ramp = str(spec.get("ramp", ""))
+                share = float(net.ramp_capacity_veh_h.get(ramp, 0.0)) / total_ramp_cap
+                cap_flow = float(np.clip(
+                    nuf_upper * share / max(ramp_counts.get(ramp, 1), 1),
+                    0.0,
+                    flow_max,
+                ))
+            if kind in {"boundary_in", "off_ramp"}:
+                inflow_cap += cap_flow
+            else:
+                outflow_cap += cap_flow
+        return float(-outflow_cap), float(inflow_cap)
 
     def _movement_np_bounds(
         self,
@@ -343,11 +569,8 @@ class Leader:
         # 후보 범위(feasible set)는 현재 state+첫-스텝 수요로 정해 forecast-미래에 무관하게 둔다
         # (forecast 민감도는 후보 평가에서 다룬다 — leader 후보 설계 계약). 첫-스텝 도착률을
         # np 목표 horizon으로 스케일해 큐와 합산한다.
-        dt_h = max(float(self.cfg.simulation.T_c_h), 1.0e-9)
-        first_step = list(forecast)[:1]
-        step_arrivals = movement_forecast_arrivals_veh(self.cfg, first_step)
-        horizon_scale = horizon_h / dt_h
-        arrivals = {movement: value * horizon_scale for movement, value in step_arrivals.items()}
+        forecast_steps = list(forecast)[: max(1, self.cfg.mpc.horizon_steps)]
+        arrivals = movement_forecast_arrivals_veh(self.cfg, forecast_steps)
         total_ramp_cap = max(float(net.total_ramp_capacity), 1.0e-9)
         ramp_counts: Dict[str, int] = {}
         for spec in net.urban_movements.values():

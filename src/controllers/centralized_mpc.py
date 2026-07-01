@@ -1,4 +1,6 @@
-# budgeted centralized MPC — WU-CC-F(green+VSL)와 PROPOSED-CENTRALIZED(full authority) 공용 (spec 16.6/16.9)
+# Centralized MPC reference for WU-CC-F and PROPOSED-CENTRALIZED.
+# Default mode solves a full-network bounded SLSQP problem; structured-grid
+# search remains available as a fallback/reference mode (spec 16.6/16.9).
 from __future__ import annotations
 
 import time
@@ -540,6 +542,121 @@ class CentralizedMPC:
         })
         return float(best_obj), best_control, evals, improved_in_fine
 
+    def _slsqp_search(
+        self,
+        state: TrafficState,
+        forecast: List[DemandStep],
+        previous: ControlAction,
+    ) -> tuple[float, ControlAction, int, bool]:
+        """Full-network centralized NLP/SQP reference.
+
+        Wu et al. (2022)의 CC scheme처럼 전체 mixed-network control vector를
+        하나의 중앙 NLP로 묶고, SciPy SLSQP로 bounded continuous optimization을
+        수행한다. Green/offset/RM/allocation은 연속 변수로 최적화하고, VSL은
+        기존 plant 제약과 같은 repair/quantization 경로를 통과시켜 평가한다.
+        """
+        try:
+            from scipy.optimize import minimize
+        except Exception:
+            best_obj, best_control, evals, fine_improved = self._structured_grid_search(
+                state, forecast, previous,
+            )
+            best_control.diagnostics.update({
+                "centralized_solver_mode_slsqp": 1.0,
+                "centralized_slsqp_available": 0.0,
+                "centralized_slsqp_fallback_structured_grid": 1.0,
+                "centralized_slsqp_success": 0.0,
+            })
+            return best_obj, best_control, evals, fine_improved
+
+        lower, upper, names = self._vector_bounds(previous)
+        bounds = list(zip(lower.tolist(), upper.tolist()))
+        span = np.maximum(upper - lower, 1.0e-9)
+        maxiter = max(1, int(self.cfg.mpc.optimizer_maxiter))
+        n_starts = max(1, int(self.cfg.mpc.optimizer_n_starts))
+        time_index = int(round(state.time_sec / max(self.cfg.simulation.control_interval, 1.0e-9)))
+        rng = np.random.default_rng(int(self.cfg.simulation.random_seed) + 15485863 * time_index)
+
+        evals = 0
+        best_obj = float("inf")
+        best_control = previous.copy()
+        success_count = 0
+        last_message = ""
+
+        def evaluate(vec: np.ndarray) -> float:
+            nonlocal evals, best_obj, best_control
+            evals += 1
+            try:
+                clipped = np.clip(np.asarray(vec, dtype=float), lower, upper)
+                control = self._control_from_vector(clipped, names, previous)
+                states, trajectory_ttt = self._predict_with_ttt(state, control, forecast)
+                objective = self._objective(states, control, previous, trajectory_ttt)
+            except Exception:
+                return 1.0e18
+            if np.isfinite(objective) and objective < best_obj - 1.0e-9:
+                best_obj = float(objective)
+                best_control = control.copy()
+            return float(objective if np.isfinite(objective) else 1.0e18)
+
+        def clipped_vector(control: ControlAction) -> np.ndarray:
+            return np.clip(self._vector_from_control(control, names), lower, upper)
+
+        starts: list[np.ndarray] = [
+            clipped_vector(previous),
+            clipped_vector(_wu_fixed_base(self.cfg)),
+            lower + 0.5 * span,
+        ]
+        while len(starts) < n_starts:
+            starts.append(lower + rng.random(len(lower)) * span)
+        starts = starts[:n_starts]
+
+        # 모든 초기점에서 같은 중앙 NLP를 풀고, Wu 논문처럼 objective가 가장 낮은 해를 채택한다.
+        for start_vec in starts:
+            result = minimize(
+                evaluate,
+                start_vec,
+                method="SLSQP",
+                bounds=bounds,
+                options={
+                    "maxiter": maxiter,
+                    "ftol": float(self.cfg.mpc.centralized_slsqp_ftol),
+                    "disp": False,
+                },
+            )
+            last_message = str(getattr(result, "message", ""))
+            if bool(getattr(result, "success", False)):
+                success_count += 1
+            evaluate(np.asarray(result.x, dtype=float))
+
+        if not np.isfinite(best_obj):
+            best_obj, best_control, evals_grid, fine_improved = self._structured_grid_search(
+                state, forecast, previous,
+            )
+            best_control.diagnostics.update({
+                "centralized_solver_mode_slsqp": 1.0,
+                "centralized_slsqp_available": 1.0,
+                "centralized_slsqp_fallback_structured_grid": 1.0,
+                "centralized_slsqp_success": 0.0,
+                "centralized_slsqp_evaluations_before_fallback": float(evals),
+            })
+            return best_obj, best_control, evals + evals_grid, fine_improved
+
+        best_control.diagnostics.update({
+            "centralized_solver_mode_slsqp": 1.0,
+            "centralized_solver_mode_structured_grid": 0.0,
+            "centralized_slsqp_available": 1.0,
+            "centralized_slsqp_fallback_structured_grid": 0.0,
+            "centralized_slsqp_starts": float(len(starts)),
+            "centralized_slsqp_success_count": float(success_count),
+            "centralized_slsqp_success": float(success_count > 0),
+            "centralized_slsqp_evaluations": float(evals),
+            "centralized_slsqp_variable_count": float(len(names)),
+            "centralized_slsqp_maxiter": float(maxiter),
+            "centralized_slsqp_ftol": float(self.cfg.mpc.centralized_slsqp_ftol),
+            "centralized_slsqp_last_message_length": float(len(last_message)),
+        })
+        return float(best_obj), best_control, evals, success_count == 0
+
     # ---------- decide ----------
 
     def decide_with_info(
@@ -551,7 +668,16 @@ class CentralizedMPC:
         start = time.perf_counter()
         forecast = list(demand_forecast)
         previous = previous_control or self.previous_control or _wu_fixed_base(self.cfg)
-        best_obj, best_control, evals, fine_improved = self._structured_grid_search(state, forecast, previous)
+        if self.cfg.mpc.centralized_solver_mode == "slsqp":
+            best_obj, best_control, evals, fine_improved = self._slsqp_search(state, forecast, previous)
+        else:
+            best_obj, best_control, evals, fine_improved = self._structured_grid_search(
+                state, forecast, previous,
+            )
+            best_control.diagnostics.update({
+                "centralized_solver_mode_slsqp": 0.0,
+                "centralized_solver_mode_structured_grid": 1.0,
+            })
         converged = not fine_improved
         self.previous_control = best_control
         return CentralizedDecisionInfo(

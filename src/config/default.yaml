@@ -213,7 +213,9 @@ mpc:
   control_horizon_steps: 3
   urban_freeway_tts_weight_alpha: 1.0
   optimizer_maxiter: 40
-  optimizer_n_starts: 2
+  optimizer_n_starts: 5
+  centralized_solver_mode: slsqp
+  centralized_slsqp_ftol: 0.001
   relaxed_quantized_controls: false
   relaxed_green_quantum_sec: 1.0
   relaxed_vsl_quantum_km_h: 10.0
@@ -235,6 +237,7 @@ mpc:
   stackelberg_fallback_full_refresh_sec: 1800.0
   stackelberg_fallback_use_cached_pfo: true
   stackelberg_enable_fallback: true
+  stackelberg_enable_pfo_incumbent: true
   # guard의 leader vs PFO 비교를 rollout-TTT로(2026-06-25). false면 기존 penalized-objective.
   stackelberg_fallback_guard_use_rollout_ttt: true
   stackelberg_leader_parallel_backend: serial
@@ -242,6 +245,10 @@ mpc:
   stackelberg_inner_backend_when_outer_process: thread
   stackelberg_reuse_process_pool: true
   stackelberg_allocation_mode: direct
+  wu_faithful_np_predictor_mode: legacy
+  wu_np_storage_guard: false
+  wu_np_arrival_mode: horizon
+  wu_np_phase_substep: false
 leader:
   objective_mode: follower_ttt
   w_P: 1.0

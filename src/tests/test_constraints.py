@@ -3,6 +3,7 @@ from unittest.mock import patch
 
 import numpy as np
 
+from src.controllers.centralized_mpc import CentralizedMPC
 from src.controllers.distributed_coordinator import AgentSolve, DistributedCoordinator, build_agent_specs
 from src.controllers.freeway_follower import FreewayFollower, FreewayFollowerResult
 from src.controllers.leader import Leader, LeaderAction
@@ -17,6 +18,7 @@ from src.controllers.spillback_constraints import (
     onramp_combined_capacity_veh,
 )
 from src.controllers.stackelberg_mpc import StackelbergMPCController, _LeaderCandidateEvaluation
+from src.controllers.stackelberg_wu_metered import StackelbergWuMeteredController
 from src.controllers.structured_grid import sensitivity_probe_candidates, structured_grid_candidates
 from src.controllers.urban_follower import UrbanFollower
 from src.controllers.wu_distributed import WuDistributedController, _wu_fixed_control
@@ -48,6 +50,35 @@ class ConstraintTests(unittest.TestCase):
         self.assertFalse(cfg.mpc.relaxed_quantized_controls)
         self.assertEqual(cfg.mpc.relaxed_rounding_mode, "floor")
         self.assertIsInstance(UrbanFollower(cfg).allocation_module, InflowOutflowAllocationModule)
+
+    def test_centralized_slsqp_solver_path_runs_and_logs(self):
+        cfg = ExperimentConfig.from_file(
+            "src/config/default.yaml",
+            {
+                "simulation": {"T_total": 180.0},
+                "mpc": {
+                    "horizon_steps": 1,
+                    "centralized_solver_mode": "slsqp",
+                    "optimizer_maxiter": 1,
+                    "optimizer_n_starts": 1,
+                },
+            },
+        )
+        state = TrafficState.initial(cfg)
+        demand = DemandProfile(cfg, ScenarioConfig("test")).at(0.0)
+        info = CentralizedMPC(cfg, mode="wu").decide_with_info(state, [demand])
+
+        self.assertGreater(info.solver_evaluations, 0)
+        self.assertEqual(info.control.diagnostics["centralized_solver_mode_slsqp"], 1.0)
+        self.assertEqual(info.control.diagnostics["centralized_slsqp_available"], 1.0)
+        self.assertIn("centralized_slsqp_variable_count", info.control.diagnostics)
+
+    def test_centralized_solver_mode_validation(self):
+        with self.assertRaises(ValueError):
+            ExperimentConfig.from_file(
+                "src/config/default.yaml",
+                {"mpc": {"centralized_solver_mode": "not_a_solver"}},
+            )
 
     def test_allocation_batch_objective_matches_scalar_objective(self):
         cfg = short_config()
@@ -925,6 +956,65 @@ class ConstraintTests(unittest.TestCase):
         self.assertGreater(high_diag["distributed_response_ramp_release_veh"], low_diag["distributed_response_ramp_release_veh"])
         self.assertLess(high_obj, low_obj)
 
+    def test_distributed_response_density_rollout_charges_ramp_release(self):
+        cfg = ExperimentConfig.from_file(
+            "src/config/default.yaml",
+            {
+                "simulation": {"T_total": 180.0},
+                "mpc": {"horizon_steps": 1, "max_nash_iter": 1},
+                "freeway_follower": {"density_penalty": 1.0},
+            },
+        )
+        coordinator = DistributedCoordinator(cfg)
+        state = TrafficState.initial(cfg)
+        for link in cfg.network.freeway_links:
+            state.freeway_density[link] = [
+                0.98 * cfg.network.rho_crit for _ in state.freeway_density[link]
+            ]
+            state.freeway_speed[link] = [cfg.network.v_min for _ in state.freeway_speed[link]]
+        for ramp in cfg.network.ramps:
+            state.ramp_queue[ramp] = cfg.network.ramp_queue_max_veh
+        forecast = [
+            DemandStep(
+                freeway_mainline={link: 0.0 for link in cfg.network.freeway_links},
+                urban_boundary={},
+                ramp_arrival={ramp: 0.0 for ramp in cfg.network.ramps},
+            )
+        ]
+
+        low = ControlAction.fixed(cfg)
+        low.ramp_metering = {ramp: 0.0 for ramp in cfg.network.ramps}
+        high = ControlAction.fixed(cfg)
+        high.ramp_metering = dict(cfg.network.ramp_capacity_veh_h)
+
+        _, low_diag = coordinator._response_tts_objective(
+            state,
+            low,
+            forecast,
+            residual=0.0,
+            proxy_objective=0.0,
+        )
+        _, high_diag = coordinator._response_tts_objective(
+            state,
+            high,
+            forecast,
+            residual=0.0,
+            proxy_objective=0.0,
+        )
+
+        self.assertGreater(
+            high_diag["distributed_response_ramp_release_veh"],
+            low_diag["distributed_response_ramp_release_veh"],
+        )
+        self.assertGreater(
+            high_diag["distributed_response_density_excess_tts"],
+            low_diag["distributed_response_density_excess_tts"],
+        )
+        self.assertGreater(
+            high_diag["distributed_response_density_rollout_peak_density"],
+            low_diag["distributed_response_density_rollout_peak_density"],
+        )
+
     def test_distributed_response_objective_uses_lightweight_proxy_without_rollout(self):
         cfg = ExperimentConfig.from_file(
             "src/config/default.yaml",
@@ -1341,6 +1431,95 @@ class ConstraintTests(unittest.TestCase):
         self.assertEqual(meta["leader_fallback_guard_rejected_leader"], 1.0)
         self.assertEqual(meta["leader_fallback_guard_terminal_severe"], 1.0)
 
+    def test_stackelberg_wu_pfo_incumbent_can_be_selected_when_leader_is_worse(self):
+        cfg = ExperimentConfig.from_file(
+            "src/config/default.yaml",
+            {
+                "simulation": {"T_total": 180.0},
+                "mpc": {
+                    "horizon_steps": 1,
+                    "max_nash_iter": 1,
+                    "stackelberg_enable_fallback": False,
+                    "stackelberg_enable_pfo_incumbent": True,
+                    "stackelberg_leader_parallel_backend": "serial",
+                    "grid_parallel_backend": "serial",
+                },
+            },
+        )
+        controller = StackelbergWuMeteredController(cfg)
+        state = TrafficState.initial(cfg)
+        forecast = DemandProfile(cfg, ScenarioConfig("test")).horizon(0.0, 1)
+        previous = ControlAction.fixed(cfg)
+
+        pfo_candidates = controller._evaluate_fallback_candidates(
+            state,
+            forecast,
+            previous,
+            start_index=1000000,
+        )
+        self.assertEqual(len(pfo_candidates), 1)
+        pfo = pfo_candidates[0]
+        worse_control = ControlAction.fixed(cfg)
+        worse_control.N_P_star = pfo.action.N_P_star
+        worse_control.N_UF_star = pfo.action.N_UF_star
+        worse_nash = NashResult(
+            control=worse_control,
+            objective_value=pfo.objective + 10.0,
+            iterations=1,
+            converged=True,
+            residual_objective=0.0,
+            residual_control=0.0,
+            diagnostics={},
+        )
+        worse_leader = _LeaderCandidateEvaluation(
+            index=0,
+            action=LeaderAction(pfo.action.N_P_star, pfo.action.N_UF_star),
+            nash=worse_nash,
+            objective=pfo.objective + 10.0,
+            objective_terms={
+                "leader_total_objective": pfo.objective + 10.0,
+                "leader_objective_base": pfo.objective + 10.0,
+                "leader_follower_ttt_base": pfo.objective + 10.0,
+            },
+            metadata={},
+            rollout_used=False,
+            stage="refined",
+        )
+
+        best, meta = controller._select_with_fallback_guard([worse_leader], pfo_candidates)
+
+        self.assertEqual(best.stage, "fallback_pfo")
+        self.assertEqual(meta["leader_pfo_incumbent_active"], 1.0)
+        self.assertEqual(meta["leader_pfo_incumbent_selected"], 1.0)
+        for key in (
+            "leader_pfo_incumbent_N_P_star",
+            "leader_pfo_incumbent_N_UF_star",
+            "leader_pfo_incumbent_objective",
+        ):
+            self.assertIsInstance(meta[key], float)
+
+    def test_stackelberg_wu_pfo_incumbent_flag_can_disable_candidate(self):
+        cfg = short_config().with_updates({
+            "mpc": {
+                "stackelberg_enable_fallback": False,
+                "stackelberg_enable_pfo_incumbent": False,
+            },
+        })
+        controller = StackelbergWuMeteredController(cfg)
+        state = TrafficState.initial(cfg)
+        forecast = DemandProfile(cfg, ScenarioConfig("test")).horizon(0.0, 1)
+
+        self.assertFalse(controller._pfo_incumbent_fallback_enabled())
+        self.assertEqual(
+            controller._evaluate_fallback_candidates(
+                state,
+                forecast,
+                ControlAction.fixed(cfg),
+                start_index=1000000,
+            ),
+            [],
+        )
+
     def test_stackelberg_leader_evaluates_coarse_and_refined_grid(self):
         cfg = ExperimentConfig.from_file(
             "src/config/default.yaml",
@@ -1592,6 +1771,48 @@ class ConstraintTests(unittest.TestCase):
         self.assertLess(bounds.np_upper, float(cfg.leader.N_P_star_range[1]))
         self.assertGreater(bounds.np_upper, 0.0)
         self.assertLessEqual(bounds.np_lower, 0.0)
+
+    def test_leader_search_area_expands_under_high_stress(self):
+        cfg = ExperimentConfig.from_file(
+            "src/config/default.yaml",
+            {"mpc": {"leader_candidate_count": 21}},
+        )
+        leader = Leader(cfg)
+        low_state = TrafficState.initial(cfg)
+        high_state = TrafficState.initial(cfg)
+        for link, values in high_state.freeway_density.items():
+            high_state.freeway_density[link] = [
+                cfg.network.rho_crit * 1.05 for _ in values
+            ]
+        for ramp in cfg.network.ramps:
+            high_state.ramp_queue[ramp] = 0.75 * cfg.network.ramp_queue_max_veh
+
+        low_forecast = DemandProfile(cfg, ScenarioConfig("low")).horizon(0.0, cfg.mpc.horizon_steps)
+        high_forecast = DemandProfile(
+            cfg,
+            ScenarioConfig("sweet_220_like", urban_scale=2.2, freeway_scale=2.2, ramp_scale=2.2),
+        ).horizon(0.0, cfg.mpc.horizon_steps)
+
+        low_bounds = leader._candidate_bounds(low_state, None, low_forecast[0], low_forecast)
+        high_bounds = leader._candidate_bounds(high_state, None, high_forecast[0], high_forecast)
+        high_actions = leader.candidates(high_state, ControlAction.fixed(cfg), high_forecast[0], high_forecast)
+
+        self.assertGreater(high_bounds.stress_index, low_bounds.stress_index)
+        self.assertGreater(
+            high_bounds.np_upper - high_bounds.np_lower,
+            low_bounds.np_upper - low_bounds.np_lower,
+        )
+        self.assertGreaterEqual(high_bounds.nuf_upper, 0.75 * cfg.network.total_ramp_capacity)
+        self.assertTrue(any(
+            action.N_P_star <= high_bounds.movement_capacity_np_lower + 1.0e-6
+            or action.N_P_star >= min(high_bounds.movement_capacity_np_upper, high_bounds.np_upper) - 1.0e-6
+            for action in high_actions
+        ))
+        self.assertTrue(any(
+            abs(action.N_UF_star - high_bounds.nuf_queue_drain_target) <= 1.0e-6
+            or abs(action.N_UF_star - high_bounds.nuf_upper) <= 1.0e-6
+            for action in high_actions
+        ))
 
     def test_leader_objective_matches_spec_accumulation_form(self):
         cfg = ExperimentConfig.from_file(
@@ -2081,6 +2302,140 @@ class ConstraintTests(unittest.TestCase):
                         for i in range(len(after))
                     )
                 )
+
+    def test_wu_faithful_np_target_projects_to_signed_feasible_range(self):
+        cfg = ExperimentConfig.from_file(
+            "src/config/default.yaml",
+            {
+                "simulation": {"T_total": 180.0},
+                "mpc": {"horizon_steps": 1, "max_nash_iter": 1},
+            },
+        )
+        state = TrafficState.initial(cfg)
+        forecast = DemandProfile(
+            cfg,
+            ScenarioConfig("urban_med", urban_scale=1.15, freeway_scale=1.0, ramp_scale=1.15),
+        ).horizon(0.0, 1)
+        previous = ControlAction.fixed(cfg)
+
+        for target in (9999.0, -9999.0):
+            result = WuFaithfulFollower(cfg).solve(
+                state.copy(),
+                LeaderAction(target, 1000.0),
+                forecast,
+                previous,
+            )
+            diagnostics = result.diagnostics
+            projected = float(diagnostics["wu_faithful_np_projected_target_veh"])
+            feasible_min = float(diagnostics["wu_faithful_np_feasible_min_veh"])
+            feasible_max = float(diagnostics["wu_faithful_np_feasible_max_veh"])
+            sum_nin = float(diagnostics["wu_faithful_sum_nin"])
+
+            self.assertLessEqual(feasible_min - 1.0e-9, projected)
+            self.assertLessEqual(projected, feasible_max + 1.0e-9)
+            self.assertLessEqual(abs(sum_nin - projected), 1.0)
+            self.assertEqual(result.control.N_P_star, target)
+            self.assertEqual(
+                float(diagnostics["urban_net_inflow_target_veh"]),
+                projected,
+            )
+            self.assertNotEqual(
+                float(diagnostics["urban_net_inflow_original_target_veh"]),
+                projected,
+            )
+
+    def test_wu_faithful_np_predictor_modes_project_in_vehicle_units(self):
+        for mode, code in (
+            ("storage_aware", 1.0),
+            ("current_interval", 2.0),
+            ("phase_substep", 3.0),
+        ):
+            cfg = ExperimentConfig.from_file(
+                "src/config/default.yaml",
+                {
+                    "simulation": {"T_total": 180.0},
+                    "mpc": {
+                        "horizon_steps": 3,
+                        "max_nash_iter": 1,
+                        "wu_faithful_np_predictor_mode": mode,
+                    },
+                },
+            )
+            state = TrafficState.initial(cfg)
+            forecast = DemandProfile(
+                cfg,
+                ScenarioConfig("urban_med", urban_scale=1.15, freeway_scale=1.0, ramp_scale=1.15),
+            ).horizon(0.0, 3)
+            result = WuFaithfulFollower(cfg).solve(
+                state.copy(),
+                LeaderAction(9999.0, 1000.0),
+                forecast,
+                ControlAction.fixed(cfg),
+            )
+            diagnostics = result.diagnostics
+            projected = float(diagnostics["wu_faithful_np_projected_target_veh"])
+            sum_nin = float(diagnostics["wu_faithful_sum_nin"])
+
+            self.assertAlmostEqual(
+                float(diagnostics["wu_faithful_np_predictor_mode_code"]),
+                code,
+            )
+            self.assertAlmostEqual(
+                float(diagnostics[f"wu_faithful_np_predictor_{mode}"]),
+                1.0,
+            )
+            self.assertLessEqual(
+                float(diagnostics["wu_faithful_np_feasible_min_veh"]) - 1.0e-9,
+                projected,
+            )
+            self.assertLessEqual(
+                projected,
+                float(diagnostics["wu_faithful_np_feasible_max_veh"]) + 1.0e-9,
+            )
+            self.assertLessEqual(abs(sum_nin - projected), 2.0)
+            self.assertAlmostEqual(
+                float(diagnostics["urban_net_inflow_target_veh"]),
+                projected,
+            )
+
+    def test_wu_faithful_storage_predictor_caps_blocked_receiving_space(self):
+        overrides = {
+            "simulation": {"T_total": 180.0},
+            "mpc": {"horizon_steps": 3, "max_nash_iter": 1},
+        }
+        cfg_legacy = ExperimentConfig.from_file("src/config/default.yaml", overrides)
+        cfg_storage = ExperimentConfig.from_file(
+            "src/config/default.yaml",
+            {
+                **overrides,
+                "mpc": {
+                    **overrides["mpc"],
+                    "wu_faithful_np_predictor_mode": "storage_aware",
+                },
+            },
+        )
+        state_legacy = TrafficState.initial(cfg_legacy)
+        state_storage = TrafficState.initial(cfg_storage)
+        for link in state_storage.urban_link_storage:
+            state_storage.urban_link_storage[link] = 0.0
+        forecast = DemandProfile(
+            cfg_legacy,
+            ScenarioConfig("urban_med", urban_scale=1.15, freeway_scale=1.0, ramp_scale=1.15),
+        ).horizon(0.0, 3)
+        horizon_h = cfg_legacy.simulation.T_c_h * 3
+        legacy = WuFaithfulFollower(cfg_legacy)
+        storage = WuFaithfulFollower(cfg_storage)
+        legacy_arrivals = legacy._movement_forecast_arrivals_veh(forecast)
+        storage_arrivals = storage._movement_forecast_arrivals_veh(forecast)
+
+        _, legacy_max, _ = legacy._np_feasible_sum_range(
+            state_legacy, legacy_arrivals, horizon_h,
+        )
+        _, storage_max, _ = storage._np_feasible_sum_range(
+            state_storage, storage_arrivals, horizon_h,
+        )
+
+        self.assertLess(storage_max, legacy_max)
 
     def test_freeway_follower_handles_capacity_drop_with_valid_vsl(self):
         cfg = ExperimentConfig.from_file(

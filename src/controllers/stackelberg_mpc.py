@@ -187,6 +187,7 @@ class StackelbergMPCController:
         search_mode = str(self.cfg.mpc.leader_search_mode)
         fallback_start_index = 1000000
         fallback_enabled = bool(self.cfg.mpc.stackelberg_enable_fallback)
+        pfo_incumbent_enabled = bool(self._pfo_incumbent_fallback_enabled())
         fallback_evaluations = (
             self._evaluate_fallback_candidates(
                 state,
@@ -194,7 +195,7 @@ class StackelbergMPCController:
                 previous,
                 start_index=fallback_start_index,
             )
-            if fallback_enabled
+            if fallback_enabled or pfo_incumbent_enabled
             else []
         )
         fallback_incumbent_obj = min(
@@ -231,6 +232,7 @@ class StackelbergMPCController:
             "leader_search_mode_grid": float(search_mode == "grid"),
             "leader_search_mode_continuous": float(search_mode == "continuous"),
             "leader_fallback_enabled": float(fallback_enabled),
+            "leader_pfo_incumbent_enabled": float(pfo_incumbent_enabled),
             "leader_fallback_incumbent_seed_active": float(fallback_incumbent_obj < float("inf")),
             "leader_fallback_incumbent_objective": float(
                 fallback_incumbent_obj if fallback_incumbent_obj < float("inf") else 0.0
@@ -701,7 +703,7 @@ class StackelbergMPCController:
         np_mid = 0.5 * (np_lower + np_upper)
         nuf_mid = 0.5 * (nuf_lower + nuf_upper)
         heuristic_nuf = float(min(max(float(bounds.heuristic_nuf), nuf_lower), nuf_upper))
-        return [
+        actions = [
             clipped(previous.N_P_star, previous.N_UF_star),
             clipped(np_mid, nuf_mid),
             clipped(0.0, heuristic_nuf),
@@ -714,6 +716,16 @@ class StackelbergMPCController:
             clipped(np_mid, nuf_lower),
             clipped(np_mid, nuf_upper),
         ]
+        np_anchors = sorted(self.leader._np_anchor_values(bounds, previous))
+        nuf_anchors = sorted(self.leader._nuf_anchor_values(bounds, previous))
+        for np_value in np_anchors:
+            actions.append(clipped(np_value, heuristic_nuf))
+        for nuf_value in nuf_anchors:
+            actions.append(clipped(0.0, nuf_value))
+        for np_value in (np_anchors[0], np_anchors[-1]) if np_anchors else ():
+            for nuf_value in (nuf_anchors[0], nuf_anchors[-1]) if nuf_anchors else ():
+                actions.append(clipped(np_value, nuf_value))
+        return self._unique_leader_actions(actions)
 
     def _continuous_prefilter_actions(
         self,
@@ -935,6 +947,9 @@ class StackelbergMPCController:
         step_index = int(round(float(state.time_sec) / interval))
         refresh_steps = max(1, int(round(float(self.cfg.mpc.stackelberg_fallback_full_refresh_sec) / interval)))
         return step_index == 0 or step_index % refresh_steps == 0
+
+    def _pfo_incumbent_fallback_enabled(self) -> bool:
+        return False
 
     def _unique_leader_actions(self, actions: list[LeaderAction]) -> list[LeaderAction]:
         seen: set[tuple[float, float]] = set()

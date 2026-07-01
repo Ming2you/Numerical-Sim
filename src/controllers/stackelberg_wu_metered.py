@@ -19,7 +19,7 @@ follower를 바꾸려면 `_make_follower_solver`만 오버라이드하면 된다
 """
 from __future__ import annotations
 
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 from src.controllers.stackelberg_mpc import (
     StackelbergMPCController,
@@ -36,6 +36,289 @@ class StackelbergWuMeteredController(StackelbergMPCController):
 
     def _make_follower_solver(self, cfg: ExperimentConfig):
         return WuFaithfulFollower(cfg)
+
+    def _pfo_incumbent_fallback_enabled(self) -> bool:
+        return bool(getattr(self.cfg.mpc, "stackelberg_enable_pfo_incumbent", True))
+
+    @staticmethod
+    def _finite(value: float) -> bool:
+        return value == value and value not in (float("inf"), -float("inf"))
+
+    def _pfo_equivalent_action(
+        self,
+        control: ControlAction,
+        state: TrafficState,
+        forecast: List[DemandStep],
+        previous: ControlAction,
+    ) -> tuple[LeaderAction, Dict[str, float]]:
+        # PFO response를 leader local search의 target 좌표계로 변환한다.
+        diagnostics = dict(control.diagnostics)
+        raw_np = float(diagnostics.get("wu_faithful_sum_nin", control.N_P_star))
+        if not self._finite(raw_np):
+            raw_np = float(control.N_P_star)
+        raw_nuf = float(sum(float(v) for v in control.ramp_metering.values()))
+        if raw_nuf <= 1.0e-9 and self._finite(float(control.N_UF_star)):
+            raw_nuf = float(control.N_UF_star)
+        bounds = self.leader._candidate_bounds(state, previous, forecast[0], forecast)
+        clipped_np = float(min(max(raw_np, bounds.np_lower), bounds.np_upper))
+        clipped_nuf = float(min(max(raw_nuf, bounds.nuf_lower), bounds.nuf_upper))
+        return LeaderAction(clipped_np, clipped_nuf), {
+            "leader_pfo_incumbent_N_P_star": clipped_np,
+            "leader_pfo_incumbent_N_UF_star": clipped_nuf,
+            "leader_pfo_incumbent_raw_N_P_star": raw_np,
+            "leader_pfo_incumbent_raw_N_UF_star": raw_nuf,
+            "leader_pfo_incumbent_N_P_clipped": float(abs(clipped_np - raw_np) > 1.0e-9),
+            "leader_pfo_incumbent_N_UF_clipped": float(abs(clipped_nuf - raw_nuf) > 1.0e-9),
+        }
+
+    def _evaluate_fallback_candidates(
+        self,
+        state: TrafficState,
+        forecast: List[DemandStep],
+        previous: ControlAction,
+        start_index: int,
+    ) -> List[_LeaderCandidateEvaluation]:
+        self._pfo_incumbent_center: Optional[LeaderAction] = None
+        self._pfo_incumbent_eval: Optional[_LeaderCandidateEvaluation] = None
+        if not self._pfo_incumbent_fallback_enabled():
+            return []
+        pfo_previous = previous.copy()
+        pfo_previous.N_P_star = 0.0
+        pfo_previous.N_UF_star = 0.0
+        pfo_previous.inflow_outflow_allocation = {}
+        pfo_nash = self.nash_solver.solve(state.copy(), None, forecast, pfo_previous)
+        action, action_meta = self._pfo_equivalent_action(pfo_nash.control, state, forecast, previous)
+        pfo_nash.control.N_P_star = float(action.N_P_star)
+        pfo_nash.control.N_UF_star = float(action.N_UF_star)
+        pfo_nash.control.diagnostics.update(action_meta)
+        predicted_states, follower_ttt, rollout_used = self._leader_evaluation_base(
+            state,
+            pfo_nash,
+            forecast,
+        )
+        objective_terms = self.leader.objective_terms(
+            predicted_states,
+            pfo_nash.control,
+            previous,
+            follower_ttt,
+            pfo_nash.converged,
+            pfo_nash.residual_objective,
+            pfo_nash.residual_control,
+        )
+        metadata = {
+            "leader_response_proxy_state_count": float(len(predicted_states)),
+            "leader_pfo_incumbent_active": 1.0,
+            "leader_pfo_incumbent_candidate": 1.0,
+            "leader_pfo_incumbent_objective": float(objective_terms["leader_total_objective"]),
+            **action_meta,
+        }
+        pfo_eval = _LeaderCandidateEvaluation(
+            index=start_index,
+            action=action,
+            nash=pfo_nash,
+            objective=float(objective_terms["leader_total_objective"]),
+            objective_terms=objective_terms,
+            metadata=metadata,
+            rollout_used=rollout_used,
+            stage="fallback_pfo",
+        )
+        self._pfo_incumbent_center = action
+        self._pfo_incumbent_eval = pfo_eval
+        self._append_progress_event(
+            event="candidate_evaluated",
+            stage="fallback_pfo",
+            completed=1,
+            total=1,
+            evaluation=pfo_eval,
+            best_objective=pfo_eval.objective,
+        )
+        return [pfo_eval]
+
+    def _pfo_centered_previous(self, previous: ControlAction) -> ControlAction:
+        center = getattr(self, "_pfo_incumbent_center", None)
+        if center is None:
+            return previous
+        seeded = previous.copy()
+        seeded.N_P_star = float(center.N_P_star)
+        seeded.N_UF_star = float(center.N_UF_star)
+        return seeded
+
+    def _grid_leader_search(
+        self,
+        state: TrafficState,
+        forecast: List[DemandStep],
+        previous: ControlAction,
+        global_refresh: bool,
+        fallback_incumbent_obj: float,
+    ):
+        return super()._grid_leader_search(
+            state,
+            forecast,
+            self._pfo_centered_previous(previous),
+            global_refresh,
+            fallback_incumbent_obj,
+        )
+
+    @staticmethod
+    def _leader_action_key(action: LeaderAction) -> tuple[float, float]:
+        return (round(float(action.N_P_star), 6), round(float(action.N_UF_star), 6))
+
+    def _pfo_global_scout_evaluations(
+        self,
+        state: TrafficState,
+        forecast: List[DemandStep],
+        previous: ControlAction,
+        local_evaluations: List[_LeaderCandidateEvaluation],
+        fallback_incumbent_obj: float,
+    ) -> tuple[List[_LeaderCandidateEvaluation], Dict[str, float]]:
+        bounds = self.leader._candidate_bounds(state, previous, forecast[0], forecast)
+        np_lower, np_upper = float(bounds.np_lower), float(bounds.np_upper)
+        nuf_lower, nuf_upper = float(bounds.nuf_lower), float(bounds.nuf_upper)
+
+        def clipped(np_value: float, nuf_value: float) -> LeaderAction:
+            return LeaderAction(
+                float(min(max(float(np_value), np_lower), np_upper)),
+                float(min(max(float(nuf_value), nuf_lower), nuf_upper)),
+            )
+
+        seed_actions = self._unique_leader_actions(
+            [LeaderAction(previous.N_P_star, previous.N_UF_star)]
+            + self._continuous_seed_actions(
+                previous,
+                bounds,
+                np_lower,
+                np_upper,
+                nuf_lower,
+                nuf_upper,
+                clipped,
+            )
+        )
+        scout_top_k = max(1, min(2, int(self.cfg.mpc.leader_continuous_prefilter_top_k)))
+        scout_actions, scout_meta = self._continuous_prefilter_actions(
+            seed_actions,
+            state,
+            forecast,
+            previous,
+            np_lower,
+            np_upper,
+            nuf_lower,
+            nuf_upper,
+            prefilter_samples=int(self.cfg.mpc.leader_continuous_prefilter_samples),
+            prefilter_top_k=scout_top_k,
+        )
+        seen = {self._leader_action_key(item.action) for item in local_evaluations}
+        scout_actions = [
+            action for action in scout_actions
+            if self._leader_action_key(action) not in seen
+        ]
+        full_budget = max(
+            0,
+            min(2, int(self.cfg.mpc.leader_continuous_max_evals) - len(local_evaluations)),
+        )
+        if full_budget <= 0 or not scout_actions:
+            return [], {
+                "leader_pfo_anchor_scout_full_budget": float(full_budget),
+                "leader_pfo_anchor_scout_candidate_count": float(len(scout_actions)),
+                "leader_pfo_anchor_scout_full_evaluated_count": 0.0,
+                "leader_pfo_anchor_scout_top_k": float(scout_top_k),
+            }
+        incumbent = min(
+            [float(fallback_incumbent_obj)]
+            + [float(item.objective) for item in local_evaluations],
+        )
+        scout_evals, _ = self._evaluate_continuous_action_set(
+            scout_actions[:full_budget],
+            state,
+            forecast,
+            previous,
+            stage="continuous_global_scout",
+            index_start=len(local_evaluations),
+            incumbent_obj=incumbent,
+        )
+        prefixed = {
+            f"leader_pfo_anchor_scout_{key}": float(value)
+            for key, value in scout_meta.items()
+            if isinstance(value, (int, float, bool))
+        }
+        prefixed.update({
+            "leader_pfo_anchor_scout_full_budget": float(full_budget),
+            "leader_pfo_anchor_scout_candidate_count": float(len(scout_actions)),
+            "leader_pfo_anchor_scout_full_evaluated_count": float(len(scout_evals)),
+            "leader_pfo_anchor_scout_top_k": float(scout_top_k),
+        })
+        return scout_evals, prefixed
+
+    def _continuous_leader_search(
+        self,
+        state: TrafficState,
+        forecast: List[DemandStep],
+        previous: ControlAction,
+        global_refresh: bool,
+        fallback_incumbent_obj: float,
+    ):
+        centered_previous = self._pfo_centered_previous(previous)
+        if global_refresh and getattr(self, "_pfo_incumbent_center", None) is not None:
+            local_evals, base_meta, proxy_meta, refined_meta = super()._continuous_leader_search(
+                state,
+                forecast,
+                centered_previous,
+                False,
+                fallback_incumbent_obj,
+            )
+            scout_evals, scout_meta = self._pfo_global_scout_evaluations(
+                state,
+                forecast,
+                centered_previous,
+                local_evals,
+                fallback_incumbent_obj,
+            )
+            full_evals = local_evals + scout_evals
+            base_meta.update(scout_meta)
+            base_meta.update({
+                "leader_pfo_anchor_global_hybrid_active": 1.0,
+                "leader_pfo_anchor_local_full_evaluated_count": float(len(local_evals)),
+                "leader_pfo_anchor_total_full_evaluated_count": float(len(full_evals)),
+                "leader_candidate_global_refresh": 1.0,
+                "leader_candidate_coarse_global": 1.0,
+                "leader_candidate_coarse_local": 0.0,
+            })
+            return full_evals, base_meta, proxy_meta, refined_meta
+        return super()._continuous_leader_search(
+            state,
+            forecast,
+            centered_previous,
+            global_refresh,
+            fallback_incumbent_obj,
+        )
+
+    def _select_with_fallback_guard(
+        self,
+        leader_evaluations: List[_LeaderCandidateEvaluation],
+        fallback_evaluations: List[_LeaderCandidateEvaluation],
+    ):
+        best, metadata = super()._select_with_fallback_guard(leader_evaluations, fallback_evaluations)
+        pfo_eval = getattr(self, "_pfo_incumbent_eval", None)
+        pfo_tie_break_selected = False
+        if pfo_eval is not None and best.stage != "fallback_pfo":
+            eps = 1.0e-9
+            if float(best.objective) >= float(pfo_eval.objective) - eps:
+                best = pfo_eval
+                pfo_tie_break_selected = True
+                metadata["leader_fallback_guard_selected"] = 1.0
+                metadata["leader_fallback_guard_selected_pfo"] = 1.0
+                metadata["leader_fallback_guard_rejected_leader"] = 1.0
+        metadata.update({
+            "leader_pfo_incumbent_active": float(pfo_eval is not None),
+            "leader_pfo_incumbent_selected": float(best.stage == "fallback_pfo"),
+            "leader_pfo_incumbent_tie_break_selected": float(pfo_tie_break_selected),
+            "leader_pfo_incumbent_N_P_star": float(pfo_eval.action.N_P_star) if pfo_eval else 0.0,
+            "leader_pfo_incumbent_N_UF_star": float(pfo_eval.action.N_UF_star) if pfo_eval else 0.0,
+            "leader_pfo_incumbent_objective": float(pfo_eval.objective) if pfo_eval else 0.0,
+            "leader_pfo_incumbent_local_center_used": float(
+                pfo_eval is not None and getattr(self, "_pfo_incumbent_center", None) is not None
+            ),
+        })
+        return best, metadata
 
     def _evaluate_candidate_set(
         self,

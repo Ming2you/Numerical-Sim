@@ -3282,6 +3282,87 @@ class DistributedCoordinator:
             total += release[ramp]
         return release, float(total)
 
+    def _estimate_freeway_density_excess_tts(
+        self,
+        state: TrafficState,
+        forecast: list[DemandStep],
+        ramp_release_veh: Mapping[str, float],
+        horizon_h: float,
+    ) -> tuple[float, float, float]:
+        """Approximate candidate-dependent freeway density-excess vehicle-hours.
+
+        The response objective used to charge density excess from the current
+        state only. This rollout pushes ramp release into the configured merge
+        segment so metering changes affect downstream density penalties.
+        """
+        net = self.cfg.network
+        steps = forecast[: max(1, self.cfg.mpc.horizon_steps)]
+        if not steps or horizon_h <= 0.0:
+            return 0.0, state.freeway_segment_vehicles(net), 0.0
+        lane_profile, _lane_diag = effective_lane_profile(state, self.cfg, steps[0])
+        release_rate_by_segment: Dict[tuple[str, int], float] = {}
+        for ramp, vehicles in ramp_release_veh.items():
+            link = net.ramp_to_freeway.get(ramp, "")
+            densities = state.freeway_density.get(link, [])
+            if not link or not densities:
+                continue
+            merge_idx = _configured_segment_index(
+                getattr(net, "ramp_merge_segment_index", {}),
+                ramp,
+                len(densities) // 2,
+                max(len(densities), 1),
+            )
+            key = (link, merge_idx)
+            release_rate_by_segment[key] = release_rate_by_segment.get(key, 0.0) + (
+                max(0.0, float(vehicles)) / max(horizon_h, 1.0e-9)
+            )
+
+        dt_h = self.cfg.simulation.T_c_h
+        density_excess_tts = 0.0
+        terminal_freeway_vehicles = 0.0
+        peak_density = 0.0
+        for link in net.freeway_links:
+            rhos = [max(0.0, float(rho)) for rho in state.freeway_density.get(link, [])]
+            if not rhos:
+                continue
+            speeds = list(state.freeway_speed.get(link, []))
+            lanes = lane_profile.get(link, [float(net.freeway_lanes) for _ in rhos])
+            for step in steps:
+                outflows: list[float] = []
+                next_rhos: list[float] = []
+                for idx, rho in enumerate(rhos):
+                    lane = max(1.0e-9, float(lanes[idx] if idx < len(lanes) else net.freeway_lanes))
+                    speed = max(
+                        net.v_min,
+                        float(speeds[idx] if idx < len(speeds) else net.v_free),
+                    )
+                    q_upstream = (
+                        max(0.0, float(step.freeway_mainline.get(link, 0.0)))
+                        if idx == 0
+                        else outflows[idx - 1]
+                    )
+                    release_rate = release_rate_by_segment.get((link, idx), 0.0)
+                    q_out = max(0.0, rho * speed * lane)
+                    segment_veh_per_density = net.freeway_segment_length_km * lane
+                    rho_next = float(np.clip(
+                        rho + (q_upstream + release_rate - q_out) * dt_h
+                        / max(segment_veh_per_density, 1.0e-9),
+                        0.0,
+                        net.rho_max,
+                    ))
+                    density_excess_tts += 0.5 * (
+                        max(0.0, rho - net.rho_crit)
+                        + max(0.0, rho_next - net.rho_crit)
+                    ) * segment_veh_per_density * dt_h
+                    outflows.append(q_out)
+                    next_rhos.append(rho_next)
+                    peak_density = max(peak_density, rho, rho_next)
+                rhos = next_rhos
+            for idx, rho in enumerate(rhos):
+                lane = max(1.0e-9, float(lanes[idx] if idx < len(lanes) else net.freeway_lanes))
+                terminal_freeway_vehicles += max(0.0, rho) * net.freeway_segment_length_km * lane
+        return float(density_excess_tts), float(terminal_freeway_vehicles), float(peak_density)
+
     def _estimate_mainline_exit_veh(
         self,
         state: TrafficState,
@@ -3443,9 +3524,17 @@ class DistributedCoordinator:
             for values in state.freeway_density.values()
             for rho in values
         )
+        density_excess_tts, density_rollout_terminal, density_rollout_peak = (
+            self._estimate_freeway_density_excess_tts(
+                state,
+                steps,
+                ramp_release_veh,
+                horizon_h,
+            )
+        )
         residual_penalty = max(0.0, residual if np.isfinite(residual) else 0.0) * current_total * horizon_h
         objective = 0.5 * (current_total + terminal_total) * horizon_h
-        objective += self.cfg.freeway_follower.density_penalty * density_excess_veh * horizon_h
+        objective += self.cfg.freeway_follower.density_penalty * density_excess_tts
         objective += residual_penalty
         spillback_penalty = self.cfg.freeway_follower.ramp_queue_penalty * total_spillback_violation * horizon_h
         objective += spillback_penalty
@@ -3484,6 +3573,10 @@ class DistributedCoordinator:
             "distributed_response_residual_penalty": float(residual_penalty),
             "distributed_response_residual": float(residual if np.isfinite(residual) else 0.0),
             "distributed_response_density_excess_veh": float(density_excess_veh),
+            "distributed_response_density_excess_current_tts": float(density_excess_veh * horizon_h),
+            "distributed_response_density_excess_tts": float(density_excess_tts),
+            "distributed_response_density_rollout_terminal_freeway_vehicles": float(density_rollout_terminal),
+            "distributed_response_density_rollout_peak_density": float(density_rollout_peak),
             "distributed_response_spillback_penalty": float(spillback_penalty),
             "distributed_response_onramp_spillback_violation_veh": float(onramp_spillback_violation),
             "distributed_response_offramp_spillback_violation_veh": float(offramp_spillback_violation),
