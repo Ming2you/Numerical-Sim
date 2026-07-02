@@ -12,7 +12,8 @@ follower를 바꾸려면 `_make_follower_solver`만 오버라이드하면 된다
   - `_realized_net_inflow_veh` / `_evaluate_fallback_candidates`: DistributedCoordinator가 아니면
     각각 None / [] 반환 → output closure는 intent 유지, fallback 후보(no_control/pfo) 비활성.
     즉 우리 경우 fallback guard는 leader 후보만 보고 선택한다(leader vs PFO 비교는 러너가 한다).
-  - `_proxy_score_candidate`: else 분기에서 cheap state-vehicle proxy로 prefilter — 정상 동작.
+  - `_proxy_score_candidate`: 베이스 else 분기는 action-blind(모든 후보 동점)라 이 파일에서
+    action-aware 버전으로 오버라이드한다(용량비례 metering 근사 + plant rollout 채점).
 
 따라서 서브클래스는 follower 주입만 한다. cfg는 호출처에서 follower_solver_mode를 임의값(예:
 "wu_metered")으로 두거나 기본값 그대로 둬도 무방하다(우리는 mode와 무관하게 항상 주입).
@@ -319,6 +320,69 @@ class StackelbergWuMeteredController(StackelbergMPCController):
             ),
         })
         return best, metadata
+
+    def _proxy_score_candidate(
+        self,
+        index: int,
+        action: LeaderAction,
+        state: TrafficState,
+        forecast: List[DemandStep],
+        previous: ControlAction,
+    ) -> Dict[str, float]:
+        """action-aware prefilter proxy(베이스의 action-blind else 분기 대체).
+
+        베이스 `_proxy_score_candidate`의 else 분기는 현재 state만 읽어 모든 후보의 점수가
+        동일했다(prefilter가 index 순서로 무작위 통과). 여기서는 후보-의존으로 만든다:
+        (1) follower의 hard-budget 분기(N_UF_star>0)를 simplex 탐색 없이 용량비례 배분으로
+        근사해 candidate metering을 구성하고, (2) leader full 평가와 동일한 plant rollout
+        (`self._predict`)으로 예측 상태를 만들어 `objective_terms`로 채점한다(leader는
+        centralized이므로 정보 철학 위반 아님).
+
+        한계: green의 λ(N_P) 응답은 근사하지 않는다 — N_P 차원은 predicted states의
+        protected accumulation 항을 통해서만 간접 반영되며, 주된 후보-분별력은
+        N_UF(metering) 차원에서 나온다."""
+        control = previous.copy()
+        control.N_P_star = float(action.N_P_star)
+        control.N_UF_star = float(action.N_UF_star)
+        net = self.cfg.network
+        if float(action.N_UF_star) > 0.0:
+            # follower hard-budget 분기 근사: link budget = ω_F[link]·N_UF_star를
+            # 소유 ramp들에 용량비례로 배분(각 ramp은 capacity로 clamp).
+            follower = self.nash_solver
+            for link in net.freeway_links:
+                model = follower._local_freeway_models[link]
+                owned = list(model.owned_ramps)
+                if not owned:
+                    continue
+                caps = {r: float(net.ramp_capacity_veh_h[r]) for r in owned}
+                cap_sum = sum(caps.values())
+                if cap_sum <= 0.0:
+                    continue
+                omega = float(follower._wu._omega_f.get(link, 0.0))
+                budget = min(max(omega * float(action.N_UF_star), 0.0), cap_sum)
+                for ramp in owned:
+                    share = budget * (caps[ramp] / cap_sum)
+                    control.ramp_metering[ramp] = float(min(max(share, 0.0), caps[ramp]))
+        # N_UF_star<=0이면 follower autonomous 분기에 대응 — previous.ramp_metering 유지.
+        states, rollout_ttt = self._predict(state, control, forecast)
+        terms = self.leader.objective_terms(
+            states,
+            control,
+            previous,
+            float(rollout_ttt),
+            True,
+            0.0,
+            0.0,
+        )
+        return {
+            "index": float(index),
+            "N_P_star": float(action.N_P_star),
+            "N_UF_star": float(action.N_UF_star),
+            "objective": float(terms["leader_total_objective"]),
+            "base": float(terms["leader_objective_base"]),
+            "follower_ttt": float(terms["leader_follower_ttt_base"]),
+            "spillback_violation": 0.0,
+        }
 
     def _evaluate_candidate_set(
         self,
