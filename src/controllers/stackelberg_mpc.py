@@ -85,6 +85,123 @@ class StackelbergMPCController:
             return DistributedCoordinator(cfg)
         return NashSolver(cfg)
 
+    @staticmethod
+    def _finite_float(value: object) -> Optional[float]:
+        try:
+            out = float(value)
+        except (TypeError, ValueError):
+            return None
+        if out != out or out in (float("inf"), -float("inf")):
+            return None
+        return out
+
+    @staticmethod
+    def _merged_nash_diagnostics(nash: NashResult) -> Dict[str, float]:
+        diag = dict(getattr(nash, "diagnostics", {}) or {})
+        diag.update(getattr(nash.control, "diagnostics", {}) or {})
+        return diag
+
+    def _follower_realized_net_inflow_veh(
+        self,
+        nash: NashResult,
+    ) -> tuple[Optional[float], Optional[float], str]:
+        """Spec 4.1 follower projection: 후보 solve 뒤 실현 가능한 N_P[veh]를 읽는다."""
+        diag = self._merged_nash_diagnostics(nash)
+        projected_sources = [
+            ("leader_projected_N_P_star", "leader_projected"),
+            ("wu_faithful_np_projected_target_veh", "wu_projected"),
+            ("wu_faithful_np_projected_target", "wu_projected"),
+            ("distributed_grid_leader_projected_net_inflow_veh", "distributed_projected"),
+            ("allocation_projected_net_inflow_veh", "allocation_projected"),
+        ]
+        realized_sources = [
+            ("leader_realized_N_P_star", "leader_realized"),
+            ("wu_faithful_sum_nin", "wu_sum_nin"),
+            ("distributed_grid_leader_projected_net_inflow_veh", "distributed_projected"),
+            ("allocation_projected_net_inflow_veh", "allocation_projected"),
+        ]
+        projected: Optional[float] = None
+        for key, _source in projected_sources:
+            value = self._finite_float(diag.get(key))
+            if value is not None:
+                projected = value
+                break
+        for key, source in realized_sources:
+            value = self._finite_float(diag.get(key))
+            if value is not None:
+                return value, projected if projected is not None else value, source
+        if projected is not None:
+            return projected, projected, "projected_only"
+        return None, None, "none"
+
+    def _close_nash_response_leader_action(
+        self,
+        action: LeaderAction,
+        nash: NashResult,
+        forecast: Optional[list[DemandStep]] = None,
+        intent_action: Optional[LeaderAction] = None,
+    ) -> tuple[LeaderAction, Dict[str, float]]:
+        """Follower solve 후 leader 좌표를 raw intent가 아니라 실현/사영 N_P로 닫는다."""
+        raw_intent = intent_action if intent_action is not None else action
+        intent_np = float(raw_intent.N_P_star)
+        intent_nuf = float(raw_intent.N_UF_star)
+        solver_np = float(action.N_P_star)
+        solver_nuf = float(action.N_UF_star)
+        realized_np, projected_np, source = self._follower_realized_net_inflow_veh(nash)
+        closed_np = solver_np if realized_np is None else float(realized_np)
+        closed_projected_np = solver_np if projected_np is None else float(projected_np)
+        realized_nuf = sum(float(v) for v in nash.control.ramp_metering.values())
+        if self._finite_float(realized_nuf) is None:
+            realized_nuf = solver_nuf
+        source_names = [
+            "leader_realized",
+            "wu_sum_nin",
+            "wu_projected",
+            "distributed_projected",
+            "allocation_projected",
+            "projected_only",
+            "none",
+        ]
+        changed_np = abs(closed_np - intent_np) > 1.0e-9
+        horizon_steps = len(forecast or [])
+        if horizon_steps <= 0:
+            horizon_steps = int(self.cfg.mpc.horizon_steps)
+        horizon_steps = max(1, min(horizon_steps, int(self.cfg.mpc.horizon_steps)))
+        horizon_h = max(float(self.cfg.simulation.T_c_h) * horizon_steps, 1.0e-9)
+        metadata: Dict[str, float] = {
+            "leader_intent_N_P_star": intent_np,
+            "leader_intent_N_UF_star": intent_nuf,
+            "leader_solver_N_P_star": solver_np,
+            "leader_solver_N_UF_star": solver_nuf,
+            "leader_realized_N_P_star": closed_np,
+            "leader_projected_N_P_star": closed_projected_np,
+            "leader_realized_N_UF_star": float(realized_nuf),
+            "leader_response_closure_applied": float(realized_np is not None),
+            "leader_response_closure_changed_N_P": float(changed_np),
+            "leader_response_N_P_star_realization_residual": float(intent_np - closed_np),
+            "leader_response_N_P_star_projection_residual": float(intent_np - closed_projected_np),
+            "leader_response_N_UF_star_realization_residual": float(intent_nuf - realized_nuf),
+            "leader_candidate_intent_N_P_star": intent_np,
+            "leader_candidate_intent_N_UF_star": intent_nuf,
+            "leader_candidate_solver_N_P_star": solver_np,
+            "leader_candidate_solver_N_UF_star": solver_nuf,
+            "leader_candidate_realized_N_P_star": closed_np,
+            "leader_candidate_projected_N_P_star": closed_projected_np,
+            "leader_candidate_realized_N_UF_star": float(realized_nuf),
+            "urban_net_inflow_original_target_veh": intent_np,
+            "urban_net_inflow_target_veh": closed_projected_np,
+            "urban_net_inflow_target_veh_h": float(closed_projected_np / horizon_h),
+        }
+        for name in source_names:
+            metadata[f"leader_response_net_inflow_source_{name}"] = float(source == name)
+        # Wu follower의 horizon rollout objective는 control.N_P_star를 읽으므로 closure 후 다시 평가한다.
+        metadata["leader_response_closure_use_rollout_objective"] = float(source.startswith("wu_"))
+        nash.control.N_P_star = closed_np
+        nash.control.N_UF_star = float(realized_nuf)
+        nash.control.diagnostics.update(metadata)
+        nash.diagnostics.update(metadata)
+        return LeaderAction(closed_np, float(realized_nuf)), metadata
+
     def _append_progress_event(
         self,
         *,
@@ -244,6 +361,21 @@ class StackelbergMPCController:
                 "index": float(item.index),
                 "N_P_star": float(item.action.N_P_star),
                 "N_UF_star": float(item.action.N_UF_star),
+                "intent_N_P_star": float(
+                    item.metadata.get("leader_candidate_intent_N_P_star", item.action.N_P_star)
+                ),
+                "intent_N_UF_star": float(
+                    item.metadata.get("leader_candidate_intent_N_UF_star", item.action.N_UF_star)
+                ),
+                "realized_N_P_star": float(
+                    item.metadata.get("leader_candidate_realized_N_P_star", item.action.N_P_star)
+                ),
+                "projected_N_P_star": float(
+                    item.metadata.get("leader_candidate_projected_N_P_star", item.action.N_P_star)
+                ),
+                "realized_N_UF_star": float(
+                    item.metadata.get("leader_candidate_realized_N_UF_star", item.action.N_UF_star)
+                ),
                 "objective": float(item.objective),
                 "base": float(item.objective_terms["leader_objective_base"]),
                 "follower_ttt": float(item.objective_terms["leader_follower_ttt_base"]),
@@ -300,6 +432,24 @@ class StackelbergMPCController:
         feasible-set 경로에서만 생성), injection 진단과 동일하게 coordinator의 feasible-set
         진단을 committed control에 직접 적용해 service(inflow−outflow)를 구한다.
         distributed follower가 아니거나 키 부재 시 None(=닫기 보류)."""
+        # WuFaithful follower는 leader target을 자체 feasible Σnin 범위로 투영한다.
+        # output closure는 raw intent가 아니라 실제 follower response[veh/horizon]를
+        # 다음 step seed와 로그의 committed target으로 사용해야 한다.
+        diag = getattr(control, "diagnostics", {}) or {}
+        for key in (
+            "leader_response_realized_N_P_star",
+            "leader_realized_N_P_star",
+            "wu_faithful_realized_N_P_star",
+            "wu_faithful_np_realized_sum_nin_veh",
+            "wu_faithful_sum_nin",
+            "wu_faithful_np_projected_target_veh",
+            "wu_faithful_np_projected_target",
+        ):
+            if key not in diag:
+                continue
+            value = float(diag.get(key, 0.0))
+            if value == value and value not in (float("inf"), -float("inf")):
+                return value
         if not isinstance(self.nash_solver, DistributedCoordinator):
             return None
         probe_leader = LeaderAction(float(control.N_P_star), float(control.N_UF_star))
@@ -324,18 +474,36 @@ class StackelbergMPCController:
         `leader_intent_*` 진단키로, 기존 `leader_selected_*`(=intent)도 그대로 보존해 추적성을 유지한다.
         """
         control = best.control
-        intent_np = float(control.N_P_star)
-        intent_nuf = float(control.N_UF_star)
+        diag = getattr(control, "diagnostics", None) or {}
+        intent_np = self._finite_float(diag.get("leader_intent_N_P_star"))
+        intent_nuf = self._finite_float(diag.get("leader_intent_N_UF_star"))
+        if intent_np is None:
+            intent_np = float(control.N_P_star)
+        if intent_nuf is None:
+            intent_nuf = float(control.N_UF_star)
+        realized_np = self._finite_float(diag.get("leader_response_realized_N_P_star"))
+        if realized_np is None:
+            realized_np = self._finite_float(diag.get("leader_realized_N_P_star"))
+        projected_np = self._finite_float(diag.get("leader_response_projected_N_P_star"))
+        if projected_np is None:
+            projected_np = self._finite_float(diag.get("leader_projected_N_P_star"))
         # realized net-inflow[veh]: committed control의 service로 직접 계산(부재 시 intent 유지).
-        realized_net = self._realized_net_inflow_veh(control, state, forecast)
+        realized_net = self._realized_net_inflow_veh(control, state, forecast) if realized_np is None else realized_np
         realized_np = intent_np if realized_net is None else realized_net
+        projected_np = realized_np if projected_np is None else projected_np
         # realized metering[veh/h]: follower가 적용한 ramp metering 합(이미 공급/수용 상한에 사영됨).
         realized_nuf = sum(float(v) for v in control.ramp_metering.values())
         control.diagnostics["leader_intent_N_P_star"] = intent_np
         control.diagnostics["leader_intent_N_UF_star"] = intent_nuf
         control.diagnostics["leader_realized_N_P_star"] = realized_np
+        control.diagnostics["leader_projected_N_P_star"] = projected_np
         control.diagnostics["leader_realized_N_UF_star"] = realized_nuf
         control.diagnostics["leader_output_closure_applied"] = 1.0 if realized_net is not None else 0.0
+        horizon_steps = max(1, min(len(forecast), int(self.cfg.mpc.horizon_steps)))
+        horizon_h = max(float(self.cfg.simulation.T_c_h) * horizon_steps, 1.0e-9)
+        control.diagnostics["urban_net_inflow_original_target_veh"] = intent_np
+        control.diagnostics["urban_net_inflow_target_veh"] = projected_np
+        control.diagnostics["urban_net_inflow_target_veh_h"] = float(projected_np / horizon_h)
         control.N_P_star = realized_np
         control.N_UF_star = realized_nuf
 
@@ -346,8 +514,8 @@ class StackelbergMPCController:
         # realized(commit), seed는 intent로 분리한다.
         diag = getattr(out, "diagnostics", None) or {}
         if float(diag.get("leader_output_closure_applied", 0.0)) >= 0.5:
-            out.N_P_star = float(diag.get("leader_intent_N_P_star", out.N_P_star))
-            out.N_UF_star = float(diag.get("leader_intent_N_UF_star", out.N_UF_star))
+            out.N_P_star = float(diag.get("leader_realized_N_P_star", out.N_P_star))
+            out.N_UF_star = float(diag.get("leader_realized_N_UF_star", out.N_UF_star))
         if out.N_UF_star > 1.0e-9:
             return out
         net = self.cfg.network
@@ -778,11 +946,16 @@ class StackelbergMPCController:
             ]
         rows = sorted(rows, key=lambda row: (row["objective"], row["spillback_violation"], row["index"]))
         top_k = max(1, int(prefilter_top_k))
-        selected_indices = [int(row["index"]) for row in rows[:top_k]]
-        selected_actions = [samples[idx] for idx in selected_indices if 0 <= idx < len(samples)]
+        selected_actions = [
+            LeaderAction(float(row["N_P_star"]), float(row["N_UF_star"]))
+            for row in rows[:top_k]
+        ]
         # 기본/직전 seed가 cheap proxy에서 살짝 밀려도 한 개는 남겨 guard 역할을 하게 한다.
         if seed_actions:
-            selected_actions.insert(0, seed_actions[0])
+            seed0, _ = self._project_action_to_follower_feasible_np(
+                seed_actions[0], state, forecast, previous
+            )
+            selected_actions.insert(0, seed0)
         selected_actions = self._unique_leader_actions(selected_actions)
         objectives = [float(row["objective"]) for row in rows] or [0.0]
         best = rows[0] if rows else {"index": 0.0, "objective": 0.0}
@@ -1003,6 +1176,10 @@ class StackelbergMPCController:
         stage: str = "coarse",
         incumbent_obj: float = float("inf"),
     ) -> _LeaderCandidateEvaluation:
+        raw_action = LeaderAction(float(action.N_P_star), float(action.N_UF_star))
+        action, projection_meta = self._project_action_to_follower_feasible_np(
+            action, state, forecast, previous
+        )
         if isinstance(self.nash_solver, DistributedCoordinator):
             nash = self.nash_solver.solve(
                 state.copy(),
@@ -1013,6 +1190,12 @@ class StackelbergMPCController:
             )
         else:
             nash = self.nash_solver.solve(state.copy(), action, forecast, previous)
+        evaluated_action, closure_metadata = self._close_nash_response_leader_action(
+            action,
+            nash,
+            forecast,
+            intent_action=raw_action,
+        )
         predicted_states, follower_ttt, rollout_used = self._leader_evaluation_base(
             state,
             nash,
@@ -1029,6 +1212,10 @@ class StackelbergMPCController:
         )
         metadata = {
             "leader_response_proxy_state_count": float(len(predicted_states)),
+            "leader_candidate_raw_N_P_star": float(raw_action.N_P_star),
+            "leader_candidate_raw_N_UF_star": float(raw_action.N_UF_star),
+            **projection_meta,
+            **closure_metadata,
             "leader_candidate_incumbent_active": float(incumbent_obj < float("inf")),
             "leader_candidate_incumbent_objective": float(incumbent_obj if incumbent_obj < float("inf") else 0.0),
             "leader_candidate_follower_early_terminated_candidates": float(
@@ -1040,7 +1227,7 @@ class StackelbergMPCController:
         }
         return _LeaderCandidateEvaluation(
             index=index,
-            action=action,
+            action=evaluated_action,
             nash=nash,
             objective=float(objective_terms["leader_total_objective"]),
             objective_terms=objective_terms,
@@ -1347,6 +1534,9 @@ class StackelbergMPCController:
         forecast: list[DemandStep],
         previous: ControlAction,
     ) -> Dict[str, float]:
+        action, projection_meta = self._project_action_to_follower_feasible_np(
+            action, state, forecast, previous
+        )
         control = previous.copy()
         control.N_P_star = float(action.N_P_star)
         control.N_UF_star = float(action.N_UF_star)
@@ -1388,7 +1578,57 @@ class StackelbergMPCController:
             "base": float(terms["leader_objective_base"]),
             "follower_ttt": float(terms["leader_follower_ttt_base"]),
             "spillback_violation": float(proxy_diag.get("distributed_response_total_spillback_violation_veh", 0.0)),
+            **projection_meta,
         }
+
+    def _project_action_to_follower_feasible_np(
+        self,
+        action: LeaderAction,
+        state: TrafficState,
+        forecast: list[DemandStep],
+        previous: ControlAction,
+    ) -> tuple[LeaderAction, Dict[str, float]]:
+        """Follower가 구현 가능한 Σnin 범위로 leader N_P 후보를 투영한다.
+
+        PFO anchor/fallback 없이도 Stackelberg leader가 raw infeasible target 공간을
+        탐색하지 않도록, follower solver가 노출하는 현재 feasible range를 사용한다.
+        N_UF는 기존 freeway follower projection 경로가 처리하므로 여기서는 N_P만
+        조정한다. 단위는 controller horizon 전체 차량수[veh].
+        """
+        feasible_fn = getattr(self.nash_solver, "leader_np_feasible_range", None)
+        if feasible_fn is None:
+            return action, {"leader_np_follower_feasible_projection_active": 0.0}
+        try:
+            sigma_min, sigma_max, diag = feasible_fn(state.copy(), list(forecast), previous.copy())
+        except Exception:
+            return action, {
+                "leader_np_follower_feasible_projection_active": 0.0,
+                "leader_np_follower_feasible_projection_failed": 1.0,
+            }
+        lower = min(float(sigma_min), float(sigma_max))
+        upper = max(float(sigma_min), float(sigma_max))
+        raw_np = float(action.N_P_star)
+        np_coordination_mode = str(
+            getattr(self.cfg.mpc, "wu_faithful_np_coordination_mode", "equality")
+        ).lower()
+        if np_coordination_mode == "cap":
+            projected_np = float(min(raw_np, upper))
+        else:
+            projected_np = float(min(max(raw_np, lower), upper))
+        meta = {
+            "leader_np_follower_feasible_projection_active": 1.0,
+            "leader_np_follower_feasible_projection_failed": 0.0,
+            "leader_np_follower_feasible_projection_cap_mode": float(np_coordination_mode == "cap"),
+            "leader_np_follower_feasible_min": lower,
+            "leader_np_follower_feasible_max": upper,
+            "leader_np_raw_N_P_star": raw_np,
+            "leader_np_projected_N_P_star": projected_np,
+            "leader_np_projection_residual": float(raw_np - projected_np),
+            "leader_np_projection_applied": float(abs(raw_np - projected_np) > 1.0e-9),
+        }
+        for key, value in diag.items():
+            meta[f"leader_{key}"] = float(value)
+        return LeaderAction(projected_np, float(action.N_UF_star)), meta
 
     def _prefilter_leader_candidates(
         self,
@@ -1670,9 +1910,30 @@ class StackelbergMPCController:
         objectives = [row["objective"] for row in evaluations]
         selected_stage = selected_eval.stage if selected_eval is not None else str(best.get("stage", ""))
         selected_objective = float(selected_eval.objective) if selected_eval is not None else float(best["objective"])
+        selected_diag = getattr(selected, "diagnostics", None) or {}
+        selected_intent_np = self._finite_float(selected_diag.get("leader_intent_N_P_star"))
+        selected_intent_nuf = self._finite_float(selected_diag.get("leader_intent_N_UF_star"))
+        selected_realized_np = self._finite_float(selected_diag.get("leader_realized_N_P_star"))
+        selected_projected_np = self._finite_float(selected_diag.get("leader_projected_N_P_star"))
+        selected_realized_nuf = self._finite_float(selected_diag.get("leader_realized_N_UF_star"))
+        if selected_intent_np is None:
+            selected_intent_np = float(best.get("intent_N_P_star", selected.N_P_star))
+        if selected_intent_nuf is None:
+            selected_intent_nuf = float(best.get("intent_N_UF_star", selected.N_UF_star))
+        if selected_realized_np is None:
+            selected_realized_np = float(best.get("realized_N_P_star", selected.N_P_star))
+        if selected_projected_np is None:
+            selected_projected_np = float(best.get("projected_N_P_star", selected_realized_np))
+        if selected_realized_nuf is None:
+            selected_realized_nuf = float(best.get("realized_N_UF_star", selected.N_UF_star))
         return {
             "leader_selected_N_P_star": float(selected.N_P_star),
             "leader_selected_N_UF_star": float(selected.N_UF_star),
+            "leader_selected_intent_N_P_star": float(selected_intent_np),
+            "leader_selected_intent_N_UF_star": float(selected_intent_nuf),
+            "leader_selected_realized_N_P_star": float(selected_realized_np),
+            "leader_selected_projected_N_P_star": float(selected_projected_np),
+            "leader_selected_realized_N_UF_star": float(selected_realized_nuf),
             "leader_selected_objective": selected_objective,
             "leader_selected_stage_coarse": float(str(selected_stage).startswith("coarse")),
             "leader_selected_stage_refined": float(selected_stage == "refined"),
@@ -1691,6 +1952,16 @@ class StackelbergMPCController:
             "leader_candidate_best_N_UF_star": float(best["N_UF_star"]),
             "leader_candidate_second_N_P_star": float(second["N_P_star"]),
             "leader_candidate_second_N_UF_star": float(second["N_UF_star"]),
+            "leader_candidate_best_intent_N_P_star": float(best.get("intent_N_P_star", best["N_P_star"])),
+            "leader_candidate_best_intent_N_UF_star": float(best.get("intent_N_UF_star", best["N_UF_star"])),
+            "leader_candidate_best_realized_N_P_star": float(best.get("realized_N_P_star", best["N_P_star"])),
+            "leader_candidate_best_projected_N_P_star": float(best.get("projected_N_P_star", best["N_P_star"])),
+            "leader_candidate_best_realized_N_UF_star": float(best.get("realized_N_UF_star", best["N_UF_star"])),
+            "leader_candidate_second_intent_N_P_star": float(second.get("intent_N_P_star", second["N_P_star"])),
+            "leader_candidate_second_intent_N_UF_star": float(second.get("intent_N_UF_star", second["N_UF_star"])),
+            "leader_candidate_second_realized_N_P_star": float(second.get("realized_N_P_star", second["N_P_star"])),
+            "leader_candidate_second_projected_N_P_star": float(second.get("projected_N_P_star", second["N_P_star"])),
+            "leader_candidate_second_realized_N_UF_star": float(second.get("realized_N_UF_star", second["N_UF_star"])),
             "leader_candidate_best_objective": float(best["objective"]),
             "leader_candidate_second_objective": float(second["objective"]),
             "leader_candidate_objective_gap": float(second["objective"] - best["objective"]),
@@ -1714,6 +1985,8 @@ class StackelbergMPCController:
         # but evaluate leader penalties on future MPC rollout states.
         states, rollout_ttt = self._predict(state, nash.control, forecast)
         if self.cfg.leader.objective_mode == "state_accumulation":
+            return states, rollout_ttt, True
+        if float(nash.control.diagnostics.get("leader_response_closure_use_rollout_objective", 0.0)) >= 0.5:
             return states, rollout_ttt, True
         return states, float(nash.objective_value), True
 

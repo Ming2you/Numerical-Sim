@@ -13957,3 +13957,1218 @@ coarsened part of the action-response space that the legacy P-Stack was
 exploiting. The next useful diagnostic is to compare legacy and WuFaithful
 control trajectories on the same steps, especially green allocation, offset
 changes, total RM release, on-ramp queues, and urban departures.
+
+## 2026-07-02 WuFaithful P-Stack Anchor-Off Standalone Diagnosis
+
+### Purpose
+
+The user clarified that the final P-Stack controller should not depend on a PFO
+anchor, fallback, or scenario-specific guide. A valid Stackelberg controller
+must stand alone and reproduce the target behavior from its own leader-follower
+optimization. Therefore, I reran current WuFaithful P-Stack with:
+
+- PFO incumbent anchor disabled.
+- PFO/no-control fallback disabled.
+- PFO fallback cache disabled.
+- Threaded leader backend retained.
+
+### Commands
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.six_controller_comparison --scenario sweet_155 --controllers PROPOSED-STACKELBERG --T-total 7200 --output outputs\sweet155_pstack_standalone_no_anchor_no_fallback_7200_20260702 --stackelberg-leader-parallel-backend thread --disable-stackelberg-pfo-incumbent --disable-stackelberg-fallback --disable-stackelberg-pfo-fallback-cache
+
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.six_controller_comparison --scenario sweet_190 --controllers PROPOSED-STACKELBERG --T-total 7200 --output outputs\sweet190_pstack_standalone_no_anchor_no_fallback_7200_20260702 --stackelberg-leader-parallel-backend thread --disable-stackelberg-pfo-incumbent --disable-stackelberg-fallback --disable-stackelberg-pfo-fallback-cache
+```
+
+### Results
+
+| scenario | controller | total TTT | urban TTT | freeway TTT | completed veh | terminal veh | compute sec |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| sweet_155 | NO-CONTROL | `8611.785` | `5357.164` | `3254.621` | `23379.9` | `13428.9` | `0.00` |
+| sweet_155 | current PFO | `4490.018` | `3676.465` | `813.553` | `32519.3` | `4244.7` | `161.61` |
+| sweet_155 | current P-Stack, anchor/fallback on | `4568.062` | `3772.098` | `795.964` | `32238.1` | `4527.8` | `841.34` |
+| sweet_155 | current P-Stack, anchor/fallback off | `7765.857` | `6856.346` | `909.511` | `29826.1` | `6970.7` | `690.28` |
+| sweet_155 | legacy pre-WuFaithful P-Stack | `4051.641` | `3318.737` | `732.904` | `33243.2` | `3551.2` | `3219.54` |
+| sweet_190 | NO-CONTROL | `25170.572` | `15393.978` | `9776.594` | `15921.5` | `29139.1` | `0.00` |
+| sweet_190 | current PFO | `13590.622` | `12365.455` | `1225.166` | `29731.7` | `15300.0` | `164.62` |
+| sweet_190 | current P-Stack, anchor/fallback on | `12984.869` | `11581.681` | `1403.187` | `30808.5` | `14194.3` | `827.07` |
+| sweet_190 | current P-Stack, anchor/fallback off | `14234.171` | `12747.286` | `1486.885` | `29412.0` | `15661.2` | `680.29` |
+| sweet_190 | legacy pre-WuFaithful P-Stack | `10728.763` | `9201.420` | `1527.343` | `33260.2` | `11685.0` | `3661.68` |
+
+### Key Diagnostics
+
+Anchor-off P-Stack is not only worse than legacy; it is also worse than current
+PFO in both sweet scenarios.
+
+Leader target behavior:
+
+- `sweet_155`: `N_P_star < 0` in `20/40` steps; min `-3315.0`.
+- `sweet_190`: `N_P_star < 0` in `10/40` steps; min `-3315.0`.
+- In the negative-target windows, WuFaithful follower cannot realize the raw
+  target and projects it to the feasible edge. Example in `sweet_155`:
+  `N_P_star=-3315.0` but projected feasible target is roughly `884-1279 veh`
+  over the horizon.
+
+This means the leader search and follower feasible response are not using the
+same coordinate system. The leader can search and seed infeasible raw targets,
+while the follower silently projects them before computing green allocations.
+
+PFO vs anchor-off P-Stack service comparison:
+
+- `sweet_155`:
+  - PFO urban total departures: `58034.3 veh`.
+  - Anchor-off P-Stack urban total departures: `48237.0 veh`.
+  - PFO boundary-out sink: `15967.7 veh`.
+  - Anchor-off P-Stack boundary-out sink: `13747.9 veh`.
+  - PFO urban TTT: `3676.5 veh-h`.
+  - Anchor-off P-Stack urban TTT: `6856.3 veh-h`.
+- `sweet_190`:
+  - PFO urban total departures: `41777.2 veh`.
+  - Anchor-off P-Stack urban total departures: `40477.2 veh`.
+  - PFO boundary-out sink: `13780.9 veh`.
+  - Anchor-off P-Stack boundary-out sink: `12998.9 veh`.
+
+So the failure mode is not a clean network-level tradeoff where P-Stack stores a
+small queue to improve total throughput. In the standalone run, it reduces urban
+discharge and leaves more vehicles inside the system.
+
+### Diagnosis
+
+The PFO anchor was masking a deeper issue. It injected a feasible, good
+follower response into the leader candidate set. When the anchor is removed, the
+current leader search often moves to raw `N_P_star` values outside the
+WuFaithful follower's actual feasible net-inflow range. The follower then
+projects those targets, but the leader search state, candidate ranking, and
+next-step seed remain tied to the raw intent.
+
+Increasing search budget alone is unlikely to fix this reliably: a larger
+search may simply explore the wrong raw-target space more thoroughly.
+
+The next correction should be generic, not a runtime guide:
+
+1. Make leader candidate generation/evaluation use the follower-realizable
+   net-inflow range for the current state and demand.
+2. Record and rank candidates by projected/realized follower response, not raw
+   infeasible `N_P_star` intent.
+3. Update WuFaithful P-Stack output closure so `leader_realized_N_P_star`
+   reflects `wu_faithful_sum_nin`/projected response rather than raw intent.
+4. Re-run anchor-off sweet_155/sweet_190 and compare against PFO and legacy
+   targets.
+
+This keeps the controller standalone: no PFO anchor, no fallback guard, and no
+scenario-specific guide.
+
+## 2026-07-02 Follower-Realizable Leader Target Closure
+
+### Purpose
+
+Implemented the generic correction proposed above: without a PFO anchor or
+fallback guide, Stackelberg leader candidates should be projected/evaluated in
+the net-inflow range that the current WuFaithful follower can actually realize.
+
+### Implementation
+
+Changed files:
+
+- `src/controllers/wu_faithful_follower.py`
+  - Added `leader_np_feasible_range(...)`, returning the current follower
+    feasible `Σnin` range in horizon vehicles.
+  - Added vehicle-unit diagnostics for raw/projected/realized `N_P_star`:
+    `wu_faithful_np_original_target_veh`,
+    `wu_faithful_np_projected_target_veh`,
+    `wu_faithful_np_realized_sum_nin_veh`,
+    `wu_faithful_np_feasible_min_veh`, and
+    `wu_faithful_np_feasible_max_veh`.
+  - Added `wu_faithful_np_predictor_mode_code` and one-hot predictor mode
+    diagnostics for later audit.
+- `src/controllers/stackelberg_mpc.py`
+  - Added leader candidate pre-projection through
+    `_project_action_to_follower_feasible_np(...)`.
+  - Added response closure through `_close_nash_response_leader_action(...)`,
+    preserving raw intent while committing/logging projected/realized
+    follower response.
+  - Added candidate metadata for intent/projected/realized `N_P_star` and
+    `N_UF_star`.
+  - Updated previous-control normalization and output closure to keep realized
+    targets rather than raw infeasible intent.
+
+### Commands
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m py_compile src\controllers\stackelberg_mpc.py src\controllers\stackelberg_wu_metered.py src\controllers\wu_faithful_follower.py
+
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m unittest -v src.tests.test_constraints.ConstraintTests.test_wu_faithful_np_target_projects_to_signed_feasible_range src.tests.test_constraints.ConstraintTests.test_wu_faithful_np_predictor_modes_project_in_vehicle_units src.tests.test_constraints.ConstraintTests.test_stackelberg_leader_evaluates_coarse_and_refined_grid src.tests.test_constraints.ConstraintTests.test_stackelberg_leader_continuous_search_evaluates_targets src.tests.test_constraints.ConstraintTests.test_stackelberg_default_objective_uses_follower_response_with_future_penalty_states
+
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m unittest -v src.tests.test_constraints.ConstraintTests.test_stackelberg_wu_pfo_incumbent_flag_can_disable_candidate src.tests.test_constraints.ConstraintTests.test_stackelberg_wu_pfo_incumbent_can_be_selected_when_leader_is_worse src.tests.test_constraints.ConstraintTests.test_stackelberg_fallback_guard_rejects_terminal_worse_leader
+
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.six_controller_comparison --scenario sweet_155 --controllers PROPOSED-FOLLOWERS-ONLY,PROPOSED-STACKELBERG --T-total 1800 --output outputs\sweet155_np_feasible_projection_anchor_off_1800_20260702 --stackelberg-leader-parallel-backend thread --disable-stackelberg-pfo-incumbent --disable-stackelberg-fallback --disable-stackelberg-pfo-fallback-cache
+
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.six_controller_comparison --scenario sweet_155 --controllers NO-CONTROL --T-total 1800 --output outputs\sweet155_np_feasible_projection_no_control_1800_20260702
+```
+
+### Targeted Test Results
+
+- `py_compile`: PASS.
+- WuFaithful N_P projection tests: PASS.
+- Stackelberg grid/continuous leader target tests: PASS.
+- Fallback/PFO-incumbent flag tests: PASS.
+- Mutation safety tests run separately: PASS.
+
+Whole-suite caveats:
+
+- `pytest` is unavailable in the bundled runtime.
+- `test_centralized_slsqp_solver_path_runs_and_logs` fails because SLSQP/Scipy
+  is unavailable in this runtime (`centralized_slsqp_available=0`).
+- `test_allocation_batch_objective_matches_scalar_objective` fails only by
+  `1.36e-12` floating-point tolerance at `places=12`.
+- Some `test_six_controller_comparison.py` expectations are stale for the
+  current WuFaithful controller mapping, e.g. expecting PFO/P-Stack to use
+  `DistributedCoordinator`.
+
+### 1800 s Sweet-155 Anchor-Off Results
+
+| controller | total TTT | urban TTT | freeway TTT | completed veh | terminal veh | compute sec |
+|---|---:|---:|---:|---:|---:|---:|
+| NO-CONTROL | `518.411` | n/a in summary | n/a in summary | n/a | n/a | `~0` |
+| PROPOSED-FOLLOWERS-ONLY | `529.441` | `398.404` | `131.037` | `7976.0` | `1382.4` | `50.07` |
+| PROPOSED-STACKELBERG, anchor/fallback off | `610.620` | `492.829` | `117.791` | `7526.5` | `1803.0` | `181.01` |
+
+P-Stack now no longer selects negative raw/committed `N_P_star` in this 1800 s
+run:
+
+- Committed `N_P_star`: min `1069.10`, mean `1156.70`, max `1217.21`.
+- Leader intent `N_P_star`: min `1045.69`, mean `1135.78`, max `1200.19`.
+- Projected `N_P_star`: min `1045.69`, mean `1131.97`, max `1172.95`.
+- Projection was active in `1/10` decisions.
+- Realization residual mean: `-20.92 veh`; no negative committed `N_P_star`.
+
+However, the standalone P-Stack remains worse than PFO in this short run:
+
+- Freeway TTT improves versus PFO: `131.037 -> 117.791 veh-h`.
+- Urban TTT worsens: `398.404 -> 492.829 veh-h`.
+- Completed vehicles decrease: `7976.0 -> 7526.5`.
+- Terminal vehicles increase: `1382.4 -> 1803.0`.
+- Urban total departures decrease over the 10 control intervals:
+  `14942.0 -> 13522.7 veh`.
+- Boundary-in load increases: mean `106.5 -> 177.5 veh`.
+- Boundary-out load increases: mean `234.5 -> 385.4 veh`.
+
+### Diagnosis
+
+The previous severe failure mode, where anchor-off P-Stack searched infeasible
+negative `N_P_star` targets and then silently relied on follower projection, is
+substantially fixed. The new logs separate intent, projected target, and
+realized follower response.
+
+The remaining failure is different: the leader now picks feasible but still
+over-aggressive high `N_P`/high `N_UF` combinations. This reduces freeway TTT
+and ramp queues, but it shifts too much burden into urban queues and lowers
+urban departures within the 1800 s horizon. Therefore the current problem is
+not raw target feasibility; it is candidate evaluation/fidelity or objective
+balance around urban discharge and terminal burden.
+
+### Proposed Next Modification
+
+Do not reintroduce PFO anchor or fallback as the main fix. Next inspect the
+leader candidate evaluation table for low/medium `N_UF` and lower feasible
+`N_P` candidates:
+
+1. Verify whether the prefilter/top-K path is discarding lower-urban-burden
+   candidates before full follower evaluation.
+2. Add candidate-level realized urban departures, boundary-in/out loads, and
+   terminal vehicles to the leader metadata.
+3. Compare leader predicted rollout TTT/terminal state against realized
+   closed-loop step TTT for selected and second-best candidates.
+4. If the mismatch is confirmed, adjust leader evaluation to price terminal
+   urban/boundary burden or use a longer/terminal-corrected rollout, not a PFO
+   guide.
+
+## 2026-07-02 GNE Shared-Multiplier P-Stack Experimental Copy
+
+### Purpose
+
+WuFaithful PFO-anchor P-Stack 계열을 production controller에 직접 반영하지 않고,
+실험용 copy path에서 follower 쪽 `N_P_star` 처리만 generalized Nash equilibrium
+shared-multiplier 방식으로 명시했다. 핵심 가설은 leader의 hard budget을 follower
+agent별로 임의 배분하거나 hard matching시키는 구조가 urban response를 왜곡한다는
+것이다.
+
+### Implemented
+
+- `work/gne_wu_faithful_experiment.py`
+  - `GNEWuFaithfulFollower`: production `WuFaithfulFollower`를 상속하는 실험 variant.
+  - Urban follower는 signal agent별 hard budget split 없이 shared `lambda_P`를 사용한다.
+  - 각 signal agent는 기존 local objective에 `lambda_P * nin_i`를 더해 green을 선택한다.
+  - `lambda_P`, target, realized `sum_nin`, residual, iterations, objective를 `gne_*`
+    diagnostics로 승격했다.
+  - `N_P`는 horizon vehicles, `N_UF`는 vehicles/hour 단위임을 diagnostics에 기록한다.
+  - 선택 옵션으로 N_UF hard split을 shared-price candidate scoring으로 바꾸는
+    `use_shared_lambda_uf` hook을 추가했다. 기본값은 off이며, 이번 smoke에서는 urban
+    GNE 우선으로만 검증했다.
+- `work/run_gne_pstack_experiment.py`
+  - `PROPOSED-FOLLOWERS-ONLY`와 `GNE-PSTACK`을 같은 scenario, seed, plant, horizon에서
+    비교하는 실험 runner.
+  - `--disable-pfo-anchor`, `--disable-fallback`으로 PFO incumbent anchor/fallback을 끌 수
+    있게 했다.
+  - `decision_diagnostics.csv`와 `progress_summary.csv`에 `gne_lambda_P`,
+    `gne_np_target_veh`, `gne_np_realized_sum_nin_veh`, `gne_np_residual_veh`를 기록한다.
+
+### Files Changed
+
+- `work/gne_wu_faithful_experiment.py`
+- `work/run_gne_pstack_experiment.py`
+- `reports/codex_run_report.md`
+
+Production `src/controllers/*` 파일은 이번 작업에서 수정하지 않았다. 다만 작업 시작
+시점에 `src/controllers/stackelberg_mpc.py`, `src/controllers/wu_faithful_follower.py`,
+`reports/codex_run_report.md`는 이미 modified 상태였다.
+
+### Commands
+
+Compile:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m py_compile work\gne_wu_faithful_experiment.py work\run_gne_pstack_experiment.py
+```
+
+Smoke baseline/PFO and proposed GNE-PSTACK:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B work\run_gne_pstack_experiment.py --scenario sweet_155 --T-total 180 --controllers PROPOSED-FOLLOWERS-ONLY,GNE-PSTACK --output outputs\gne_pstack_sweet155_smoke_180_20260702 --leader-backend serial --disable-pfo-anchor --disable-fallback
+```
+
+Suggested 7200 s experiment:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B work\run_gne_pstack_experiment.py --scenario sweet_155 --T-total 7200 --controllers PROPOSED-FOLLOWERS-ONLY,GNE-PSTACK --output outputs\gne_pstack_sweet155_7200_20260702 --leader-backend thread --disable-pfo-anchor --disable-fallback
+```
+
+Optional N_UF shared-price diagnostic:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B work\run_gne_pstack_experiment.py --scenario sweet_155 --T-total 180 --controllers GNE-PSTACK --output outputs\gne_pstack_sweet155_nuf_price_smoke_180_20260702 --leader-backend serial --disable-pfo-anchor --disable-fallback --enable-nuf-shared-price
+```
+
+### Smoke Results
+
+| controller | Total TTT | Urban TTT | Freeway TTT | completed veh | terminal veh | compute sec |
+|---|---:|---:|---:|---:|---:|---:|
+| PROPOSED-FOLLOWERS-ONLY | `24.263` | `15.792` | `8.471` | `448.2` | `624.2` | `4.785` |
+| GNE-PSTACK | `24.262` | `15.792` | `8.471` | `439.7` | `632.7` | `44.254` |
+
+GNE diagnostic sample, step 0:
+
+- `gne_lambda_P = 0.1070556640625`
+- `gne_np_target_veh = 1022.82`
+- `gne_np_realized_sum_nin_veh = 1003.89`
+- `gne_np_residual_veh = -18.93`
+- feasible N_P range: `[841.1775, 1133.945] veh`
+- `gne_objective = 102.48682645150029`
+
+Optional N_UF shared-price smoke also executed for one interval:
+
+- Total TTT: `24.245 veh-h`
+- `gne_nuf_shared_lambda_active = 1.0`
+- `gne_nuf_target_veh_h = 3600.0`
+- `gne_nuf_realized_sum_metering_veh_h = 6000.0`
+- `gne_nuf_residual_veh_h = 2400.0`
+- `gne_lambda_UF = 0.0`
+- `gne_lambda_P = 0.02996826171875`
+
+This confirms the no-hard-split N_UF hook runs, but it is not yet a converged
+N_UF dual update; it is intentionally kept off by default for the 7200 s urban
+GNE comparison.
+
+### Boundary Queue Balancing Result
+
+The smoke was only one control interval, so it is not a valid acceptance run.
+Boundary balance is recorded in `run_log.csv`/`progress_summary.csv`, but no
+7200 s boundary non-degradation judgment was made in this pass.
+
+### Control Validation Summary
+
+- `py_compile`: PASS.
+- Closed-loop smoke: PASS, output written under
+  `outputs/gne_pstack_sweet155_smoke_180_20260702`.
+- Ramp metering, VSL, green time, offsets, and N_P GNE diagnostics are logged.
+- Full 7200 s acceptance, unit-test suite, and Claude review were not run in this
+  pass.
+
+### Failed Criteria / Next Modification
+
+This is an experimental copy-path implementation, not a final controller
+acceptance. The controller is not claimed complete because:
+
+- Unit-test suite was not rerun.
+- Closed-loop full 7200 s sweet_155 comparison was not run.
+- Improvement >= 8% and boundary non-degradation were not evaluated.
+- N_UF shared-price mode is only a diagnostic hook and remains off by default.
+
+Next modification: run the suggested 7200 s `sweet_155` comparison with anchor
+and fallback disabled, then inspect whether the shared `lambda_P` path improves
+urban discharge/terminal burden relative to the prior anchor-off P-Stack.
+
+## 2026-07-02 - Copy-Path GNE Follower Soft-Price 7200 s Check
+
+### What Was Implemented
+
+Follow-up correction to the copy-path GNE experiment:
+
+- `GNEWuFaithfulFollower` now overrides the production
+  `_bisect_lambda_for_np(...)` path.
+- The production hard equality/feasibility matching of `N_P_star` is disabled in
+  the copy path.
+- `lambda_P` is used as a soft shared-constraint price update instead of a hard
+  bisection target matcher.
+- `GNEPStackController` snapshots and restores follower price state around each
+  leader candidate evaluation so rejected candidates do not leak `lambda_P` or
+  coupling state into later candidates.
+- The selected closed-loop response still warm-starts the next step.
+
+This remains an experimental work-path implementation, not the production
+controller.
+
+### Files Changed
+
+- `work/gne_wu_faithful_experiment.py`
+- `work/run_gne_pstack_experiment.py`
+- `reports/codex_run_report.md`
+
+### Commands
+
+Compile:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m py_compile work\gne_wu_faithful_experiment.py work\run_gne_pstack_experiment.py
+```
+
+Smoke:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B work\run_gne_pstack_experiment.py --scenario sweet_155 --T-total 180 --controllers PROPOSED-FOLLOWERS-ONLY,GNE-PSTACK --output outputs\gne_pstack_sweet155_soft_gne_smoke_180_20260702 --leader-backend serial --disable-pfo-anchor --disable-fallback
+```
+
+7200 s comparison:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B work\run_gne_pstack_experiment.py --scenario sweet_155 --T-total 7200 --controllers PROPOSED-FOLLOWERS-ONLY,GNE-PSTACK --output outputs\gne_pstack_sweet155_soft_gne_7200_20260702 --leader-backend thread --disable-pfo-anchor --disable-fallback
+```
+
+### Smoke Result
+
+The smoke confirmed that the copy-path GNE branch disables hard bisection:
+
+- `gne_hard_bisection_disabled = 1.0`
+- `gne_lambda_update_iterations = 5`
+- `gne_lambda_P = 0.0950535`
+- `gne_np_target_veh = 1022.82`
+- `gne_np_realized_sum_nin_veh = 1070.015`
+- `gne_np_residual_veh = 47.195`
+
+180 s plant TTT was equal at this horizon:
+
+| controller | Total TTT | Urban TTT | Freeway TTT | completed veh | compute sec |
+|---|---:|---:|---:|---:|---:|
+| PROPOSED-FOLLOWERS-ONLY | `24.263` | `15.792` | `8.471` | `448.2` | `4.412` |
+| GNE-PSTACK | `24.263` | `15.792` | `8.471` | `448.2` | `37.017` |
+
+### 7200 s Result
+
+`sweet_155`, fallback disabled, PFO-anchor disabled:
+
+| controller | Total TTT | Urban TTT | Freeway TTT | completed veh | terminal veh | compute sec | mean step sec |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| PROPOSED-FOLLOWERS-ONLY | `4490.018` | `3676.465` | `813.553` | `32519.3` | `4244.7` | `184.621` | `4.616` |
+| GNE-PSTACK | `6657.007` | `5757.725` | `899.283` | `30486.3` | `6260.4` | `711.887` | `17.797` |
+
+Relative to PFO, the GNE P-Stack copy path worsened Total TTT by
+`2166.989 veh-h` (`-48.262%` improvement vs PFO), reduced completed vehicles by
+`2033.0`, and increased terminal vehicles by `2015.7`.
+
+### Diagnostic Notes
+
+- `leader_fallback_enabled = 0` for all steps.
+- `leader_pfo_incumbent_enabled = 0` for all steps.
+- `N_UF_star` averaged `5685.25 veh/h`, ranged from `5100` to `6000 veh/h`, and
+  hit the `6000 veh/h` upper bound in `16/40` steps.
+- Mean absolute GNE `N_P` residual was `36.204 veh`; max absolute residual was
+  `124.314 veh`.
+- `lambda_P` ranged from `-0.554` to `0.630`.
+
+Interpretation: removing the hard follower feasibility/bisection layer is
+consistent with a GNE formulation, but this simple soft-price follower is not yet
+a valid replacement for the old response solver. The run indicates that the
+remaining leader/follower coupling evaluation still favors high `N_UF_star`
+release decisions and accumulates terminal burden. The failure is therefore not
+just the hard `N_P` matcher; the GNE follower response needs a stronger
+shared-constraint equilibrium update or an explicit realization-aware leader
+evaluation before it can replace the current Wu-faithful response.
+
+### Control Validation Summary
+
+- `py_compile`: PASS.
+- Closed-loop 180 s smoke: PASS.
+- Closed-loop 7200 s comparison: completed.
+- Acceptance: FAIL for the experimental GNE copy path because P-Stack is worse
+  than PFO and does not meet the configured improvement criteria.
+
+### Proposed Next Modification
+
+Do not promote this copy-path GNE change to production. The next diagnostic
+should compare:
+
+1. Current hard-response Wu-faithful P-Stack.
+2. Soft-price GNE P-Stack.
+3. A proper GNE solver with iterative shared-constraint residual minimization,
+   including `N_UF` allocation, not only `N_P`.
+
+The specific question is whether the bad result comes from the simplified GNE
+price update or from the leader objective still under-pricing high freeway
+release/terminal burden.
+
+## 2026-07-02 - Option A N_P Inequality Cap, sweet_190 P-Stack Faithful 7200 s
+
+### What Was Implemented
+
+Tested Claude's Option A interpretation for Wu-faithful P-Stack:
+
+- `N_P_star` is treated as an upper-bound cap in the Wu-faithful follower:
+  `sum_i nin_i <= N_P_star`.
+- In cap mode, `lambda_P` is constrained to be non-negative.
+- If `lambda_P = 0` already satisfies the cap, the follower returns with
+  `lambda_P = 0` by complementarity.
+- Stackelberg pre-projection no longer raises a cap target to the follower
+  feasible lower bound in cap mode. It only clips the upper side.
+- Added diagnostics:
+  - `wu_faithful_np_coordination_cap`
+  - `wu_faithful_np_coordination_equality`
+  - `wu_faithful_np_cap_violation_veh`
+  - `wu_faithful_np_cap_slack_veh`
+  - `leader_np_follower_feasible_projection_cap_mode`
+
+### Files Changed
+
+- `src/models/state.py`
+- `src/config/default.yaml`
+- `src/controllers/wu_faithful_follower.py`
+- `src/controllers/stackelberg_mpc.py`
+- `reports/codex_run_report.md`
+
+### Commands
+
+Compile:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m py_compile src\models\state.py src\controllers\wu_faithful_follower.py src\controllers\stackelberg_mpc.py src\controllers\stackelberg_wu_metered.py work\run_claude_style_five_controller.py
+```
+
+Run:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B work\run_claude_style_five_controller.py --scenario sweet_190 --T-total 7200 --controllers P-STACK-WU-FAITHFUL --output outputs\sweet190_pstack_np_cap_7200_20260702
+```
+
+### Result
+
+`sweet_190`, `P-STACK-WU-FAITHFUL`, 7200 s:
+
+| case | Total TTT | Urban TTT | Freeway TTT | completed veh | terminal veh | compute sec |
+|---|---:|---:|---:|---:|---:|---:|
+| NEW N_P cap mode | `13246.094` | `11842.611` | `1403.483` | `30365.6` | `14666.1` | `1601.971` |
+| OLD default P-Stack (`outputs/sweet190_all_boundary_halfcap_7200_20260701`) | `12984.869` | `11581.681` | `1403.187` | `30808.5` | `14194.3` | `827.070` |
+| OLD high-accuracy P-Stack | `12931.636` | `11458.212` | `1473.424` | `30924.3` | `14099.5` | `4220.060` |
+| OLD standalone no-anchor/no-fallback | `14234.171` | `12747.275` | `1486.896` | `29579.1` | `15454.0` | `511.350` |
+
+Compared with the closest existing default P-Stack run, cap mode is worse by
+`+261.225 veh-h` (`+2.012%` Total TTT), completes `442.9` fewer vehicles, and
+leaves `471.8` more terminal vehicles.
+
+### Diagnostics
+
+- `lambda_P` stayed non-negative:
+  - min `0.0`
+  - max `10.0`
+  - mean `0.2511`
+- Fallback/PFO incumbent was active in the default runner:
+  - selected fallback/PFO in `25/40` steps
+  - non-fallback selected in `15/40` steps
+- Cap violation diagnostics:
+  - all steps: violation in `27/40`, mean `1137.4 veh`
+  - non-fallback steps only: violation in `2/15`, mean `297.1 veh`, max
+    `4454.7 veh`
+- `N_UF_star` averaged `4329.375 veh/h` and hit the `6000 veh/h` upper bound in
+  `6/40` steps.
+
+### Interpretation
+
+Option A fixed the negative-lambda pathology: the follower no longer uses
+negative `lambda_P` to subsidize urban admission. However, in this `sweet_190`
+7200 s P-Stack-faithful run it did not improve performance relative to the
+stored default P-Stack result. The Total TTT degradation is mainly urban-side
+(`+260.93 veh-h` urban TTT vs old default), while freeway TTT is almost
+unchanged.
+
+This suggests that negative `lambda_P` was not the dominant cause of the current
+P-Stack degradation in this scenario. The remaining issue is more likely the
+leader/follower response evaluation and the frequent fallback/PFO incumbent
+selection, plus residual cap infeasibility when the selected cap is below what
+the follower can realize.
+
+### Status
+
+`py_compile`: PASS.
+
+Closed-loop run: completed.
+
+Acceptance: FAIL for promotion. Keep this as a diagnostic result unless a
+follow-up no-fallback/no-anchor apples-to-apples run shows a different trend.
+
+## 2026-07-02 - PFO vs Legacy Selection Width and Multi-Start Jacobi Probe
+
+### What Was Tested
+
+Compared saved `sweet_190` 7200 s control traces:
+
+- PFO:
+  `outputs/sweet190_all_boundary_halfcap_7200_20260701/runs/sweet_190/PROPOSED-FOLLOWERS-ONLY`
+- Legacy P-Stack:
+  `outputs/legacy_pstack_sweet190_7200_20260702/runs/sweet_190/LEGACY-STACKELBERG`
+
+Then ran a PFO multi-start diagnostic at selected high-difference steps
+`0,10,20,21,26,35,39`:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B work\compare_pfo_legacy_multistart.py --scenario sweet_190 --steps 0,10,20,21,26,35,39 --random-starts 20 --output outputs\pfo_legacy_multistart_sweet190_20260702
+```
+
+### Files Changed
+
+- `work/compare_pfo_legacy_multistart.py`
+- `reports/codex_run_report.md`
+
+### Trace Comparison Result
+
+Saved full-run performance:
+
+| controller | Total TTT | Urban TTT | Freeway TTT | completed veh | terminal veh |
+|---|---:|---:|---:|---:|---:|
+| PFO | `13590.622` | `12365.455` | `1225.166` | `29731.7` | `15300.0` |
+| Legacy P-Stack | `10728.763` | `9201.420` | `1527.343` | `33260.2` | `11685.0` |
+
+PFO has lower freeway TTT, but much worse urban TTT and terminal burden. Legacy
+appears to spend more freeway delay to discharge the urban/ramp side.
+
+Stepwise control-profile overlap:
+
+- Ramp-metering profile equal in only `4/40` steps.
+- Link VSL profile equal in only `7/40` steps.
+- Green profile equal in `0/40` steps.
+- Offset profile equal in `0/40` steps.
+
+Mean selected controls:
+
+| control | PFO mean | Legacy mean |
+|---|---:|---:|
+| `R_D_E` metering | `545.6` | `1417.2` |
+| `R_D_W` metering | `637.5` | `1427.5` |
+| `R_F_E` metering | `1500.0` | `1432.5` |
+| `R_F_W` metering | `1500.0` | `1423.2` |
+| `FW_E` VSL | `74.8` | `86.4` |
+| `FW_W` VSL | `81.0` | `86.6` |
+
+Legacy uses offsets in `40/40` steps with `27` unique offset profiles. PFO uses
+zero offsets in every step.
+
+### Multi-Start Result
+
+For each selected state, PFO was solved from:
+
+- runtime PFO previous control
+- saved PFO previous control
+- default uncontrolled control
+- legacy previous control
+- legacy current control as seed
+- 20 random feasible green/VSL/offset seeds
+
+The best one-step TTT improved only modestly relative to runtime PFO. More
+importantly, no seed moved PFO close to the legacy ramp-release regime in the
+congested middle/late steps:
+
+| step | legacy ramp sum | PFO runtime ramp sum | multi-start ramp range | legacy action 1-step TTT | best PFO multi-start 1-step TTT |
+|---:|---:|---:|---:|---:|---:|
+| 20 | `6000.0` | `3900.0` | `3750.0-3900.0` | `313.392` | `313.674` |
+| 21 | `6000.0` | `3900.0` | `3750.0-3900.0` | `334.737` | `335.111` |
+| 26 | `6000.0` | `3900.0` | `3750.0-3900.0` | `456.287` | `456.043` |
+| 35 | `5756.25` | `3750.0` | `3750.0-3750.0` | `674.783` | `676.461` |
+| 39 | `6000.0` | `3750.0` | `3750.0-3750.0` | `758.013` | `759.808` |
+
+Offsets stayed inactive in all PFO multi-start solutions.
+
+### Interpretation
+
+The PFO-vs-legacy gap is not explained by a simple Jacobi initial-condition trap.
+Even when initialized from legacy previous/current controls, PFO does not remain
+near the legacy choice. It falls back to a much lower ramp-release regime and
+zero offsets. This suggests the main mismatch is in the PFO/Wu-faithful local
+objective/feasible response itself, not just in the Jacobi starting point.
+
+Legacy's advantage appears to come from a follower response space that allows
+high ramp release plus coordinated green/offset movement, accepting somewhat
+higher freeway TTT to greatly reduce urban TTT and terminal burden.
+
+### Proposed Next Modification
+
+Do not focus only on leader-grid width. The next probe should compare the legacy
+and Wu-faithful follower scoring functions for the same candidate ramp-release
+vectors, especially high-release vectors around `5750-6000 veh/h`. If
+Wu-faithful scores those candidates poorly while one-step plant TTT and legacy
+score them well, the fix belongs in the freeway/ramp follower local objective or
+candidate generation, not in leader search.
+
+## 2026-07-02 - Forced Leader Response Probe for Legacy Outcome Coverage
+
+### Purpose
+
+The goal was to split the "leader exists but does not move toward the legacy
+solution" failure into three possibilities:
+
+1. The leader search does not include the legacy-like `N_P_star`/`N_UF_star`
+   region.
+2. The leader objective evaluates the legacy region incorrectly.
+3. The Wu-faithful follower response map does not contain the legacy outcome set,
+   so even a correct leader target cannot induce the legacy high-release/signal
+   pattern.
+
+### Command
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B work\forced_leader_response_probe.py --scenario sweet_190 --steps 20,21,26,35,39 --np-mode cap --output outputs\forced_leader_response_probe_sweet190_20260702
+```
+
+### Files Changed
+
+- `work/forced_leader_response_probe.py`
+- `reports/codex_run_report.md`
+
+### Data Sources
+
+- PFO trace:
+  `outputs/sweet190_all_boundary_halfcap_7200_20260701/runs/sweet_190/PROPOSED-FOLLOWERS-ONLY/control_timeseries.csv`
+- Legacy P-Stack trace:
+  `outputs/legacy_pstack_sweet190_7200_20260702/runs/sweet_190/LEGACY-STACKELBERG/control_timeseries.csv`
+
+### Result Summary
+
+For selected congested steps, the probe replayed either the saved PFO state or
+the saved legacy state, then solved the Wu-faithful follower with forced leader
+targets:
+
+- `legacy_target`: the saved legacy `N_P_star` and `N_UF_star`
+- `high_release_6000`: legacy `N_P_star` and `N_UF_star = 6000`
+- `pfo_zero_target`: saved PFO targets
+
+The forced high-release target is reachable by the follower in the ramp dimension:
+when `N_UF_star = 6000`, the Wu-faithful response usually produced ramp sums near
+`6000 veh/h`. Therefore, this is not primarily a leader search-width failure for
+`N_UF_star`.
+
+However, the response remains far from the legacy full control profile:
+
+| target group | mean ramp distance | mean green p1 distance | mean offset distance | mean VSL-link distance | mean composite distance |
+|---|---:|---:|---:|---:|---:|
+| `legacy_target` | `48.8` | `153.5` | `384.0` | `27.0` | `5308.4` |
+| `high_release_6000` | `48.8` | `153.5` | `384.0` | `27.0` | `5308.4` |
+| `pfo_zero_target` | `2010.0` | `165.8` | `384.0` | `36.0` | `7606.8` |
+
+Most importantly:
+
+- Wu-faithful response offset active count: `0` in all `120/120` probe solves.
+- Legacy offset active count: `5` in all probed legacy steps.
+- Even when the ramp sum matches legacy (`5756-6000 veh/h`), the follower
+  response typically keeps zero offsets and a different green allocation.
+- On the same replayed states, exogenously evaluating the saved legacy action
+  often gives lower horizon rollout TTT than the best Wu-faithful response.
+
+Representative best-objective rows:
+
+| state | step | target | response horizon TTT | legacy action horizon TTT | saved PFO horizon TTT | response ramp | legacy ramp | response offsets | legacy offsets |
+|---|---:|---|---:|---:|---:|---:|---:|---:|---:|
+| legacy replay | 20 | high release | `813.71` | `784.62` | `799.86` | `6000.0` | `6000.0` | `0` | `5` |
+| legacy replay | 21 | high release | `853.24` | `830.16` | `846.70` | `6000.0` | `6000.0` | `0` | `5` |
+| legacy replay | 26 | high release | `1114.90` | `1090.09` | `1105.05` | `6000.0` | `6000.0` | `0` | `5` |
+| legacy replay | 35 | legacy target | `1598.18` | `1594.33` | `1609.97` | `5756.25` | `5756.25` | `0` | `5` |
+| legacy replay | 39 | high release | `1799.10` | `1796.25` | `1811.38` | `6000.0` | `6000.0` | `0` | `5` |
+
+### Interpretation
+
+The strongest current diagnosis is hypothesis 3: the leader can request a
+legacy-like high-release budget, but the Wu-faithful follower response map does
+not contain the legacy full outcome set because signal timing and offset choices
+collapse back to the local follower optimum. A global leader can only optimize
+over the response returned by the follower; if the follower response never
+returns the legacy high-release plus coordinated offset/green pattern, the leader
+cannot select it even when that exogenous action scores better under rollout TTT.
+
+This also explains why PFO anchoring does not guarantee improvement. The anchor
+can move the leader into a reasonable `N_UF_star` region, but the follower's
+realized response still differs in the urban signal/offset dimensions.
+
+### Proposed Next Modification
+
+The next modification should target the Wu-faithful follower response formation,
+not only leader search:
+
+- make urban offset/green candidates phase-resolved enough that nonzero offsets
+  can win when they reduce local rollout TTT;
+- add a forced-candidate diagnostic where the saved legacy green/offset profile
+  is injected into the Wu-faithful follower candidate set to see whether the
+  local objective rejects it or the candidate generator simply never proposes it;
+- then rerun the same forced response probe to verify that the response map can
+  reproduce the legacy high-release plus offset operating region without using a
+  scenario-specific fallback guide.
+
+## 2026-07-02 - Forced Legacy Green/Offset Candidate Injection Probe
+
+### Purpose
+
+The previous probe showed that the leader can force high `N_UF_star`, but the
+Wu-faithful follower still does not return the legacy green/offset pattern. This
+probe checks whether that is merely a candidate-generation failure or whether
+the local follower objective itself rejects the legacy-like signal timing.
+
+### Commands
+
+Compilation:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m py_compile work\forced_legacy_candidate_probe.py
+```
+
+Initial all-step probe attempted:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B work\forced_legacy_candidate_probe.py --scenario sweet_190 --steps 20,21,26,35,39 --np-mode cap --output outputs\forced_legacy_candidate_probe_sweet190_20260702
+```
+
+This exceeded the 20 minute command limit because each row includes additional
+offset candidate solves plus multiple horizon rollouts. The diagnosis was then
+rerun on representative congested steps:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B work\forced_legacy_candidate_probe.py --scenario sweet_190 --steps 20 --np-mode cap --output outputs\forced_legacy_candidate_probe_sweet190_step20_20260702
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B work\forced_legacy_candidate_probe.py --scenario sweet_190 --steps 35 --np-mode cap --output outputs\forced_legacy_candidate_probe_sweet190_step35_20260702
+```
+
+### Files Changed
+
+- `work/forced_legacy_candidate_probe.py`
+- `reports/codex_run_report.md`
+
+### Probe Design
+
+For the same replayed PFO or legacy state, the script compares:
+
+- normal Wu-faithful response;
+- Wu-faithful response with the saved legacy `green_p1` values injected into
+  each urban agent's local green candidate set;
+- Wu-faithful response with saved legacy offsets injected into the offset
+  candidate set;
+- green+offset injection with and without the offset guard;
+- ex-post full-plant rollout if the normal response is manually overwritten with
+  legacy green, legacy offset, or both.
+
+### Key Results
+
+Representative step 20:
+
+| replay state | target | normal response | response + legacy green | response + legacy offset | response + legacy green+offset | legacy full | saved PFO |
+|---|---|---:|---:|---:|---:|---:|---:|
+| PFO state | legacy/high-release | `993.756` | `989.622` | `993.071` | `988.785` | `988.788` | `998.494` |
+| legacy state | legacy/high-release | `813.714` | `788.574` | `807.799` | `784.709` | `784.618` | `799.859` |
+
+Representative step 35:
+
+| replay state | target | normal response | response + legacy green | response + legacy offset | response + legacy green+offset | legacy full | saved PFO |
+|---|---|---:|---:|---:|---:|---:|---:|
+| PFO state | legacy target | `2080.007` | `2077.251` | `2076.275` | `2073.471` | `2073.719` | `2095.647` |
+| PFO state | high-release | `2079.546` | `2076.765` | `2075.669` | `2072.972` | `2073.719` | `2095.647` |
+| legacy state | legacy target | `1598.309` | `1596.559` | `1597.179` | `1593.477` | `1594.334` | `1609.971` |
+| legacy state | high-release | `1599.257` | `1597.066` | `1599.073` | `1594.394` | `1594.334` | `1609.971` |
+
+Additional observations:
+
+- `WuFaithfulFollower.__init__` currently sets `offset_enabled = False`, so
+  ordinary Wu-faithful response never searches offset at all.
+- When offset search is enabled for the probe, the local offset search finds
+  only partial nonzero offsets (`1-3` signals), and the guard often zeroes them.
+- Injecting legacy green values into the local candidate set does not make the
+  solver choose them. For example, step 20 legacy-replayed state keeps response
+  `green_p1_sum = 316` while legacy has `274`, even though ex-post overwriting
+  the response with legacy green reduces horizon TTT from `813.714` to
+  `788.574`.
+- The same pattern appears in step 35: the normal response remains away from the
+  legacy green/offset profile even though ex-post legacy green+offset lowers the
+  full-plant rollout TTT to roughly the legacy action.
+
+### Interpretation
+
+This is not just a missing-candidate problem. The diagnostic injected the legacy
+green candidate, but the Wu-faithful local follower still selected a different
+green profile. Ex-post full-plant rollout shows that the legacy green/offset
+profile improves network TTT, but the distributed local objective does not select
+it.
+
+Therefore the current failure is more specifically:
+
+1. offset is disabled by design in the current Wu-faithful follower path;
+2. even when offset is re-enabled diagnostically, only partial local offsets are
+   selected and the guard removes them;
+3. legacy green values can be made available as candidates, but the local
+   follower objective/budget decomposition rejects them.
+
+The root mismatch is the follower response formation: the leader target is an
+aggregate budget, while each urban follower minimizes a local signal TTS proxy
+with frozen coupling. A corridor/global green+offset pattern can reduce
+full-plant TTT but still be invisible or unattractive to each local signal
+player.
+
+### Proposed Next Modification
+
+The next productive fix is not simply widening leader search. It should modify
+how the Wu-faithful urban follower evaluates signal timing under a leader target:
+
+- evaluate green and offset jointly, not as green-first then optional local
+  offset;
+- make the local signal objective include a corridor-response term or a
+  phase-resolved downstream queue/throughput benefit so the legacy-style green
+  profile becomes locally visible;
+- remove the unconditional `offset_enabled = False` only after the above
+  objective is fixed, otherwise selfish offset search can reintroduce noisy
+  partial offsets without reproducing the useful corridor profile.
+
+## 2026-07-02 - Neighbor-Rollout Wu-Faithful Diagnostic Copy
+
+### Purpose
+
+The previous forced-candidate probe showed that the legacy green/offset profile
+can reduce full-plant rollout TTT, but the Wu-faithful local follower does not
+select it even when the legacy values are injected into the candidate set.
+
+This run creates a diagnostic copy that changes only the urban signal scoring
+scope:
+
+- baseline score: each signal evaluates its own local movement/ramp-aware TTS;
+- neighbor score: each signal evaluates ego + topology neighbors;
+- corridor score: each signal evaluates the full signal corridor with the same
+  local plant scorer.
+
+This is not a production controller change. It is a copy-based probe to test
+whether the failure is merely that each signal cannot see nearby downstream
+effects.
+
+### Files Changed
+
+- `work/neighbor_rollout_candidate_probe.py`
+- `reports/codex_run_report.md`
+
+The implementation was drafted by a coding subagent and reviewed by a separate
+review subagent. After review, the neighbor map was patched to include
+freeway-interface adjacency through on-ramp/off-ramp links as well as direct
+urban movement adjacency.
+
+### Commands
+
+```bash
+python -B work/neighbor_rollout_candidate_probe.py \
+  --scenario sweet_190 \
+  --steps 20,35 \
+  --np-mode cap \
+  --score-scope ego_neighbor \
+  --output outputs/neighbor_rollout_candidate_probe_sweet190_cap_ego_neighbor_20260702
+
+python -B work/neighbor_rollout_candidate_probe.py \
+  --scenario sweet_190 \
+  --steps 20,35 \
+  --np-mode cap \
+  --score-scope corridor \
+  --output outputs/neighbor_rollout_candidate_probe_sweet190_cap_corridor_20260702
+
+python -B -m py_compile work/neighbor_rollout_candidate_probe.py
+```
+
+### Output Files
+
+- `outputs/neighbor_rollout_candidate_probe_sweet190_cap_ego_neighbor_20260702/neighbor_rollout_summary_cap_ego_neighbor.csv`
+- `outputs/neighbor_rollout_candidate_probe_sweet190_cap_ego_neighbor_20260702/neighbor_rollout_choice_details_cap_ego_neighbor.csv`
+- `outputs/neighbor_rollout_candidate_probe_sweet190_cap_corridor_20260702/neighbor_rollout_summary_cap_corridor.csv`
+- `outputs/neighbor_rollout_candidate_probe_sweet190_cap_corridor_20260702/neighbor_rollout_choice_details_cap_corridor.csv`
+
+### Key Results
+
+Default-seed results:
+
+| step | replay state | local response | ego+neighbor response | corridor response | response overwritten by legacy green+offset | legacy full | saved PFO |
+|---:|---|---:|---:|---:|---:|---:|---:|
+| 20 | PFO state | `994.611` | `996.200` | `996.200` | `988.785` | `988.788` | `998.494` |
+| 20 | legacy state | `814.343` | `814.478` | `814.478` | `784.618` | `784.618` | `799.859` |
+| 35 | PFO state | `2080.493` | `2075.956` | `2075.956` | `2073.453` | `2073.719` | `2095.647` |
+| 35 | legacy state | `1597.292` | `1598.450` | `1598.450` | `1593.477` | `1594.334` | `1609.971` |
+
+Legacy choice counts:
+
+- Default seed: `green_legacy_chosen_count = 0/5` and
+  `offset_legacy_chosen_count = 0/5` for all tested local, ego-neighbor, and
+  corridor cases.
+- Legacy-current seed occasionally selects one legacy green value, but still
+  never selects the full legacy green/offset profile and never matches legacy
+  offsets.
+
+Computation:
+
+- Local scoring took roughly `5.6-7.4 s` per probe solve.
+- Ego-neighbor scoring took roughly `10.5-23.9 s` per probe solve.
+- Corridor scoring took roughly `15.9-37.3 s` per probe solve.
+
+### Interpretation
+
+The neighbor/corridor copy does not recover the legacy high-release
+green/offset behavior. In step 35, ego-neighbor scoring modestly improves the
+response (`2080.493 -> 2075.956` on the PFO-replayed state), but it still does
+not choose the legacy green/offset bundle, while an ex-post overwrite with the
+legacy green+offset values reaches `2073.453`.
+
+Therefore the current evidence says the problem is not only insufficient
+one-hop visibility. Even when the local scorer is widened to a corridor sum, the
+Wu-faithful response formation still misranks the full-plant-beneficial
+green/offset profile.
+
+The review subagent recommended an even stronger oracle probe: evaluate limited
+green/offset overrides through the full `run_coupled_interval` plant rollout
+instead of summing local signal scorers. That would be the next diagnostic if we
+need to distinguish "summed local plant is still wrong" from "only a fully
+joint signal search can find the useful profile."
+
+### Proposed Next Modification
+
+Do not merge the neighbor scorer into production as-is. It increases online
+cost and does not recover the target behavior.
+
+The next implementation path should be one of:
+
+1. build a full-plant limited-override oracle probe for the same steps and
+   states;
+2. replace per-signal green/offset Nash response with a small joint
+   corridor-signal bundle search under the leader budget;
+3. keep Wu-faithful local scoring for fast ramp/VSL response, but move
+   green/offset coordination to a corridor-level follower/player where offset
+   progression benefits are visible.
+
+## 2026-07-02 - Candidate-Dependent 1-Hop Neighbor Rollout Probe
+
+### Purpose
+
+The previous neighbor-rollout copy widened the score from ego-only to
+ego+neighbor/corridor, but it still used local signal scorers. This pass tests
+the user's more specific hypothesis:
+
+> A neighbor TTT scalar is not enough; for each ego candidate, neighbor queues
+> and TTT must be recomputed under that ego candidate while neighbor controls
+> stay frozen.
+
+This is still a copy-based diagnostic and does not modify production `src/`
+controller code.
+
+### Files Changed
+
+- `work/candidate_dependent_neighbor_rollout_probe.py`
+- `reports/codex_run_report.md`
+
+The new script imports the existing forced-response/neighbor-probe helpers, then
+subclasses the diagnostic Wu-faithful follower. For each ego green or offset
+candidate it:
+
+1. freezes all non-ego controls in the candidate snapshot;
+2. rolls a copied urban plant with `urban_substep(...)`;
+3. scores vehicle TTS in the ego + 1-hop neighbor signal scope;
+4. keeps neighbor controls frozen but lets neighbor queues/storage/ramp queues
+   evolve under the ego candidate.
+
+This makes the neighbor TTT term candidate-dependent instead of adding a frozen
+constant.
+
+### Commands
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m py_compile work\candidate_dependent_neighbor_rollout_probe.py
+
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B work\candidate_dependent_neighbor_rollout_probe.py --help
+
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B work\candidate_dependent_neighbor_rollout_probe.py --scenario sweet_190 --steps 20,35 --np-mode cap --score-scope ego_neighbor --output outputs\candidate_dependent_neighbor_rollout_probe_sweet190_cap_ego_neighbor_20260702
+```
+
+### Output Files
+
+- `outputs/candidate_dependent_neighbor_rollout_probe_sweet190_cap_ego_neighbor_20260702/candidate_dependent_neighbor_summary_cap_ego_neighbor.csv`
+- `outputs/candidate_dependent_neighbor_rollout_probe_sweet190_cap_ego_neighbor_20260702/candidate_dependent_neighbor_choice_details_cap_ego_neighbor.csv`
+- `outputs/candidate_dependent_neighbor_rollout_probe_sweet190_cap_ego_neighbor_20260702/candidate_dependent_neighbor_summary_cap_ego_neighbor.json`
+
+### Verification
+
+- `py_compile`: PASS.
+- `--help`: PASS.
+- Copy-path probe completed for `sweet_190`, steps `20,35`, `np-mode=cap`.
+
+### Key Results
+
+Legacy-current seed summary:
+
+| step | replay state | local response TTT | candidate-dependent 1-hop response TTT | response overwritten by legacy green+offset | legacy full | saved PFO | local legacy choices | 1-hop legacy choices |
+|---:|---|---:|---:|---:|---:|---:|---|---|
+| 20 | PFO state | `994.611` | `996.235` | `988.785` | `988.788` | `998.494` | green `0/5`, offset `0/5` | green `0/5`, offset `0/5` |
+| 20 | legacy state | `813.908` | `812.436` | `784.618` | `784.618` | `799.859` | green `0/5`, offset `0/5` | green `0/5`, offset `0/5` |
+| 35 | PFO state | `2080.142` | `2074.514` | `2073.453` | `2073.719` | `2095.647` | green `0/5`, offset `0/5` | green `3/5`, offset `0/5` |
+| 35 | legacy state | `1597.590` | `1597.593` | `1594.162` | `1594.334` | `1609.971` | green `0/5`, offset `0/5` | green `3/5`, offset `2/5` |
+
+Default-seed summary:
+
+| step | replay state | local response TTT | candidate-dependent 1-hop response TTT | local legacy choices | 1-hop legacy choices |
+|---:|---|---:|---:|---|---|
+| 20 | PFO state | `994.611` | `996.235` | green `0/5`, offset `0/5` | green `0/5`, offset `0/5` |
+| 20 | legacy state | `814.343` | `812.436` | green `0/5`, offset `0/5` | green `0/5`, offset `0/5` |
+| 35 | PFO state | `2080.493` | `2075.841` | green `0/5`, offset `0/5` | green `1/5`, offset `1/5` |
+| 35 | legacy state | `1597.292` | `1597.698` | green `0/5`, offset `0/5` | green `0/5`, offset `1/5` |
+
+Computation cost was much larger than the local scorer:
+
+- local probe solves: roughly `5.8-7.6 s`;
+- candidate-dependent 1-hop solves: roughly `178-226 s`.
+
+### Interpretation
+
+The candidate-dependent 1-hop rollout is directionally informative but not yet
+production-ready:
+
+- It can move choices toward the legacy profile in some congested cases.
+  Example: step 35 PFO-replayed state with legacy seed improves from
+  `2080.142` to `2074.514` and selects `3/5` legacy green values.
+- It still does not recover the full legacy green/offset bundle. The same row
+  remains above the ex-post legacy green+offset overwrite (`2073.453`) and the
+  offset match remains `0/5`.
+- Step 20 PFO-replayed state gets worse (`994.611 -> 996.235`), despite moving
+  the green/offset aggregate closer to legacy.
+- The solve time is too high for online use in its direct form.
+
+This supports a narrower diagnosis than before: making neighbor TTT
+candidate-dependent helps at the right time/region, so the idea is not wrong.
+But a naive per-candidate urban plant rollout is too expensive and still not
+enough to reliably find the useful full green/offset profile.
+
+### Proposed Next Modification
+
+Do not merge this diagnostic scorer directly into production.
+
+The next ablation should be cheaper and more selective:
+
+1. Keep the fast local scorer as a first-stage candidate generator.
+2. Use candidate-dependent 1-hop rollout only as a top-K re-ranker for green and
+   offset candidates.
+3. If top-K re-ranking still fails to recover the legacy-like bundle, do not
+   jump directly to a joint corridor bundle search. The user flagged that joint
+   offset search creates a main-stream/reference ambiguity and can undermine
+   the distributed game structure. Prefer anchored sequential offset diagnosis
+   first.
+
+This keeps the sequential diagnosis clean: neighbor candidate-dependence helps
+partly, but direct use is not sufficient because it is both incomplete and too
+slow.
+
+## 2026-07-02 - Anchored Sequential Offset Probe
+
+### Purpose
+
+The user clarified that the desired next test is not joint corridor search.
+Instead, keep the Nash/sequential follower structure and fix one intersection's
+offset to zero as the phase reference. The remaining intersections then run the
+ordinary sequential offset best response.
+
+This copy-based diagnostic tests whether that gauge fixing can recover useful
+offset coordination without increasing computation cost:
+
+- no joint corridor bundle search;
+- no production `src/` edits;
+- one anchor signal fixed to offset `0`;
+- other eligible signals use the existing `_solve_offset_local`;
+- green, ramp metering, and VSL are unchanged.
+
+### Files Changed
+
+- `work/anchored_sequential_offset_probe.py`
+- `reports/codex_run_report.md`
+
+### Commands
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m py_compile work\anchored_sequential_offset_probe.py
+
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B work\anchored_sequential_offset_probe.py --help
+
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B work\anchored_sequential_offset_probe.py --scenario sweet_190 --steps 20,35 --np-mode cap --state-sources pfo_replayed_state --modes offset_off,offset_free,offset_anchor --anchors A --seed default_uncontrolled --output outputs\anchored_sequential_offset_probe_sweet190_cap_anchorA_20260702
+
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B work\anchored_sequential_offset_probe.py --scenario sweet_190 --steps 20,35 --np-mode cap --state-sources pfo_replayed_state --modes offset_anchor --anchors B,C --seed default_uncontrolled --output outputs\anchored_sequential_offset_probe_sweet190_cap_anchorBC_20260702
+```
+
+### Key Results
+
+| step | mode | anchor | response TTT | offset active | solve time |
+|---:|---|---|---:|---:|---:|
+| 20 | offset off | - | `993.756` | `0` | `5.38 s` |
+| 20 | offset free | - | `994.611` | `1` | `5.75 s` |
+| 20 | offset anchored | A | `993.756` | `0` | `5.36 s` |
+| 20 | offset anchored | B | `994.611` | `1` | `5.66 s` |
+| 20 | offset anchored | C | `994.611` | `1` | `5.71 s` |
+| 35 | offset off | - | `2080.299` | `0` | `6.82 s` |
+| 35 | offset free | - | `2080.493` | `1` | `7.14 s` |
+| 35 | offset anchored | A | `2080.493` | `1` | `7.19 s` |
+| 35 | offset anchored | B | `2080.299` | `0` | `6.83 s` |
+| 35 | offset anchored | C | `2080.493` | `1` | `7.18 s` |
+
+Reference full-rollout TTT:
+
+- step 20 legacy action: `988.788`;
+- step 35 legacy action: `2073.719`;
+- step 20 saved PFO action: `998.494`;
+- step 35 saved PFO action: `2095.647`.
+
+### Interpretation
+
+Anchored sequential offset keeps computation cost near the ordinary
+Wu-faithful solve time (`~5.4-7.2 s`) and avoids the exponential joint-search
+problem. However, it does not improve TTT in these sampled states.
+
+The free-offset diagnostic activates only one local offset:
+
+- step 20: signal `A` chooses `30 s`;
+- step 35: signal `B` chooses `45 s`;
+- signals `D` and `F` are ramp-interface local models (`model_has_ramps=True`)
+  and the current Wu-faithful offset path returns `0` for them.
+
+Anchoring the active signal simply turns that offset off and recovers the
+offset-off TTT. Anchoring other signals leaves the same single offset active and
+keeps the worse offset-free TTT. Therefore the missing legacy-like behavior is
+not just absolute offset reference drift.
+
+### Decision
+
+Do not merge anchored sequential offset as a standalone production fix. It is a
+valid gauge-fixing diagnostic, but it does not recover the useful multi-signal
+offset/progression pattern.
+
+The next non-joint direction should preserve sequential best response while
+changing what each offset player can see:
+
+1. keep one offset anchor as a harmless phase reference;
+2. keep offset search sequential, not joint;
+3. score each offset candidate with candidate-dependent downstream
+   arrival/TTT for the next one-hop signal;
+4. apply that only as a top-K re-ranker so the solve does not become the
+   `178-226 s` direct candidate-dependent probe.

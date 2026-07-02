@@ -246,6 +246,7 @@ mpc:
   stackelberg_reuse_process_pool: true
   stackelberg_allocation_mode: direct
   wu_faithful_np_predictor_mode: legacy
+  wu_faithful_np_coordination_mode: cap
   wu_np_storage_guard: false
   wu_np_arrival_mode: horizon
   wu_np_phase_substep: false
