@@ -12825,3 +12825,1135 @@ Standalone report:
 ### 다음 수정/검증
 
 - 메인 에이전트가 이 패치 후보를 채택하면 `PROPOSED-FOLLOWERS-ONLY` vs `PROPOSED-STACKELBERG` 동일 scenario/demand/horizon closed-loop run으로 PFO incumbent가 P-Stack 악화를 실제로 줄이는지 확인해야 한다.
+
+## 2026-07-01 Wu-Faithful Freeway Ramp Timing Fix
+
+### Context
+
+`2026-07-01/notes.md`의 Finding #3을 구현했다. `WuFaithfulFollower`의 freeway
+local rollout은 current `u_on_{ramp}` coupling arrival을 ramp reservoir에 먼저 적재한 뒤
+metering release를 계산하고 있었다. 실제 coupled plant는 Spec 3.4.3 순서대로 T_f 시작 시점의
+reservoir에서 release를 먼저 결정하고, 같은 T_f 안의 urban green arrival은 그 뒤 reservoir에
+적재한다.
+
+Used specs:
+
+- `docs/spec/04_controller.md`
+- `docs/spec/03_traffic_models.md`
+- `docs/spec/12_coding_style.md`
+- `docs/spec/15_caveats.md`
+- `docs/spec/10_tests.md`
+
+### Implementation
+
+Changed files:
+
+- `src/controllers/wu_faithful_follower.py`
+  - `_solve_freeway_agent_local` 내부 순서를 `release -> subtract reservoir -> add current u_on arrival`로 변경.
+  - `_local_ramp_release` 자체는 이미 `include_current_arrivals=False` 의미로 구현되어 있어 변경하지 않았다.
+- `src/tests/test_constraints.py`
+  - `test_wu_faithful_freeway_release_uses_start_reservoir_before_current_arrivals` 추가.
+  - 회귀 테스트는 `u_on=3600 veh/h`, `T_f=10 s`, 초기 ramp reservoir 0 veh 조건에서 release 계산 직전
+    queue가 10 veh로 보이면 실패하고 0 veh이면 통과한다.
+
+### Validation Commands
+
+Compile:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m py_compile "src\controllers\wu_faithful_follower.py" "src\tests\test_constraints.py" "src\tests\test_local_signal_plant.py"
+```
+
+Targeted timing/sign tests:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m unittest src.tests.test_constraints.ConstraintTests.test_wu_faithful_freeway_release_uses_start_reservoir_before_current_arrivals
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m unittest src.tests.test_local_signal_plant
+```
+
+Related coupling/order tests:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m unittest src.tests.test_constraints.ConstraintTests.test_simulator_uses_coupling_module_diagnostics src.tests.test_constraints.ConstraintTests.test_onramp_uses_two_reservoirs_instead_of_syncing_queues src.tests.test_constraints.ConstraintTests.test_onramp_demand_enters_urban_movement_queue_when_metering_closed src.tests.test_constraints.ConstraintTests.test_onramp_green_controls_approach_release_to_ramp_queue src.tests.test_constraints.ConstraintTests.test_coupling_passes_actual_ramp_release_to_freeway_step
+```
+
+Additional existing Wu-faithful tests attempted:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m unittest src.tests.test_constraints.ConstraintTests.test_wu_faithful_vsl_sequence_reaches_lower_future_values src.tests.test_constraints.ConstraintTests.test_wu_faithful_np_target_projects_to_signed_feasible_range
+```
+
+### Validation Results
+
+- `py_compile`: PASS.
+- New ramp timing regression test: PASS.
+- `src.tests.test_local_signal_plant`: PASS.
+- Related coupling/order tests: PASS (`5` tests).
+- Existing `test_wu_faithful_vsl_sequence_reaches_lower_future_values`: PASS when run in the two-test batch.
+- Existing `test_wu_faithful_np_target_projects_to_signed_feasible_range`: FAIL, unrelated to this timing patch.
+  - Failure: `KeyError: 'wu_faithful_np_projected_target_veh'`.
+  - This indicates the current `WuFaithfulFollower.solve()` diagnostics no longer expose the expected N_P projection key on that path; this should be handled as a separate diagnostics/test contract issue.
+
+### Simulation Status
+
+- Baseline run command: not run in this targeted implementation step.
+- Proposed-controller run command: not run in this targeted implementation step.
+- Baseline Total TTT/TTS: not measured.
+- Proposed Total TTT/TTS: not measured.
+- Improvement rate: not measured.
+- Boundary queue balancing result: not measured.
+
+### Control Validation Summary
+
+- The local freeway follower now matches the plant's two-reservoir on-ramp timing convention for same-step urban arrivals.
+- This fix removes an actually reachable candidate-scoring mismatch: same-T_f urban arrivals can no longer be released into the freeway before the plant would allow them.
+- Full closed-loop performance impact is still unknown until PFO/P-Stack scenario reruns are performed.
+
+### Proposed Next Modification
+
+1. Separately inspect the missing `wu_faithful_np_projected_target_veh` diagnostic/test contract.
+2. Run a short closed-loop comparison on a scenario where ramp timing matters (`sweet_155`, `bal_med`, or `urban_med`) for:
+   - `PROPOSED-FOLLOWERS-ONLY`
+   - `PROPOSED-STACKELBERG`
+3. Then revisit Finding #5, the Wu-metered P-Stack action-blind prefilter.
+
+## 2026-07-01 Sweet-155 Closed-Loop Check After Ramp Timing Fix
+
+### Command
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.six_controller_comparison --scenario sweet_155 --controllers NO-CONTROL,PROPOSED-FOLLOWERS-ONLY,PROPOSED-STACKELBERG --T-total 1800 --output outputs\sweet155_timingfix_nocontrol_pfo_pstack_1800_20260701 --stackelberg-leader-parallel-backend serial
+```
+
+### Results
+
+| controller | Total TTT | Urban TTT | Freeway TTT | Diff vs no-control | Improvement vs no-control | Delay | Completed | Terminal | Compute |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| NO-CONTROL | 518.411 | 385.865 | 132.547 | 0.000 | 0.000% | 96.522 | 8037.2 | 1308.1 | 0.00 s |
+| PROPOSED-FOLLOWERS-ONLY | 529.441 | 398.404 | 131.037 | +11.030 | -2.128% | 107.552 | 7976.0 | 1382.4 | 41.46 s |
+| PROPOSED-STACKELBERG | 527.533 | 402.587 | 124.946 | +9.122 | -1.760% | 105.643 | 7996.8 | 1368.8 | 199.76 s |
+
+### Interpretation
+
+- The ramp-timing fix does not make PFO beat no-control in this `sweet_155` 1800 s run.
+- P-Stack is still worse than no-control by `9.122 veh-h` (`-1.760%`).
+- P-Stack improves over PFO by `1.908 veh-h` (`0.360%` of PFO Total TTT), and also has lower terminal vehicles (`1368.8` vs `1382.4`) and higher completed vehicles (`7996.8` vs `7976.0`).
+- Compared with the earlier pre-fix `sweet_155` diagnostic run, P-Stack Total TTT improved from `528.180` to `527.533`, while PFO stayed essentially unchanged (`529.421` to `529.441`). The fix helps P-Stack slightly but does not resolve the no-control gap.
+
+### Acceptance Status
+
+- Same scenario/demand/horizon were used inside this comparison.
+- Horizon is diagnostic 1800 s, not full 7200 s acceptance.
+- Main 8% improvement criterion is not met.
+- Boundary balancing was not separately summarized in this quick table; raw outputs are under `outputs/sweet155_timingfix_nocontrol_pfo_pstack_1800_20260701`.
+
+### Next Diagnostic
+
+The remaining issue is not just the same-step ramp timing mismatch. Since PFO still loses to no-control and P-Stack only partially improves over PFO, the next likely causes are:
+
+1. local urban own-TTS scoring still missing plant-compatible storage/terminal effects;
+2. P-Stack prefilter/top-K being insufficiently action-sensitive;
+3. fallback/PFO-anchor labels and leader search stages masking whether P-Stack is actually evaluating enough non-PFO candidates.
+
+## 2026-07-01 Copy-Only Frozen Reservoir Drain Candidate
+
+### Context
+
+The user requested that the suspected `_frozen_reservoir_drain` fix must **not**
+be applied directly to the original code. A copy-only experiment was created under:
+
+```text
+work/ns_drainfix_20260701_200642
+```
+
+Two sub-agents were used:
+
+- coding sub-agent: implemented the copy-only patch and regression test;
+- review sub-agent: verified that the patch matches plant ordering and that the
+  original repo does not contain this specific frozen-drain change.
+
+Both sub-agents were closed after completion.
+
+### Copy-Only Implementation
+
+Changed only inside the copy:
+
+- `work/ns_drainfix_20260701_200642/src/controllers/wu_faithful_follower.py`
+  - `_frozen_reservoir_drain()` now calls:
+
+```python
+compute_ramp_release_flows(
+    state,
+    control,
+    demand,
+    self.cfg,
+    include_current_arrivals=False,
+)
+```
+
+- `work/ns_drainfix_20260701_200642/src/tests/test_constraints.py`
+  - Added `test_wu_frozen_reservoir_drain_ignores_current_ramp_arrivals`.
+
+### Copy-Only Validation
+
+Commands run in copy root:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m py_compile "src\controllers\wu_faithful_follower.py" "src\tests\test_constraints.py"
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m unittest src.tests.test_constraints.ConstraintTests.test_wu_frozen_reservoir_drain_ignores_current_ramp_arrivals
+```
+
+Results:
+
+- `py_compile`: PASS.
+- New copy-only regression test: PASS.
+- Reviewer verdict: PASS for plant-order fidelity and test discriminating power.
+
+### Copy-Only Closed-Loop Run
+
+Command run in copy root:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.six_controller_comparison --scenario sweet_155 --controllers NO-CONTROL,PROPOSED-FOLLOWERS-ONLY,PROPOSED-STACKELBERG --T-total 1800 --output outputs\sweet155_frozen_drain_copy_nocontrol_pfo_pstack_1800_20260701 --stackelberg-leader-parallel-backend serial
+```
+
+Copy-only results:
+
+| controller | Total TTT | Urban TTT | Freeway TTT | Diff vs no-control | Improvement vs no-control | Delay | Completed | Terminal | Compute |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| NO-CONTROL | 518.411 | 385.865 | 132.547 | 0.000 | 0.000% | 96.522 | 8037.2 | 1308.1 | 0.00 s |
+| PROPOSED-FOLLOWERS-ONLY | 531.257 | 402.141 | 129.115 | +12.846 | -2.478% | 109.367 | 7962.0 | 1400.5 | 43.95 s |
+| PROPOSED-STACKELBERG | 529.788 | 401.836 | 127.952 | +11.377 | -2.195% | 107.899 | 7970.8 | 1392.3 | 208.42 s |
+
+Compared with the current original timing-fix-only run:
+
+| controller | original Total TTT | copy Total TTT | delta | original Urban | copy Urban | original Freeway | copy Freeway |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| NO-CONTROL | 518.411 | 518.411 | +0.000 | 385.865 | 385.865 | 132.547 | 132.547 |
+| PROPOSED-FOLLOWERS-ONLY | 529.441 | 531.257 | +1.816 | 398.404 | 402.141 | 131.037 | 129.115 |
+| PROPOSED-STACKELBERG | 527.533 | 529.788 | +2.255 | 402.587 | 401.836 | 124.946 | 127.952 |
+
+### Decision
+
+- The copy-only candidate did **not** improve TTT.
+- It worsened PFO by `+1.816 veh-h` and P-Stack by `+2.255 veh-h` relative to the current original timing-fix-only run.
+- Therefore this frozen-drain change was **not applied** to the original code.
+
+### Interpretation
+
+The initial diagnosis that `include_current_arrivals=True` in `_frozen_reservoir_drain`
+was a direct PFO degradation cause is not supported by the closed-loop experiment.
+The candidate removed one plant-order mismatch, but the PFO local scorer then selected
+even more aggressive F-signal green splits (`68/44`, later `80/32`), increasing urban
+TTT despite lower freeway TTT. The dominant remaining issue is likely deeper in the
+D/F ramp-aware urban local objective/ranking, not just in the frozen reservoir-drain
+release convention.
+
+### Next Diagnostic
+
+Do not apply the frozen-drain candidate. Instead, inspect D/F ramp-aware green candidate
+ranking directly:
+
+1. For a fixed state/step, evaluate each candidate `green_p1` with the local
+   `rollout_local_tts_ramp_aware`.
+2. Evaluate the same candidate with a short full `run_coupled_interval` horizon on
+   copied states.
+3. Compare whether the local argmin agrees with the plant-TTT argmin.
+4. If ranking differs, decompose movement queue, ramp reservoir, on-ramp approach,
+   storage occupancy, and freeway TTT terms.
+
+## 2026-07-01 Sweet-155 7200 s Wu-Faithful PFO-Anchor P-Stack Run
+
+### Purpose
+
+The user clarified that the intended P-Stack run is the version that first
+computes the `WuFaithfulFollower` PFO response, converts that response into
+leader-space `N_P_star` / `N_UF_star` anchors, and then searches around that
+PFO anchor. This is the current `StackelbergWuMeteredController` path used by
+`PROPOSED-STACKELBERG`.
+
+### Commands
+
+Current wu-faithful no-control/WU/PFO reference:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.six_controller_comparison --scenario sweet_155 --controllers NO-CONTROL,WU-CD-F,PROPOSED-FOLLOWERS-ONLY --T-total 7200 --output outputs\sweet155_current_wufaithful_7200_20260701 --stackelberg-leader-parallel-backend serial
+```
+
+Wu-faithful PFO-anchor P-Stack:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.six_controller_comparison --scenario sweet_155 --controllers PROPOSED-STACKELBERG --T-total 7200 --output outputs\sweet155_current_pstack_7200_20260701 --stackelberg-leader-parallel-backend thread
+```
+
+Validation:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m py_compile src\controllers\wu_faithful_follower.py src\controllers\stackelberg_wu_metered.py src\tests\test_constraints.py
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m unittest src.tests.test_constraints.ConstraintTests.test_wu_faithful_freeway_release_uses_start_reservoir_before_current_arrivals
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m unittest src.tests.test_local_signal_plant
+```
+
+### Results
+
+| controller | Total TTT | Urban TTT | Freeway TTT | Total delay | Completed | Terminal | Compute | TTT improvement vs no-control |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| NO-CONTROL | 8611.785 | 5357.164 | 3254.621 | 6886.102 | 23379.9 | 13428.9 | 0.00 s | 0.00% |
+| WU-CD-F | 8842.809 | 5497.660 | 3345.149 | 7117.126 | 23276.4 | 13529.5 | 86.93 s | -2.68% |
+| PROPOSED-FOLLOWERS-ONLY | 4490.018 | 3676.465 | 813.553 | 2764.335 | 32519.3 | 4244.7 | 161.61 s | 47.86% |
+| PROPOSED-STACKELBERG | 4542.423 | 3720.532 | 821.891 | 2816.740 | 32268.4 | 4491.6 | 825.49 s | 47.25% |
+
+Relative to PFO, the PFO-anchor P-Stack is worse by:
+
+- Total TTT: `+52.405 veh-h` (`-1.17%` relative improvement vs PFO).
+- Urban TTT: `+44.067 veh-h`.
+- Freeway TTT: `+8.338 veh-h`.
+- Completed vehicles: `-250.9`.
+- Terminal vehicles: `+246.9`.
+
+### Anchor Diagnostics
+
+From `outputs/sweet155_current_pstack_7200_20260701/runs/sweet_155/PROPOSED-STACKELBERG/decision_diagnostics.csv`:
+
+- `leader_pfo_incumbent_active`: `40/40` steps.
+- `leader_pfo_incumbent_local_center_used`: `40/40` steps.
+- `leader_pfo_incumbent_selected`: `30/40` steps.
+- `leader_pfo_incumbent_tie_break_selected`: `8/40` steps.
+- `leader_pfo_anchor_global_hybrid_active`: `4/40` steps.
+- Average selected-vs-PFO-anchor absolute difference:
+  - `N_P_star`: `3.0 veh/h`.
+  - `N_UF_star`: `85.505 veh/h`.
+- Selected range:
+  - `N_P_star`: `781.374` to `1495.850`.
+  - `N_UF_star`: `4687.5` to `6000.0`.
+- Average per-step computation time: `20.64 s`.
+
+### Interpretation
+
+This run confirms that the executed P-Stack is the intended wu-faithful
+PFO-anchor version. However, the leader layer does not improve the full
+7200 s `sweet_155` result relative to PFO. Since 30 of 40 steps select the
+PFO incumbent and the remaining leader deviations are small in average anchor
+distance, the measured degradation is likely caused by a few non-PFO leader
+deviations that look better under the leader objective but realize slightly
+worse closed-loop urban/freeway TTT.
+
+The result supports two immediate follow-ups:
+
+1. Compare the 10 non-PFO-selected steps against the PFO incumbent candidate
+   by realized next-interval TTT, completed vehicles, terminal vehicles, and
+   urban/freeway split.
+2. Tighten the PFO-anchor acceptance rule so the leader can deviate from PFO
+   only when the predicted gain clears a stronger margin or a realized-risk
+   proxy does not worsen.
+
+### Additional Per-Step Check
+
+After the run, per-step realized TTT was compared against the standalone PFO
+run by summing `urban_ttt + freeway_ttt` from each controller's `run_log.csv`.
+This comparison is not a same-state counterfactual, but it is useful for
+identifying where the closed-loop gap accumulates.
+
+- Total P-Stack minus PFO realized TTT delta: `+52.406 veh-h`.
+- Steps where P-Stack did **not** select the PFO incumbent: `10/40`.
+- Delta over non-PFO-selected steps only: `-17.666 veh-h`.
+- Delta over PFO-selected steps: `+70.072 veh-h`.
+
+This indicates that the non-PFO leader deviations were not immediately worse
+within their own intervals. Instead, the deviations improved several middle
+steps but changed the downstream state enough that later intervals, even when
+the controller returned to the PFO incumbent, realized worse TTT than the
+standalone PFO trajectory. The next diagnosis should therefore treat the
+PFO-anchor leader issue as a delayed-state/future-risk problem rather than a
+simple one-step candidate ranking error.
+
+### Acceptance Status
+
+- Same scenario/demand/horizon were used for no-control, WU, PFO, and P-Stack.
+- `py_compile`: PASS.
+- Ramp timing regression test: PASS.
+- Local signal plant test: PASS.
+- PFO exceeds the default 8% improvement threshold vs no-control.
+- PFO-anchor P-Stack also exceeds the threshold vs no-control, but fails the
+  intended leader-value comparison because it is worse than PFO by `52.405 veh-h`.
+
+## 2026-07-01 Sweet-155 7200 s P-Stack Full Search Without PFO Anchor
+
+### Purpose
+
+The user asked to compare the PFO-anchor P-Stack against the older full-search
+style where the leader does not first seed itself with the Wu-faithful PFO
+incumbent. This run disables the PFO incumbent/anchor path while keeping the
+same current `StackelbergWuMeteredController` follower implementation.
+
+### Command
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.six_controller_comparison --scenario sweet_155 --controllers PROPOSED-STACKELBERG --T-total 7200 --output outputs\sweet155_current_pstack_fullsearch_no_anchor_7200_20260701 --stackelberg-leader-parallel-backend thread --disable-stackelberg-pfo-incumbent
+```
+
+### Result
+
+| controller / variant | Total TTT | Urban TTT | Freeway TTT | Total delay | Completed | Terminal | Compute |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| PROPOSED-FOLLOWERS-ONLY reference | 4490.018 | 3676.465 | 813.553 | 2764.335 | 32519.3 | 4244.7 | 161.61 s |
+| P-Stack, PFO-anchor | 4542.423 | 3720.532 | 821.891 | 2816.740 | 32268.4 | 4491.6 | 825.49 s |
+| P-Stack, full search without PFO anchor | 7765.857 | 6856.346 | 909.511 | 6040.174 | 29826.1 | 6970.7 | 520.85 s |
+
+Relative to PFO:
+
+- PFO-anchor P-Stack: `+52.405 veh-h` worse.
+- Full-search/no-anchor P-Stack: `+3275.839 veh-h` worse.
+
+### Diagnostics
+
+From `outputs/sweet155_current_pstack_fullsearch_no_anchor_7200_20260701/runs/sweet_155/PROPOSED-STACKELBERG/decision_diagnostics.csv`:
+
+- PFO incumbent/anchor active: `0/40` steps.
+- Selected `N_P_star` range: `-3315.0` to `2518.020`.
+- Average selected `N_P_star`: `-136.8`.
+- Steps with negative `N_P_star`: `20/40`.
+- Steps at the lower bound (`N_P_star <= -3314.9`): `10/40`.
+- Selected `N_UF_star` range: `5250.0` to `6000.0`.
+- Average selected `N_UF_star`: `5681.21`.
+
+The full-search path repeatedly selected extreme protected-network inflow
+targets:
+
+- Steps 10-19 selected approximately `N_P_star=-2016`.
+- Steps 30-39 selected `N_P_star=-3315`.
+
+This produced much larger urban TTT and terminal vehicles than both PFO and
+the PFO-anchor P-Stack.
+
+### Interpretation
+
+The result shows that the PFO-anchor modification is not the cause of the major
+P-Stack degradation. It actually prevents the leader from falling into the much
+worse extreme-target regime exposed by the no-anchor full search.
+
+The remaining PFO-anchor gap is therefore smaller and more subtle: the anchor
+version mostly selects PFO, but a few leader deviations alter the downstream
+state enough that later intervals realize a slightly worse trajectory. The
+full-search result points to a deeper leader-objective/search issue: wide
+leader search can exploit finite-horizon/terminal-accounting weaknesses and
+prefer negative `N_P_star` targets that are not good for closed-loop plant TTT.
+
+### Next Diagnostic
+
+The next fix should not remove the PFO anchor. Instead:
+
+1. Keep PFO as a hard incumbent/baseline.
+2. Allow leader deviation only when the predicted gain exceeds a stronger
+   no-regret margin.
+3. Add terminal-state guards for urban accumulation, boundary/movement queue,
+   completed vehicles, and terminal vehicles.
+4. Inspect same-state counterfactuals for the anchor run's 10 non-PFO-selected
+   steps to see which terminal state components the 540 s rollout undervalues.
+
+## 2026-07-01 PFO-Anchor P-Stack Gap Diagnosis
+
+### Question
+
+Why can the PFO-anchor P-Stack still be worse than the standalone PFO even
+though PFO is used as the leader anchor/incumbent?
+
+### Evidence From Saved Runs
+
+Runs compared:
+
+- PFO: `outputs/sweet155_current_wufaithful_7200_20260701`
+- PFO-anchor P-Stack: `outputs/sweet155_current_pstack_7200_20260701`
+
+The PFO-anchor P-Stack gap is:
+
+- Total TTT: `4542.423 - 4490.018 = +52.405 veh-h`.
+- Urban TTT: `+44.067 veh-h`.
+- Freeway TTT: `+8.338 veh-h`.
+- Completed vehicles: `-250.9`.
+- Terminal vehicles: `+246.9`.
+
+### Timing of the Gap
+
+Stepwise comparison using each controller's `progress_summary.csv` shows:
+
+| step | cumulative P-Stack minus PFO TTT | terminal vehicles delta | PFO incumbent selected? |
+|---:|---:|---:|---:|
+| 10 | `0.000` | `0.0` | 1 |
+| 12 | `-0.289` | `-22.1` | 0 |
+| 19 | `-7.820` | `-67.6` | 0 |
+| 23 | `-21.566` | `-96.1` | 0 |
+| 26 | `-34.308` | `-38.5` | 0 |
+| 27 | `-34.647` | `+20.9` | 0 |
+| 30 | `-28.919` | `+76.5` | 1 |
+| 35 | `+8.647` | `+193.6` | 1 |
+| 39 | `+52.405` | `+246.8` | 1 |
+
+Interpretation: P-Stack is not worse from the start. It is better than PFO
+through roughly step 30, but the non-PFO deviations create a terminal/backlog
+burden that becomes visible after step 27 and turns the cumulative TTT negative
+after step 35.
+
+### Same-State Leader Objective Clue
+
+For the 10 steps where the PFO incumbent was not selected, the saved diagnostics
+show that the leader sometimes accepted a candidate with worse rollout TTT than
+PFO because the penalized leader objective was lower:
+
+| step | selected rollout TTT | PFO rollout TTT | PFO minus selected rollout | objective gain | selected MFD penalty | PFO MFD penalty |
+|---:|---:|---:|---:|---:|---:|---:|
+| 15 | `254.613` | `253.852` | `-0.760` | `+4.492` | `1.681` | `1.075` |
+| 23 | `389.722` | `388.784` | `-0.937` | `+3.300` | `12.773` | `12.770` |
+| 24 | `413.255` | `412.361` | `-0.894` | `+3.400` | `15.866` | `18.901` |
+| 27 | `479.807` | `479.794` | `-0.013` | `+6.371` | `34.449` | `40.374` |
+
+Other non-PFO steps had lower rollout TTT, but they also tended to trade off
+urban storage/terminal state. The key point is that the leader objective is not
+a pure TTT argmin; storage/MFD/non-convergence terms can dominate small TTT
+differences.
+
+### State Trajectory Clue
+
+Compared against standalone PFO, P-Stack's mid-horizon deviations initially
+lower urban vehicles and TTT but alter queue placement:
+
+- Around steps 23-26:
+  - P-Stack has lower urban TTT and lower urban vehicles.
+  - Ramp queue is higher than PFO by about `+54` to `+105 veh`.
+  - On-ramp approach queue is lower by about `-110 veh`.
+- By step 35:
+  - Urban total vehicles are higher by `+178.9 veh`.
+  - Urban accumulation is higher by `+148.3 veh`.
+  - Terminal vehicles are higher by `+193.6`.
+- By step 39:
+  - Urban total vehicles are higher by `+302.7 veh`.
+  - Urban accumulation is higher by `+268.4 veh`.
+  - Terminal vehicles are higher by `+246.8`.
+
+This is consistent with a delayed-state effect: the leader deviation improves
+the short/mid-horizon objective but leaves a worse terminal state that later
+appears as higher urban TTT and terminal burden.
+
+### Guard Implementation Finding
+
+The fallback guard is intended to compare more than objective values:
+
+- `leader_fallback_guard_leader_completed_proxy_veh`
+- `leader_fallback_guard_fallback_completed_proxy_veh`
+- `leader_fallback_guard_leader_terminal_proxy_veh`
+- `leader_fallback_guard_fallback_terminal_proxy_veh`
+
+However, in the PFO-anchor P-Stack run these diagnostics are all zero for all
+steps:
+
+- leader completed proxy sum: `0`
+- fallback completed proxy sum: `0`
+- leader terminal proxy sum: `0`
+- fallback terminal proxy sum: `0`
+- completed worse flags: `0`
+- terminal worse flags: `0`
+
+Code inspection shows why:
+
+- `StackelbergMPCController._evaluation_terminal_proxy()` reads
+  `distributed_response_terminal_proxy_vehicles`.
+- `StackelbergMPCController._evaluation_completed_proxy()` reads
+  `distributed_response_completed_proxy_vehicles`.
+- `WuFaithfulFollower.solve()` fills `distributed_response_rollout_ttt`,
+  `distributed_response_rollout_freeway_ttt`, and
+  `distributed_response_rollout_urban_ttt`, but it does not fill the terminal
+  or completed proxy diagnostics.
+
+Therefore, for the current wu-faithful PFO-anchor P-Stack path, the
+throughput/terminal fallback guard is effectively disabled even though the
+metadata fields exist.
+
+### Diagnosis
+
+The PFO-anchor mechanism itself is working:
+
+- PFO incumbent active: `40/40`.
+- PFO incumbent selected: `30/40`.
+- Non-PFO selections: `10/40`.
+
+The observed PFO gap comes from:
+
+1. finite-horizon leader deviations that improve the 540 s objective but leave
+   worse terminal/queue state;
+2. leader objective terms such as MFD/storage/non-convergence penalties allowing
+   small TTT losses or queue placement changes;
+3. terminal/completed guard diagnostics being zero in the `WuFaithfulFollower`
+   path, so the guard cannot reject candidates that reduce short-horizon TTT
+   but worsen later terminal backlog.
+
+### Recommended Fix
+
+Do not remove the PFO anchor. Instead:
+
+1. Extend `WuFaithfulFollower._rollout_horizon_ttt()` or add a sibling method
+   that returns terminal vehicles and completed vehicles over the same
+   full-coupled horizon.
+2. Populate:
+   - `distributed_response_terminal_proxy_vehicles`
+   - `distributed_response_completed_proxy_vehicles`
+   - optionally urban/freeway split proxies.
+3. Make `_select_with_fallback_guard()` reject leader deviations when:
+   - rollout TTT gain is below a meaningful margin, and
+   - terminal vehicles or completed vehicles are worse than the PFO incumbent.
+4. Re-run `sweet_155` 7200 s PFO/PFO-anchor P-Stack to verify that the leader
+   either matches PFO or improves it without creating delayed terminal burden.
+
+## 2026-07-01 - All-Boundary Half-Cap MFD Penalty Check
+
+### Implementation
+
+Changed the leader `all_urban_halfcap` penalty so movement-queue half-cap
+excess is counted for every urban movement, including:
+
+- `boundary_in`
+- `boundary_out`
+- `off_ramp`
+- `on_ramp`
+- internal movements
+
+Previously the experimental half-cap path skipped `boundary_in` and
+`boundary_out`. That made the storage/MFD pressure incomplete at the urban
+network boundary.
+
+Changed files:
+
+- `src/controllers/leader.py`
+- `src/tests/test_constraints.py`
+
+### Validation
+
+Commands:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m py_compile src\controllers\leader.py src\tests\test_constraints.py
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m unittest src.tests.test_constraints.ConstraintTests.test_leader_all_urban_halfcap_penalty_counts_boundary_and_storage
+```
+
+Result:
+
+- `py_compile`: PASS
+- targeted constraint test: PASS
+
+The targeted test now explicitly checks boundary-in movement excess,
+boundary-out movement excess, internal movement excess, and link-storage excess.
+
+### Closed-Loop Run
+
+Command:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.six_controller_comparison --scenario sweet_155 --controllers PROPOSED-STACKELBERG --T-total 7200 --output outputs\sweet155_pstack_all_boundary_halfcap_7200_20260701 --stackelberg-leader-parallel-backend thread
+```
+
+Reference current PFO/no-control command:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.six_controller_comparison --scenario sweet_155 --controllers NO-CONTROL,WU-CD-F,PROPOSED-FOLLOWERS-ONLY --T-total 7200 --output outputs\sweet155_current_wufaithful_7200_20260701 --stackelberg-leader-parallel-backend serial
+```
+
+### Results
+
+| controller | total TTT | urban TTT | freeway TTT | completed veh | terminal veh | compute sec |
+|---|---:|---:|---:|---:|---:|---:|
+| NO-CONTROL | `8611.785` | `5357.164` | `3254.621` | `23379.9` | `13428.9` | `0.00` |
+| PROPOSED-FOLLOWERS-ONLY | `4490.018` | `3676.465` | `813.553` | `32519.3` | `4244.7` | `161.61` |
+| P-Stack, previous half-cap | `4542.423` | `3720.532` | `821.891` | `32268.4` | `4491.6` | `825.49` |
+| P-Stack, all-boundary half-cap | `4568.062` | `3772.098` | `795.964` | `32238.1` | `4527.8` | `841.34` |
+
+Compared with standalone PFO, the all-boundary P-Stack run is worse by:
+
+- total TTT: `+78.044 veh-h`
+- completed vehicles: `-281.2 veh`
+- terminal vehicles: `+283.1 veh`
+
+Compared with the previous PFO-anchor P-Stack run, the all-boundary half-cap
+run is also worse:
+
+- total TTT: `+25.639 veh-h`
+- urban TTT: `+51.566 veh-h`
+- freeway TTT: `-25.927 veh-h`
+- terminal vehicles: `+36.2 veh`
+
+### Diagnostics
+
+The all-boundary half-cap path did affect leader ranking:
+
+| diagnostic | previous half-cap | all-boundary half-cap |
+|---|---:|---:|
+| PFO incumbent selected steps | `30/40` | `33/40` |
+| non-PFO selected steps | `10/40` | `7/40` |
+| avg MFD penalty | `19.407` | `59.743` |
+| max MFD penalty | `73.164` | `233.779` |
+| avg movement excess | `388.1` | `1194.9` |
+
+However, the performance did not improve. Including boundary-in and
+boundary-out movement queues in the half-cap penalty increases the penalty
+signal and makes the leader stick closer to PFO more often, but it does not
+remove the delayed terminal/urban burden.
+
+### Diagnosis
+
+Boundary coverage in the half-cap MFD penalty was incomplete and is now fixed,
+but this was not the root cause of P-Stack being worse than PFO on `sweet_155`.
+The stronger remaining implementation issue is still the missing
+terminal/completed proxy in the `WuFaithfulFollower` response diagnostics:
+
+- `distributed_response_terminal_proxy_vehicles` remains unavailable for the
+  wu-faithful follower response path.
+- `distributed_response_completed_proxy_vehicles` remains unavailable for the
+  wu-faithful follower response path.
+- Therefore the fallback guard cannot reject finite-horizon leader deviations
+  that look good in short-horizon TTT but worsen later terminal burden.
+
+Next recommended modification:
+
+1. Add terminal and completed proxy outputs to the `WuFaithfulFollower`
+   full-coupled horizon rollout.
+2. Re-enable the leader fallback guard against the PFO incumbent using those
+   proxies.
+3. Re-run `sweet_155` PFO and PFO-anchor P-Stack for 7200 s.
+
+## 2026-07-01 - Sweet 190 All-Boundary Half-Cap 7200 s Run
+
+### Purpose
+
+Run the current all-boundary half-cap leader objective on `sweet_190` to check
+whether the P-Stack behavior that was poor on `sweet_155` persists at a higher
+demand level.
+
+### Command
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.six_controller_comparison --scenario sweet_190 --controllers NO-CONTROL,PROPOSED-FOLLOWERS-ONLY,PROPOSED-STACKELBERG --T-total 7200 --output outputs\sweet190_all_boundary_halfcap_7200_20260701 --stackelberg-leader-parallel-backend thread
+```
+
+### Results
+
+| controller | total TTT | urban TTT | freeway TTT | completed veh | terminal veh | computation sec | avg sec/step |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| NO-CONTROL | `25170.572` | `15393.978` | `9776.594` | `15921.5` | `29139.1` | `0.00` | `0.00` |
+| PROPOSED-FOLLOWERS-ONLY | `13590.622` | `12365.455` | `1225.166` | `29731.7` | `15300.0` | `164.62` | `4.116` |
+| PROPOSED-STACKELBERG | `12984.869` | `11581.681` | `1403.187` | `30808.5` | `14194.3` | `827.07` | `20.677` |
+
+### P-Stack vs PFO
+
+P-Stack improved over PFO on this higher-demand case:
+
+- total TTT improvement: `605.753 veh-h` (`5.28%` vs PFO)
+- completed vehicles: `+1076.8 veh`
+- network throughput: `+538.4 veh/h`
+- terminal vehicles: `-1105.7 veh`
+- urban TTT: `-783.774 veh-h`
+- freeway TTT: `+178.021 veh-h`
+
+This means the leader traded a modest freeway TTT increase for a larger urban
+TTT and terminal-burden reduction. Unlike `sweet_155`, the higher-demand case
+shows a positive network-level value for the leader layer.
+
+### Computation Cost
+
+| comparison | value |
+|---|---:|
+| PFO total compute | `164.62 s` |
+| P-Stack total compute | `827.07 s` |
+| P-Stack / PFO compute ratio | `5.02x` |
+| PFO average step compute | `4.116 s` |
+| P-Stack average step compute | `20.677 s` |
+| P-Stack max step compute | `25.484 s` |
+| control interval budget | `180 s` |
+| PFO budget share | `2.29%` |
+| P-Stack average budget share | `11.49%` |
+| P-Stack max budget share | `14.16%` |
+
+The current P-Stack implementation is substantially more expensive than PFO,
+but it remains below the 180 s online control interval in this run.
+
+### Leader Diagnostics
+
+- PFO incumbent selected: `18/40` steps
+- global hybrid anchor/search active: `4/40` steps
+- P-Stack selected `N_P_star` average: `1579.25 veh`
+- P-Stack selected `N_UF_star` average: `4733.99 veh/h`
+- P-Stack `N_UF_star` range: `3300` to `6000 veh/h`
+
+### Diagnosis
+
+The `sweet_190` result suggests that P-Stack is not inherently broken; the
+leader layer can improve total TTT, throughput, and terminal burden when the
+demand level is high enough for coordination to have clear value. The remaining
+issue is scenario-dependent ranking/fidelity:
+
+- On `sweet_155`, finite-horizon leader deviations still worsen delayed
+  terminal/urban burden.
+- On `sweet_190`, the same leader machinery improves network-level outcomes.
+
+Next diagnostic target remains the same: add terminal/completed proxy outputs
+to the wu-faithful follower response so the leader can reject short-horizon
+choices that create delayed terminal burden in moderate-demand cases.
+
+## 2026-07-01 - Sweet 155 East Incident 7200 s Run
+
+### Purpose
+
+Run a `sweet_155` demand case with an eastbound downstream incident to see
+whether the leader value appears when the moderate-demand case receives a
+freeway bottleneck shock.
+
+### Scenario
+
+Temporary scenario file:
+
+- `work/scenarios_sweet155_incident.yaml`
+
+Scenario definition:
+
+- name: `sweet_155_incident_east`
+- urban/freeway/ramp scale: `1.55`
+- incident: `FW_E`, segment `3`, `lane_loss=1.0`
+- incident window: `2400 <= t < 4800 s`
+
+This uses the same directional incident pattern as `medium_incident_east`, but
+with `sweet_155` demand levels.
+
+### Command
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.six_controller_comparison --scenarios-config work\scenarios_sweet155_incident.yaml --scenario sweet_155_incident_east --controllers NO-CONTROL,PROPOSED-FOLLOWERS-ONLY,PROPOSED-STACKELBERG --T-total 7200 --output outputs\sweet155_incident_all_boundary_halfcap_7200_20260701 --stackelberg-leader-parallel-backend thread
+```
+
+### Results
+
+| controller | total TTT | urban TTT | freeway TTT | completed veh | terminal veh | computation sec | avg sec/step |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| NO-CONTROL | `10207.386` | `6217.758` | `3989.627` | `21814.4` | `14994.3` | `0.00` | `0.00` |
+| PROPOSED-FOLLOWERS-ONLY | `9191.270` | `6069.016` | `3122.253` | `24756.0` | `12040.2` | `164.89` | `4.122` |
+| PROPOSED-STACKELBERG | `9133.371` | `6103.706` | `3029.665` | `24610.3` | `12186.3` | `813.40` | `20.335` |
+
+### P-Stack vs PFO
+
+P-Stack is slightly better than PFO in total TTT, but not in throughput or
+terminal burden:
+
+- total TTT improvement: `57.899 veh-h` (`0.78%` vs PFO)
+- freeway TTT: `-92.588 veh-h`
+- urban TTT: `+34.690 veh-h`
+- completed vehicles: `-145.7 veh`
+- network throughput: `-72.9 veh/h`
+- terminal vehicles: `+146.1 veh`
+
+The leader's improvement comes mainly from reducing freeway TTT during/after
+the incident. It does not dominate PFO on terminal state or throughput.
+
+### Computation Cost
+
+| comparison | value |
+|---|---:|
+| PFO total compute | `164.89 s` |
+| P-Stack total compute | `813.40 s` |
+| P-Stack / PFO compute ratio | `4.93x` |
+| PFO average step compute | `4.122 s` |
+| P-Stack average step compute | `20.335 s` |
+| P-Stack max step compute | `26.147 s` |
+| control interval budget | `180 s` |
+| PFO budget share | `2.29%` |
+| P-Stack average budget share | `11.30%` |
+| P-Stack max budget share | `14.53%` |
+
+### Leader Diagnostics
+
+- PFO incumbent selected: `35/40` steps
+- global hybrid anchor/search active: `4/40` steps
+- selected `N_P_star` average: `1247.49 veh`
+- selected `N_P_star` range: `828.89` to `1661.21 veh`
+- selected `N_UF_star` average: `5850 veh/h`
+- selected `N_UF_star` range: `3750` to `6000 veh/h`
+
+### Diagnosis
+
+The incident changes the `sweet_155` conclusion:
+
+- In no-incident `sweet_155`, all-boundary P-Stack was worse than PFO.
+- With the eastbound incident, P-Stack becomes slightly better in total TTT.
+
+However, the improvement is small and comes with worse completed/terminal
+metrics. This is consistent with the previous diagnosis: the leader can reduce
+short-horizon/freeway TTT, but without terminal/completed response proxies it
+can still accept deviations that are not clearly better at the end-state level.
+
+## 2026-07-01 - Sweet 155 Incident High-Accuracy P-Stack Search
+
+### Purpose
+
+Check whether the small P-Stack gain in `sweet_155_incident_east` was limited by
+leader search accuracy. This run keeps the wu-faithful PFO incumbent/anchor
+enabled, but increases continuous leader search budgets.
+
+### Command
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.six_controller_comparison --scenarios-config work\scenarios_sweet155_incident.yaml --scenario sweet_155_incident_east --controllers PROPOSED-STACKELBERG --T-total 7200 --output outputs\sweet155_incident_pstack_high_accuracy_7200_20260701 --stackelberg-leader-parallel-backend thread --leader-search-mode continuous --leader-continuous-max-evals 32 --leader-continuous-seed-count 15 --leader-continuous-prefilter-samples 121 --leader-continuous-prefilter-top-k 16 --leader-continuous-local-max-evals 16 --leader-continuous-local-seed-count 9 --leader-continuous-local-prefilter-samples 61 --leader-continuous-local-prefilter-top-k 12 --leader-continuous-local-iterations 8 --leader-continuous-initial-step-fraction 0.5 --leader-continuous-shrink-factor 0.5 --leader-continuous-min-np-step-veh 20 --leader-continuous-min-nuf-step-veh-h 50 --stackelberg-prefilter-top-k 16 --stackelberg-prefilter-local-top-k 12
+```
+
+### Results
+
+| controller | total TTT | urban TTT | freeway TTT | completed veh | terminal veh | computation sec | avg sec/step |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| NO-CONTROL | `10207.386` | `6217.758` | `3989.627` | `21814.4` | `14994.3` | `0.00` | `0.00` |
+| PROPOSED-FOLLOWERS-ONLY | `9191.270` | `6069.016` | `3122.253` | `24756.0` | `12040.2` | `164.89` | `4.122` |
+| P-Stack, default search | `9133.371` | `6103.706` | `3029.665` | `24610.3` | `12186.3` | `813.40` | `20.335` |
+| P-Stack, high-accuracy search | `8970.486` | `5939.282` | `3031.204` | `24790.3` | `12004.0` | `3671.94` | `91.799` |
+
+### Improvement
+
+High-accuracy P-Stack improves over:
+
+- no-control by `1236.900 veh-h` (`12.118%`)
+- PFO by `220.784 veh-h` (`2.402%`)
+- default-search P-Stack by `162.885 veh-h` (`1.783%`)
+
+Compared with PFO, high-accuracy P-Stack also improves end-state metrics:
+
+- completed vehicles: `+34.3 veh`
+- terminal vehicles: `-36.2 veh`
+
+This is a stronger result than the default-search P-Stack run, where P-Stack
+reduced total TTT but had worse completed/terminal metrics than PFO.
+
+### Computation Cost
+
+| comparison | value |
+|---|---:|
+| high-accuracy P-Stack total compute | `3671.94 s` |
+| high-accuracy P-Stack average step compute | `91.799 s` |
+| high-accuracy P-Stack max step compute | `103.649 s` |
+| control interval budget | `180 s` |
+| average budget share | `50.999%` |
+| max budget share | `57.583%` |
+| high-accuracy / PFO compute ratio | `22.27x` |
+| high-accuracy / default P-Stack compute ratio | `4.51x` |
+
+The high-accuracy search remains below the 180 s control interval in this run,
+but the margin is much smaller. This setting is suitable as a diagnostic or
+offline/high-computation variant, not yet as the default online setting.
+
+### Leader Diagnostics
+
+- PFO incumbent selected: `22/40` steps
+- global hybrid anchor/search active: `4/40` steps
+- average full leader evaluations per step: `16.10`
+- max full leader evaluations per step: `17`
+- selected `N_P_star` average: `1236.58 veh`
+- selected `N_P_star` range: `810.35` to `1582.83 veh`
+- selected `N_UF_star` average: `5793.75 veh/h`
+- selected `N_UF_star` range: `3750` to `6000 veh/h`
+
+### Diagnosis
+
+This run changes the search-accuracy conclusion for incident cases:
+
+- The default PFO-anchor P-Stack was conservative and selected the PFO
+  incumbent `35/40` steps.
+- The high-accuracy run selected the PFO incumbent only `22/40` steps and found
+  additional leader deviations that improved total TTT and end-state metrics.
+
+Therefore, for `sweet_155_incident_east`, P-Stack performance was partly limited
+by leader search accuracy. The remaining trade-off is computation cost. A likely
+next step is to keep the high-accuracy option for global-refresh/incident-trigger
+steps only, while using cheaper local search in normal periods.
+
+## 2026-07-02 - Sweet 155 and Sweet 190 High-Accuracy P-Stack Search
+
+### Purpose
+
+Run the same high-accuracy wu-faithful P-Stack search used in the incident
+diagnostic on the base `sweet_155` and `sweet_190` scenarios. The PFO incumbent
+anchor remains enabled; only leader search accuracy is increased.
+
+### Commands
+
+`sweet_155`:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.six_controller_comparison --scenario sweet_155 --controllers PROPOSED-STACKELBERG --T-total 7200 --output outputs\sweet155_pstack_high_accuracy_7200_20260702 --stackelberg-leader-parallel-backend thread --leader-search-mode continuous --leader-continuous-max-evals 32 --leader-continuous-seed-count 15 --leader-continuous-prefilter-samples 121 --leader-continuous-prefilter-top-k 16 --leader-continuous-local-max-evals 16 --leader-continuous-local-seed-count 9 --leader-continuous-local-prefilter-samples 61 --leader-continuous-local-prefilter-top-k 12 --leader-continuous-local-iterations 8 --leader-continuous-initial-step-fraction 0.5 --leader-continuous-shrink-factor 0.5 --leader-continuous-min-np-step-veh 20 --leader-continuous-min-nuf-step-veh-h 50 --stackelberg-prefilter-top-k 16 --stackelberg-prefilter-local-top-k 12
+```
+
+`sweet_190`:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.six_controller_comparison --scenario sweet_190 --controllers PROPOSED-STACKELBERG --T-total 7200 --output outputs\sweet190_pstack_high_accuracy_7200_20260702 --stackelberg-leader-parallel-backend thread --leader-search-mode continuous --leader-continuous-max-evals 32 --leader-continuous-seed-count 15 --leader-continuous-prefilter-samples 121 --leader-continuous-prefilter-top-k 16 --leader-continuous-local-max-evals 16 --leader-continuous-local-seed-count 9 --leader-continuous-local-prefilter-samples 61 --leader-continuous-local-prefilter-top-k 12 --leader-continuous-local-iterations 8 --leader-continuous-initial-step-fraction 0.5 --leader-continuous-shrink-factor 0.5 --leader-continuous-min-np-step-veh 20 --leader-continuous-min-nuf-step-veh-h 50 --stackelberg-prefilter-top-k 16 --stackelberg-prefilter-local-top-k 12
+```
+
+### Sweet 155 Results
+
+| controller | total TTT | urban TTT | freeway TTT | completed veh | terminal veh | computation sec |
+|---|---:|---:|---:|---:|---:|---:|
+| NO-CONTROL | `8611.785` | `5357.164` | `3254.621` | `23379.9` | `13428.9` | `0.00` |
+| PROPOSED-FOLLOWERS-ONLY | `4490.018` | `3676.465` | `813.553` | `32519.3` | `4244.7` | `161.61` |
+| P-Stack default search | `4568.062` | `3772.098` | `795.964` | `32238.1` | `4527.8` | `841.34` |
+| P-Stack high-accuracy search | `4362.055` | `3577.778` | `784.277` | `32629.5` | `4134.7` | `4254.06` |
+
+High-accuracy P-Stack improves over:
+
+- no-control by `49.348%`
+- PFO by `127.963 veh-h` (`2.850%`)
+- default P-Stack by `206.007 veh-h` (`4.510%`)
+
+Compared with PFO:
+
+- completed vehicles: `+110.2 veh`
+- terminal vehicles: `-110.0 veh`
+
+### Sweet 190 Results
+
+| controller | total TTT | urban TTT | freeway TTT | completed veh | terminal veh | computation sec |
+|---|---:|---:|---:|---:|---:|---:|
+| NO-CONTROL | `25170.572` | `15393.978` | `9776.594` | `15921.5` | `29139.1` | `0.00` |
+| PROPOSED-FOLLOWERS-ONLY | `13590.622` | `12365.455` | `1225.166` | `29731.7` | `15300.0` | `164.62` |
+| P-Stack default search | `12984.869` | `11581.681` | `1403.187` | `30808.5` | `14194.3` | `827.07` |
+| P-Stack high-accuracy search | `12931.636` | `11458.212` | `1473.424` | `30924.3` | `14099.5` | `4220.06` |
+
+High-accuracy P-Stack improves over:
+
+- no-control by `48.624%`
+- PFO by `658.986 veh-h` (`4.849%`)
+- default P-Stack by `53.233 veh-h` (`0.410%`)
+
+Compared with PFO:
+
+- completed vehicles: `+1192.6 veh`
+- terminal vehicles: `-1200.5 veh`
+
+### Computation Cost and Diagnostics
+
+| scenario | total compute | avg step sec | max step sec | PFO selected | avg full evals | compute/PFO | compute/default P-Stack |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `sweet_155` | `4254.06 s` | `106.351` | `144.835` | `20/40` | `16.10` | `26.32x` | `5.06x` |
+| `sweet_190` | `4220.06 s` | `105.501` | `128.112` | `10/40` | `16.10` | `25.64x` | `5.10x` |
+
+Both high-accuracy runs stay below the 180 s control interval on average and at
+the worst step, but the computation margin is much smaller than the default
+P-Stack configuration.
+
+### Diagnosis
+
+The high-accuracy search changes the non-incident conclusions:
+
+- In `sweet_155`, default P-Stack was worse than PFO, but high-accuracy P-Stack
+  becomes better than PFO in total TTT, completed vehicles, and terminal
+  vehicles.
+- In `sweet_190`, default P-Stack was already better than PFO; high-accuracy
+  search adds only a small extra TTT improvement, suggesting the default search
+  was already close to a good solution for that high-demand case.
+
+This supports a search-fidelity interpretation:
+
+- Moderate or localized cases can require more accurate leader search to avoid
+  being trapped near conservative PFO-anchor choices.
+- Strong high-demand cases already give a clearer leader objective landscape,
+  so default P-Stack captures most of the available improvement.
+
+The open design question is how to activate high-accuracy search selectively,
+for example at global refresh steps or when incident/density/storage stress is
+high, without paying the full `~5x` P-Stack computation cost every control step.
+
+## 2026-07-02 Legacy Pre-WuFaithful P-Stack Sweet 155/190 Comparison
+
+### Purpose
+
+The user asked whether the pre-WuFaithful P-Stack controller had better
+performance in `sweet_155` and `sweet_190`, and requested a same-condition
+comparison when existing outputs were insufficient.
+
+Existing outputs were not sufficient for a same-condition 7200 s comparison:
+
+- `outputs/classical_hierarchical_sweet190_3600_20260629` has a pre-WuFaithful
+  P-Stack partial run only through `1080 s`.
+- `outputs/sweet155_legacy_distributed_pfo_7200_20260701` is legacy PFO only
+  and stops at `5940 s`; it is not a completed legacy P-Stack run.
+
+### Temporary Runner
+
+Added temporary work scripts only:
+
+- `work/run_legacy_pstack_compare.py`
+- `work/summarize_legacy_pstack_compare.py`
+
+The runner instantiates `StackelbergMPCController` with
+`DistributedCoordinator`, matching the pre-WuFaithful follower path, and writes
+the same summary fields used by `six_controller_comparison.py`. A first
+`sweet_190` attempt failed at step 10 with `MemoryError` because the legacy
+controller copied very large diagnostics through `previous_control`; the
+temporary runner was adjusted to clear only cached diagnostics between steps.
+The control values are preserved.
+
+### Commands
+
+Smoke / compile:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m py_compile work\run_legacy_pstack_compare.py
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B work\run_legacy_pstack_compare.py --scenarios sweet_155 --T-total 180 --leader-backend thread --output outputs\legacy_pstack_smoke_180_thread_20260702
+```
+
+Full runs:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B work\run_legacy_pstack_compare.py --scenarios sweet_155 --T-total 7200 --leader-backend thread --output outputs\legacy_pstack_sweet155_7200_20260702
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B work\run_legacy_pstack_compare.py --scenarios sweet_190 --T-total 7200 --leader-backend thread --output outputs\legacy_pstack_sweet190_7200_20260702
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B work\summarize_legacy_pstack_compare.py
+```
+
+Comparison CSV:
+
+- `outputs/legacy_pstack_sweet155_sweet190_7200_20260702/comparison_summary.csv`
+
+### Results
+
+| scenario | controller | total TTT | urban TTT | freeway TTT | completed veh | terminal veh | compute sec | improvement vs no-control |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| sweet_155 | NO-CONTROL | `8611.785` | `5357.164` | `3254.621` | `23379.9` | `13428.9` | `0.00` | `0.00%` |
+| sweet_155 | current PFO | `4490.018` | `3676.465` | `813.553` | `32519.3` | `4244.7` | `161.61` | `47.86%` |
+| sweet_155 | current WuFaithful P-Stack | `4568.062` | `3772.098` | `795.964` | `32238.1` | `4527.8` | `841.34` | `46.96%` |
+| sweet_155 | legacy pre-WuFaithful P-Stack | `4051.641` | `3318.737` | `732.904` | `33243.2` | `3551.2` | `3219.54` | `52.95%` |
+| sweet_190 | NO-CONTROL | `25170.572` | `15393.978` | `9776.594` | `15921.5` | `29139.1` | `0.00` | `0.00%` |
+| sweet_190 | current PFO | `13590.622` | `12365.455` | `1225.166` | `29731.7` | `15300.0` | `164.62` | `46.01%` |
+| sweet_190 | current WuFaithful P-Stack | `12984.869` | `11581.681` | `1403.187` | `30808.5` | `14194.3` | `827.07` | `48.41%` |
+| sweet_190 | legacy pre-WuFaithful P-Stack | `10728.763` | `9201.420` | `1527.343` | `33260.2` | `11685.0` | `3661.68` | `57.38%` |
+
+### Direct Differences
+
+Legacy pre-WuFaithful P-Stack compared with current PFO:
+
+- `sweet_155`: `-438.377 veh-h` total TTT, `+723.9` completed vehicles,
+  `-693.5` terminal vehicles.
+- `sweet_190`: `-2861.859 veh-h` total TTT, `+3528.5` completed vehicles,
+  `-3615.0` terminal vehicles.
+
+Legacy pre-WuFaithful P-Stack compared with current WuFaithful P-Stack:
+
+- `sweet_155`: `-516.421 veh-h` total TTT, `+1005.1` completed vehicles,
+  `-976.6` terminal vehicles.
+- `sweet_190`: `-2256.106 veh-h` total TTT, `+2451.7` completed vehicles,
+  `-2509.3` terminal vehicles.
+
+### Diagnosis
+
+The pre-WuFaithful P-Stack path still finds substantially better TTT/throughput
+solutions on these two sweet scenarios, but it is much more expensive:
+
+- `sweet_155`: `3219.54 s`, about `19.92x` current PFO and `3.83x` current
+  WuFaithful P-Stack.
+- `sweet_190`: `3661.68 s`, about `22.24x` current PFO and `4.43x` current
+  WuFaithful P-Stack.
+
+This suggests the main regression from the WuFaithful simplification is not that
+the leader is useless, but that the faster follower/search path has removed or
+coarsened part of the action-response space that the legacy P-Stack was
+exploiting. The next useful diagnostic is to compare legacy and WuFaithful
+control trajectories on the same steps, especially green allocation, offset
+changes, total RM release, on-ramp queues, and urban departures.

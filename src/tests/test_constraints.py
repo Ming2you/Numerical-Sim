@@ -1958,14 +1958,21 @@ class ConstraintTests(unittest.TestCase):
             for movement, spec in cfg.network.urban_movements.items()
             if spec.get("kind") == "boundary_in"
         )
+        boundary_out_movement, boundary_out_spec = next(
+            (movement, spec)
+            for movement, spec in cfg.network.urban_movements.items()
+            if spec.get("kind") == "boundary_out"
+        )
         internal_movement, internal_spec = next(
             (movement, spec)
             for movement, spec in cfg.network.urban_movements.items()
             if spec.get("kind") == "internal"
         )
         boundary_capacity = cfg.leader.mfd_boundary_queue_capacity_veh
+        boundary_out_capacity = movement_storage_capacity(cfg, boundary_out_movement, boundary_out_spec)
         internal_capacity = movement_storage_capacity(cfg, internal_movement, internal_spec)
         state.urban_movement_queue[boundary_movement] = 0.5 * boundary_capacity + 10.0
+        state.urban_movement_queue[boundary_out_movement] = 0.5 * boundary_out_capacity + 15.0
         state.urban_movement_queue[internal_movement] = 0.5 * internal_capacity + 20.0
 
         link = "A_to_D"
@@ -1980,11 +1987,11 @@ class ConstraintTests(unittest.TestCase):
             nash_converged=True,
         )
 
-        expected_excess = 10.0 + 20.0 + 30.0
+        expected_excess = 10.0 + 15.0 + 20.0 + 30.0
         expected_penalty = 2.0 * expected_excess * cfg.simulation.T_c_h
         self.assertEqual(cfg.leader.mfd_penalty_mode, "all_urban_halfcap")
         self.assertAlmostEqual(terms["leader_target_penalty"], 0.0)
-        self.assertAlmostEqual(terms["leader_mfd_movement_excess_veh"], 30.0)
+        self.assertAlmostEqual(terms["leader_mfd_movement_excess_veh"], 45.0)
         self.assertAlmostEqual(terms["leader_mfd_boundary_queue_capacity_veh"], 220.0)
         self.assertAlmostEqual(terms["leader_mfd_link_excess_veh"], 30.0)
         self.assertAlmostEqual(terms["leader_mfd_storage_excess_veh"], expected_excess)
@@ -2302,6 +2309,95 @@ class ConstraintTests(unittest.TestCase):
                         for i in range(len(after))
                     )
                 )
+
+    def test_wu_faithful_freeway_release_uses_start_reservoir_before_current_arrivals(self):
+        cfg = ExperimentConfig.from_file(
+            "src/config/default.yaml",
+            {
+                "simulation": {
+                    "T_total": 10.0,
+                    "T_f": 10.0,
+                    "control_interval": 10.0,
+                },
+                "mpc": {"horizon_steps": 1},
+                "freeway_follower": {
+                    "freeway_prediction_horizon_steps": 1,
+                    "vsl_sequence_search": False,
+                },
+            },
+        )
+        follower = WuFaithfulFollower(cfg)
+        link = next(
+            link
+            for link, model in follower._local_freeway_models.items()
+            if model.owned_ramps
+        )
+        model = follower._local_freeway_models[link]
+        ramp = model.owned_ramps[0]
+        state = TrafficState.initial(cfg)
+        state.ramp_queue[ramp] = 0.0
+        previous = ControlAction.fixed(cfg)
+        demand = DemandProfile(cfg, ScenarioConfig("test", ramp_scale=0.0)).at(0.0)
+        coupling = {f"u_on_{ramp}": 3600.0}
+        release_seen_queue: list[dict[str, float]] = []
+
+        def fake_local_ramp_release(
+            link_arg,
+            rhos,
+            ramp_queue,
+            candidate_control,
+            demand_step,
+        ):
+            del rhos, candidate_control, demand_step
+            if link_arg == link:
+                release_seen_queue.append(dict(ramp_queue))
+            return {owned: 0.0 for owned in follower._local_freeway_models[link_arg].owned_ramps}
+
+        def fake_freeway_substep_local(
+            local_model,
+            rhos,
+            speeds,
+            prev_lanes,
+            occ,
+            origin_q,
+            ramp_release,
+            offramp_capacity,
+            candidate_control,
+            demand_step,
+        ):
+            del occ, ramp_release, offramp_capacity, candidate_control, demand_step
+            return (
+                list(rhos),
+                list(speeds),
+                list(prev_lanes),
+                origin_q,
+                {off_ramp: 0.0 for off_ramp in local_model.owned_offramps},
+                [0.0 for _ in range(local_model.n_seg)],
+            )
+
+        # Spec 3.4.3: current urban→ramp arrival은 같은 T_f의 release 결정 이후
+        # reservoir에 적재되어야 한다. 버그가 있으면 여기서 3600 veh/h * 10 s = 10 veh가
+        # release 계산 전에 보인다.
+        with patch.object(
+            follower,
+            "_freeway_vsl_sequence_candidates",
+            return_value=[[[100.0 for _ in range(model.n_seg)]]],
+        ):
+            with patch.object(follower, "_local_ramp_release", side_effect=fake_local_ramp_release):
+                with patch(
+                    "src.controllers.wu_faithful_follower.freeway_substep_local",
+                    side_effect=fake_freeway_substep_local,
+                ):
+                    follower._solve_freeway_agent_local(
+                        link,
+                        state,
+                        coupling,
+                        demand,
+                        previous,
+                    )
+
+        self.assertTrue(release_seen_queue)
+        self.assertAlmostEqual(release_seen_queue[0][ramp], 0.0, places=6)
 
     def test_wu_faithful_np_target_projects_to_signed_feasible_range(self):
         cfg = ExperimentConfig.from_file(

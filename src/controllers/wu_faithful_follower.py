@@ -1089,17 +1089,19 @@ class WuFaithfulFollower:
                 for i, v in enumerate(current_vec):
                     candidate_control.vsl[f"{link}__seg{i}"] = float(v)
                 for _ in range(sim.K_cf):
-                    # urban->freeway coupling[veh/h]을 ramp reservoir에 적재.
+                    # Spec 3.4.3: ramp metering release는 T_f 시작 시점의 reservoir만 본다.
+                    # 같은 T_f 안에서 urban green으로 새로 들어온 차량은 이번 release가 아니라
+                    # 다음 release 결정부터 사용할 수 있으므로, release를 먼저 계산하고 나중에 적재한다.
+                    ramp_release = self._local_ramp_release(link, rhos, ramp_q, candidate_control, demand)
+                    for ramp, rel in ramp_release.items():
+                        ramp_q[ramp] = max(0.0, ramp_q.get(ramp, 0.0) - max(0.0, rel) * dt_h)
+                    # urban->freeway coupling[veh/h]은 release 이후 ramp reservoir에 적재된다.
                     for ramp in model.owned_ramps:
                         approach = max(0.0, float(coupling.get(f"u_on_{ramp}", 0.0)))
                         ramp_q[ramp] = min(
                             net.ramp_queue_max_veh,
                             max(0.0, ramp_q.get(ramp, 0.0)) + approach * dt_h,
                         )
-                    # per-link ramp release(국소 복제), reservoir 배출.
-                    ramp_release = self._local_ramp_release(link, rhos, ramp_q, candidate_control, demand)
-                    for ramp, rel in ramp_release.items():
-                        ramp_q[ramp] = max(0.0, ramp_q.get(ramp, 0.0) - max(0.0, rel) * dt_h)
                     # off-ramp cap(국소 storage 가용공간 기반).
                     storage_avail = {
                         o: max(0.0, model.offramp_storage_cap.get(o, 0.0) - occ.get(o, 0.0))
