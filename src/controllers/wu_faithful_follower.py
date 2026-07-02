@@ -120,6 +120,10 @@ class WuFaithfulFollower:
         # 매 step 측정한 듀얼 gain G=|dΣnin/dλ|로 α = dual_step_c·cost_norm/max(G,G_floor)
         # 로 자기보정한다(스케일 인지·과적합 방지). 아래 _solve_followers 참고.
         self.dual_step_c: float = 1.0
+        # λ step 간 적분 갱신 게인[h²/veh]: 오차 100 veh/h가 1 step에 λ를 ~1 움직이는 스케일.
+        # 진단(2026-07-02): λ 응답 임계 ≈1, Σnin 바닥 도달 ≈10 — cap은 바닥 기준.
+        self.lambda_np_step_gain: float = 0.01
+        self.lambda_np_cap: float = 10.0
         # 어댑터가 n_agents를 셀 때 쓰는 속성(six_controller 어댑터 호환).
         self.urban_agents = list(cfg.network.signals)
         self.freeway_agents = list(cfg.network.freeway_links)
@@ -1325,133 +1329,17 @@ class WuFaithfulFollower:
             e_total += e
         return total_nin, e_total
 
-    def _bisect_lambda_for_np(
-        self,
-        n_p_star: float,
-        state: TrafficState,
-        coupling: Mapping[str, float],
-        s_eff_frozen: Mapping[str, float],
-        reservoir_drain: Mapping[str, float],
-        freeway_congestion: Mapping[str, float],
-        snapshot: ControlAction,
-        leader: Optional[object],
-        forecast_arrivals: Mapping[str, float],
-        horizon_h: float,
-        demand: DemandStep,
-    ) -> tuple[float, float, int]:
-        """결합제약 Σ_i nin_i(λ) = N_P_star 를 만족하는 가격 λ*를 **이분법**으로 찾는다.
+    def _lambda_np_update(self, lambda_p: float, sum_nin: float, target: float) -> float:
+        """λ의 control step 간 적분 갱신(A1+A2, 2026-07-02 진단 기반).
 
-        반환 (λ*, realized Σnin(λ*), 총 평가수). 이전 gain-정규화 subgradient는 _measure_dual_gain의
-        측정 gain이 ~0(probe λ가 응답 임계 ~1보다 한참 낮음)이라 λ가 0에 갇혀 N_P를 못 따라갔다.
-        Σnin(λ)는 **단조 비증가·조각상수**(λ=0~0.1 평탄→λ≈1 임계→λ↑서 바닥 saturate)임을 λ-sweep으로
-        확인했으므로 이분법이 견고하고 가능한 한 정확하다(조각상수라 Σnin 정확히 맞히기보다 λ 구간 수렴).
-
-        절차:
-          1. Σnin(0) 계산. N_P_star ≥ Σnin(0)이면 제약 slack → λ*=0.
-          2. λ_max를 기하급수(1,10,100,…)로 키워 Σnin이 더 안 줄 때까지(바닥 도달) 늘린다.
-             N_P_star ≤ Σnin(λ_max)이면 target이 바닥 밑 → 실현 불가 → λ*=λ_max(바닥까지 추적).
-          3. 아니면 [0, λ_max]에서 이분: Σnin(mid) > N_P이면 더 눌러야 하니 lo=mid(λ↑),
-             아니면 hi=mid. ~18회 또는 구간이 좁아질 때까지. Σnin은 조각상수라 구간(λ)에 수렴한다.
-        각 _sum_nin_at_lambda는 urban agent sweep 1회(=5 agent). 총 ~20회 sweep으로 국소·저렴."""
-        def sigma(lmbda: float) -> tuple[float, int]:
-            return self._sum_nin_at_lambda(
-                lmbda, state, coupling, s_eff_frozen, reservoir_drain,
-                freeway_congestion, snapshot, leader, forecast_arrivals, horizon_h, demand,
-            )
-
-        evals = 0
-        # 0) 자연(λ=0) net-inflow. signed target 부호로 어느 쪽 λ를 탐색할지 가른다.
-        nin0, e = sigma(0.0)
-        evals += e
-        # target이 자연값과 사실상 같으면 가격 불필요.
-        if abs(n_p_star - nin0) <= 1.0e-9:
-            return 0.0, float(nin0), evals
-
-        if n_p_star < nin0:
-            # ---- target < 자연 inflow: inflow를 줄여야 함 → λ>0 (기존 양수 분기 그대로). ----
-            # 1) λ_max를 키워 바닥(floor)에 닿게 한다. Σnin이 직전 대비 사실상 안 줄면 멈춘다.
-            lambda_max = 1.0
-            nin_max = nin0
-            prev_nin = nin0
-            for _ in range(8):  # 1,10,…,1e7까지 — 진단상 응답 임계 ~1, 바닥은 λ≈10에서 도달.
-                nin_max, e = sigma(lambda_max)
-                evals += e
-                # target이 이 λ에서의 Σnin 이상이면 [현 lo, lambda_max] 안에 교차점 존재 → 멈춘다.
-                if n_p_star >= nin_max - 1.0e-9:
-                    break
-                # Σnin이 더 이상 안 줄면(바닥) target 도달 불가 → 더 키워도 무의미.
-                if prev_nin - nin_max <= 1.0e-9:
-                    break
-                prev_nin = nin_max
-                lambda_max *= 10.0
-
-            # target이 바닥보다 낮으면(실현 불가) λ*=λ_max로 바닥까지 추적 후 clamp.
-            if n_p_star <= nin_max + 1.0e-9:
-                return float(lambda_max), float(nin_max), evals
-
-            # 2) [lo, hi]=[0, lambda_max]에서 이분. Σnin(lo)=nin0>N_P>nin_max=Σnin(hi).
-            lo, hi = 0.0, lambda_max
-            nin_at_lo = nin0
-            for _ in range(18):
-                if hi - lo <= 1.0e-4:
-                    break
-                mid = 0.5 * (lo + hi)
-                nin_mid, e = sigma(mid)
-                evals += e
-                if nin_mid > n_p_star:
-                    # 아직 inflow가 target보다 많다 → 더 눌러야 함 → 가격↑.
-                    lo, nin_at_lo = mid, nin_mid
-                else:
-                    # target 이하로 내려옴 → 가격을 더 낮춰도 되는지 본다 → 상한 당김.
-                    hi, nin_max = mid, nin_mid
-            # 구간 양끝 중 realized Σnin이 target에 더 가까운 쪽을 commit(조각상수 대비).
-            if abs(nin_at_lo - n_p_star) <= abs(nin_max - n_p_star):
-                return float(lo), float(nin_at_lo), evals
-            return float(hi), float(nin_max), evals
-
-        # ---- target > 자연 inflow: inflow를 늘려야 함 → λ<0 (신규 음수 분기). ----
-        # Σnin은 λ에 단조 비증가이므로, λ를 음수로 내릴수록 Σnin이 커진다(천장까지).
-        # 1) lambda_min을 -1,-10,…로 키워(절댓값) target에 닿거나 천장 saturate까지 늘린다.
-        lambda_min = -1.0
-        nin_min = nin0
-        prev_nin = nin0
-        for _ in range(8):  # -1,-10,…,-1e7. 이산 green이라 첫 span은 무응답일 수 있음 → 끝까지 넓힌다.
-            nin_min, e = sigma(lambda_min)
-            evals += e
-            # target이 이 λ에서의 Σnin 이하면 [lambda_min, 0] 안에 교차점 존재 → 멈춘다.
-            if n_p_star <= nin_min + 1.0e-9:
-                break
-            # Σnin이 더 이상 안 늘면(천장) target 도달 불가 → 더 내려도 무의미.
-            if nin_min - prev_nin <= 1.0e-9:
-                break
-            prev_nin = nin_min
-            lambda_min *= 10.0
-
-        # target이 천장보다 높으면(실현 불가) λ*=lambda_min로 천장까지 추적.
-        if n_p_star >= nin_min - 1.0e-9:
-            return float(lambda_min), float(nin_min), evals
-
-        # 2) [lo, hi]=[lambda_min, 0]에서 이분. Σnin(lo)=nin_min>N_P>nin0=Σnin(hi).
-        # 단조 비증가: 더 음수인 lo가 더 큰 Σnin. nin_mid>target이면 가격을 덜 음수로(hi=mid).
-        lo, hi = lambda_min, 0.0
-        nin_at_lo = nin_min
-        nin_at_hi = nin0
-        for _ in range(18):
-            if hi - lo <= 1.0e-4:
-                break
-            mid = 0.5 * (lo + hi)
-            nin_mid, e = sigma(mid)
-            evals += e
-            if nin_mid > n_p_star:
-                # inflow가 target보다 많다 → 가격을 덜 음수로(억제 약화) → 상한 당김.
-                hi, nin_at_hi = mid, nin_mid
-            else:
-                # inflow가 target보다 적다 → 더 음수로(보상 강화) → 하한 올림.
-                lo, nin_at_lo = mid, nin_mid
-        # 구간 양끝 중 realized Σnin이 target에 더 가까운 쪽을 commit(조각상수 대비).
-        if abs(nin_at_lo - n_p_star) <= abs(nin_at_hi - n_p_star):
-            return float(lo), float(nin_at_lo), evals
-        return float(hi), float(nin_at_hi), evals
+        λ_next = clip(λ + lambda_np_step_gain·(Σnin − target), 0, lambda_np_cap).
+        방향: Σnin > target(유입 과다) → λ 증가(억제 강화). max(0,·)이 A1(음수 λ 금지)을
+        강제한다 — target > Σnin이면 λ가 0으로 내려가 자연 유입만 허용하고, 유입을 강제로
+        늘리는 보상은 없다. cap은 진단상 Σnin 바닥 도달 λ≈10 기준."""
+        return min(
+            max(0.0, lambda_p + self.lambda_np_step_gain * (sum_nin - target)),
+            self.lambda_np_cap,
+        )
 
     def _np_feasible_range(
         self,
@@ -1564,10 +1452,15 @@ class WuFaithfulFollower:
         lambda_p = float(self._lambda_P) if dual_active else 0.0  # warm-start(직전 step 수렴값).
         sum_nin = 0.0
         evals = 0
-        # 듀얼 분해 N_P 추적은 **이분법**으로 한다(Jacobi 합의 수렴 후 1회). 이전 gain-정규화
-        # subgradient는 측정 gain≈0(probe λ가 응답 임계보다 낮음)이라 λ가 0에 갇혀 N_P를 못 따라갔다.
-        # 합의 루프 동안 λ는 warm-start 값으로 동결(스냅샷/결합이 안정되게)하고, 수렴 후 _bisect_
-        # lambda_for_np로 λ*를 찾은 뒤 최종 urban sweep으로 green을 commit한다(아래 post-loop).
+        # 듀얼 분해 N_P 추적은 **control step 간 λ 적분 갱신**으로 한다(A1+A2, 2026-07-02 진단).
+        # 이 step의 λ는 warm-start 값(직전 step에 컨트롤러가 commit한 λ) 하나뿐이고, green은
+        # Jacobi 합의값 그대로 커밋한다. 폐지된 step 내 λ* 이분법+commit sweep의 병리(실측):
+        #   (i) 음수 λ 분기가 dual solve의 34~41%에서 발동 — follower가 보호구역 유입을 늘리도록
+        #       보상받아 target을 평균 67~89 veh/h 초과(overshoot).
+        #   (iii) dual solve의 83~95%에서 λ* 재해 green이 합의 green을 중앙값 30초씩 뒤집은 채
+        #        coupling 재수렴 없이 커밋(off-equilibrium commit).
+        # λ_next = clip(λ + gain·(Σnin − projected_target), 0, cap)은 수렴 후 계산해 diagnostics로만
+        # 내보내고, 선택된 후보의 λ만 컨트롤러가 commit한다(아래 post-loop 참고).
 
         s_max = max(1, min(self.cfg.mpc.max_nash_iter, 5))
         alpha = 0.5
@@ -1597,8 +1490,8 @@ class WuFaithfulFollower:
                 new_green[f"{signal}_p2"] = net.effective_green_total - p1
                 sum_nin += nin_i
                 evals += e
-            # 합의 루프 동안 λ는 warm-start 값으로 동결한다(스냅샷/결합 settle 우선). λ* 탐색은
-            # 수렴 후 이분법으로 1회 수행한다(아래 post-loop). PFO(leader=None)는 dual_active=False라 무영향.
+            # 합의 루프 동안 λ는 warm-start 값으로 동결한다(스냅샷/결합 settle 우선). λ 갱신은
+            # step 간 적분(수렴 후 λ_next 계산, 아래 post-loop). PFO(leader=None)는 dual_active=False라 무영향.
             # freeway agent(Jacobi 내부): VSL solve만 cheap하게 — VSL은 여기서 inert이고
             # metering 좌표하강은 비싸므로 합의 루프 밖에서 1회만 돈다(아래 post-loop).
             for link in net.freeway_links:
@@ -1626,13 +1519,16 @@ class WuFaithfulFollower:
             if residual < self.cfg.mpc.distributed_coupling_tol:
                 converged = True
                 break
-        # ---- 듀얼 분해 λ* 이분법 + 최종 urban commit sweep(수렴된 결합 기준, step당 1회) ----
-        # 합의 루프는 warm-start λ로 green을 정했다. 이제 수렴 결합/스냅샷에서 Σnin(λ)=N_P_star를
-        # 푸는 λ*를 이분법으로 찾고(아래), λ*에서 urban agent를 한 번 더 sweep해 green을 확정한다.
+        # ---- 듀얼 분해 λ step 간 적분 갱신(A1+A2 — 이분법·commit sweep 폐지, 2026-07-02) ----
+        # green은 Jacobi가 수렴시킨 값 그대로 커밋된다(A2: off-equilibrium commit 소멸). λ_next는
+        # 마지막 합의 sweep의 Σnin과 투영 target으로 적분 갱신하되, 여기서 self._lambda_P에 쓰지
+        # 않고 diagnostics로만 내보낸다(P-Stack이 step당 solve를 후보마다 여러 번 부르므로, 선택된
+        # 후보의 λ만 컨트롤러가 commit해야 한다 — stackelberg_wu_metered._select_with_fallback_guard).
         # leader=None/use_dual_np=False면 dual_active=False라 이 블록 전체를 건너뛴다(PFO 무영향).
         projected_target = 0.0
         sigma_min = 0.0
         sigma_max = 0.0
+        lambda_next = lambda_p
         if dual_active:
             commit_snapshot = ControlAction(
                 ramp_metering=dict(control.ramp_metering),
@@ -1647,27 +1543,8 @@ class WuFaithfulFollower:
                 state, coupling, commit_snapshot, forecast_arrivals, horizon_h,
             )
             projected_target = min(max(n_p_star, sigma_min), sigma_max)
-            lambda_p, _, e_bis = self._bisect_lambda_for_np(
-                projected_target, state, coupling, s_eff_frozen, reservoir_drain,
-                freeway_congestion, commit_snapshot, leader, forecast_arrivals,
-                horizon_h, demand,
-            )
-            evals += e_bis
-            # λ*에서 최종 urban sweep — green commit + realized Σnin 기록.
-            final_green: Dict[str, float] = {}
-            sum_nin = 0.0
-            for signal in net.signals:
-                arr_movement = self._per_movement_arrivals(signal, state, commit_snapshot, demand)
-                p1, _, e, nin_i = self._solve_urban_agent_local(
-                    signal, state, coupling, arr_movement, s_eff_frozen,
-                    reservoir_drain, freeway_congestion, commit_snapshot, leader,
-                    lambda_p, forecast_arrivals, horizon_h, demand,
-                )
-                final_green[f"{signal}_p1"] = p1
-                final_green[f"{signal}_p2"] = net.effective_green_total - p1
-                sum_nin += nin_i
-                evals += e
-            control.green_times.update(final_green)
+            # 방향: Σnin > target(유입 과다) → λ 증가(억제 강화). max(0,·)이 A1(음수 금지)을 강제.
+            lambda_next = self._lambda_np_update(lambda_p, sum_nin, projected_target)
         # ---- per-signal OFFSET 국소 탐색(PLATOON-AWARE, "proposed" authority 전용, step당 1회) ----
         # 수렴된 green/결합값을 고정한 뒤, 각 신호가 자기 corridor objective를 최소화하는 offset을
         # 탐색해 control.offsets에 commit한다. offset 채점은 phase-resolved 서비스 + 상류 platoon
@@ -1749,9 +1626,11 @@ class WuFaithfulFollower:
             control.diagnostics["wu_faithful_offset_ttt_off"] = float(ttt_off)
         # 다음 step warm-start용 수렴 결합값 저장.
         self._prev_coupling = dict(coupling)
-        # 듀얼 N_P 추적: 수렴 λ를 다음 step warm-start로 저장 + realized Σnin/λ를 진단 노출.
+        # 듀얼 N_P 추적: λ_next는 diagnostics로만 노출 — solve() 내 영속 상태(self._lambda_P)
+        # 변경 금지(후보별 solve가 가격을 오염시키지 않게). 선택된 후보의 λ_next만 컨트롤러가
+        # commit한다. sum_nin은 이제 마지막 합의 sweep 기준.
         if dual_active:
-            self._lambda_P = float(lambda_p)
+            control.diagnostics["wu_faithful_lambda_next"] = float(lambda_next)
         control.diagnostics["wu_faithful_sum_nin"] = float(sum_nin)
         control.diagnostics["wu_faithful_lambda_P"] = float(lambda_p)
         control.diagnostics["wu_faithful_np_target"] = float(n_p_star)

@@ -319,6 +319,14 @@ class StackelbergWuMeteredController(StackelbergMPCController):
                 pfo_eval is not None and getattr(self, "_pfo_incumbent_center", None) is not None
             ),
         })
+        # λ step 간 적분 갱신(A1+A2): **선택된 후보**의 λ_next만 follower 영속 가격에 commit한다
+        # (후보별 solve는 diagnostics로만 λ_next를 내놓고 self._lambda_P를 건드리지 않는다).
+        # PFO incumbent 선택 시(stage=="fallback_pfo", leader=None이라 lambda_next 없음) λ는 갱신
+        # 하지 않고 유지한다 — 커밋된 제어가 PFO면 λ는 plant에 영향이 없으므로 새 정보가 없다.
+        lam_next = best.nash.control.diagnostics.get("wu_faithful_lambda_next")
+        if lam_next is not None:
+            self.nash_solver._lambda_P = float(lam_next)
+        metadata["leader_lambda_np_committed"] = float(lam_next is not None)
         return best, metadata
 
     def _proxy_score_candidate(
