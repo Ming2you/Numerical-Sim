@@ -247,6 +247,7 @@ mpc:
   stackelberg_allocation_mode: direct
   wu_faithful_np_predictor_mode: legacy
   wu_faithful_np_coordination_mode: cap
+  wu_faithful_nuf_coordination_mode: equality
   wu_np_storage_guard: false
   wu_np_arrival_mode: horizon
   wu_np_phase_substep: false

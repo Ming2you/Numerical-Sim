@@ -17,7 +17,7 @@ leader는 None(PFO 모드)부터 구현한다.
 from __future__ import annotations
 
 import time
-from typing import Dict, Iterable, List, Mapping, Optional
+from typing import Dict, Iterable, List, Mapping, Optional, Sequence
 
 import numpy as np
 
@@ -125,6 +125,33 @@ class WuFaithfulFollower:
         # sweet_190 +1.09%/sweet_128 +0.94% 악화 — sweet_190이 "1% 초과 악화 STOP" 기준에
         # 걸려 기본 비활성(opt-in)으로 남긴다. 채점 인프라·단위테스트는 유효(하위호환 완전).
         self.ramp_aware_phase_resolved: bool = False
+        # P1.5 조건부(auto) 활성화(2026-07-03 재검토): phase-resolved 채점은 sweet_155(중부하)
+        # −1.47% 개선이나 sweet_190/128에서 ~+1% 악화 — 상시 ON은 기각됐고, "중부하에서만"이
+        # 재시도 방향이다. auto=True면 step당 1회 ramp 신호별 phase 포화도
+        #   x = max_p (q0_p/horizon_h + arr_p) / (Σ cap_flow·g_p/total)
+        # 를 계산해, **모든 ramp 신호의 x가 band [lo, hi) 안일 때만**(AND-게이트) phase-
+        # resolved 채점을 켠다. band (1.0, 2.2)는 3600s PFO 계측(outputs/_p15_sat_*)에서:
+        #   sweet_128(+0.94% 악화): D 0.68–0.96 미포화 → D가 band 밖 → OFF.
+        #   sweet_155(−1.47% 개선): D 0.83–1.69 / F 1.0–2.1 → 대부분 ON.
+        #   sweet_190(+1.09% 악화): step 8 이후 D 2.6–4.3 과포화 → OFF.
+        # 직관: green window 시간구조가 채점에 유효한 건 막 포화된 green-binding 영역뿐 —
+        # 미포화는 큐가 사소해 노이즈, 깊은 과포화는 큐가 cycle 내내 남아 cycle-평균이 이미
+        # 정확하다. AND인 이유: sweet_128의 F(1.0–1.37)가 sweet_155 대역과 겹쳐 신호별
+        # 게이트로는 분리 불가(회귀 재발) — 망 단위 "중부하 regime" 판정이 필요하다.
+        # False(기본)면 완전 휴면(기존 거동 비트 동일). x는 wu_p15_sat_{signal}로 진단 기록.
+        self.ramp_aware_phase_auto: bool = False
+        self.ramp_aware_phase_auto_band: tuple[float, float] = (1.0, 2.2)
+        self._phase_resolved_active_signals: set = set()
+        # ---------- B2: leader-계산 per-signal externality 가격(2026-07-03 Step B1 검증) ----------
+        # P-Stack 컨트롤러가 refresh마다 설정하는 신호별 가격 g_ext_i[veh·h/green-sec]와
+        # 기준점 p1_ref. green 후보 비용에 + weight·g_ext_i·(p1 − p1_ref_i)를 더한다.
+        # g_ext = d(전역TTT)/dp1 − d(own-TTS)/dp1 (Pigouvian — own-TTS 몫을 빼야 부호·크기가
+        # 산다, Step B1 ext 9/15 vs full 1/15). 이 가격은 전역 rollout이 필요해 분산 follower가
+        # 스스로 계산할 수 없다 — 순수 PFO 러너는 절대 설정하지 않으며, None이면 기존 거동과
+        # 비트 동일(가격 채널 완전 휴면).
+        self.signal_marginal_price: Optional[Dict[str, float]] = None
+        self.signal_marginal_price_ref: Dict[str, float] = {}
+        self.signal_marginal_price_weight: float = 1.0
         # 신호별 offset 후보 분율(×cycle_length). [0, cycle) 안의 작은 후보집합으로 국소 탐색.
         # 0.0은 현 baseline(offset off). 0~7/8 cycle을 8등분(끝점 cycle 제외).
         self.offset_fractions: tuple[float, ...] = (
@@ -466,6 +493,7 @@ class WuFaithfulFollower:
         forecast_arrivals: Optional[Mapping[str, float]] = None,
         horizon_h: float = 1.0,
         demand: Optional[DemandStep] = None,
+        candidates_override: Optional[Sequence[float]] = None,
     ) -> tuple[float, float, int, float]:
         """green p1 후보 탐색 — 반환 (p1*, 자기 TTS objective, evaluations, nin_i*).
 
@@ -543,9 +571,15 @@ class WuFaithfulFollower:
         # **밖에서 1회** 계산한다(green/offset에 불변). gf만 후보별로 갱신한다.
         # ramp-aware(D/F)는 storage 동역학이 복잡해 기존 cycle-평균 경로 유지(Task-B 범위 밖).
         use_phased = (not model.has_ramps) and demand is not None
-        # P1.5: D/F(ramp-aware)도 phase-resolved + platoon 도착으로 채점(플래그로 게이트).
+        # P1.5: D/F(ramp-aware)도 phase-resolved + platoon 도착으로 채점. 상시 플래그
+        # (ramp_aware_phase_resolved) 또는 auto 게이트가 이 신호를 활성화했을 때만.
         use_phased_ramp = (
-            model.has_ramps and demand is not None and self.ramp_aware_phase_resolved
+            model.has_ramps
+            and demand is not None
+            and (
+                self.ramp_aware_phase_resolved
+                or signal in self._phase_resolved_active_signals
+            )
         )
         start_idx = _urban_step_index(state, self.cfg)
         # green search 동안 offset은 snapshot 값(직전 best-response)으로 동결한다.
@@ -564,7 +598,12 @@ class WuFaithfulFollower:
             }
 
         prev_p1 = float(previous.green_times.get(f"{signal}_p1", total / 2.0))
-        candidates = self._urban_green_candidates(signal, state, coupling, previous)
+        # candidates_override: B2 가격 계산 등 외부에서 특정 후보만 채점할 때(단일 후보면
+        # best_obj가 곧 그 후보의 cost). None이면 기존 후보 구성 그대로.
+        if candidates_override is not None:
+            candidates = [float(v) for v in candidates_override]
+        else:
+            candidates = self._urban_green_candidates(signal, state, coupling, previous)
 
         # Leader N_P 추적. 두 모드:
         #  (A) use_dual_np=True(기본, 듀얼 분해): 후보 비용에 + λ_P·nin_i(green)을 더한다.
@@ -624,6 +663,14 @@ class WuFaithfulFollower:
                     model, q0, arr_mv, s_eff0, p1, p2, substeps, dt_h,
                 )
             cost += smooth_w * abs(p1 - prev_p1)
+            # B2 가격항: leader가 하달한 per-signal externality 가격(설정 시에만).
+            # own-TTS는 그대로 두고 선형 가격만 더한다 — Step B1 검증 형태
+            # priced = local + w·g_ext_i·(p1 − p1_ref_i). None이면 완전 휴면(비트 동일).
+            if self.signal_marginal_price is not None:
+                g_ext = self.signal_marginal_price.get(signal)
+                if g_ext is not None:
+                    ref = float(self.signal_marginal_price_ref.get(signal, prev_p1))
+                    cost += self.signal_marginal_price_weight * float(g_ext) * (float(p1) - ref)
             # nin_i(green)은 리더 setpoint와 비교 가능한 net-inflow(듀얼·진단 공통).
             nin = self._agent_net_inflow_veh(signal, p1, state, fa, horizon_h)
             if dual_mode:
@@ -635,6 +682,99 @@ class WuFaithfulFollower:
             if cost < best_obj:
                 best_obj, best_p1, best_nin = cost, float(p1), float(nin)
         return best_p1, best_obj, evals, best_nin
+
+    # ---------- B2: leader가 부르는 국소 green 비용 조회(가격항 제외) ----------
+
+    def local_green_costs(
+        self,
+        requests: Mapping[str, Sequence[float]],
+        state: TrafficState,
+        control: ControlAction,
+        demand: DemandStep,
+    ) -> Dict[str, List[float]]:
+        """신호별 green-p1 후보들의 국소 own-TTS 비용을 반환한다(B2 d_local 유한차분용).
+
+        `_solve_followers` 프롤로그(동결 결합/스냅샷)를 1회 구성하고, 각 요청 후보를
+        `_solve_urban_agent_local`(단일 후보, leader=None)로 채점한다 — Step A/B probe의
+        score_candidate와 동일 경로. 가격항은 일시 비활성화한다: d_local은 **비가격**
+        own-TTS의 기울기여야 한다(가격이 들어가면 g_ext = g_i − d_local이 자기 가격을
+        다시 빼는 순환). warm-start coupling(`_prev_coupling`)은 읽지도 쓰지도 않아
+        follower 영속 상태를 오염시키지 않는다.
+        """
+        ctrl = ControlAction.uncontrolled(self.cfg)
+        ctrl.green_times = dict(control.green_times)
+        ctrl.offsets = dict(control.offsets)
+        ctrl.vsl = dict(control.vsl)
+        ctrl.ramp_metering = dict(control.ramp_metering)
+        ctrl.inflow_outflow_allocation = {}
+        coupling = self._wu._coupling(state, ctrl, demand)
+        s_eff_frozen = self._frozen_s_eff(state)
+        reservoir_drain = self._frozen_reservoir_drain(state, ctrl, demand)
+        freeway_congestion = self._frozen_freeway_congestion(state)
+        snapshot = ControlAction(
+            ramp_metering=dict(ctrl.ramp_metering),
+            vsl=dict(ctrl.vsl),
+            green_times=dict(ctrl.green_times),
+            offsets=dict(ctrl.offsets),
+            inflow_outflow_allocation={},
+        )
+        saved_price = self.signal_marginal_price
+        self.signal_marginal_price = None
+        out: Dict[str, List[float]] = {}
+        try:
+            for signal, p1_list in requests.items():
+                arr_movement = self._per_movement_arrivals(signal, state, snapshot, demand)
+                costs: List[float] = []
+                for p1 in p1_list:
+                    _, obj, _, _ = self._solve_urban_agent_local(
+                        signal, state.copy(), coupling, arr_movement, s_eff_frozen,
+                        reservoir_drain, freeway_congestion, snapshot,
+                        None, 0.0, None, 1.0, demand,
+                        candidates_override=[float(p1)],
+                    )
+                    costs.append(float(obj))
+                out[signal] = costs
+        finally:
+            self.signal_marginal_price = saved_price
+        return out
+
+    # ---------- P1.5 auto 게이트: phase 포화도 ----------
+
+    def _ramp_phase_saturation(
+        self,
+        signal: str,
+        state: TrafficState,
+        coupling: Mapping[str, float],
+        control: ControlAction,
+        horizon_h: float,
+    ) -> float:
+        """P1.5 auto 게이트용 phase 포화도 x(신호별, frozen coupling 기준).
+
+        x_p = (q0_p/horizon_h + arr_p) / (Σ_{m∈p, 큐 movement} cap_flow_m · g_p/total),
+        반환 max_p x_p. 서비스 항의 g_p는 현재 control(직전 commit) green — 게이트는
+        후보 탐색 전에 step당 1회만 평가한다(후보 의존 아님). off_ramp movement는
+        큐 서비스 대상이 아니므로 제외(도착도 storage로 가서 arr_phase에서 빠짐과 대칭)."""
+        net = self.cfg.network
+        model = self._local_models[signal]
+        total = float(net.effective_green_total)
+        q0 = {m: max(0.0, state.urban_movement_queue.get(m, 0.0)) for m in model.movements}
+        x_max = 0.0
+        for pid in ("p1", "p2"):
+            g = float(control.green_times.get(f"{signal}_{pid}", total / 2.0))
+            cap = sum(
+                float(model.cap_flow_of.get(m, 0.0))
+                for m in model.movements
+                if model.phase_of[m] == pid and model.kind_of.get(m) != "off_ramp"
+            ) * max(g, 0.0) / max(total, 1.0e-9)
+            demand_rate = (
+                q0_sum(q0, model, pid) / max(horizon_h, 1.0e-9)
+                + float(coupling.get(f"arr_{signal}_{pid}", 0.0))
+            )
+            if cap > 1.0e-9:
+                x_max = max(x_max, demand_rate / cap)
+            elif demand_rate > 1.0e-9:
+                x_max = float("inf")
+        return float(x_max)
 
     # ---------- PLATOON 도착 재구성 + offset-aware service (Task-B 핵심) ----------
 
@@ -1303,6 +1443,50 @@ class WuFaithfulFollower:
             # link budget을 가용 영역 [0, Σcap]으로 clamp(나머지는 follower가 분배).
             budget = float(np.clip(omega_f * n_uf_star, 0.0, cap_sum))
 
+            # ---- N_UF cap 모드(2026-07-03): budget을 등식이 아니라 상한으로 처리 ----
+            # 진단: PFO(P1)의 자율 metering이 똑똑해졌는데 등식 budget이 이를 덮어써
+            # standalone 악화(sweet_190 7200s 14711.8)·bal_med N_UF 폭주를 만들었다.
+            # cap 모드는 자율 좌표하강(PFO 분기와 동일 후보)을 그대로 돌리되 모든 후보를
+            # link 합 ≤ budget으로 비례 투영한다: 자율 최적이 budget 미만이면 leader가
+            # 건드리지 않고(자율 존중), 초과할 때만 boundary(합=budget)로 눌린다.
+            # N_P cap(wu_faithful_np_coordination_mode)과 대칭. 기본 equality(기존 거동).
+            nuf_mode = str(getattr(
+                self.cfg.mpc, "wu_faithful_nuf_coordination_mode", "equality"
+            ))
+            if nuf_mode == "cap":
+                def _project_to_cap(meter: Mapping[str, float]) -> Dict[str, float]:
+                    clipped = {
+                        r: float(np.clip(float(meter.get(r, caps[r])), 0.0, caps[r]))
+                        for r in owned_ramps
+                    }
+                    total_m = sum(clipped.values())
+                    if total_m > budget + 1.0e-9 and total_m > 0.0:
+                        scale = budget / total_m
+                        clipped = {r: v * scale for r, v in clipped.items()}
+                    return clipped
+
+                best_meter = _project_to_cap({
+                    r: float(snapshot.ramp_metering.get(r, caps[r]))
+                    for r in owned_ramps
+                })
+                best_vsl, best_cost, e0 = _solve_with(best_meter)
+                evals_total += e0
+                for ramp in owned_ramps:
+                    for frac in self.ramp_metering_fractions:
+                        trial = dict(best_meter)
+                        trial[ramp] = frac * caps[ramp]
+                        trial = _project_to_cap(trial)
+                        if all(
+                            abs(trial[r] - best_meter[r]) <= 1.0e-9
+                            for r in owned_ramps
+                        ):
+                            continue
+                        vsl_dict, cost, e = _solve_with(trial)
+                        evals_total += e
+                        if cost < best_cost:
+                            best_cost, best_vsl, best_meter = cost, vsl_dict, dict(trial)
+                return best_vsl, best_meter, evals_total
+
             best_meter: Dict[str, float] = {}
             best_vsl: Dict[str, float] = {}
             best_cost = float("inf")
@@ -1726,6 +1910,26 @@ class WuFaithfulFollower:
         steps_h = fc[: max(1, self.cfg.mpc.horizon_steps)] or fc[:1]
         horizon_h = max(self.cfg.simulation.T_c_h * max(len(steps_h), 1), 1.0e-9)
         forecast_arrivals = self._movement_forecast_arrivals_veh(fc)
+        # ---- P1.5 auto 게이트(신호별, step당 1회): 포화도 band 안의 ramp 신호만 활성 ----
+        # 항상 reset(이전 step 잔존 방지). auto=False면 빈 집합 그대로 → 기존 거동 비트 동일.
+        self._phase_resolved_active_signals = set()
+        if self.ramp_aware_phase_auto:
+            lo_band, hi_band = self.ramp_aware_phase_auto_band
+            ramp_signals = [
+                s for s in net.signals if self._local_models[s].has_ramps
+            ]
+            all_in_band = bool(ramp_signals)
+            for signal in ramp_signals:
+                x = self._ramp_phase_saturation(signal, state, coupling, control, horizon_h)
+                control.diagnostics[f"wu_p15_sat_{signal}"] = float(x)
+                if not (lo_band <= x < hi_band):
+                    all_in_band = False
+            # AND-게이트: 모든 ramp 신호가 band 안일 때만 전체 활성(망 단위 중부하 판정).
+            if all_in_band:
+                self._phase_resolved_active_signals = set(ramp_signals)
+            control.diagnostics["wu_p15_auto_active_count"] = float(
+                len(self._phase_resolved_active_signals)
+            )
         dual_active = leader is not None and self.use_dual_np
         n_p_star = float(getattr(leader, "N_P_star", 0.0)) if leader is not None else 0.0
         lambda_p = float(self._lambda_P) if dual_active else 0.0  # warm-start(직전 step 수렴값).

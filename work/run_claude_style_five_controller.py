@@ -33,6 +33,24 @@ CONTROLLERS = [
     "CLASSICAL-HIERARCHICAL",
 ]
 
+# 3점 사다리(2026-07-03 §4d) 변형 ID — 기본 5종의 거동은 불변:
+#   WU-FAITHFUL-FOLLOWER-NOP1 : rung1 = PFO 순수 own-TTS(P1 blocked-inflow 가격 OFF).
+#   WU-FAITHFUL-FOLLOWER      : rung2 = PFO + tax(P1 ON, leader 없음) — 기존 기본값.
+#   P-STACK-WU-FAITHFUL       : rung3 = leader + marginal price(B2 ON) — B2가 기본.
+#   P-STACK-WU-FAITHFUL-NOB2  : rung3의 가격 채널 귀속용 A/B(B2 OFF, 구 P-Stack).
+LADDER_VARIANTS = [
+    "WU-FAITHFUL-FOLLOWER-NOP1",
+    "P-STACK-WU-FAITHFUL-NOB2",
+]
+
+# P1.5 재검토(조건부 활성화) 변형:
+#   WU-FAITHFUL-FOLLOWER-P15SAT  : 게이트는 닫아두고 포화도 x만 진단 기록(계측 전용).
+#   WU-FAITHFUL-FOLLOWER-P15AUTO : 포화도 band 안의 ramp 신호만 phase-resolved 활성.
+P15_VARIANTS = [
+    "WU-FAITHFUL-FOLLOWER-P15SAT",
+    "WU-FAITHFUL-FOLLOWER-P15AUTO",
+]
+
 
 def write_csv(path: Path, rows: List[Dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -70,7 +88,38 @@ def make_controller(controller_id: str, cfg: ExperimentConfig):
         return DistributedCoordinator(cfg, ablation="WU_GREEN_VSL_ONLY_TTT")
     if controller_id == "WU-FAITHFUL-FOLLOWER":
         return WuFaithfulFollower(cfg)
+    if controller_id == "WU-FAITHFUL-FOLLOWER-NOP1":
+        follower = WuFaithfulFollower(cfg)
+        follower.count_blocked_ramp_inflow = False
+        return follower
+    if controller_id == "WU-FAITHFUL-FOLLOWER-P15SAT":
+        follower = WuFaithfulFollower(cfg)
+        follower.ramp_aware_phase_auto = True
+        follower.ramp_aware_phase_auto_band = (9.0e9, 9.0e9)  # 계측 전용(게이트 불발)
+        return follower
+    if controller_id == "WU-FAITHFUL-FOLLOWER-P15AUTO":
+        follower = WuFaithfulFollower(cfg)
+        follower.ramp_aware_phase_auto = True
+        return follower
     if controller_id == "P-STACK-WU-FAITHFUL":
+        return StackelbergWuMeteredController(cfg)
+    if controller_id == "P-STACK-WU-FAITHFUL-NOB2":
+        controller = StackelbergWuMeteredController(cfg)
+        controller.signal_price_enabled = False
+        return controller
+    # N_UF 등식→cap A/B(2026-07-03): budget을 상한으로만 쓰는 cap 모드 변형.
+    if controller_id == "P-STACK-WU-FAITHFUL-NUFCAP":
+        cfg.mpc.wu_faithful_nuf_coordination_mode = "cap"
+        return StackelbergWuMeteredController(cfg)
+    # standalone(=PFO incumbent/fallback 없이 leader 후보만) — 등식 budget 악화 사례의 A/B.
+    if controller_id == "P-STACK-WU-FAITHFUL-STANDALONE":
+        cfg.mpc.stackelberg_enable_fallback = False
+        cfg.mpc.stackelberg_enable_pfo_incumbent = False
+        return StackelbergWuMeteredController(cfg)
+    if controller_id == "P-STACK-WU-FAITHFUL-STANDALONE-NUFCAP":
+        cfg.mpc.stackelberg_enable_fallback = False
+        cfg.mpc.stackelberg_enable_pfo_incumbent = False
+        cfg.mpc.wu_faithful_nuf_coordination_mode = "cap"
         return StackelbergWuMeteredController(cfg)
     if controller_id == "CLASSICAL-HIERARCHICAL":
         return ClassicalHierarchicalController(cfg)
@@ -80,9 +129,15 @@ def make_controller(controller_id: str, cfg: ExperimentConfig):
 def decide(controller_id: str, controller, sim: MixedTrafficSimulator, forecast, previous, cfg, step: int):
     if controller_id == "NO-CONTROL":
         return baseline_control("no_control", cfg, sim.state, forecast[0])
-    if controller_id in {"WU-CD-F", "WU-FAITHFUL-FOLLOWER"}:
+    if controller_id in {
+        "WU-CD-F",
+        "WU-FAITHFUL-FOLLOWER",
+        "WU-FAITHFUL-FOLLOWER-NOP1",
+        "WU-FAITHFUL-FOLLOWER-P15SAT",
+        "WU-FAITHFUL-FOLLOWER-P15AUTO",
+    }:
         return controller.solve(sim.state.copy(), None, forecast, previous).control
-    if controller_id == "P-STACK-WU-FAITHFUL":
+    if controller_id.startswith("P-STACK-WU-FAITHFUL"):
         return controller.decide(sim.state.copy(), forecast, previous, cfg)
     if controller_id == "CLASSICAL-HIERARCHICAL":
         return controller.decide(sim.state.copy(), forecast, previous)
@@ -160,6 +215,11 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
             "leader_full_evaluated_count": float(control.diagnostics.get("leader_candidate_full_evaluated_count", 0.0)),
             "leader_serial_override": float(control.diagnostics.get("leader_candidate_wu_metered_serial_override", 0.0)),
         }
+        # B2 가격(wu_b2_*)·P1.5 포화도(wu_p15_*) 진단은 control_row에 안 실리므로 여기서 수집.
+        decision.update({
+            k: float(v) for k, v in control.diagnostics.items()
+            if k.startswith(("wu_b2_", "wu_p15_")) and isinstance(v, (int, float, bool))
+        })
         decision_rows.append(decision)
         control_rows.append(control_row(control, cfg, step, sim.state.time_sec))
         state_rows.append(state_row(sim.state, cfg, step))

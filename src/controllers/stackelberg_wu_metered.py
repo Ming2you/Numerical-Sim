@@ -23,20 +23,184 @@ from __future__ import annotations
 from typing import Dict, List, Optional
 
 from src.controllers.stackelberg_mpc import (
+    DecisionResult,
     StackelbergMPCController,
     _LeaderCandidateEvaluation,
 )
 from src.controllers.wu_faithful_follower import WuFaithfulFollower
 from src.models.demand import DemandStep
 from src.models.state import ControlAction, ExperimentConfig, TrafficState
-from src.controllers.leader import LeaderAction
+from src.controllers.leader import Leader, LeaderAction
 
 
 class StackelbergWuMeteredController(StackelbergMPCController):
     """follower=WuFaithfulFollower(metering-PFO)로 고정한 Stackelberg 컨트롤러."""
 
+    def __init__(self, cfg: ExperimentConfig):
+        super().__init__(cfg)
+        # ---------- B2: per-signal externality 가격(marginal price) 하달 ----------
+        # Step B1(2026-07-03)이 검증한 가격 채널의 구현판. leader가 refresh마다 유한차분
+        # 전역 rollout으로 g_ext_i = d(전역TTT)/dp1 − d(own-TTS)/dp1을 계산해 follower의
+        # signal_marginal_price에 설정하고(사이엔 hold), follower는 green 후보 비용에
+        # + w·g_ext_i·(p1 − p1_ref_i)를 더한다. w=1이 1차 정확값(B1 sweet spot, w=2는
+        # overshoot). 이 가격은 전역 rollout이 필요해 leader 전용 — 순수 PFO 러너에는
+        # 존재하지 않는다(P-Stack에서만 활성).
+        self.signal_price_enabled: bool = True
+        self.signal_price_delta_sec: float = 6.0  # 유한차분 스텝(B1 probe와 동일)
+        self.signal_price_weight: float = 1.0
+        # event-trigger 재선형화: 운영점(commit green)이 기준점에서 이만큼 이동하면
+        # 재계산한다(B1 step35류 non-monotone은 재선형화 iteration으로 흡수). 그 외엔
+        # 기존 leader_global_refresh cadence에 편승.
+        self.signal_price_refresh_threshold_sec: float = 3.0
+        self._signal_price_refresh_count: int = 0
+        self._signal_price_meta: Dict[str, float] = {}
+
     def _make_follower_solver(self, cfg: ExperimentConfig):
         return WuFaithfulFollower(cfg)
+
+    # ---------- B2: per-signal externality 가격 계산/refresh ----------
+
+    def decide_with_info(
+        self,
+        state: TrafficState,
+        demand_forecast,
+        previous_control: Optional[ControlAction] = None,
+        config: Optional[ExperimentConfig] = None,
+    ) -> DecisionResult:
+        # config 교체는 base와 동일 로직을 먼저 수행한다 — 가격이 새 cfg의 follower에
+        # 걸리도록(base가 나중에 nash_solver를 갈아치우면 하달한 가격이 유실된다).
+        if config is not None and config is not self.cfg:
+            self.close()
+            self.cfg = config
+            self.leader = Leader(config)
+            self.nash_solver = self._make_follower_solver(config)
+            self._pfo_fallback_previous_control = None
+        forecast = list(demand_forecast)
+        previous = (
+            previous_control.copy()
+            if previous_control is not None
+            else self.previous_control.copy()
+            if self.previous_control is not None
+            else ControlAction.fixed(self.cfg)
+        )
+        self._maybe_refresh_signal_prices(state, forecast, previous)
+        result = super().decide_with_info(state, forecast, previous_control, config)
+        if self._signal_price_meta:
+            result.metadata.update(self._signal_price_meta)
+            result.control.diagnostics.update(self._signal_price_meta)
+        return result
+
+    def _signal_price_p1_bounds(self) -> tuple[float, float]:
+        # p1 pair-feasible 범위: p1∈[green_min, green_max] ∧ p2=total−p1∈[green_min, green_max].
+        net = self.cfg.network
+        total = float(net.effective_green_total)
+        lo = max(float(net.green_min), total - float(net.green_max))
+        hi = min(float(net.green_max), total - float(net.green_min))
+        return lo, hi
+
+    def _global_rollout_ttt_with_green(
+        self,
+        state: TrafficState,
+        previous: ControlAction,
+        forecast: List[DemandStep],
+        signal: str,
+        p1: float,
+    ) -> float:
+        """ego 신호만 green을 p1로 바꾸고 나머지는 previous 유지, horizon 전역 rollout TTT.
+
+        B1 probe의 truth_horizon_ttt와 같은 구조지만, 미래 legacy trace 대신 현재
+        committed control을 horizon 동안 hold한다(closed-loop에서 미래 제어는 미지)."""
+        total = float(self.cfg.network.effective_green_total)
+        control = previous.copy()
+        control.green_times[f"{signal}_p1"] = float(p1)
+        control.green_times[f"{signal}_p2"] = float(total - p1)
+        _, ttt = self._predict(state, control, forecast)
+        return float(ttt)
+
+    def _maybe_refresh_signal_prices(
+        self,
+        state: TrafficState,
+        forecast: List[DemandStep],
+        previous: ControlAction,
+    ) -> None:
+        follower = self.nash_solver
+        if not isinstance(follower, WuFaithfulFollower):
+            return
+        if not self.signal_price_enabled:
+            # OFF: 잔존 가격 제거(순수 P-Stack A/B용 게이트).
+            follower.signal_marginal_price = None
+            self._signal_price_meta = {
+                "wu_b2_price_enabled": 0.0,
+                "wu_b2_price_refreshed": 0.0,
+            }
+            return
+        net = self.cfg.network
+        total = float(net.effective_green_total)
+        lo, hi = self._signal_price_p1_bounds()
+
+        def clamp(v: float) -> float:
+            return max(lo, min(hi, float(v)))
+
+        op_point = {
+            signal: clamp(previous.green_times.get(f"{signal}_p1", total / 2.0))
+            for signal in net.signals
+        }
+        refresh = follower.signal_marginal_price is None
+        if not refresh and self._leader_global_refresh_active(state):
+            refresh = True
+        if not refresh:
+            # event-trigger: 운영점이 선형화 기준점에서 threshold 이상 이동한 신호가 있으면
+            # 재선형화(dual ascent/SQP식 iteration — B1 step35 non-monotone 처방).
+            for signal, p1_now in op_point.items():
+                ref = float(follower.signal_marginal_price_ref.get(signal, p1_now))
+                if abs(p1_now - ref) >= float(self.signal_price_refresh_threshold_sec):
+                    refresh = True
+                    break
+        if not refresh:
+            self._signal_price_meta = dict(self._signal_price_meta)
+            self._signal_price_meta["wu_b2_price_refreshed"] = 0.0
+            return
+
+        delta = float(self.signal_price_delta_sec)
+        pts: Dict[str, tuple[float, float, float]] = {}
+        requests: Dict[str, List[float]] = {}
+        for signal, p1_0 in op_point.items():
+            p_hi = clamp(p1_0 + delta)
+            p_lo = clamp(p1_0 - delta)
+            pts[signal] = (p1_0, p_lo, p_hi)
+            requests[signal] = [p_lo, p_hi]
+        local_costs = follower.local_green_costs(requests, state, previous, forecast[0])
+
+        prices: Dict[str, float] = {}
+        refs: Dict[str, float] = {}
+        meta: Dict[str, float] = {"wu_b2_price_enabled": 1.0}
+        for signal, (p1_0, p_lo, p_hi) in pts.items():
+            two_delta = p_hi - p_lo
+            if two_delta <= 1.0e-9:
+                g_ext = 0.0
+            else:
+                ttt_hi = self._global_rollout_ttt_with_green(
+                    state, previous, forecast, signal, p_hi,
+                )
+                ttt_lo = self._global_rollout_ttt_with_green(
+                    state, previous, forecast, signal, p_lo,
+                )
+                g_i = (ttt_hi - ttt_lo) / two_delta
+                cost_lo, cost_hi = local_costs[signal]
+                d_local = (cost_hi - cost_lo) / two_delta
+                g_ext = g_i - d_local
+            prices[signal] = float(g_ext)
+            refs[signal] = float(p1_0)
+            meta[f"wu_b2_price_{signal}"] = float(g_ext)
+            meta[f"wu_b2_price_ref_{signal}"] = float(p1_0)
+        follower.signal_marginal_price = prices
+        follower.signal_marginal_price_ref = refs
+        follower.signal_marginal_price_weight = float(self.signal_price_weight)
+        self._signal_price_refresh_count += 1
+        meta["wu_b2_price_refreshed"] = 1.0
+        meta["wu_b2_price_refresh_count"] = float(self._signal_price_refresh_count)
+        meta["wu_b2_price_delta_sec"] = delta
+        self._signal_price_meta = meta
 
     def _pfo_incumbent_fallback_enabled(self) -> bool:
         return bool(getattr(self.cfg.mpc, "stackelberg_enable_pfo_incumbent", True))

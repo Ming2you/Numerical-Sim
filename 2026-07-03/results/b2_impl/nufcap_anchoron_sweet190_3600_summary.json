@@ -1,0 +1,25 @@
+[
+  {
+    "controller_id": "P-STACK-WU-FAITHFUL-NUFCAP",
+    "total_ttt": 3074.194,
+    "urban_ttt": 2415.909,
+    "freeway_ttt": 658.284,
+    "free_flow_reference_total_ttt": 1050.265,
+    "total_delay": 2023.929,
+    "urban_delay": 1564.291,
+    "freeway_delay": 459.637,
+    "completed_vehicles": 16683.7,
+    "completed_urban_vehicles": 8397.1,
+    "completed_freeway_vehicles": 8286.6,
+    "network_throughput_veh_h": 16683.7,
+    "terminal_total_vehicles": 5918.4,
+    "terminal_urban_vehicles": 5086.9,
+    "terminal_onramp_vehicles": 2256.8,
+    "terminal_freeway_vehicles": 255.0,
+    "computation_time_sec": 2230.148,
+    "mean_step_compute_sec": 111.507,
+    "max_step_compute_sec": 144.646,
+    "ttt_improvement_vs_no_control_pct": 0.0,
+    "delay_improvement_vs_no_control_pct": 0.0
+  }
+]

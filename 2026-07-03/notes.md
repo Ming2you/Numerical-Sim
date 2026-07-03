@@ -206,3 +206,100 @@ argmin을 전역최적으로 이동(양성), (iii)조정=부호가 신호마다 
   None이면 기존과 비트 동일). Step A용 주입 통로이자 향후 Step B 재사용 가능.
 - `src/tests/test_local_signal_plant.py`(+61): TestSEffBySubstepInjection 2건. 전체 13/13 PASS.
 - `work/step_a_oracle_probe.py`: probe 하네스(진단용).
+
+---
+
+# 이하 Claude 세션 (2026-07-03 후반) — Step B2 구현 + 사다리 + N_UF cap + P1.5 재검토
+
+## 7. Step B2 구현 완료 (§4f 설계대로, TODO 1번)
+
+- **follower** (`wu_faithful_follower.py`): `signal_marginal_price`(Optional[Dict], None=완전 휴면·
+  비트 동일)/`signal_marginal_price_ref`/`_weight` 신설. `_solve_urban_agent_local` 후보 루프의
+  smoothness 뒤에 `+ w·g_ext_i·(p1 − p1_ref_i)` 선형 가격항(B1 검증 형태 그대로). 외부 채점용
+  `candidates_override` 인자와, leader가 d_local 유한차분에 쓰는 `local_green_costs()`(프롤로그 1회
+  구성 + 단일후보 채점, **가격항 일시 비활성** — g_ext가 자기 가격을 다시 빼는 순환 방지) 추가.
+- **controller** (`stackelberg_wu_metered.py`): `decide_with_info` 훅에서 refresh 판정 →
+  `_maybe_refresh_signal_prices`가 per-signal 중심차분(δ=6.0, B1과 동일)으로
+  `g_ext_i = d(전역TTT)/dp1 − d(local)/dp1` 계산. 전역항은 `_predict` 재사용(ego green만 p1±δ,
+  나머지는 previous를 horizon hold — closed-loop라 미래 legacy trace 대신). **refresh 트리거** =
+  최초 ∨ `leader_global_refresh` cadence ∨ event-trigger(운영점 p1이 기준점에서 ≥3s 이동 시
+  재선형화 = §4e non-monotone 처방). 사이엔 hold. 비용 실측 ~3.8s/refresh(솔브 ~90s 대비 미미).
+- **게이트**: 순수 PFO 러너는 가격을 설정할 수 없음(leader 전용 채널 유지). P-Stack 내부의 PFO
+  incumbent solve도 가격을 봄 → tie-break이 incumbent를 골라도 가격이 plant에 도달한다.
+- 진단: `wu_b2_price_{sig}`/`_ref_{sig}`/`_refreshed`/`_refresh_count`(runner decision_diagnostics로 수집).
+- 테스트: `src/tests/test_signal_marginal_price.py` 5건(0가격=비트동일, 부호가 argmin을 밈,
+  local_green_costs 가격 무시+복원, refresh/hold/event-trigger, disable 게이트) + 기존 회귀 전부 PASS.
+
+## 8. 3점 사다리 결과 (sweet_190) — **leader 순수 가치(2→3) 첫 양수**
+
+3600s (`outputs/_b2_ladder_sweet190_3600/`, 요약 `results/b2_impl/`):
+
+| rung | controller | total TTT | 격차 |
+|---|---|---:|---|
+| — | NO-CONTROL | 5240.041 | |
+| 1 | PFO 순수 (P1 OFF, `WU-FAITHFUL-FOLLOWER-NOP1`) | 3176.156 | |
+| 2 | PFO + tax (P1 ON) | 3063.715 | 1→2 = **−3.54%** (가격[ii] 가치; §1의 −3.5% 재현=회귀 무결성) |
+| 3 | P-Stack (leader + marginal price, B2) | **2999.663** | 2→3 = **−2.09%** (leader[iii] 순수 가치) |
+| A/B | P-Stack B2 OFF (구 P-Stack) | 3055.811 | B2 단독 −1.84% |
+
+- §4d의 우려(2→3 음수 = leader가 순수 가격보다 못함)가 **해소**: NOB2(3055.8)는 PFO(3063.7)와
+  사실상 동률 — 잔여 leader 가치 ~0 — 인데 B2가 −2.09%를 만든다. 개선은 전부 가격 채널.
+- B2 refresh 18/20 step(event-trigger 실작동: 운영점이 매 step 3s 이상 이동).
+
+7200s (`outputs/_b2_sweet190_7200/`): PFO+P1 **12885.668**(로컬 재측정 — §2의 12934.1과 −0.37%,
+크로스머신 부동소수 차로 판단, legacy는 §4c에서 이 머신 정확 재현이므로 로컬 비교 기준으로 사용),
+P-Stack B2 **12409.520**(urban 10950.7 / freeway 1458.8) → PFO 대비 **−3.70%**. legacy(10728.763)
+격차 2156.9 → **1680.8 (−22%)**. 수정 전 P-Stack(§2, 13007.2) 대비 −4.6%.
+
+## 9. N_UF 등식→cap (TODO 5번) — 구현 완료, **기본은 equality 유지 결정**
+
+- 구현: `mpc.wu_faithful_nuf_coordination_mode: equality|cap`(기본 equality=기존 거동).
+  cap = 자율 metering 좌표하강(PFO 분기와 동일 후보)을 돌리되 모든 후보를 link 합 ≤ budget으로
+  비례 투영 — 자율이 budget보다 덜 흘리면 leader가 안 덮어씀. `src/tests/test_nuf_cap_mode.py` 2건.
+- 3600s A/B (모두 B2 ON):
+
+| 구성 | equality | cap | Δ |
+|---|---:|---:|---|
+| standalone sweet_190 | 4229.831 | **4092.995** | **−3.24%** |
+| anchor-on bal_med | 926.689 | 926.689 | 0 (committed control 동일) |
+| anchor-on sweet_190 (헤드라인) | **2999.663** | 3074.194 | **+2.48% 악화** |
+
+- **결론: cap의 가치는 leader 품질에 반비례.** leader가 나쁜 standalone에선 등식 budget이 자율
+  metering을 덮어쓰는 손해를 cap이 처방하지만, B2로 leader가 좋아진 anchor-on에선 등식 budget이
+  생산적이라 cap이 손해. §2의 standalone 악화 진단은 맞았으나 처방은 "cap 전환"이 아니라
+  "leader를 고쳐라(B2)"였던 것. cap은 standalone-류 구성 opt-in으로 보존. (cap 모드 solve
+  +20~35% 느림: 투영 후보의 중복 skip이 덜 걸림.)
+
+## 10. P1.5 중부하 조건부 활성화 (TODO 7번) — **음성(포화도로 분리 불가), 기본 OFF 유지**
+
+- 계측 인프라: step당 1회 ramp 신호별 phase 포화도
+  `x = max_p (q0_p/horizon_h + arr_p)/(Σ cap_flow·g_p/total)` 계산(`wu_p15_sat_{sig}` 진단,
+  계측 전용 모드 = band 불발 시 비트 동일). 3600s PFO 계측(`results/b2_impl/p15_sat_*.csv`):
+
+| 시나리오 (P1.5 상시효과) | D 대역 | F 대역 |
+|---|---|---|
+| sweet_128 (+0.94%) | 0.68–0.96 미포화 | 0.95–1.37 |
+| sweet_155 (−1.47%) | 0.83–1.69 | 1.0–2.1 |
+| sweet_190 (+1.09%) | 1.0→**2.6–4.3** 과포화 | 1.1–3.2 |
+
+- AND-게이트(모든 ramp 신호 x∈[1.0, 2.2)일 때만 활성, `ramp_aware_phase_auto`) 3600s A/B:
+  sweet_128 **−0.19%**(악화 제거), sweet_155 **−0.52%**(이득 1/3 보존), sweet_190 **+1.09%
+  그대로**(활성 7/20 초반 step에서 해악 전부 발생 — STOP 기준 여전히 위반).
+- **기각 근거**: sweet_190 초반(해악 구간)의 x 1.0–2.0이 sweet_155 이득 대역과 정확히 겹침 —
+  포화도는 필요조건일 수 있으나 판별자가 아니다. 게이트/계측 인프라는 유지(기본 OFF),
+  향후 판별자는 다른 축(큐 증가율·freeway 여유 등) 필요. `src/tests/test_p15_auto_gate.py` 2건.
+
+## 11. TODO 갱신 + 프로세스 기록
+
+- [x] Step B2 구현 + closed-loop (§7–8). **다음 개선 여지**: w 스윕/신호별 w≠1, refresh threshold
+  튜닝, N_P/N_UF 스칼라의 가격벡터 통합(§4f 마지막 항 — 미착수).
+- [x] 3점 사다리 (§8). 7200s에서 legacy 격차 1680.8 잔존 — 남은 재료는 leader 조정(iii) 심화
+  (offset 등 legacy 운영점의 coordinated 레버, §8에서 가격만으로는 닫히지 않은 몫).
+- [x] N_UF 등식→cap (§9) — 기본 equality 유지, cap은 opt-in.
+- [x] P1.5 조건부 (§10) — 음성 확정, 기본 OFF.
+- **프로세스 사고 1건**: 러너(run_claude_style_five_controller)는 **컨트롤러마다 default.yaml을
+  디스크에서 재로드**한다 — 백그라운드 런 중 yaml에 새 키를 추가하면 (구버전 state.py를 로드한)
+  실행 중 프로세스가 `MPCConfig.__init__() got an unexpected keyword` 로 죽는다. 실제 첫 사다리
+  런이 이걸로 크래시(완료분 NO-CONTROL/rung1은 유효, 나머지 재실행). **런 중 config/yaml 편집 금지.**
+- 러너 변형 ID 추가: `WU-FAITHFUL-FOLLOWER-NOP1`/`-P15SAT`/`-P15AUTO`,
+  `P-STACK-WU-FAITHFUL-NOB2`/`-NUFCAP`/`-STANDALONE`/`-STANDALONE-NUFCAP`.

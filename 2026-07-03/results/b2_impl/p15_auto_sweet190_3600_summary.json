@@ -1,0 +1,25 @@
+[
+  {
+    "controller_id": "WU-FAITHFUL-FOLLOWER-P15AUTO",
+    "total_ttt": 3097.212,
+    "urban_ttt": 2525.042,
+    "freeway_ttt": 572.169,
+    "free_flow_reference_total_ttt": 1050.265,
+    "total_delay": 2046.947,
+    "urban_delay": 1673.424,
+    "freeway_delay": 373.522,
+    "completed_vehicles": 16641.1,
+    "completed_urban_vehicles": 8136.0,
+    "completed_freeway_vehicles": 8505.1,
+    "network_throughput_veh_h": 16641.1,
+    "terminal_total_vehicles": 5976.3,
+    "terminal_urban_vehicles": 5311.9,
+    "terminal_onramp_vehicles": 2002.7,
+    "terminal_freeway_vehicles": 239.1,
+    "computation_time_sec": 165.592,
+    "mean_step_compute_sec": 8.28,
+    "max_step_compute_sec": 12.226,
+    "ttt_improvement_vs_no_control_pct": 0.0,
+    "delay_improvement_vs_no_control_pct": 0.0
+  }
+]

@@ -405,6 +405,11 @@ class MPCConfig:
     wu_np_phase_substep: bool = False
     wu_faithful_np_predictor_mode: str = "legacy"
     wu_faithful_np_coordination_mode: str = "cap"
+    # N_UF 조정 모드: "equality"=leader link budget으로 metering 합을 hard 고정(기존),
+    # "cap"=budget을 상한으로만 쓰고 자율 metering 좌표하강을 존중(합 ≤ budget 투영).
+    # 2026-07-03 진단: 등식 budget이 P1로 똑똑해진 자율 metering을 덮어써 standalone
+    # 악화(14711.8)·bal_med N_UF 폭주를 만든다 — cap이 그 구조적 처방(N_P cap과 대칭).
+    wu_faithful_nuf_coordination_mode: str = "equality"
 
 
 @dataclass
@@ -592,6 +597,8 @@ class ExperimentConfig:
             raise ValueError("mpc.relaxed_rounding_mode must be floor or nearest.")
         if self.mpc.wu_faithful_np_coordination_mode not in {"equality", "cap"}:
             raise ValueError("mpc.wu_faithful_np_coordination_mode must be equality or cap.")
+        if self.mpc.wu_faithful_nuf_coordination_mode not in {"equality", "cap"}:
+            raise ValueError("mpc.wu_faithful_nuf_coordination_mode must be equality or cap.")
         if self.mpc.grid_global_refresh_sec <= 0.0:
             raise ValueError("mpc.grid_global_refresh_sec must be positive.")
         if self.mpc.grid_parallel_backend not in {"serial", "thread", "process"}:
