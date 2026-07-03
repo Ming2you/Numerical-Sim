@@ -148,9 +148,52 @@ follower green은 자기 두 phase 큐 균형에만 반응, downstream엔 사실
   headline은 "P-Stack이 순수 PFO(~13590) 이김"으로 개선되나, 이 뒤집힘은 **원리(own-TTS 순수성)의 귀결**
   이어야지 숫자 gaming으로 보이면 안 됨. 사다리로 둘 다 정직하게 보고.
 
+## 4e. Step B1 marginal-price probe 실행 결과 — **가격 채널 양성 확정**
+
+sweet_190 step 20/26/35 × 신호 5개. 각 신호 green 후보를 국소 own-TTS로 채점하고, leader-계산가능
+per-signal marginal price를 유한차분으로 뽑아 `local(p1)+w·g·(p1−p1_0)` argmin이 truth로 이동하는지.
+(work/step_b_marginal_price_probe.py, Step A 하네스 재사용, step_a 재현 오차 0.0)
+
+**truth로 이동한 signal-step 수(15개 중)**:
+| w | full gradient g_i | externality g_ext=g_i−d_local/dp1 |
+|---|---|---|
+| 0.0(=frozen) | 0 | 0 |
+| 0.5 | 0 | 8 |
+| **1.0(1차 정확)** | 1 | **9** |
+| 2.0 | 2 | 7 |
+
+- **가격 채널 작동**(ext 9/15) — 정보 채널(Step A 0/15)과 결정적 대조. A·C는 w=1에서 argmin이
+  truth에 **정확 착지**(A:46→68, C:47→80 등).
+- **externality 가격 ≫ full 가격**(9 vs 1). full g_i는 자기 own-TTS 변화가 상쇄해 거의 0(무력).
+  g_ext=g_i−d_local/dp1로 own-TTS 몫을 빼야 부호·크기가 살아남 — **P1 이중가격 우려의 정확한 처방을
+  수치로 확증**(순수 Pigouvian이 정답). 예: D@20 g_i=−0.19(부호 틀림)→g_ext=+0.93(부호 맞음).
+- **w≈1.0이 sweet spot**(1차 정확값, 튜닝 fudge 아님). w=2는 overshoot(9→7).
+
+**한계**: step 35 실패 군집(truth 곡선이 p1_0 근처 non-monotone/flat) — 단일 operating point의 1차
+선형 가격이 부족. 처방 = **iteration**(operating point가 움직이며 재선형화 = dual ascent/SQP, 곧
+event-trigger refresh cadence). 신호별 g_ext 크기가 달라 단일 전역 w는 부적절 → 신호별 w=1(자기 g_ext).
+
+## 4f. 종합 — (i)정보 기각, (ii)가격 채널 검증. 다음=B2 구현
+
+세 재료 실증 완료: (i)가시성=s_eff 채널 non-binding(기각), (ii)가격=per-signal externality price가
+argmin을 전역최적으로 이동(양성), (iii)조정=부호가 신호마다 반대(A/C 고p1·D/F 저p1)라 스칼라 하나로
+불가·**per-signal 가격 벡터 필수**. 이 벡터=∂(전역TTT)/∂(신호 행동)은 전역 rollout 필요 → leader 전용.
+
+**Step B2(구현) 설계**:
+- leader가 refresh마다 per-signal `g_ext_i = d전역TTT/dp1 − d_local/dp1`(유한차분, 전역 rollout)을
+  계산해 follower에 하달. follower는 green 비용에 `g_ext_i·(p1−p1_0)`(w=1) 추가.
+- **leader 있을 때만 활성**(P-Stack) → PFO는 순수 own-TTS 유지(4d 프레이밍 해소).
+- refresh: event-trigger(또는 기존 global_refresh cadence 재사용). 사이엔 hold+국소 적분보정(A1+A2 λ의
+  벡터 일반화). 비용: 5신호×2섭동×3interval=30 run_coupled_interval/refresh(현 leader 탐색보다 저렴).
+- non-monotone(step35)은 operating point 이동에 따른 재선형화로 흡수.
+- N_P/N_UF 스칼라를 이 가격 벡터로 대체/보완할지는 B2 설계 결정.
+
 ## 5. TODO
-- [x] Step A oracle probe 실행 → **음성 확정**(s_eff 채널 non-binding, 정보로는 조정 불가).
-- [ ] **Step B marginal-price probe**: leader 전역 rollout으로 각 신호 green의 marginal 전역 TTT 민감도
+- [x] Step A oracle probe → **음성 확정**(s_eff 채널 non-binding, 정보로는 조정 불가).
+- [x] Step B1 marginal-price probe → **가격 채널 양성**(ext 9/15, w=1), externality≫full, P1 이중가격 처방 확증.
+- [ ] **Step B2 구현**: leader per-signal externality price 하달 + follower 주입(leader 활성시만) + event-trigger refresh + closed-loop.
+- [ ] ~~Step B marginal-price probe~~ (완료, 위)
+- [ ] (구 항목) leader 전역 rollout으로 각 신호 green의 marginal 전역 TTT 민감도
   (probe는 유한차분) 계산 → follower green 비용에 `−price·(phase 방출)` 항 주입 → argmin이 full-plant
   최적(=legacy green)으로 이동하는지 확인. 이동하면 가격 채널 검증 → 저렴판(자원 shadow price, 전역
   rollout 1회) 설계 + closed-loop. 이동 안 하면 가격 형태(어느 자원에 거는가) 재설계.
