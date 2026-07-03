@@ -188,10 +188,35 @@ argmin을 전역최적으로 이동(양성), (iii)조정=부호가 신호마다 
 - non-monotone(step35)은 operating point 이동에 따른 재선형화로 흡수.
 - N_P/N_UF 스칼라를 이 가격 벡터로 대체/보완할지는 B2 설계 결정.
 
+## 4g. Step B2 production 구현 결과 — 가격 채널 end-to-end 검증(양성, modest)
+
+leader가 decide_with_info에서 operating point(=previous)에 대해 per-signal `g_i=d(전역TTT)/dp1`을
+`_predict` 유한차분(±δ=6)으로 계산해 follower.green_price에 하달. follower는 `g_ext=g_i−d_local/dp1`
+(own-TTS 기울기 차감, 중심차분)를 green 비용에 `g_ext·(p1−prev_p1)` 항으로 주입. leader 있을 때만
+활성(PFO 게이트 off). base stackelberg_mpc.py 미변경(subclass decide_with_info override). refresh=매 step
+(=successive linearization). (구현: 코딩 에이전트가 세션 종료로 검증 전 중단 → 코드는 완성돼 있어
+coordinator가 직접 검증.)
+
+**검증(전부 PASS, B2 신규 파손 0)**:
+- **probe 앵커 테스트**: probe g_i 주입 시 follower argmin이 probe ext@w=1과 일치(A→68, C→80) → production이 검증된 메커니즘 동일 재현.
+- **PFO 순수성**: sweet_128 3600s = **742.210 비트동일**(PFO는 green_price 안 받음, own-TTS 보존).
+- **하위호환**: green_price=None이면 기존과 동일. follower 10/10 PASS.
+- **회귀**: constraints+six_controller 6실패는 전부 pre-existing stale/env(DistributedCoordinator assert·SLSQP·float tol·VSL). B2 무관.
+- **closed-loop**(sweet_190 3600s, deterministic): green_price OFF=3075.473 → ON=**3052.001**(−23.5 veh·h, **−0.76%**), 시간 362→393s(+8.5%, 30 rollout/step).
+
+**해석**: 가격 채널이 closed-loop에서 **양성**(개선 방향, deterministic이라 노이즈 아님). 다만 **modest**.
+이유: (a) urban green만 가격화(metering·freeway 미포함 — 큰 레버는 그쪽, P1이 metering으로 23% 회수),
+(b) 3600s는 혼잡 onset이라 초반 gradient≈0(7200s 전체혼잡이면 더 클 여지), (c) green misranking의
+per-step 비용 자체가 작음(probe: step20 C 3.5 veh·h). **가치는 구조적** — leader만 계산 가능한 per-signal
+marginal externality price가 실제 closed-loop 조정을 제공함을 end-to-end 입증(PFO는 원리적으로 불가).
+
 ## 5. TODO
 - [x] Step A oracle probe → **음성 확정**(s_eff 채널 non-binding, 정보로는 조정 불가).
 - [x] Step B1 marginal-price probe → **가격 채널 양성**(ext 9/15, w=1), externality≫full, P1 이중가격 처방 확증.
-- [ ] **Step B2 구현**: leader per-signal externality price 하달 + follower 주입(leader 활성시만) + event-trigger refresh + closed-loop.
+- [x] **Step B2 구현·검증** → probe 앵커·PFO 비트동일 PASS, closed-loop sweet_190 3600s −0.76%(modest, deterministic).
+- [ ] **B3(큰 레버)**: 같은 marginal-price 메커니즘을 metering/VSL로 확장 — P1의 손코딩 blocked_q를 정확한 per-actuator externality price로 대체(metering이 23% 레버였음 → 큰 이득 여지).
+- [ ] sweet_190 7200s On/Off(전체혼잡서 green-price 효과 확대 여부).
+- [ ] 3점 사다리(P1 leader 게이트) + N_UF cap + P1.5 중부하 재검토.
 - [ ] ~~Step B marginal-price probe~~ (완료, 위)
 - [ ] (구 항목) leader 전역 rollout으로 각 신호 green의 marginal 전역 TTT 민감도
   (probe는 유한차분) 계산 → follower green 비용에 `−price·(phase 방출)` 항 주입 → argmin이 full-plant

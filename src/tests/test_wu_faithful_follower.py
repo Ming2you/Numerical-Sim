@@ -327,5 +327,154 @@ class TestBlockedRampInflowCost(unittest.TestCase):
         self.assertEqual(cost_on, cost_off)
 
 
+# Step B2 앵커: production green_price 주입이 probe(step_b) ext@w=1 argmin과 일치함을 증명.
+import json  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+_B2_ROOT = Path(__file__).resolve().parents[2]
+_B2_PROBE = _B2_ROOT / "outputs" / "_stepB_probe" / "step_b_results.json"
+_B2_LEGACY = (
+    _B2_ROOT
+    / "outputs"
+    / "legacy_pstack_sweet190_7200_20260703"
+    / "runs"
+    / "sweet_190"
+    / "LEGACY-STACKELBERG"
+    / "control_timeseries.csv"
+)
+
+
+class _B2StubLeader:
+    """price_active 게이트(leader is not None)만 통과시키는 최소 leader 스텁."""
+
+    N_P_star = 0.0
+
+
+@unittest.skipUnless(
+    _B2_PROBE.exists() and _B2_LEGACY.exists(),
+    "step_b probe JSON 또는 legacy trace 부재 — 앵커 테스트 스킵",
+)
+class TestGreenPriceProbeAnchor(unittest.TestCase):
+    """Step B2: follower.green_price에 probe g_i를 주입하면 국소 green argmin이 probe의
+    ext@w=1 argmin으로 이동함을 검증(production 구현이 probe 메커니즘과 동일함을 증명)."""
+
+    def test_step20_argmin_matches_probe_ext_w1(self):
+        # probe replay 하네스 재사용(work/step_b·step_a와 동일 경로).
+        from src.controllers.wu_faithful_follower import WuFaithfulFollower
+        from src.models.demand import DemandProfile
+        from src.models.state import ControlAction
+        from work.step_a_oracle_probe import (
+            build_cfg,
+            load_legacy_controls,
+            replay_to_step,
+        )
+
+        with open(_B2_PROBE) as _fh:
+            probe = json.load(_fh)
+        step_k = 20
+        s20 = probe["steps"][str(step_k)]
+
+        cfg, scenario = build_cfg("sweet_190")
+        profile = DemandProfile(cfg, scenario)
+        controls = load_legacy_controls(cfg, str(_B2_LEGACY))
+        net = cfg.network
+        follower = WuFaithfulFollower(cfg)
+
+        state_k = replay_to_step(cfg, profile, controls, step_k)
+        demand_k = profile.at(state_k.time_sec)
+
+        control = ControlAction.uncontrolled(cfg)
+        control.green_times = dict(controls[step_k].green_times)
+        control.offsets = dict(controls[step_k].offsets)
+        control.vsl = dict(controls[step_k].vsl)
+        control.ramp_metering = dict(controls[step_k].ramp_metering)
+        control.inflow_outflow_allocation = {}
+        coupling = follower._wu._coupling(state_k, control, demand_k)
+        s_eff_frozen = follower._frozen_s_eff(state_k)
+        reservoir_drain = follower._frozen_reservoir_drain(state_k, control, demand_k)
+        freeway_congestion = follower._frozen_freeway_congestion(state_k)
+        snapshot = ControlAction(
+            ramp_metering=dict(control.ramp_metering),
+            vsl=dict(control.vsl),
+            green_times=dict(control.green_times),
+            offsets=dict(control.offsets),
+            inflow_outflow_allocation={},
+        )
+
+        # probe가 계산한 per-signal g_i(전역 gradient)를 그대로 주입.
+        follower.green_price = {sig: float(s20[sig]["g_i"]) for sig in net.signals}
+        leader = _B2StubLeader()
+
+        for sig in net.signals:
+            arr_movement = follower._per_movement_arrivals(sig, state_k, snapshot, demand_k)
+            best_p1, _, _, _ = follower._solve_urban_agent_local(
+                sig, state_k.copy(), coupling, arr_movement, s_eff_frozen,
+                reservoir_drain, freeway_congestion, snapshot, leader,
+                0.0, None, 1.0, demand_k,
+            )
+            expect = float(s20[sig]["priced_argmin_ext"]["1.0"])
+            self.assertAlmostEqual(
+                best_p1, expect, places=6,
+                msg=(
+                    f"signal {sig}: production green_price argmin {best_p1} != "
+                    f"probe ext@w=1 argmin {expect} — B2 메커니즘 불일치"
+                ),
+            )
+
+    def test_green_price_none_leaves_solve_unchanged(self):
+        # green_price=None(기본)이면 leader present여도 price_active=False → 기존과 동일.
+        from src.controllers.wu_faithful_follower import WuFaithfulFollower
+        from src.models.demand import DemandProfile
+        from src.models.state import ControlAction
+        from work.step_a_oracle_probe import (
+            build_cfg,
+            load_legacy_controls,
+            replay_to_step,
+        )
+
+        step_k = 20
+        cfg, scenario = build_cfg("sweet_190")
+        profile = DemandProfile(cfg, scenario)
+        controls = load_legacy_controls(cfg, str(_B2_LEGACY))
+        net = cfg.network
+        follower = WuFaithfulFollower(cfg)
+        state_k = replay_to_step(cfg, profile, controls, step_k)
+        demand_k = profile.at(state_k.time_sec)
+        control = ControlAction.uncontrolled(cfg)
+        control.green_times = dict(controls[step_k].green_times)
+        control.offsets = dict(controls[step_k].offsets)
+        control.vsl = dict(controls[step_k].vsl)
+        control.ramp_metering = dict(controls[step_k].ramp_metering)
+        control.inflow_outflow_allocation = {}
+        coupling = follower._wu._coupling(state_k, control, demand_k)
+        s_eff_frozen = follower._frozen_s_eff(state_k)
+        reservoir_drain = follower._frozen_reservoir_drain(state_k, control, demand_k)
+        freeway_congestion = follower._frozen_freeway_congestion(state_k)
+        snapshot = ControlAction(
+            ramp_metering=dict(control.ramp_metering),
+            vsl=dict(control.vsl),
+            green_times=dict(control.green_times),
+            offsets=dict(control.offsets),
+            inflow_outflow_allocation={},
+        )
+        leader = _B2StubLeader()
+        # green_price=None(기본)이면 leader present여도 국소 own-TTS argmin 그대로.
+        for sig in net.signals:
+            arr_movement = follower._per_movement_arrivals(sig, state_k, snapshot, demand_k)
+            follower.green_price = None
+            p1_none, _, _, _ = follower._solve_urban_agent_local(
+                sig, state_k.copy(), coupling, arr_movement, s_eff_frozen,
+                reservoir_drain, freeway_congestion, snapshot, leader,
+                0.0, None, 1.0, demand_k,
+            )
+            # PFO(leader=None)와도 동일해야 한다(price 게이트가 leader에도 걸리므로).
+            p1_pfo, _, _, _ = follower._solve_urban_agent_local(
+                sig, state_k.copy(), coupling, arr_movement, s_eff_frozen,
+                reservoir_drain, freeway_congestion, snapshot, None,
+                0.0, None, 1.0, demand_k,
+            )
+            self.assertAlmostEqual(p1_none, p1_pfo, places=9)
+
+
 if __name__ == "__main__":
     unittest.main()
