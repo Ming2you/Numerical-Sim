@@ -349,6 +349,12 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         한계: green의 λ(N_P) 응답은 근사하지 않는다 — N_P 차원은 predicted states의
         protected accumulation 항을 통해서만 간접 반영되며, 주된 후보-분별력은
         N_UF(metering) 차원에서 나온다."""
+        # base full 평가(_evaluate_full_candidate)는 follower-feasible로 투영된 좌표를
+        # 채점하므로, prefilter proxy도 동일 좌표계에서 채점해야 랭킹이 어긋나지 않는다
+        # (base _proxy_score_candidate 1537-1539행과 동일한 pre-projection).
+        action, _projection_meta = self._project_action_to_follower_feasible_np(
+            action, state, forecast, previous
+        )
         control = previous.copy()
         control.N_P_star = float(action.N_P_star)
         control.N_UF_star = float(action.N_UF_star)

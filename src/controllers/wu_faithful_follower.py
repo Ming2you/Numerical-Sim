@@ -52,6 +52,14 @@ from src.models.urban_queue_model import (
 _INFLOW_KINDS = {"boundary_in", "off_ramp"}
 _OUTFLOW_KINDS = {"boundary_out", "on_ramp"}
 
+# N_P predictor 모드 코드(진단용 one-hot과 함께 기록; 2026-06-30 리포트 원인분리 스위치).
+_NP_PREDICTOR_MODE_CODES = {
+    "legacy": 0.0,
+    "storage_aware": 1.0,
+    "current_interval": 2.0,
+    "phase_substep": 3.0,
+}
+
 
 class WuFaithfulFollower:
     """Wu §IV-D 충실 분산 follower(PFO 모드 우선)."""
@@ -98,6 +106,25 @@ class WuFaithfulFollower:
         # freeway agent가 탐색할 ramp metering 후보 분율(×capacity). +41.8% 검증 최적(≈0.5)을
         # 중심으로 0.25~1.0을 덮는다. cap=100%(=metering off)부터 강한 metering 25%까지.
         self.ramp_metering_fractions: tuple[float, ...] = (1.0, 0.7, 0.5, 0.35, 0.25)
+        # freeway agent own-TTS에 urban 상류 blocked 큐(가상)를 포함할지 (P1, 2026-07-03).
+        # 진단 근거: sweet_190(중부하)에서 PFO가 D-ramp metering을 ~546 veh/h로 조이면
+        # reservoir(≤ramp_queue_max)가 차고 plant가 urban green release를 ramp_space로
+        # 스케일다운해 차량이 urban movement 큐에 갇힌다. freeway agent own-TTS는
+        # (본선+자기 reservoir+off-ramp storage)만 세서 이 상류 비용이 안 보였다 —
+        # 보이는 비용(cap 180)과 안 보이는 비용(무한 urban 큐)을 맞바꾸는 externality.
+        # True면 reservoir가 수용 못 한 coupling 유입을 ramp별 가상 blocked 큐로 이월
+        # 적재하고 그 차량수를 own-TTS에 더한다(새 가중치 없음 — 차량 수 세기).
+        # False면 기존 거동과 완전 동일(A/B probe용).
+        self.count_blocked_ramp_inflow: bool = True
+        # D/F(ramp-aware) 신호의 green 채점을 phase-resolved(platoon 도착 + offset-aware
+        # green window)로 할지 (P1.5, 2026-07-03). 기존 cycle-평균 gf=green/cycle 상수는
+        # green의 시간구조·offset이 채점에 전혀 안 들어가 legacy green 주입도 기각하는
+        # 원인 일부로 의심됐다. 비-ramp(A/B/C)는 이미 같은 경로(use_phased)를 쓴다.
+        # False면 기존 cycle-평균 경로 그대로(A/B probe용).
+        # ── 기본 False(게이트 실패, 2026-07-03 closed-loop A/B): sweet_155 −1.47% 개선이나
+        # sweet_190 +1.09%/sweet_128 +0.94% 악화 — sweet_190이 "1% 초과 악화 STOP" 기준에
+        # 걸려 기본 비활성(opt-in)으로 남긴다. 채점 인프라·단위테스트는 유효(하위호환 완전).
+        self.ramp_aware_phase_resolved: bool = False
         # 신호별 offset 후보 분율(×cycle_length). [0, cycle) 안의 작은 후보집합으로 국소 탐색.
         # 0.0은 현 baseline(offset off). 0~7/8 cycle을 8등분(끝점 cycle 제외).
         self.offset_fractions: tuple[float, ...] = (
@@ -516,14 +543,25 @@ class WuFaithfulFollower:
         # **밖에서 1회** 계산한다(green/offset에 불변). gf만 후보별로 갱신한다.
         # ramp-aware(D/F)는 storage 동역학이 복잡해 기존 cycle-평균 경로 유지(Task-B 범위 밖).
         use_phased = (not model.has_ramps) and demand is not None
+        # P1.5: D/F(ramp-aware)도 phase-resolved + platoon 도착으로 채점(플래그로 게이트).
+        use_phased_ramp = (
+            model.has_ramps and demand is not None and self.ramp_aware_phase_resolved
+        )
         start_idx = _urban_step_index(state, self.cfg)
         # green search 동안 offset은 snapshot 값(직전 best-response)으로 동결한다.
         offset_for_green = float(previous.offsets.get(signal, 0.0))
         arr_by_substep: Dict[str, List[float]] = {}
-        if use_phased:
+        if use_phased or use_phased_ramp:
             arr_by_substep = self._platoon_arrival_profiles(
                 signal, state, previous, demand, arr_mv, substeps, start_idx,
             )
+        if use_phased_ramp:
+            # off_ramp movement는 큐 도착이 아니라 storage 유입(단계 (c))이므로 프로파일에서
+            # 제외한다(rollout의 도착 주입은 queue_movements만 읽지만 명시적으로 필터).
+            arr_by_substep = {
+                m: prof for m, prof in arr_by_substep.items()
+                if model.kind_of.get(m) != "off_ramp"
+            }
 
         prev_p1 = float(previous.green_times.get(f"{signal}_p1", total / 2.0))
         candidates = self._urban_green_candidates(signal, state, coupling, previous)
@@ -551,12 +589,27 @@ class WuFaithfulFollower:
             if p2 < net.green_min - 1.0e-9 or p2 > net.green_max + 1.0e-9:
                 continue
             if model.has_ramps:
-                cost = rollout_local_tts_ramp_aware(
-                    model, q0, arr_mv, s_eff0,
-                    offramp_inflow, offramp_occ0, ramp_queue0, reservoir_drain,
-                    freeway_congestion, self.ramp_metering_weight,
-                    p1, p2, substeps, dt_h,
-                )
+                if use_phased_ramp:
+                    # phase-resolved 서비스(offset-aware) + platoon 도착(P1.5). offset은
+                    # 비-ramp 경로와 동일하게 snapshot 값으로 동결, gf만 후보별 갱신.
+                    gf_by_substep = self._offset_green_fractions(
+                        signal, p1, offset_for_green, substeps, start_idx,
+                    )
+                    cost = rollout_local_tts_ramp_aware(
+                        model, q0, arr_mv, s_eff0,
+                        offramp_inflow, offramp_occ0, ramp_queue0, reservoir_drain,
+                        freeway_congestion, self.ramp_metering_weight,
+                        p1, p2, substeps, dt_h,
+                        arr_by_substep=arr_by_substep,
+                        gf_by_substep=gf_by_substep,
+                    )
+                else:
+                    cost = rollout_local_tts_ramp_aware(
+                        model, q0, arr_mv, s_eff0,
+                        offramp_inflow, offramp_occ0, ramp_queue0, reservoir_drain,
+                        freeway_congestion, self.ramp_metering_weight,
+                        p1, p2, substeps, dt_h,
+                    )
             elif use_phased:
                 # phase-resolved 서비스(offset-aware) + platoon 도착. offset은 green search 동안
                 # snapshot 값으로 동결(offset best-response는 _solve_offset_local에서 별도).
@@ -1083,6 +1136,9 @@ class WuFaithfulFollower:
             ramp_q = dict(ramp_q0)
             occ = dict(occ0)
             recv_occ = dict(recv_occ0)
+            # 가상 상류 blocked 큐[veh]: reservoir 만석으로 수용 못 한 coupling 유입의 이월분
+            # (P1 — urban 상류 externality를 own-TTS에 보이게 한다). 후보별 독립.
+            blocked_q = {r: 0.0 for r in model.owned_ramps}
             cost = 0.0
             first_offramp_flow = dict(best_offramp_flow)
             first_substep = True
@@ -1102,10 +1158,22 @@ class WuFaithfulFollower:
                     # urban->freeway coupling[veh/h]은 release 이후 ramp reservoir에 적재된다.
                     for ramp in model.owned_ramps:
                         approach = max(0.0, float(coupling.get(f"u_on_{ramp}", 0.0)))
-                        ramp_q[ramp] = min(
-                            net.ramp_queue_max_veh,
-                            max(0.0, ramp_q.get(ramp, 0.0)) + approach * dt_h,
-                        )
+                        if self.count_blocked_ramp_inflow:
+                            # 가상 blocked 큐: reservoir 가용공간(space)에 blocked 이월분을
+                            # 먼저(FIFO) 넣고, 남은 공간에 신규 유입을 넣는다. 못 들어간
+                            # 차량은 blocked_q에 남아 own-TTS에서 세어진다(무한 큐 가시화).
+                            q = max(0.0, ramp_q.get(ramp, 0.0))
+                            space = max(0.0, net.ramp_queue_max_veh - q)
+                            arrival = approach * dt_h
+                            adm1 = min(blocked_q[ramp], space)
+                            adm2 = min(arrival, space - adm1)
+                            ramp_q[ramp] = min(net.ramp_queue_max_veh, q + adm1 + adm2)
+                            blocked_q[ramp] = blocked_q[ramp] - adm1 + (arrival - adm2)
+                        else:
+                            ramp_q[ramp] = min(
+                                net.ramp_queue_max_veh,
+                                max(0.0, ramp_q.get(ramp, 0.0)) + approach * dt_h,
+                            )
                     # off-ramp cap(국소 storage 가용공간 기반).
                     storage_avail = {
                         o: max(0.0, model.offramp_storage_cap.get(o, 0.0) - occ.get(o, 0.0))
@@ -1139,11 +1207,15 @@ class WuFaithfulFollower:
                     if first_substep:
                         first_offramp_flow = {o: max(0.0, float(offramp_flow.get(o, 0.0))) for o in best_offramp_flow}
                         first_substep = False
-                    # Wu own-TTS: 이 link segment 차량 + 이 link ramp queue + off-ramp storage 점유.
+                    # Wu own-TTS: 이 link segment 차량 + 이 link ramp queue + off-ramp storage 점유
+                    # + (P1) reservoir가 수용 못 한 가상 blocked 큐(urban 상류 externality).
                     link_vehicles = sum(veh_count)
                     link_ramp_queue = sum(max(0.0, ramp_q.get(r, 0.0)) for r in model.owned_ramps)
                     link_offramp_storage = sum(occ.get(o, 0.0) for o in model.owned_offramps)
-                    cost += (link_vehicles + link_ramp_queue + link_offramp_storage) * dt_h
+                    link_blocked_queue = sum(blocked_q.values())
+                    cost += (
+                        link_vehicles + link_ramp_queue + link_offramp_storage + link_blocked_queue
+                    ) * dt_h
             smooth = sum(abs(first_vec[i] - prev_vec[i]) for i in range(min(n_seg, len(first_vec))))
             for prev_step, next_step in zip(sequence, sequence[1:]):
                 smooth += sum(
@@ -1357,7 +1429,9 @@ class WuFaithfulFollower:
         for signal in self.cfg.network.signals:
             candidates = self._urban_green_candidates(signal, state, coupling, snapshot)
             nin_vals = [
-                self._agent_net_inflow_veh(signal, p1, state, forecast_arrivals, horizon_h)
+                self._predicted_agent_net_inflow_veh(
+                    signal, p1, state, forecast_arrivals, horizon_h
+                )
                 for p1 in candidates
             ]
             if not nin_vals:
@@ -1365,6 +1439,211 @@ class WuFaithfulFollower:
             sigma_min += min(nin_vals)
             sigma_max += max(nin_vals)
         return float(sigma_min), float(sigma_max)
+
+    def _predicted_agent_net_inflow_veh(
+        self,
+        signal: str,
+        green_p1: float,
+        state: TrafficState,
+        forecast_arrivals: Mapping[str, float],
+        horizon_h: float,
+    ) -> float:
+        """predictor 모드(cfg.mpc.wu_faithful_np_predictor_mode)를 반영한 nin_i[veh] 예측.
+
+        "legacy"(기본)는 기존 `_agent_net_inflow_veh` 그대로 위임한다 — 기본 경로 거동 불변.
+        나머지 모드는 2026-06-30 리포트의 원인분리용 진단 스위치를 복원한 것이다.
+          storage_aware   — served 유입을 receiving 링크 가용 저장공간(state.urban_link_storage,
+                            available-space 저장)으로 추가 상한(막힌 수용공간이 예측을 깎는다).
+          current_interval — horizon 전체 forecast 도착을 즉시 처리 가능량으로 보지 않고
+                            현 control interval 몫(1/steps)만 available에 넣는다.
+          phase_substep   — cycle 평균 green 비율 대신 `_phase_green_fraction`의 substep
+                            green window 겹침으로 용량을 적분한다.
+        """
+        mode = str(self.cfg.mpc.wu_faithful_np_predictor_mode)
+        if mode == "legacy":
+            return self._agent_net_inflow_veh(
+                signal, green_p1, state, forecast_arrivals, horizon_h
+            )
+        net = self.cfg.network
+        sim = self.cfg.simulation
+        model = self._local_models[signal]
+        total = net.effective_green_total
+        cycle = max(net.cycle_length, 1.0e-9)
+        green = {"p1": float(green_p1), "p2": float(total - green_p1)}
+        steps = max(1, int(round(horizon_h / max(sim.T_c_h, 1.0e-9))))
+        arr_scale = (1.0 / steps) if mode == "current_interval" else 1.0
+        # phase_substep: 후보 green으로 만든 임시 control의 substep green window로 용량 적분.
+        phased_cap: Dict[str, float] = {}
+        if mode == "phase_substep":
+            probe = ControlAction(
+                ramp_metering={},
+                vsl={},
+                green_times={f"{signal}_p1": green["p1"], f"{signal}_p2": green["p2"]},
+                offsets={},
+                inflow_outflow_allocation={},
+            )
+            start_idx = _urban_step_index(state, self.cfg)
+            substeps = max(1, int(round(horizon_h / max(sim.T_u_h, 1.0e-9))))
+            for movement in model.movements:
+                spec = self._specs[movement]
+                cap = 0.0
+                for k in range(substeps):
+                    gf = _phase_green_fraction(probe, self.cfg, spec, start_idx + k)
+                    cap += sim.T_u_h * gf * model.cap_flow_of[movement]
+                phased_cap[movement] = cap
+        served: Dict[str, float] = {}
+        raw_onramp_by_ramp: Dict[str, float] = {}
+        onramp_by_movement = {
+            m: r for r, mvs in net.on_ramp_to_movement.items() for m in mvs
+        }
+        for movement in model.movements:
+            spec = self._specs[movement]
+            kind = model.kind_of[movement]
+            available = max(0.0, float(state.urban_movement_queue.get(movement, 0.0)))
+            if kind == "off_ramp":
+                off_ramp = str(spec.get("off_ramp", ""))
+                inflow = self._frozen_offramp_inflow(off_ramp, state)
+                available += inflow * horizon_h * float(spec.get("beta", 0.0)) * arr_scale
+            else:
+                available += max(0.0, float(forecast_arrivals.get(movement, 0.0))) * arr_scale
+            if mode == "phase_substep":
+                cap_veh = phased_cap.get(movement, 0.0)
+            else:
+                green_fraction = green[model.phase_of[movement]] / cycle
+                cap_veh = horizon_h * green_fraction * model.cap_flow_of[movement]
+            s = min(available, max(0.0, cap_veh))
+            served[movement] = s
+            if kind == "on_ramp":
+                ramp = onramp_by_movement.get(movement, "")
+                if ramp:
+                    raw_onramp_by_ramp[ramp] = raw_onramp_by_ramp.get(ramp, 0.0) + s
+        # on_ramp 서비스는 ramp reservoir 여유로 추가 스케일(_agent_net_inflow_veh와 동일).
+        for ramp, raw_total in raw_onramp_by_ramp.items():
+            if raw_total <= 1.0e-9:
+                continue
+            ramp_space = max(
+                0.0,
+                float(net.ramp_queue_max_veh) - max(0.0, float(state.ramp_queue.get(ramp, 0.0))),
+            )
+            scale = min(1.0, ramp_space / raw_total)
+            for movement in net.on_ramp_to_movement.get(ramp, []):
+                if movement in served:
+                    served[movement] *= scale
+        if mode == "storage_aware":
+            # receiving 링크별 served 합을 가용 저장공간으로 상한(비율 축소).
+            recv_totals: Dict[str, float] = {}
+            for movement in model.movements:
+                recv = model.receiving_of[movement]
+                if recv and recv in net.urban_link_storage_veh:
+                    recv_totals[recv] = recv_totals.get(recv, 0.0) + served[movement]
+            for recv, total_in in recv_totals.items():
+                if total_in <= 1.0e-9:
+                    continue
+                space = max(
+                    0.0,
+                    float(state.urban_link_storage.get(recv, net.urban_link_storage_veh[recv])),
+                )
+                scale = min(1.0, space / total_in)
+                if scale < 1.0:
+                    for movement in model.movements:
+                        if model.receiving_of[movement] == recv:
+                            served[movement] *= scale
+        inflow_veh = sum(
+            served[m] for m in model.movements if model.kind_of[m] in _INFLOW_KINDS
+        )
+        outflow_veh = sum(
+            served[m] for m in model.movements if model.kind_of[m] in _OUTFLOW_KINDS
+        )
+        return float(inflow_veh - outflow_veh)
+
+    def _np_feasible_sum_range(
+        self,
+        state: TrafficState,
+        forecast_arrivals: Mapping[str, float],
+        horizon_h: float,
+    ) -> tuple[float, float, Dict[str, float]]:
+        """coupling 없이 state·도착 예보만으로 follower Σnin 실현가능범위[veh]를 예측한다.
+
+        후보 green 집합은 solver와 동일한 `_urban_green_candidates`(중립 coupling=0,
+        snapshot=fixed)로 만들고, per-signal nin은 predictor 모드
+        (`_predicted_agent_net_inflow_veh`)로 평가해 min/max를 합산한다.
+        반환 (sigma_min, sigma_max, diag) — diag 값은 전부 float."""
+        snapshot = ControlAction.fixed(self.cfg)
+        coupling: Dict[str, float] = {}
+        sigma_min = 0.0
+        sigma_max = 0.0
+        for signal in self.cfg.network.signals:
+            candidates = self._urban_green_candidates(signal, state, coupling, snapshot)
+            nin_vals = [
+                self._predicted_agent_net_inflow_veh(
+                    signal, p1, state, forecast_arrivals, horizon_h
+                )
+                for p1 in candidates
+            ]
+            if not nin_vals:
+                continue
+            sigma_min += min(nin_vals)
+            sigma_max += max(nin_vals)
+        mode = str(self.cfg.mpc.wu_faithful_np_predictor_mode)
+        diag = {
+            "np_feasible_sum_sigma_min_veh": float(sigma_min),
+            "np_feasible_sum_sigma_max_veh": float(sigma_max),
+            "np_feasible_sum_horizon_h": float(horizon_h),
+            "np_feasible_sum_predictor_mode_code": float(
+                _NP_PREDICTOR_MODE_CODES.get(mode, 0.0)
+            ),
+        }
+        return float(sigma_min), float(sigma_max), diag
+
+    def leader_np_feasible_range(
+        self,
+        state: TrafficState,
+        forecast: List[DemandStep],
+        previous: ControlAction,
+    ) -> tuple[float, float, Dict[str, float]]:
+        """Stackelberg leader 후보 N_P 투영용 Σnin feasible range[veh over horizon].
+
+        `stackelberg_mpc._project_action_to_follower_feasible_np`(1598행)가 duck-typing으로
+        호출하는 인터페이스. `_solve_followers` 앞부분과 동일하게 coupling(warm-start 반영)·
+        snapshot·forecast_arrivals·horizon_h를 구성한 뒤 `_np_feasible_range`를 감싼다.
+        반환 (sigma_min, sigma_max, diag) — diag 키는 호출측에서 f"leader_{key}"로 승격돼
+        float(value)로 변환되므로 float 호환 값만 담는다."""
+        fc = list(forecast) if forecast else []
+        if not fc:
+            raise ValueError("leader_np_feasible_range requires at least one demand step.")
+        demand = fc[0]
+        control = ControlAction.uncontrolled(self.cfg)
+        control.green_times = dict(previous.green_times)
+        control.vsl = dict(previous.vsl)
+        control.inflow_outflow_allocation = {}
+        coupling = self._wu._coupling(state, control, demand)
+        if self._prev_coupling is not None:
+            for k in coupling:
+                if k in self._prev_coupling:
+                    coupling[k] = float(self._prev_coupling[k])
+        snapshot = ControlAction(
+            ramp_metering=dict(control.ramp_metering),
+            vsl=dict(control.vsl),
+            green_times=dict(control.green_times),
+            offsets=dict(control.offsets),
+            inflow_outflow_allocation={},
+        )
+        steps_h = fc[: max(1, self.cfg.mpc.horizon_steps)] or fc[:1]
+        horizon_h = max(self.cfg.simulation.T_c_h * max(len(steps_h), 1), 1.0e-9)
+        forecast_arrivals = self._movement_forecast_arrivals_veh(fc)
+        sigma_min, sigma_max = self._np_feasible_range(
+            state, coupling, snapshot, forecast_arrivals, horizon_h,
+        )
+        mode = str(self.cfg.mpc.wu_faithful_np_predictor_mode)
+        diag = {
+            "np_feasible_sigma_min_veh": float(sigma_min),
+            "np_feasible_sigma_max_veh": float(sigma_max),
+            "np_feasible_horizon_h": float(horizon_h),
+            "np_feasible_predictor_mode_code": float(
+                _NP_PREDICTOR_MODE_CODES.get(mode, 0.0)
+            ),
+        }
+        return float(sigma_min), float(sigma_max), diag
 
     def _measure_dual_gain(
         self,
@@ -1645,6 +1924,30 @@ class WuFaithfulFollower:
         control.diagnostics["urban_net_inflow_target_veh_h"] = float(
             projected_target / max(horizon_h, 1.0e-9)
         )
+        # ---- veh-단위 리더 인터페이스 진단(f9794b0 leader closure가 읽는 키; 테스트 스펙) ----
+        # A1+A2에서 λ는 solve 내 동결이므로 이 step에 follower가 실현하는 Σnin은 합의값
+        # 하나다. 따라서 veh-단위 "realizable" 밴드는 그 점으로 붕괴한다(min=max=sum_nin).
+        # wide 후보범위(wu_faithful_np_feasible_min/max)는 λ 적분 target 투영용으로 그대로
+        # 두고, leader closure/plant 로그가 읽는 projected_veh는 이 step 실현가능값으로
+        # 보고한다(정직한 closure — 이분법 시대의 in-step tracking을 재도입하지 않는다).
+        predictor_mode = str(self.cfg.mpc.wu_faithful_np_predictor_mode)
+        control.diagnostics["wu_faithful_np_predictor_mode_code"] = float(
+            _NP_PREDICTOR_MODE_CODES.get(predictor_mode, 0.0)
+        )
+        for mode_name in _NP_PREDICTOR_MODE_CODES:
+            control.diagnostics[f"wu_faithful_np_predictor_{mode_name}"] = float(
+                mode_name == predictor_mode
+            )
+        if dual_active:
+            realizable_veh = float(sum_nin)
+            projected_veh = float(min(max(n_p_star, realizable_veh), realizable_veh))
+            control.diagnostics["wu_faithful_np_original_target_veh"] = float(n_p_star)
+            control.diagnostics["wu_faithful_np_projected_target_veh"] = projected_veh
+            control.diagnostics["wu_faithful_np_realized_sum_nin_veh"] = realizable_veh
+            control.diagnostics["wu_faithful_np_feasible_min_veh"] = realizable_veh
+            control.diagnostics["wu_faithful_np_feasible_max_veh"] = realizable_veh
+            control.diagnostics["urban_net_inflow_original_target_veh"] = float(n_p_star)
+            control.diagnostics["urban_net_inflow_target_veh"] = projected_veh
         # offset 진단: 탐색에서 0이 아닌 offset을 고른 신호 수 + 가드 후 실제 유지된 수.
         control.diagnostics["wu_faithful_offsets_off_zero"] = float(offsets_kept)
         control.diagnostics["wu_faithful_offsets_searched_off_zero"] = float(offsets_off_zero)

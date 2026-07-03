@@ -231,5 +231,101 @@ class TestLambdaDualIntegralUpdate(unittest.TestCase):
         self.assertAlmostEqual(float(diag["wu_faithful_lambda_P"]), 0.5, places=12)
 
 
+class TestLeaderNpFeasibleRangeInterface(unittest.TestCase):
+    """P0 회귀: follower가 leader_np_feasible_range를 노출해야 leader-side projection이
+    무력화되지 않는다(stackelberg_mpc 1598행 getattr duck-typing)."""
+
+    def test_leader_np_feasible_range_exists_and_returns_range(self):
+        cfg = _dual_test_config()
+        follower = WuFaithfulFollower(cfg)
+        self.assertTrue(
+            hasattr(follower, "leader_np_feasible_range"),
+            "WuFaithfulFollower must expose leader_np_feasible_range "
+            "(otherwise leader N_P projection silently deactivates)",
+        )
+        state = TrafficState.initial(cfg)
+        forecast = DemandProfile(
+            cfg,
+            ScenarioConfig("probe", urban_scale=1.2, freeway_scale=1.0, ramp_scale=1.0),
+        ).horizon(0.0, 1)
+        previous = ControlAction.fixed(cfg)
+        # stackelberg_mpc._project_action_to_follower_feasible_np(1602행)와 동일한 호출 형태.
+        sigma_min, sigma_max, diag = follower.leader_np_feasible_range(
+            state.copy(), list(forecast), previous.copy()
+        )
+        self.assertLessEqual(float(sigma_min), float(sigma_max))
+        self.assertIsInstance(diag, dict)
+        # diag 값은 f"leader_{key}"로 승격돼 float() 변환되므로 float 호환이어야 한다.
+        for key, value in diag.items():
+            self.assertIsInstance(key, str)
+            float(value)
+
+
+class TestBlockedRampInflowCost(unittest.TestCase):
+    """P1 회귀: freeway agent own-TTS가 reservoir 만석으로 막힌 urban 유입(가상 blocked 큐)을
+    봐야 한다(count_blocked_ramp_inflow). OFF면 기존 거동과 완전 동일해야 한다."""
+
+    def _freeway_link_inputs(self, cfg):
+        link = None
+        owned = []
+        for cand in cfg.network.freeway_links:
+            owned = [
+                r for r in cfg.network.ramps
+                if cfg.network.ramp_to_freeway.get(r) == cand
+            ]
+            if owned:
+                link = cand
+                break
+        self.assertIsNotNone(link, "no freeway link with owned ramps")
+        demand = DemandProfile(
+            cfg,
+            ScenarioConfig("probe", urban_scale=1.0, freeway_scale=1.0, ramp_scale=1.0),
+        ).horizon(0.0, 1)[0]
+        previous = ControlAction.fixed(cfg)
+        return link, owned, demand, previous
+
+    def test_saturated_reservoir_blocked_cost_visible(self):
+        # reservoir 만석 + 큰 u_on coupling → 유입이 reservoir에 못 들어가 blocked 큐가
+        # 쌓이고, flag ON 비용이 OFF보다 커야 한다(externality 가시화 판별력).
+        cfg = _dual_test_config()
+        follower = WuFaithfulFollower(cfg)
+        link, owned, demand, previous = self._freeway_link_inputs(cfg)
+        state = TrafficState.initial(cfg)
+        for ramp in owned:
+            state.ramp_queue[ramp] = float(cfg.network.ramp_queue_max_veh)
+        coupling = {f"u_on_{ramp}": 5000.0 for ramp in owned}
+
+        follower.count_blocked_ramp_inflow = False
+        _, cost_off, _ = follower._solve_freeway_agent_local(
+            link, state, coupling, demand, previous,
+        )
+        follower.count_blocked_ramp_inflow = True
+        _, cost_on, _ = follower._solve_freeway_agent_local(
+            link, state, coupling, demand, previous,
+        )
+        self.assertGreater(cost_on, cost_off)
+
+    def test_unsaturated_reservoir_flag_has_no_effect(self):
+        # 비포화(빈 reservoir + 작은 coupling)면 blocked 큐가 전혀 안 쌓여 ON/OFF 비용이
+        # 완전 동일해야 한다(경부하 구조적 무영향 — sweet_128 회귀 안전장치).
+        cfg = _dual_test_config()
+        follower = WuFaithfulFollower(cfg)
+        link, owned, demand, previous = self._freeway_link_inputs(cfg)
+        state = TrafficState.initial(cfg)
+        for ramp in owned:
+            state.ramp_queue[ramp] = 0.0
+        coupling = {f"u_on_{ramp}": 100.0 for ramp in owned}
+
+        follower.count_blocked_ramp_inflow = False
+        _, cost_off, _ = follower._solve_freeway_agent_local(
+            link, state, coupling, demand, previous,
+        )
+        follower.count_blocked_ramp_inflow = True
+        _, cost_on, _ = follower._solve_freeway_agent_local(
+            link, state, coupling, demand, previous,
+        )
+        self.assertEqual(cost_on, cost_off)
+
+
 if __name__ == "__main__":
     unittest.main()

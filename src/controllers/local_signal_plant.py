@@ -13,7 +13,7 @@ movement 큐 q_m만 N_p×K_cu substep 전진시키며, 이웃에서 들어오는
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Mapping, Optional
+from typing import Dict, List, Mapping, Optional, Sequence
 
 from src.models.state import ControlAction, ExperimentConfig
 from src.models.urban_queue_model import (
@@ -269,6 +269,8 @@ def rollout_local_tts_ramp_aware(
     green_p2: float,
     substeps: int,
     dt_h: float,
+    arr_by_substep: Optional[Mapping[str, Sequence[float]]] = None,
+    gf_by_substep: Optional[Mapping[str, Sequence[float]]] = None,
 ) -> float:
     """freeway-인접 신호(D/F)의 ramp-aware 국소 rollout — 자기 own-TTS 누적 반환.
 
@@ -291,10 +293,26 @@ def rollout_local_tts_ramp_aware(
     - ramp_metering_weight: de facto ramp metering 패널티 계수. 막힌 freeway로 보낸
       reservoir 적재(=freeway 유입)에 w_fw·계수를 곱해 비용에 더한다(SPEC line 28).
     이게 V1: D/F는 off-ramp storage·on-ramp reservoir를 전진시키되 freeway 전체 호출 없음.
+
+    PHASE-RESOLVED 확장(P1.5, 선택 인자 — None이면 기존 cycle-평균 거동과 완전 동일):
+    - arr_by_substep: queue movement별 시간분해 도착[veh/h] (platoon). 제공되면 프로파일이
+      있는 movement는 균일 arr_movement 대신 arr_by_substep[m][sub]로 도착 주입.
+    - gf_by_substep: movement별 offset-aware green fraction. 제공되면 green[pid]/cycle 대신
+      gf_by_substep[m][sub]을 모든 서비스 지점 — (a) on-ramp request, (b) off-ramp drain
+      intended, (d) 일반 movement discharge — 에서 사용한다(비-ramp `rollout_local_tts_phased`
+      와 동일 철학; reservoir/storage/metering-pricing·s_eff 회계는 불변).
     """
     net = model.cfg.network
     cycle = max(net.cycle_length, 1.0e-9)
     green = {"p1": float(green_p1), "p2": float(green_p2)}
+
+    def _gf(m: str, sub: int) -> float:
+        # phase-resolved green fraction(제공 시) — 아니면 기존 cycle-평균.
+        if gf_by_substep is not None:
+            prof = gf_by_substep.get(m)
+            if prof is not None:
+                return float(prof[sub])
+        return green[model.phase_of[m]] / cycle
     # ramp(reservoir)행 movement 집합 — step (a)에서 처리, step (d)에서 제외.
     ramp_movement_set = {m for mv in model.onramp_movements.values() for m in mv}
     # off_ramp movement는 큐가 아니라 storage에서 방출되므로 movement-큐 전진 대상에서 제외.
@@ -312,9 +330,15 @@ def rollout_local_tts_ramp_aware(
     s_eff: Dict[str, float] = {link: max(0.0, float(v)) for link, v in s_eff0.items()}
 
     cost = 0.0
-    for _ in range(substeps):
-        # 0) 고정 도착 주입(off_ramp 제외: storage 유입은 (c)에서 별도 처리).
+    for sub in range(substeps):
+        # 0) 도착 주입(off_ramp 제외: storage 유입은 (c)에서 별도 처리). platoon 프로파일이
+        #    제공된 movement는 시간분해 도착, 아니면 기존 균일 도착.
         for m in queue_movements:
+            if arr_by_substep is not None:
+                prof = arr_by_substep.get(m)
+                if prof is not None:
+                    q[m] += float(prof[sub]) * dt_h
+                    continue
             q[m] += arr_movement.get(m, 0.0) * dt_h
 
         # (a0) reservoir 배출(freeway pull, frozen): w_r -= drain·dt. 이게 있어야 on_ramp
@@ -327,8 +351,7 @@ def rollout_local_tts_ramp_aware(
         for ramp, movements in model.onramp_movements.items():
             requests: Dict[str, float] = {}
             for m in movements:
-                pid = model.phase_of[m]
-                green_fraction = green[pid] / cycle
+                green_fraction = _gf(m, sub)
                 requests[m] = min(
                     max(0.0, q[m]), dt_h * green_fraction * model.cap_flow_of[m]
                 )
@@ -358,8 +381,7 @@ def rollout_local_tts_ramp_aware(
                 beta = model.beta_of[m]
                 if beta <= 0.0:
                     continue
-                pid = model.phase_of[m]
-                green_fraction = green[pid] / cycle
+                green_fraction = _gf(m, sub)
                 intended = min(beta * occupancy, dt_h * green_fraction * model.cap_flow_of[m])
                 recv = model.receiving_of[m]
                 if recv and recv in s_eff:
@@ -386,8 +408,7 @@ def rollout_local_tts_ramp_aware(
         for m in queue_movements:
             if m in ramp_movement_set:
                 continue  # ramp행 movement는 (a)에서 처리됨.
-            pid = model.phase_of[m]
-            green_fraction = green[pid] / cycle
+            green_fraction = _gf(m, sub)
             intended = min(max(0.0, q[m]), dt_h * green_fraction * model.cap_flow_of[m])
             recv = model.receiving_of[m]
             if recv and recv in s_eff:

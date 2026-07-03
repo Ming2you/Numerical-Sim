@@ -87,5 +87,118 @@ class TestOffRampDrainSignConvention(unittest.TestCase):
         self.assertAlmostEqual(cost, 35.0, places=6)
 
 
+def _build_full_model(cfg: ExperimentConfig) -> LocalSignalModel:
+    # P1.5 테스트용: 세 가지 서비스 지점을 전부 갖는 모델 —
+    # (a) on-ramp request(ramp_m), (b) off-ramp drain(off_m), (d) 일반 discharge(in_m).
+    return LocalSignalModel(
+        signal="Y",
+        cfg=cfg,
+        movements=["in_m", "ramp_m", "off_m", "internal_m"],
+        specs={"in_m": {}, "ramp_m": {}, "off_m": {}, "internal_m": {}},
+        phase_of={"in_m": "p1", "ramp_m": "p1", "off_m": "p2", "internal_m": "p2"},
+        receiving_of={
+            "in_m": "own_link",
+            "ramp_m": "",
+            "off_m": "own_link",
+            "internal_m": "sink_link",
+        },
+        origin_of={"in_m": "", "ramp_m": "", "off_m": "OR_Y", "internal_m": "own_link"},
+        beta_of={"in_m": 1.0, "ramp_m": 1.0, "off_m": 1.0, "internal_m": 0.0},
+        cap_flow_of={"in_m": 900.0, "ramp_m": 600.0, "off_m": 700.0, "internal_m": 500.0},
+        receiving_space_rule="proportional",
+        kind_of={
+            "in_m": "boundary_in",
+            "ramp_m": "on_ramp",
+            "off_m": "off_ramp",
+            "internal_m": "internal",
+        },
+        offramp_movements={"OR_Y": ["off_m"]},
+        offramp_storage_cap={"OR_Y": 100.0},
+        onramp_movements={"R_Y": ["ramp_m"]},
+        ramp_queue_max=180.0,
+        has_ramps=True,
+    )
+
+
+class TestPhaseResolvedRampAware(unittest.TestCase):
+    """P1.5: rollout_local_tts_ramp_aware의 arr_by_substep/gf_by_substep 확장 회귀."""
+
+    def test_uniform_profiles_match_legacy_exactly(self):
+        # 하위호환 동등성: 균일 도착 프로파일 + 상수 gf(green/cycle)를 명시로 주면
+        # 인자 없는 legacy 호출과 비용이 정확히 동일해야 한다.
+        cfg = ExperimentConfig()
+        model = _build_full_model(cfg)
+        cycle = max(cfg.network.cycle_length, 1.0e-9)
+        green_p1, green_p2 = 70.0, 42.0
+        substeps, dt_h = 6, 5.0 / 3600.0
+        q0 = {"in_m": 8.0, "ramp_m": 5.0, "internal_m": 3.0}
+        arr_movement = {"in_m": 400.0, "ramp_m": 300.0, "internal_m": 200.0}
+        common = dict(
+            q0=q0,
+            arr_movement=arr_movement,
+            s_eff0={"own_link": 50.0, "sink_link": 50.0},
+            offramp_inflow={"OR_Y": 250.0},
+            offramp_occ0={"OR_Y": 30.0},
+            ramp_queue0={"R_Y": 20.0},
+            reservoir_drain={"R_Y": 500.0},
+            freeway_congestion={"R_Y": 0.4},
+            ramp_metering_weight=0.0,
+            green_p1=green_p1,
+            green_p2=green_p2,
+            substeps=substeps,
+            dt_h=dt_h,
+        )
+        legacy_cost = rollout_local_tts_ramp_aware(model, **common)
+        gf_const = {"p1": green_p1 / cycle, "p2": green_p2 / cycle}
+        arr_by_substep = {m: [arr_movement.get(m, 0.0)] * substeps for m in q0}
+        gf_by_substep = {
+            m: [gf_const[model.phase_of[m]]] * substeps for m in model.movements
+        }
+        explicit_cost = rollout_local_tts_ramp_aware(
+            model, **common, arr_by_substep=arr_by_substep, gf_by_substep=gf_by_substep,
+        )
+        self.assertEqual(explicit_cost, legacy_cost)
+
+    def test_green_window_alignment_discriminates(self):
+        # 시간구조 판별력: 같은 도착 총량(burst) + 같은 green 총량에서, green window가
+        # burst와 정렬된 gf는 비용이 낮고 어긋난 gf는 높아야 한다(비용이 달라야 한다).
+        cfg = ExperimentConfig()
+        model = _build_full_model(cfg)
+        substeps, dt_h = 4, 1.0
+        base = dict(
+            q0={"in_m": 0.0, "ramp_m": 0.0, "internal_m": 0.0},
+            arr_movement={},
+            s_eff0={"own_link": 1.0e9, "sink_link": 1.0e9},
+            offramp_inflow={"OR_Y": 0.0},
+            offramp_occ0={"OR_Y": 0.0},
+            ramp_queue0={"R_Y": 0.0},
+            reservoir_drain={"R_Y": 0.0},
+            freeway_congestion={"R_Y": 0.0},
+            ramp_metering_weight=0.0,
+            green_p1=56.0,
+            green_p2=56.0,
+            substeps=substeps,
+            dt_h=dt_h,
+        )
+        # burst: in_m 도착이 앞 2 substep에만 몰림(총량 = 10+10).
+        burst = {"in_m": [10.0, 10.0, 0.0, 0.0]}
+        zero = [0.0] * substeps
+        # 같은 green 총량(mean gf 0.25): 정렬 = burst substep에 green, 어긋남 = 뒤 2 substep.
+        gf_aligned = {
+            m: ([0.5, 0.5, 0.0, 0.0] if m == "in_m" else zero) for m in model.movements
+        }
+        gf_misaligned = {
+            m: ([0.0, 0.0, 0.5, 0.5] if m == "in_m" else zero) for m in model.movements
+        }
+        cost_aligned = rollout_local_tts_ramp_aware(
+            model, **base, arr_by_substep=burst, gf_by_substep=gf_aligned,
+        )
+        cost_misaligned = rollout_local_tts_ramp_aware(
+            model, **base, arr_by_substep=burst, gf_by_substep=gf_misaligned,
+        )
+        self.assertNotEqual(cost_aligned, cost_misaligned)
+        self.assertLess(cost_aligned, cost_misaligned)
+
+
 if __name__ == "__main__":
     unittest.main()
