@@ -161,6 +161,12 @@ class WuFaithfulFollower:
         self.green_price: Optional[Dict[str, float]] = None
         # d_local/dp1 중심차분 δ(probe와 동일 6.0). own-TTS 몫 차감(g_ext = g_i − d_local)에 사용.
         self.green_price_delta: float = 6.0
+        # Step B3: leader-computed actuator marginal externality prices. These are
+        # opt-in channels; None keeps the PFO/follower path bit-identical.
+        self.metering_price: Optional[Dict[str, float]] = None
+        self.metering_price_delta: float = 60.0
+        self.metering_budget_penalty_weight: float = float(cfg.simulation.T_c_h)
+        self.vsl_price: Optional[Dict[str, float]] = None
 
     # ---------- per-movement 도착 (결합변수 movement 분해) ----------
 
@@ -630,8 +636,7 @@ class WuFaithfulFollower:
         # 중심차분(smooth/dual 제외 — 중심차분에서 smooth 항이 상쇄되므로 rollout-only가 안전).
         # δ 평가점은 [green_min, green_max]로 clip하고 p2 유효성도 확보한다.
         price_active = (
-            leader is not None
-            and self.green_price is not None
+            self.green_price is not None
             and signal in self.green_price
         )
         g_ext = 0.0
@@ -1109,6 +1114,7 @@ class WuFaithfulFollower:
         smooth_w = ff.vsl_smoothness_weight
         n_seg = model.n_seg
         prev_vec = [segment_vsl(previous, link, i, self.cfg) for i in range(n_seg)]
+        vsl_price = self.vsl_price or {}
 
         candidates = (
             self._wu._relaxed_freeway_segment_candidates(link, n_seg, state, coupling, previous, demand)
@@ -1259,6 +1265,11 @@ class WuFaithfulFollower:
                     for i in range(min(len(prev_step), len(next_step), n_seg))
                 )
             cost += smooth_w * smooth
+            if vsl_price:
+                for i, value in enumerate(first_vec):
+                    key = f"{link}__seg{i}"
+                    if key in vsl_price and i < len(prev_vec):
+                        cost += float(vsl_price[key]) * (float(value) - float(prev_vec[i]))
             evals += 1
             if cost < best_obj:
                 best_obj, best_vec = cost, list(first_vec)
@@ -1293,11 +1304,10 @@ class WuFaithfulFollower:
         SPEC: freeway agent가 자기 partition의 on-ramp를 소유하므로(`ramp_to_freeway[ramp]==link`),
         metering은 own-TTS 최소화 안에서 결정된다. leader 유무로 두 갈래로 나뉜다.
 
-        **leader present (N_UF_star>0):** N_UF_star는 총 urban→freeway 교환유량 target이다.
-        이 link 몫 budget B = ω_F[link]·N_UF_star(feasible [0,Σcap]로 clamp)로 소유 ramp metering
-        합을 **hard로 고정**한다. follower는 B를 소유 ramp들에 어떻게 배분(allocation simplex)할지만
-        탐색해 per-link own-TTS를 최소화한다(2 ramp이면 1-D, 7점). soft N_UF penalty는 제거됐다 —
-        budget이 패널티가 아니라 제약으로 정확히 충족된다.
+        **leader present (N_UF_star>0):** N_UF_star는 총 urban→freeway 교환유량 ceiling이다.
+        이 link 몫 ceiling B = ω_F[link]·N_UF_star(feasible [0,Σcap]로 clamp) 아래에서 follower가
+        자율 metering 후보를 고른다. 즉 leader는 "여기까지 허용"만 하고, follower가 더 제한적인
+        metering을 원하면 덮어쓰지 않는다.
 
         **leader=None (PFO):** 기존 autonomous per-ramp metering 좌표하강(미변경). 이 link 소유
         ramp 각각에 대해 5개 분율(`ramp_metering_fractions`)을 훑고 나머지는 현재 best에 고정.
@@ -1325,50 +1335,93 @@ class WuFaithfulFollower:
             )
             return vsl_dict, cost, e
 
-        # ---- leader 분기: N_UF를 hard BUDGET으로 처리(simplex allocation) ----
-        # leader가 N_UF_star(총 urban→freeway 교환유량 target, veh/h)를 주면, 이 link의 몫
-        # B = ω_F[link]·N_UF_star로 소유 ramp metering 합을 **고정**한다(soft penalty 제거).
-        # follower는 B를 소유 ramp들에 어떻게 배분(allocation)할지만 탐색해 per-link own-TTS를
-        # 최소화한다. 2 ramp이면 1-D 탐색: meter_R1 ∈ [max(0,B−cap2), min(cap1,B)], R2 = B−R1.
-        # 이 분기는 (a) leader의 N_UF를 정확히 실현하고, (b) full grid보다 훨씬 작은 탐색이며,
-        # (c) 이전 soft penalty hack을 없앤다.
+        metering_price_ext: Dict[str, float] = {}
+        if self.metering_price is not None and owned_ramps:
+            # Subtract the local own-TTS slope so the added term is Pigouvian
+            # externality, matching the green-price treatment.
+            saved_vsl_price = self.vsl_price
+            self.vsl_price = None
+            try:
+                for ramp in owned_ramps:
+                    if ramp not in self.metering_price:
+                        continue
+                    prev_value = float(snapshot.ramp_metering.get(ramp, caps[ramp]))
+                    delta = float(self.metering_price_delta)
+                    hi = min(caps[ramp], prev_value + delta)
+                    lo = max(0.0, prev_value - delta)
+                    span = hi - lo
+                    if span <= 1.0e-9:
+                        metering_price_ext[ramp] = 0.0
+                        continue
+                    high = dict(snapshot.ramp_metering)
+                    low = dict(snapshot.ramp_metering)
+                    high[ramp] = float(hi)
+                    low[ramp] = float(lo)
+                    _, cost_hi, e_hi = _solve_with(high)
+                    _, cost_lo, e_lo = _solve_with(low)
+                    evals_total += e_hi + e_lo
+                    d_local = (float(cost_hi) - float(cost_lo)) / span
+                    metering_price_ext[ramp] = float(self.metering_price[ramp]) - d_local
+            finally:
+                self.vsl_price = saved_vsl_price
+
         n_uf_star = float(getattr(leader, "N_UF_star", 0.0)) if leader is not None else 0.0
+        omega_f = float(self._wu._omega_f.get(link, 0.0))
+        cap_sum = sum(caps[r] for r in owned_ramps)
+        budget = float(np.clip(omega_f * n_uf_star, 0.0, cap_sum)) if cap_sum > 0.0 else 0.0
+        priced_metering = self.metering_price is not None and leader is not None and n_uf_star > 0.0
+
+        def _price_metering_cost(meter: Mapping[str, float]) -> float:
+            total_price = 0.0
+            for ramp, g_ext in metering_price_ext.items():
+                prev_value = float(snapshot.ramp_metering.get(ramp, caps.get(ramp, 0.0)))
+                total_price += float(g_ext) * (float(meter.get(ramp, prev_value)) - prev_value)
+            if priced_metering:
+                total_meter = sum(float(meter.get(r, 0.0)) for r in owned_ramps)
+                total_price += self.metering_budget_penalty_weight * abs(total_meter - budget)
+            return float(total_price)
+
+        # ---- leader 분기: N_UF를 ceiling/cap으로 처리 ----
+        # leader가 N_UF_star(총 urban→freeway 교환유량 ceiling, veh/h)를 주면, 이 link의 몫
+        # B = ω_F[link]·N_UF_star 아래 후보만 허용한다. 기존 hard equality는 P1 이후 더
+        # 똑똑해진 자율 metering을 high N_UF budget으로 덮어써 standalone 악화를 만들었다.
+        # ceiling이면 leader는 과방류만 막고, follower는 B 이하에서 own-TTS 최저 후보를 고른다.
         if leader is not None and n_uf_star > 0.0 and owned_ramps:
-            omega_f = float(self._wu._omega_f.get(link, 0.0))
-            cap_sum = sum(caps[r] for r in owned_ramps)
-            # link budget을 가용 영역 [0, Σcap]으로 clamp(나머지는 follower가 분배).
-            budget = float(np.clip(omega_f * n_uf_star, 0.0, cap_sum))
+            # link budget을 가용 영역 [0, Σcap]으로 clamp. In the priced path this is
+            # a soft target; otherwise it remains a ceiling guard.
+            ceiling = budget
 
-            best_meter: Dict[str, float] = {}
-            best_vsl: Dict[str, float] = {}
-            best_cost = float("inf")
+            best_meter = {
+                r: float(np.clip(snapshot.ramp_metering.get(r, caps[r]), 0.0, caps[r]))
+                for r in owned_ramps
+            }
+            current_sum = sum(best_meter.values())
+            if not priced_metering and current_sum > ceiling + 1.0e-9:
+                scale = ceiling / max(current_sum, 1.0e-9)
+                best_meter = {r: best_meter[r] * scale for r in owned_ramps}
 
-            if len(owned_ramps) == 1:
-                # ramp 1개면 배분 자유도가 없다: meter = budget(clamped).
-                r0 = owned_ramps[0]
-                meter = {r0: float(np.clip(budget, 0.0, caps[r0]))}
-                best_vsl, best_cost, e = _solve_with(meter)
-                best_meter = meter
-                evals_total += e
-            else:
-                # 2 ramp simplex: meter_R1 ∈ [lo, hi], meter_R2 = budget − meter_R1.
-                r1, r2 = owned_ramps[0], owned_ramps[1]
-                cap1, cap2 = caps[r1], caps[r2]
-                lo = max(0.0, budget - cap2)
-                hi = min(cap1, budget)
-                # 분배 격자 7점(끝점 포함). 끝점 동일하면 1점.
-                if hi - lo <= 1.0e-9:
-                    splits = [lo]
-                else:
-                    splits = [float(v) for v in np.linspace(lo, hi, 7)]
-                for m1 in splits:
-                    m1c = float(np.clip(m1, 0.0, cap1))
-                    m2c = float(np.clip(budget - m1c, 0.0, cap2))
-                    meter = {r1: m1c, r2: m2c}
-                    vsl_dict, cost, e = _solve_with(meter)
+            best_vsl, best_cost, e0 = _solve_with(best_meter)
+            best_cost += _price_metering_cost(best_meter)
+            evals_total += e0
+
+            for ramp in owned_ramps:
+                local_best = best_meter[ramp]
+                values = {0.0, local_best, min(caps[ramp], ceiling)}
+                values.update(float(frac) * caps[ramp] for frac in self.ramp_metering_fractions)
+                for cand_val in sorted(float(np.clip(v, 0.0, caps[ramp])) for v in values):
+                    if abs(cand_val - best_meter[ramp]) <= 1.0e-9:
+                        continue
+                    trial = dict(best_meter)
+                    trial[ramp] = cand_val
+                    total = sum(trial.values())
+                    if not priced_metering and total > ceiling + 1.0e-9:
+                        continue
+                    vsl_dict, cost, e = _solve_with(trial)
+                    cost += _price_metering_cost(trial)
                     evals_total += e
                     if cost < best_cost:
-                        best_cost, best_vsl, best_meter = cost, vsl_dict, dict(meter)
+                        best_cost, best_vsl, local_best = cost, vsl_dict, cand_val
+                best_meter[ramp] = local_best
 
             return best_vsl, best_meter, evals_total
 
@@ -1379,6 +1432,7 @@ class WuFaithfulFollower:
         }
         # 초기 best 비용·VSL(현재 metering에서).
         best_vsl, best_cost, e0 = _solve_with(best_meter)
+        best_cost += _price_metering_cost(best_meter)
         evals_total += e0
 
         # ramp별 좌표하강: 각 ramp의 5개 분율을 훑어 own-TTS 최저 분율로 갱신.
@@ -1391,6 +1445,7 @@ class WuFaithfulFollower:
                 trial = dict(best_meter)
                 trial[ramp] = cand_val
                 vsl_dict, cost, e = _solve_with(trial)
+                cost += _price_metering_cost(trial)
                 evals_total += e
                 if cost < best_cost:
                     best_cost, best_vsl, local_best_meter = cost, vsl_dict, cand_val

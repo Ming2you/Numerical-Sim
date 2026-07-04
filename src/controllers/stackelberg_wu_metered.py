@@ -28,7 +28,7 @@ from src.controllers.stackelberg_mpc import (
 )
 from src.controllers.wu_faithful_follower import WuFaithfulFollower
 from src.models.demand import DemandStep
-from src.models.state import ControlAction, ExperimentConfig, TrafficState
+from src.models.state import ControlAction, ExperimentConfig, TrafficState, segment_vsl
 from src.controllers.leader import LeaderAction
 
 
@@ -40,6 +40,10 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         # Step B2: leader가 per-signal marginal externality price를 계산해 follower green 비용에
         # 하달할지. config 없이 인스턴스 기본 True(끄면 B2 완전 비활성 — 기존 P-Stack 거동).
         self.green_price_enabled: bool = True
+        # Step B3 opt-in: same leader marginal-price channel for ramp metering and VSL.
+        # Defaults are off so the 2026-07-03 B2 production behavior remains unchanged.
+        self.metering_price_enabled: bool = False
+        self.vsl_price_enabled: bool = False
 
     def _make_follower_solver(self, cfg: ExperimentConfig):
         return WuFaithfulFollower(cfg)
@@ -84,6 +88,81 @@ class StackelbergWuMeteredController(StackelbergMPCController):
             price[sig] = (float(ttt_plus) - float(ttt_minus)) / two_delta
         return price
 
+    def _compute_metering_marginal_price(
+        self,
+        state: TrafficState,
+        forecast: List[DemandStep],
+        previous: ControlAction,
+    ) -> Dict[str, float]:
+        """ramp별 g_i = d(전역 horizon TTT)/d(metering_r) 중심차분."""
+        net = self.cfg.network
+        delta = float(self.nash_solver.metering_price_delta)
+        price: Dict[str, float] = {}
+        for ramp in net.ramps:
+            cap = float(net.ramp_capacity_veh_h[ramp])
+            x0 = float(previous.ramp_metering.get(ramp, cap))
+            hi = min(cap, x0 + delta)
+            lo = max(0.0, x0 - delta)
+            span = hi - lo
+            if span <= 1.0e-9:
+                price[ramp] = 0.0
+                continue
+            ctrl_plus = previous.copy()
+            ctrl_plus.ramp_metering = dict(previous.ramp_metering)
+            ctrl_plus.ramp_metering[ramp] = float(hi)
+            ctrl_minus = previous.copy()
+            ctrl_minus.ramp_metering = dict(previous.ramp_metering)
+            ctrl_minus.ramp_metering[ramp] = float(lo)
+            _, ttt_plus = self._predict(state, ctrl_plus, forecast)
+            _, ttt_minus = self._predict(state, ctrl_minus, forecast)
+            price[ramp] = (float(ttt_plus) - float(ttt_minus)) / span
+        return price
+
+    def _compute_vsl_marginal_price(
+        self,
+        state: TrafficState,
+        forecast: List[DemandStep],
+        previous: ControlAction,
+    ) -> Dict[str, float]:
+        """freeway segment별 g_i = d(전역 horizon TTT)/d(VSL_segment) 중심차분."""
+        net = self.cfg.network
+        ff = self.cfg.freeway_follower
+        vsl_values = [float(v) for v in ff.vsl_set]
+        if not vsl_values:
+            return {}
+        lower, upper = min(vsl_values), max(vsl_values)
+        delta = max(1.0, min(10.0, float(getattr(ff, "max_vsl_step", 20.0))))
+        price: Dict[str, float] = {}
+        for link in net.freeway_links:
+            n_seg = int(net.freeway_segments_per_link)
+            for index in range(n_seg):
+                key = f"{link}__seg{index}"
+                x0 = float(segment_vsl(previous, link, index, self.cfg))
+                hi = min(upper, x0 + delta)
+                lo = max(lower, x0 - delta)
+                span = hi - lo
+                if span <= 1.0e-9:
+                    price[key] = 0.0
+                    continue
+                ctrl_plus = previous.copy()
+                ctrl_plus.vsl = dict(previous.vsl)
+                ctrl_plus.vsl[key] = float(hi)
+                ctrl_plus.vsl[link] = min(
+                    float(ctrl_plus.vsl.get(link, upper)),
+                    float(hi),
+                )
+                ctrl_minus = previous.copy()
+                ctrl_minus.vsl = dict(previous.vsl)
+                ctrl_minus.vsl[key] = float(lo)
+                ctrl_minus.vsl[link] = min(
+                    float(ctrl_minus.vsl.get(link, upper)),
+                    float(lo),
+                )
+                _, ttt_plus = self._predict(state, ctrl_plus, forecast)
+                _, ttt_minus = self._predict(state, ctrl_minus, forecast)
+                price[key] = (float(ttt_plus) - float(ttt_minus)) / span
+        return price
+
     def decide_with_info(
         self,
         state: TrafficState,
@@ -95,7 +174,8 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         # config가 새로 주어지면 base가 nash_solver를 재생성하므로(그 전에 price를 계산하면
         # 폐기될 solver에 심게 됨) B2 price 계산은 skip한다 — 드문 경로라 안전 우선.
         config_swap = config is not None and config is not self.cfg
-        if self.green_price_enabled and forecast and not config_swap:
+        active_prices: Dict[str, Dict[str, float]] = {}
+        if forecast and not config_swap:
             # previous 해석은 base decide_with_info(295-302행)를 미러링 — operating point만 필요.
             prev = (
                 previous_control.copy()
@@ -105,21 +185,43 @@ class StackelbergWuMeteredController(StackelbergMPCController):
                 else ControlAction.fixed(self.cfg)
             )
             prev = self._normalize_previous_leader_reference(prev)
-            self.nash_solver.green_price = self._compute_green_marginal_price(
-                state, forecast, prev
-            )
+            if self.green_price_enabled:
+                active_prices["green"] = self._compute_green_marginal_price(
+                    state, forecast, prev
+                )
+                self.nash_solver.green_price = active_prices["green"]
+            if self.metering_price_enabled:
+                active_prices["metering"] = self._compute_metering_marginal_price(
+                    state, forecast, prev
+                )
+                self.nash_solver.metering_price = active_prices["metering"]
+            if self.vsl_price_enabled:
+                active_prices["vsl"] = self._compute_vsl_marginal_price(
+                    state, forecast, prev
+                )
+                self.nash_solver.vsl_price = active_prices["vsl"]
         try:
             result = super().decide_with_info(state, demand_forecast, previous_control, config)
         finally:
-            price = getattr(self.nash_solver, "green_price", None)
             self.nash_solver.green_price = None
+            self.nash_solver.metering_price = None
+            self.nash_solver.vsl_price = None
         # 진단: price 활성 여부·신호별 g_i 기록(DecisionResult.metadata).
-        if price is not None:
+        if active_prices:
             meta = getattr(result, "metadata", None)
             if isinstance(meta, dict):
-                meta["leader_green_price_active"] = 1.0
-                for sig, g in price.items():
-                    meta[f"leader_green_price_{sig}"] = float(g)
+                if "green" in active_prices:
+                    meta["leader_green_price_active"] = 1.0
+                    for sig, g in active_prices["green"].items():
+                        meta[f"leader_green_price_{sig}"] = float(g)
+                if "metering" in active_prices:
+                    meta["leader_metering_price_active"] = 1.0
+                    for ramp, g in active_prices["metering"].items():
+                        meta[f"leader_metering_price_{ramp}"] = float(g)
+                if "vsl" in active_prices:
+                    meta["leader_vsl_price_active"] = 1.0
+                    for key, g in active_prices["vsl"].items():
+                        meta[f"leader_vsl_price_{key}"] = float(g)
         return result
 
     def _pfo_incumbent_fallback_enabled(self) -> bool:
@@ -425,8 +527,8 @@ class StackelbergWuMeteredController(StackelbergMPCController):
 
         베이스 `_proxy_score_candidate`의 else 분기는 현재 state만 읽어 모든 후보의 점수가
         동일했다(prefilter가 index 순서로 무작위 통과). 여기서는 후보-의존으로 만든다:
-        (1) follower의 hard-budget 분기(N_UF_star>0)를 simplex 탐색 없이 용량비례 배분으로
-        근사해 candidate metering을 구성하고, (2) leader full 평가와 동일한 plant rollout
+        (1) follower의 N_UF ceiling 분기(N_UF_star>0)를 simplex 탐색 없이 근사해
+        현재 metering이 ceiling을 넘을 때만 용량비례로 축소하고, (2) leader full 평가와 동일한 plant rollout
         (`self._predict`)으로 예측 상태를 만들어 `objective_terms`로 채점한다(leader는
         centralized이므로 정보 철학 위반 아님).
 
@@ -444,8 +546,8 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         control.N_UF_star = float(action.N_UF_star)
         net = self.cfg.network
         if float(action.N_UF_star) > 0.0:
-            # follower hard-budget 분기 근사: link budget = ω_F[link]·N_UF_star를
-            # 소유 ramp들에 용량비례로 배분(각 ramp은 capacity로 clamp).
+            # follower ceiling 분기 근사: 현재/이전 metering 합이 link ceiling을 넘을 때만
+            # 용량비례로 낮춘다. Ceiling 이하면 follower 자율 metering을 덮어쓰지 않는다.
             follower = self.nash_solver
             for link in net.freeway_links:
                 model = follower._local_freeway_models[link]
@@ -457,9 +559,17 @@ class StackelbergWuMeteredController(StackelbergMPCController):
                 if cap_sum <= 0.0:
                     continue
                 omega = float(follower._wu._omega_f.get(link, 0.0))
-                budget = min(max(omega * float(action.N_UF_star), 0.0), cap_sum)
+                ceiling = min(max(omega * float(action.N_UF_star), 0.0), cap_sum)
+                current = {
+                    ramp: float(min(max(control.ramp_metering.get(ramp, caps[ramp]), 0.0), caps[ramp]))
+                    for ramp in owned
+                }
+                current_sum = sum(current.values())
+                if current_sum <= ceiling + 1.0e-9:
+                    control.ramp_metering.update(current)
+                    continue
                 for ramp in owned:
-                    share = budget * (caps[ramp] / cap_sum)
+                    share = ceiling * (caps[ramp] / cap_sum)
                     control.ramp_metering[ramp] = float(min(max(share, 0.0), caps[ramp]))
         # N_UF_star<=0이면 follower autonomous 분기에 대응 — previous.ramp_metering 유지.
         states, rollout_ttt = self._predict(state, control, forecast)
