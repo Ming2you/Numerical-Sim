@@ -29,7 +29,7 @@ from src.controllers.stackelberg_mpc import (
 )
 from src.controllers.wu_faithful_follower import WuFaithfulFollower
 from src.models.demand import DemandStep
-from src.models.state import ControlAction, ExperimentConfig, TrafficState
+from src.models.state import ControlAction, ExperimentConfig, TrafficState, segment_vsl
 from src.controllers.leader import Leader, LeaderAction
 
 
@@ -56,6 +56,24 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         # 재계산한다(B1 step35류 non-monotone은 재선형화 iteration으로 흡수). 그 외엔
         # 기존 leader_global_refresh cadence에 편승.
         self.signal_price_refresh_threshold_sec: float = 3.0
+        # ---------- B3(Codex f18e920 포팅) + B4: metering/VSL 가격 채널 ----------
+        # green과 동일 흐름으로 통일: refresh(최초/cadence/event-trigger) 시 **동일 동결
+        # 운영점**에서 g_i(전역 rollout)와 d_local(follower 국소 채점)을 모두 계산해
+        # g_ext를 완성·하달, 사이엔 hold. 1차 TTT 가격 단독의 metering/VSL 가격은 음성
+        # (절벽 lever가 과방류 → freeway breakdown, 2026-07-04 §3) → 기본 OFF.
+        self.metering_price_enabled: bool = False
+        self.metering_price_delta_veh_h: float = 60.0  # Codex f18e920과 동일 δ
+        self.metering_price_refresh_threshold_veh_h: float = 30.0
+        self.vsl_price_enabled: bool = False
+        self.vsl_price_delta_kmh: float = 10.0
+        self.vsl_price_refresh_threshold_kmh: float = 5.0
+        # B4(사용자 제안): metering 가격에 freeway rho_crit barrier 항의 marginal price를
+        # 합산. barrier = w_f·Σ (excess_veh)²·T_c_h per interval — gradient가 절벽
+        # (capacity drop)을 1차로 예고해, 정상 방류는 TTT 가격이 유도하고 과방류만
+        # 차단한다(soft state constraint의 가격 실현; TTT 밖 별도 항이라 동어반복 아님).
+        # barrier는 leader 전용 목적항이라 d_local 차감이 없다(follower own-TTS에 부재).
+        self.barrier_price_enabled: bool = False
+        self.barrier_weight: float = 1.0e-2  # excess_veh²·h → veh·h 급 환산 스케일(스윕 대상)
         self._signal_price_refresh_count: int = 0
         self._signal_price_meta: Dict[str, float] = {}
 
@@ -121,6 +139,64 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         _, ttt = self._predict(state, control, forecast)
         return float(ttt)
 
+    def _predict_ttt_and_barrier(
+        self,
+        state: TrafficState,
+        control: ControlAction,
+        forecast: List[DemandStep],
+    ) -> tuple[float, float]:
+        """전역 rollout의 (TTT, barrier). barrier는 B4 활성 시에만 계산(아니면 0).
+
+        barrier = Σ_states Σ_link Σ_seg w_f·(max(0, ρ−ρ_crit)·L_seg·lanes)²·T_c_h —
+        rho_crit 초과분을 세그먼트 초과 차량수로 환산해 제곱(interior-point식 soft
+        state constraint). TTT를 뽑는 같은 rollout의 상태에서 계산하므로 추가 rollout
+        0회 — B4의 metering 가격 유한차분이 TTT와 barrier gradient를 동시에 얻는다."""
+        states, ttt = self._predict(state, control, forecast)
+        barrier = 0.0
+        if self.barrier_price_enabled:
+            net = self.cfg.network
+            t_c_h = float(self.cfg.simulation.T_c_h)
+            seg_veh = float(net.freeway_segment_length_km) * float(net.freeway_lanes)
+            rho_crit = float(net.rho_crit)
+            for s in states:
+                for link in net.freeway_links:
+                    for rho in s.freeway_density.get(link, []):
+                        excess = max(0.0, float(rho) - rho_crit) * seg_veh
+                        barrier += self.barrier_weight * excess * excess * t_c_h
+        return float(ttt), float(barrier)
+
+    def _global_rollout_metrics_with_metering(
+        self,
+        state: TrafficState,
+        previous: ControlAction,
+        forecast: List[DemandStep],
+        ramp: str,
+        value: float,
+    ) -> tuple[float, float]:
+        """해당 ramp만 metering을 value로 바꾸고 나머지는 previous hold, (TTT, barrier)."""
+        control = previous.copy()
+        control.ramp_metering = dict(previous.ramp_metering)
+        control.ramp_metering[ramp] = float(value)
+        return self._predict_ttt_and_barrier(state, control, forecast)
+
+    def _global_rollout_ttt_with_vsl(
+        self,
+        state: TrafficState,
+        previous: ControlAction,
+        forecast: List[DemandStep],
+        link: str,
+        seg_key: str,
+        value: float,
+        vsl_upper: float,
+    ) -> float:
+        """해당 segment만 VSL을 value로 바꾸고(link fallback 키 동기화) horizon TTT."""
+        control = previous.copy()
+        control.vsl = dict(previous.vsl)
+        control.vsl[seg_key] = float(value)
+        control.vsl[link] = min(float(control.vsl.get(link, vsl_upper)), float(value))
+        _, ttt = self._predict(state, control, forecast)
+        return float(ttt)
+
     def _maybe_refresh_signal_prices(
         self,
         state: TrafficState,
@@ -130,9 +206,18 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         follower = self.nash_solver
         if not isinstance(follower, WuFaithfulFollower):
             return
+        # 채널별 게이트: 꺼진 채널의 잔존 가격은 항상 제거(A/B 격리).
         if not self.signal_price_enabled:
-            # OFF: 잔존 가격 제거(순수 P-Stack A/B용 게이트).
             follower.signal_marginal_price = None
+        if not self.metering_price_enabled:
+            follower.metering_marginal_price = None
+        if not self.vsl_price_enabled:
+            follower.vsl_marginal_price = None
+        if not (
+            self.signal_price_enabled
+            or self.metering_price_enabled
+            or self.vsl_price_enabled
+        ):
             self._signal_price_meta = {
                 "wu_b2_price_enabled": 0.0,
                 "wu_b2_price_refreshed": 0.0,
@@ -145,19 +230,59 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         def clamp(v: float) -> float:
             return max(lo, min(hi, float(v)))
 
-        op_point = {
-            signal: clamp(previous.green_times.get(f"{signal}_p1", total / 2.0))
-            for signal in net.signals
-        }
-        refresh = follower.signal_marginal_price is None
+        # ---- 운영점 스냅샷: 모든 채널이 같은 previous(동결 운영점)를 본다 ----
+        op_green: Dict[str, float] = (
+            {
+                signal: clamp(previous.green_times.get(f"{signal}_p1", total / 2.0))
+                for signal in net.signals
+            }
+            if self.signal_price_enabled else {}
+        )
+        ramp_caps = {r: float(net.ramp_capacity_veh_h[r]) for r in net.ramps}
+        op_meter: Dict[str, float] = (
+            {
+                r: min(max(float(previous.ramp_metering.get(r, ramp_caps[r])), 0.0), ramp_caps[r])
+                for r in net.ramps
+            }
+            if self.metering_price_enabled else {}
+        )
+        ff = self.cfg.freeway_follower
+        vsl_values = [float(v) for v in ff.vsl_set]
+        vsl_lower = min(vsl_values) if vsl_values else 0.0
+        vsl_upper = max(vsl_values) if vsl_values else 0.0
+        op_vsl: Dict[str, float] = {}
+        if self.vsl_price_enabled and vsl_values:
+            for link in net.freeway_links:
+                for index in range(int(net.freeway_segments_per_link)):
+                    key = f"{link}__seg{index}"
+                    op_vsl[key] = float(segment_vsl(previous, link, index, self.cfg))
+
+        # ---- refresh 판정: 가격 부재 ∨ cadence ∨ event-trigger(운영점 이동) ----
+        refresh = (
+            (self.signal_price_enabled and follower.signal_marginal_price is None)
+            or (self.metering_price_enabled and follower.metering_marginal_price is None)
+            or (self.vsl_price_enabled and follower.vsl_marginal_price is None)
+        )
         if not refresh and self._leader_global_refresh_active(state):
             refresh = True
         if not refresh:
-            # event-trigger: 운영점이 선형화 기준점에서 threshold 이상 이동한 신호가 있으면
+            # event-trigger: 운영점이 선형화 기준점에서 threshold 이상 이동한 레버가 있으면
             # 재선형화(dual ascent/SQP식 iteration — B1 step35 non-monotone 처방).
-            for signal, p1_now in op_point.items():
+            for signal, p1_now in op_green.items():
                 ref = float(follower.signal_marginal_price_ref.get(signal, p1_now))
                 if abs(p1_now - ref) >= float(self.signal_price_refresh_threshold_sec):
+                    refresh = True
+                    break
+        if not refresh:
+            for ramp, x_now in op_meter.items():
+                ref = float(follower.metering_marginal_price_ref.get(ramp, x_now))
+                if abs(x_now - ref) >= float(self.metering_price_refresh_threshold_veh_h):
+                    refresh = True
+                    break
+        if not refresh:
+            for key, v_now in op_vsl.items():
+                ref = float(follower.vsl_marginal_price_ref.get(key, v_now))
+                if abs(v_now - ref) >= float(self.vsl_price_refresh_threshold_kmh):
                     refresh = True
                     break
         if not refresh:
@@ -165,45 +290,116 @@ class StackelbergWuMeteredController(StackelbergMPCController):
             self._signal_price_meta["wu_b2_price_refreshed"] = 0.0
             return
 
-        delta = float(self.signal_price_delta_sec)
-        pts: Dict[str, tuple[float, float, float]] = {}
-        requests: Dict[str, List[float]] = {}
-        for signal, p1_0 in op_point.items():
-            p_hi = clamp(p1_0 + delta)
-            p_lo = clamp(p1_0 - delta)
-            pts[signal] = (p1_0, p_lo, p_hi)
-            requests[signal] = [p_lo, p_hi]
-        local_costs = follower.local_green_costs(requests, state, previous, forecast[0])
+        meta: Dict[str, float] = {"wu_b2_price_enabled": float(self.signal_price_enabled)}
 
-        prices: Dict[str, float] = {}
-        refs: Dict[str, float] = {}
-        meta: Dict[str, float] = {"wu_b2_price_enabled": 1.0}
-        for signal, (p1_0, p_lo, p_hi) in pts.items():
-            two_delta = p_hi - p_lo
-            if two_delta <= 1.0e-9:
-                g_ext = 0.0
-            else:
-                ttt_hi = self._global_rollout_ttt_with_green(
-                    state, previous, forecast, signal, p_hi,
-                )
-                ttt_lo = self._global_rollout_ttt_with_green(
-                    state, previous, forecast, signal, p_lo,
-                )
-                g_i = (ttt_hi - ttt_lo) / two_delta
-                cost_lo, cost_hi = local_costs[signal]
-                d_local = (cost_hi - cost_lo) / two_delta
-                g_ext = g_i - d_local
-            prices[signal] = float(g_ext)
-            refs[signal] = float(p1_0)
-            meta[f"wu_b2_price_{signal}"] = float(g_ext)
-            meta[f"wu_b2_price_ref_{signal}"] = float(p1_0)
-        follower.signal_marginal_price = prices
-        follower.signal_marginal_price_ref = refs
-        follower.signal_marginal_price_weight = float(self.signal_price_weight)
+        # ---- green 채널(B2) ----
+        if self.signal_price_enabled:
+            delta = float(self.signal_price_delta_sec)
+            pts: Dict[str, tuple[float, float, float]] = {}
+            requests: Dict[str, List[float]] = {}
+            for signal, p1_0 in op_green.items():
+                p_hi = clamp(p1_0 + delta)
+                p_lo = clamp(p1_0 - delta)
+                pts[signal] = (p1_0, p_lo, p_hi)
+                requests[signal] = [p_lo, p_hi]
+            local_costs = follower.local_green_costs(requests, state, previous, forecast[0])
+            prices: Dict[str, float] = {}
+            refs: Dict[str, float] = {}
+            for signal, (p1_0, p_lo, p_hi) in pts.items():
+                two_delta = p_hi - p_lo
+                if two_delta <= 1.0e-9:
+                    g_ext = 0.0
+                else:
+                    ttt_hi = self._global_rollout_ttt_with_green(
+                        state, previous, forecast, signal, p_hi,
+                    )
+                    ttt_lo = self._global_rollout_ttt_with_green(
+                        state, previous, forecast, signal, p_lo,
+                    )
+                    g_i = (ttt_hi - ttt_lo) / two_delta
+                    cost_lo, cost_hi = local_costs[signal]
+                    g_ext = g_i - (cost_hi - cost_lo) / two_delta
+                prices[signal] = float(g_ext)
+                refs[signal] = float(p1_0)
+                meta[f"wu_b2_price_{signal}"] = float(g_ext)
+                meta[f"wu_b2_price_ref_{signal}"] = float(p1_0)
+            follower.signal_marginal_price = prices
+            follower.signal_marginal_price_ref = refs
+            follower.signal_marginal_price_weight = float(self.signal_price_weight)
+            meta["wu_b2_price_delta_sec"] = delta
+
+        # ---- metering 채널(B3, B4 barrier 합산 가능) ----
+        # g_ext = d(전역TTT)/dx − d(own-TTS)/dx (+ d(barrier)/dx). 세 미분 모두 같은
+        # 동결 운영점에서 — Codex 원안의 "g_i는 commit점·d_local은 snapshot점" 혼합을 제거.
+        if self.metering_price_enabled:
+            meta["wu_b3_meter_price_enabled"] = 1.0
+            meta["wu_b4_barrier_enabled"] = float(self.barrier_price_enabled)
+            delta_m = float(self.metering_price_delta_veh_h)
+            m_pts: Dict[str, tuple[float, float, float]] = {}
+            m_requests: Dict[str, List[float]] = {}
+            for ramp, x0 in op_meter.items():
+                cap = ramp_caps[ramp]
+                m_hi = min(cap, x0 + delta_m)
+                m_lo = max(0.0, x0 - delta_m)
+                m_pts[ramp] = (x0, m_lo, m_hi)
+                m_requests[ramp] = [m_lo, m_hi]
+            local_m = follower.local_metering_costs(m_requests, state, previous, forecast[0])
+            m_prices: Dict[str, float] = {}
+            m_refs: Dict[str, float] = {}
+            for ramp, (x0, m_lo, m_hi) in m_pts.items():
+                span = m_hi - m_lo
+                if span <= 1.0e-9:
+                    g_ext = 0.0
+                else:
+                    ttt_hi, bar_hi = self._global_rollout_metrics_with_metering(
+                        state, previous, forecast, ramp, m_hi,
+                    )
+                    ttt_lo, bar_lo = self._global_rollout_metrics_with_metering(
+                        state, previous, forecast, ramp, m_lo,
+                    )
+                    g_i = (ttt_hi - ttt_lo) / span
+                    cost_lo, cost_hi = local_m[ramp]
+                    g_ext = g_i - (cost_hi - cost_lo) / span
+                    if self.barrier_price_enabled:
+                        # barrier는 leader 전용 목적항 — follower own-TTS에 없으므로
+                        # d_local 차감 없이 그대로 합산(B4).
+                        g_ext += (bar_hi - bar_lo) / span
+                m_prices[ramp] = float(g_ext)
+                m_refs[ramp] = float(x0)
+                meta[f"wu_b3_meter_price_{ramp}"] = float(g_ext)
+                meta[f"wu_b3_meter_price_ref_{ramp}"] = float(x0)
+            follower.metering_marginal_price = m_prices
+            follower.metering_marginal_price_ref = m_refs
+
+        # ---- VSL 채널(B3, raw g_i — d_local 미차감 주의, 기본 OFF) ----
+        if self.vsl_price_enabled and op_vsl:
+            meta["wu_b3_vsl_price_enabled"] = 1.0
+            delta_v = float(self.vsl_price_delta_kmh)
+            v_prices: Dict[str, float] = {}
+            v_refs: Dict[str, float] = {}
+            for key, x0 in op_vsl.items():
+                link = key.split("__seg")[0]
+                v_hi = min(vsl_upper, x0 + delta_v)
+                v_lo = max(vsl_lower, x0 - delta_v)
+                span = v_hi - v_lo
+                if span <= 1.0e-9:
+                    g_i = 0.0
+                else:
+                    ttt_hi = self._global_rollout_ttt_with_vsl(
+                        state, previous, forecast, link, key, v_hi, vsl_upper,
+                    )
+                    ttt_lo = self._global_rollout_ttt_with_vsl(
+                        state, previous, forecast, link, key, v_lo, vsl_upper,
+                    )
+                    g_i = (ttt_hi - ttt_lo) / span
+                v_prices[key] = float(g_i)
+                v_refs[key] = float(x0)
+            follower.vsl_marginal_price = v_prices
+            follower.vsl_marginal_price_ref = v_refs
+
         self._signal_price_refresh_count += 1
         meta["wu_b2_price_refreshed"] = 1.0
         meta["wu_b2_price_refresh_count"] = float(self._signal_price_refresh_count)
-        meta["wu_b2_price_delta_sec"] = delta
         self._signal_price_meta = meta
 
     def _pfo_incumbent_fallback_enabled(self) -> bool:

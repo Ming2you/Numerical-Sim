@@ -152,6 +152,24 @@ class WuFaithfulFollower:
         self.signal_marginal_price: Optional[Dict[str, float]] = None
         self.signal_marginal_price_ref: Dict[str, float] = {}
         self.signal_marginal_price_weight: float = 1.0
+        # ---------- B3(Codex f18e920 포팅): metering/VSL 가격 채널 ----------
+        # green과 동일 규약으로 통일(2026-07-04 병합): leader가 refresh마다 **동일 동결
+        # 운영점**에서 g_ext(=g_i − d_local)를 완성해 하달하고, follower는 선형 가격항만
+        # 더한다 — Codex 원안(solve 안에서 d_local 재계산: 운영점 혼합 + solve당 rollout
+        # 2회/ramp 낭비)과 다른 지점. metering 가격 활성 시 leader 분기의 N_UF hard
+        # budget은 soft |Σ−budget| 페널티로 완화된다(가격이 방류 수준을 결정, budget은
+        # anchor — Codex soft-budget 설계 유지). 1차 TTT 가격 단독은 음성 판정(절벽
+        # lever, 2026-07-04 §3)이라 기본 None; B4 barrier 가격과 함께 opt-in.
+        self.metering_marginal_price: Optional[Dict[str, float]] = None
+        self.metering_marginal_price_ref: Dict[str, float] = {}
+        self.metering_marginal_price_weight: float = 1.0
+        self.metering_budget_penalty_weight: float = float(cfg.simulation.T_c_h)
+        # VSL 가격(세그먼트 키 "link__segN"). 주의: VSL은 아직 d_local 미차감(raw g_i —
+        # 국소 "고정 VSL 벡터 채점" 프리미티브가 없어 Codex 원안 유지). 기본 OFF이며
+        # 활성화 전 g_ext화가 선행 과제.
+        self.vsl_marginal_price: Optional[Dict[str, float]] = None
+        self.vsl_marginal_price_ref: Dict[str, float] = {}
+        self.vsl_marginal_price_weight: float = 1.0
         # 신호별 offset 후보 분율(×cycle_length). [0, cycle) 안의 작은 후보집합으로 국소 탐색.
         # 0.0은 현 baseline(offset off). 0~7/8 cycle을 8등분(끝점 cycle 제외).
         self.offset_fractions: tuple[float, ...] = (
@@ -736,6 +754,60 @@ class WuFaithfulFollower:
                 out[signal] = costs
         finally:
             self.signal_marginal_price = saved_price
+        return out
+
+    # ---------- B3: leader가 부르는 국소 metering 비용 조회(가격항 제외) ----------
+
+    def local_metering_costs(
+        self,
+        requests: Mapping[str, Sequence[float]],
+        state: TrafficState,
+        control: ControlAction,
+        demand: DemandStep,
+    ) -> Dict[str, List[float]]:
+        """ramp별 metering 후보들의 freeway-agent 국소 own-TTS 비용(B3 d_local 유한차분용).
+
+        local_green_costs와 동일 규약: 프롤로그(동결 결합) 1회 구성, 가격은 일시 비활성
+        (g_ext가 자기 가격을 다시 빼는 순환 방지), 영속 상태 미변경. 각 후보는 그 ramp
+        소유 link의 `_solve_freeway_agent_local`(VSL best-response 포함 own-TTS)로
+        채점한다 — follower가 metering 후보를 채점하는 `_solve_with`와 동일 경로.
+        """
+        ctrl = ControlAction.uncontrolled(self.cfg)
+        ctrl.green_times = dict(control.green_times)
+        ctrl.offsets = dict(control.offsets)
+        ctrl.vsl = dict(control.vsl)
+        ctrl.ramp_metering = dict(control.ramp_metering)
+        ctrl.inflow_outflow_allocation = {}
+        coupling = self._wu._coupling(state, ctrl, demand)
+        saved_meter_price = self.metering_marginal_price
+        saved_vsl_price = self.vsl_marginal_price
+        self.metering_marginal_price = None
+        self.vsl_marginal_price = None
+        out: Dict[str, List[float]] = {}
+        try:
+            for ramp, values in requests.items():
+                link = self.cfg.network.ramp_to_freeway.get(ramp)
+                if link is None:
+                    out[ramp] = [0.0 for _ in values]
+                    continue
+                costs: List[float] = []
+                for x in values:
+                    probe_prev = ControlAction(
+                        ramp_metering=dict(ctrl.ramp_metering),
+                        vsl=dict(ctrl.vsl),
+                        green_times=dict(ctrl.green_times),
+                        offsets=dict(ctrl.offsets),
+                        inflow_outflow_allocation={},
+                    )
+                    probe_prev.ramp_metering[ramp] = float(x)
+                    _, cost, _ = self._solve_freeway_agent_local(
+                        link, state, coupling, demand, probe_prev,
+                    )
+                    costs.append(float(cost))
+                out[ramp] = costs
+        finally:
+            self.metering_marginal_price = saved_meter_price
+            self.vsl_marginal_price = saved_vsl_price
         return out
 
     # ---------- P1.5 auto 게이트: phase 포화도 ----------
@@ -1363,6 +1435,16 @@ class WuFaithfulFollower:
                     for i in range(min(len(prev_step), len(next_step), n_seg))
                 )
             cost += smooth_w * smooth
+            # B3 VSL 가격항(설정 시에만): + w·g·(vsl_seg − ref_seg). 기본 None=완전 휴면.
+            if self.vsl_marginal_price:
+                for i, value in enumerate(first_vec):
+                    key = f"{link}__seg{i}"
+                    g_vsl = self.vsl_marginal_price.get(key)
+                    if g_vsl is not None and i < len(prev_vec):
+                        ref = float(self.vsl_marginal_price_ref.get(key, float(prev_vec[i])))
+                        cost += self.vsl_marginal_price_weight * float(g_vsl) * (
+                            float(value) - ref
+                        )
             evals += 1
             if cost < best_obj:
                 best_obj, best_vec = cost, list(first_vec)
@@ -1429,6 +1511,82 @@ class WuFaithfulFollower:
             )
             return vsl_dict, cost, e
 
+        # ---- B3 metering 가격항 준비(설정 시에만; 기본 None=완전 휴면) ----
+        # leader가 동결 운영점에서 완성해 하달한 g_ext를 선형으로 더한다. green과 동일
+        # 규약 — solve 안에서 d_local을 재계산하지 않는다(운영점 혼합·중복 rollout 방지).
+        n_uf_star = float(getattr(leader, "N_UF_star", 0.0)) if leader is not None else 0.0
+        omega_f_price = float(self._wu._omega_f.get(link, 0.0))
+        cap_sum_price = sum(caps[r] for r in owned_ramps) if owned_ramps else 0.0
+        budget_price = (
+            float(np.clip(omega_f_price * n_uf_star, 0.0, cap_sum_price))
+            if cap_sum_price > 0.0 else 0.0
+        )
+        priced_metering = (
+            self.metering_marginal_price is not None
+            and leader is not None
+            and n_uf_star > 0.0
+            and bool(owned_ramps)
+        )
+
+        def _price_metering_cost(meter: Mapping[str, float]) -> float:
+            if self.metering_marginal_price is None or not owned_ramps:
+                return 0.0
+            total_price = 0.0
+            for ramp in owned_ramps:
+                g_ext = self.metering_marginal_price.get(ramp)
+                if g_ext is None:
+                    continue
+                ref = float(self.metering_marginal_price_ref.get(
+                    ramp, float(snapshot.ramp_metering.get(ramp, caps[ramp]))
+                ))
+                total_price += (
+                    self.metering_marginal_price_weight
+                    * float(g_ext)
+                    * (float(meter.get(ramp, ref)) - ref)
+                )
+            if priced_metering:
+                # 가격 모드에선 leader budget을 hard로 강제하지 않고 soft anchor로만
+                # 남긴다(|Σ−budget| 페널티, w=T_c_h — Codex f18e920 설계 유지).
+                total_meter = sum(float(meter.get(r, 0.0)) for r in owned_ramps)
+                total_price += self.metering_budget_penalty_weight * abs(
+                    total_meter - budget_price
+                )
+            return float(total_price)
+
+        # ---- B3 가격 모드 leader 분기: soft budget + 자율 후보 sweep ----
+        # metering 가격이 하달돼 있으면 hard budget/cap 분기 대신 자율 좌표하강(PFO와
+        # 동일 후보 + 경계값 {0, budget}판)을 돌리고, 비용에 가격항+soft budget을 더한다.
+        # 가격이 방류 수준을 유도하고 budget은 anchor — 절벽 과방류는 B4 barrier 가격이
+        # 담당한다(1차 TTT 가격 단독은 음성 판정, 2026-07-04 §3).
+        if priced_metering:
+            best_meter = {
+                r: float(np.clip(snapshot.ramp_metering.get(r, caps[r]), 0.0, caps[r]))
+                for r in owned_ramps
+            }
+            best_vsl, best_cost, e0 = _solve_with(best_meter)
+            best_cost += _price_metering_cost(best_meter)
+            evals_total += e0
+            for ramp in owned_ramps:
+                local_best = best_meter[ramp]
+                values = {0.0, local_best, min(caps[ramp], budget_price)}
+                values.update(
+                    float(frac) * caps[ramp] for frac in self.ramp_metering_fractions
+                )
+                for cand_val in sorted(
+                    float(np.clip(v, 0.0, caps[ramp])) for v in values
+                ):
+                    if abs(cand_val - best_meter[ramp]) <= 1.0e-9:
+                        continue
+                    trial = dict(best_meter)
+                    trial[ramp] = cand_val
+                    vsl_dict, cost, e = _solve_with(trial)
+                    cost += _price_metering_cost(trial)
+                    evals_total += e
+                    if cost < best_cost:
+                        best_cost, best_vsl, local_best = cost, vsl_dict, cand_val
+                best_meter[ramp] = local_best
+            return best_vsl, best_meter, evals_total
+
         # ---- leader 분기: N_UF를 hard BUDGET으로 처리(simplex allocation) ----
         # leader가 N_UF_star(총 urban→freeway 교환유량 target, veh/h)를 주면, 이 link의 몫
         # B = ω_F[link]·N_UF_star로 소유 ramp metering 합을 **고정**한다(soft penalty 제거).
@@ -1436,7 +1594,6 @@ class WuFaithfulFollower:
         # 최소화한다. 2 ramp이면 1-D 탐색: meter_R1 ∈ [max(0,B−cap2), min(cap1,B)], R2 = B−R1.
         # 이 분기는 (a) leader의 N_UF를 정확히 실현하고, (b) full grid보다 훨씬 작은 탐색이며,
         # (c) 이전 soft penalty hack을 없앤다.
-        n_uf_star = float(getattr(leader, "N_UF_star", 0.0)) if leader is not None else 0.0
         if leader is not None and n_uf_star > 0.0 and owned_ramps:
             omega_f = float(self._wu._omega_f.get(link, 0.0))
             cap_sum = sum(caps[r] for r in owned_ramps)
@@ -1520,13 +1677,16 @@ class WuFaithfulFollower:
 
             return best_vsl, best_meter, evals_total
 
-        # ---- leader=None(PFO) 분기: 기존 autonomous per-ramp metering 좌표하강(미변경) ----
+        # ---- leader=None(PFO) 분기: 기존 autonomous per-ramp metering 좌표하강 ----
         # 현재 best metering(절대 veh/h). 초기값 = capacity(=metering off, snapshot 기본).
+        # B3 가격이 설정돼 있으면(P-Stack 내부 incumbent solve) 가격항이 더해진다 —
+        # 순수 PFO 러너는 가격 dict가 None이라 비용 0(기존 거동 비트 동일).
         best_meter = {
             r: float(snapshot.ramp_metering.get(r, caps[r])) for r in owned_ramps
         }
         # 초기 best 비용·VSL(현재 metering에서).
         best_vsl, best_cost, e0 = _solve_with(best_meter)
+        best_cost += _price_metering_cost(best_meter)
         evals_total += e0
 
         # ramp별 좌표하강: 각 ramp의 5개 분율을 훑어 own-TTS 최저 분율로 갱신.
@@ -1539,6 +1699,7 @@ class WuFaithfulFollower:
                 trial = dict(best_meter)
                 trial[ramp] = cand_val
                 vsl_dict, cost, e = _solve_with(trial)
+                cost += _price_metering_cost(trial)
                 evals_total += e
                 if cost < best_cost:
                     best_cost, best_vsl, local_best_meter = cost, vsl_dict, cand_val

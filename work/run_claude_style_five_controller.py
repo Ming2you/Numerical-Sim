@@ -108,6 +108,19 @@ def make_controller(controller_id: str, cfg: ExperimentConfig):
         controller = StackelbergWuMeteredController(cfg)
         controller.signal_price_enabled = True
         return controller
+    # B3: green + metering 가격(1차 TTT만 — 음성 판정 재현/비교용).
+    if controller_id == "P-STACK-WU-FAITHFUL-B3":
+        controller = StackelbergWuMeteredController(cfg)
+        controller.signal_price_enabled = True
+        controller.metering_price_enabled = True
+        return controller
+    # B4: B3 + rho_crit barrier 가격(절벽 예고 항) — metering 가격의 과방류 차단.
+    if controller_id == "P-STACK-WU-FAITHFUL-B4":
+        controller = StackelbergWuMeteredController(cfg)
+        controller.signal_price_enabled = True
+        controller.metering_price_enabled = True
+        controller.barrier_price_enabled = True
+        return controller
     if controller_id == "P-STACK-WU-FAITHFUL-NOB2":
         # 기본이 OFF가 되면서 P-STACK-WU-FAITHFUL과 동일 — 과거 런 재현용 별칭으로 유지.
         controller = StackelbergWuMeteredController(cfg)

@@ -1,0 +1,70 @@
+{
+  "_codex_b3_3600": {
+    "PSTACK-B2-ON": {
+      "total_ttt": "3045.638",
+      "urban_ttt": "2452.678",
+      "freeway_ttt": "592.96",
+      "completed_vehicles": "16748.8"
+    },
+    "PSTACK-B3": {
+      "total_ttt": "3082.242",
+      "urban_ttt": "2434.365",
+      "freeway_ttt": "647.878",
+      "completed_vehicles": "16734.5"
+    }
+  },
+  "_codex_b3_7200": {
+    "PSTACK-B2-ON": {
+      "total_ttt": "12401.838",
+      "urban_ttt": "11112.884",
+      "freeway_ttt": "1288.954",
+      "completed_vehicles": "31346.1"
+    },
+    "PSTACK-B3": {
+      "total_ttt": "12837.995",
+      "urban_ttt": "11482.991",
+      "freeway_ttt": "1355.004",
+      "completed_vehicles": "30969.0"
+    }
+  },
+  "_codex_ladder_3600": {
+    "NO-CONTROL": {
+      "total_ttt": "5240.041",
+      "urban_ttt": "2934.435",
+      "freeway_ttt": "2305.606",
+      "completed_vehicles": "10393.0"
+    },
+    "PFO-PURE": {
+      "total_ttt": "3176.156",
+      "urban_ttt": "2630.082",
+      "freeway_ttt": "546.074",
+      "completed_vehicles": "16248.5"
+    },
+    "PFO-TAX-B3": {
+      "total_ttt": "3200.721",
+      "urban_ttt": "2590.327",
+      "freeway_ttt": "610.394",
+      "completed_vehicles": "16408.5"
+    },
+    "PSTACK-B2-OFF": {
+      "total_ttt": "3051.956",
+      "urban_ttt": "2479.421",
+      "freeway_ttt": "572.536",
+      "completed_vehicles": "16736.7"
+    }
+  },
+  "_codex_ladder_7200": {
+    "PFO-PURE": {
+      "total_ttt": "13627.344",
+      "urban_ttt": "12404.488",
+      "freeway_ttt": "1222.856",
+      "completed_vehicles": "29675.5"
+    },
+    "PSTACK-B2-OFF": {
+      "total_ttt": "12789.652",
+      "urban_ttt": "11325.535",
+      "freeway_ttt": "1464.117",
+      "completed_vehicles": "31114.9"
+    }
+  }
+}
