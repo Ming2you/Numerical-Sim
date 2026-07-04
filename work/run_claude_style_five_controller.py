@@ -234,10 +234,11 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
             "leader_full_evaluated_count": float(control.diagnostics.get("leader_candidate_full_evaluated_count", 0.0)),
             "leader_serial_override": float(control.diagnostics.get("leader_candidate_wu_metered_serial_override", 0.0)),
         }
-        # B2 가격(wu_b2_*)·P1.5 포화도(wu_p15_*) 진단은 control_row에 안 실리므로 여기서 수집.
+        # 가격(wu_b2_/wu_b3_/wu_b4_)·P1.5 포화도(wu_p15_*) 진단은 control_row에 안 실리므로 여기서 수집.
         decision.update({
             k: float(v) for k, v in control.diagnostics.items()
-            if k.startswith(("wu_b2_", "wu_p15_")) and isinstance(v, (int, float, bool))
+            if k.startswith(("wu_b2_", "wu_b3_", "wu_b4_", "wu_p15_"))
+            and isinstance(v, (int, float, bool))
         })
         decision_rows.append(decision)
         control_rows.append(control_row(control, cfg, step, sim.state.time_sec))

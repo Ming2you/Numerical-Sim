@@ -1,0 +1,25 @@
+[
+  {
+    "controller_id": "P-STACK-WU-FAITHFUL-B4",
+    "total_ttt": 4887.691,
+    "urban_ttt": 4173.766,
+    "freeway_ttt": 713.925,
+    "free_flow_reference_total_ttt": 1725.683,
+    "total_delay": 3162.008,
+    "urban_delay": 2772.252,
+    "freeway_delay": 389.755,
+    "completed_vehicles": 31792.9,
+    "completed_urban_vehicles": 15308.6,
+    "completed_freeway_vehicles": 16484.3,
+    "network_throughput_veh_h": 15896.5,
+    "terminal_total_vehicles": 4972.9,
+    "terminal_urban_vehicles": 4652.4,
+    "terminal_onramp_vehicles": 955.8,
+    "terminal_freeway_vehicles": 184.2,
+    "computation_time_sec": 5172.819,
+    "mean_step_compute_sec": 129.32,
+    "max_step_compute_sec": 151.979,
+    "ttt_improvement_vs_no_control_pct": 0.0,
+    "delay_improvement_vs_no_control_pct": 0.0
+  }
+]
