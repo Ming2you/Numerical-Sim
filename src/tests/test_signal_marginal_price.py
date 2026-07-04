@@ -116,6 +116,8 @@ class TestSignalMarginalPriceController(unittest.TestCase):
         # cadence가 안 걸리게 refresh 주기를 크게 — event-trigger 논리만 분리 검증.
         cfg = _build_cfg({"leader_global_refresh_sec": 1.0e9})
         controller = StackelbergWuMeteredController(cfg)
+        # 기본 OFF(STOP 관례) — refresh 로직 검증을 위해 명시 opt-in.
+        controller.signal_price_enabled = True
         state = TrafficState.initial(cfg)
         # step 0은 cadence가 무조건 활성이라 step 1 시점으로 옮긴다.
         state.time_sec = float(cfg.simulation.control_interval)

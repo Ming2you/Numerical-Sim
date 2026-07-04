@@ -45,7 +45,11 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         # + w·g_ext_i·(p1 − p1_ref_i)를 더한다. w=1이 1차 정확값(B1 sweet spot, w=2는
         # overshoot). 이 가격은 전역 rollout이 필요해 leader 전용 — 순수 PFO 러너에는
         # 존재하지 않는다(P-Stack에서만 활성).
-        self.signal_price_enabled: bool = True
+        # ── 기본 False(STOP 관례, 2026-07-04 교차검증): sweet_190에서 −1.84%(3600s)/−3.40%
+        # (7200s)로 강한 이득이나 sweet_155 +1.66%(>1% 악화 기준 위반)·sweet_128 +0.36%.
+        # 중부하 해악의 판별자(가격 크기·refresh 빈도로는 분리 안 됨)를 찾기 전까지 opt-in
+        # (러너 P-STACK-WU-FAITHFUL-B2). P1.5와 동일 처분.
+        self.signal_price_enabled: bool = False
         self.signal_price_delta_sec: float = 6.0  # 유한차분 스텝(B1 probe와 동일)
         self.signal_price_weight: float = 1.0
         # event-trigger 재선형화: 운영점(commit green)이 기준점에서 이만큼 이동하면
