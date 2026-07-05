@@ -17,6 +17,10 @@ if str(ROOT) not in sys.path:
 from src.analysis.free_flow_reference import compute_free_flow_reference
 from src.controllers.classical_hierarchical import ClassicalHierarchicalController
 from src.controllers.distributed_coordinator import DistributedCoordinator
+from src.controllers.f1_wu_faithful_follower import (
+    F1StackelbergWuMeteredController,
+    F1WuFaithfulFollower,
+)
 from src.controllers.stackelberg_wu_metered import StackelbergWuMeteredController
 from src.controllers.wu_faithful_follower import WuFaithfulFollower
 from src.models.demand import DemandProfile, apply_scenario_network_overrides, load_scenarios
@@ -130,6 +134,12 @@ def make_controller(controller_id: str, cfg: ExperimentConfig):
         controller = StackelbergWuMeteredController(cfg)
         controller.metering_price_enabled = True
         return controller
+    # F1(2026-07-06, 사본 실험): 안전 페널티를 follower objective로 이관 —
+    # urban 0.5cap spill hinge + freeway rho_crit hinge. 가격 구성은 기본(B2TR) 그대로.
+    if controller_id == "P-STACK-WU-FAITHFUL-F1":
+        return F1StackelbergWuMeteredController(cfg)
+    if controller_id == "WU-FAITHFUL-FOLLOWER-F1":
+        return F1WuFaithfulFollower(cfg)
     # B2TR: green 가격 + trust region(가격 유효 범위 = 유한차분 이웃 ±6s) —
     # B2.1 폭주(선형 가격의 이웃 밖 월권, 2026-07-05 §6·§7 진단)의 원인 직결 처방.
     if controller_id == "P-STACK-WU-FAITHFUL-B2TR":
@@ -194,6 +204,7 @@ def decide(controller_id: str, controller, sim: MixedTrafficSimulator, forecast,
         "WU-FAITHFUL-FOLLOWER-NOP1",
         "WU-FAITHFUL-FOLLOWER-P15SAT",
         "WU-FAITHFUL-FOLLOWER-P15AUTO",
+        "WU-FAITHFUL-FOLLOWER-F1",
     }:
         return controller.solve(sim.state.copy(), None, forecast, previous).control
     if controller_id.startswith("P-STACK-WU-FAITHFUL"):
