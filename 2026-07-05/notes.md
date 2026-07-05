@@ -70,9 +70,45 @@
 - **3816d74**: green price sweet_155 7200s **+10.3% 해악** → regime 의존 확정, default OFF.
 
 ## 5. TODO (다음)
-- [ ] **신규 선형+urban barrier(9683d4d) 7200s 평가** — sweet_190(과소방류 나선을 urban barrier가 막아
-  B2로 회복하는지) + **sweet_155**(green+barrier=B2BAR가 +10.3% 폭발을 잡는지). w 스윕.
-- [ ] 선형이 안정 못 시키면 **Huber**로.
-- [ ] **B2.1(최우선)**: green price의 regime 의존 기전 + regime 판별자 — 왜 sweet_190 이득/sweet_155
-  해악인지. 1차 가격의 닫힌루프 복리 피드백(§2 비볼록 나선과 동류일 가능성).
-- [ ] metering marginal price는 negative 확정(비볼록) — constraint(N_UF ceiling)/자율 own-TTS 유지.
+- [x] **신규 선형+urban barrier(9683d4d) 7200s 평가** → §6(Claude): **전면 음성** — frac 0.2는
+  regime 맞교환(155 +5.7%/190 +3.1%), frac 0.5(urban half-cap판)는 155 +14.4% 순수 악화.
+  2026-07-04 notes §10 참조. barrier로 B2.1 풀기 마감.
+- [ ] ~~선형이 안정 못 시키면 Huber로~~ → §6의 궤적 진단상 형태(shape) 문제가 아니라
+  방향(runaway) 문제 — Huber도 같은 한계 예상, 보류.
+- [ ] **B2.1(최우선)**: → §6에서 기전 확정. 다음 구현 = **trust region/proximal 앵커**.
+- [x] metering marginal price negative 확정(비볼록) — constraint(N_UF ceiling)/자율 own-TTS 유지.
+
+---
+
+# 이하 Claude — barrier 판정 + B2.1 기전 확정(단조 폭주)
+
+## 6. B2.1 기전 진단 — **진동이 아니라 단조 폭주(monotone runaway), §2 나선과 동일 족속**
+
+sweet_155 7200s B2 런(outputs/_b2_ab_sweet155_7200)의 궤적 직독:
+
+| step | price_C | green_C_p1 |
+|---:|---:|---:|
+| 0 | −0.022 | 56.0 |
+| 6 | −0.118 | 62.0 |
+| 14 | −0.165 | 62.0 |
+| 28 | −0.240 | 68.0 |
+| 36 | −0.270 | **86.0** |
+| 38 | −0.357 | **92.0** |
+
+- green_C가 56→92(상한 근처)로 **한 방향으로만** 표류, 가격은 refresh(재선형화)가 거의 매
+  step 일어나는데도 **점점 더 세게 같은 방향**. 진동/limit-cycle 아님 → 감쇠(w<1)·EMA
+  처방은 표류를 늦출 뿐 못 세움(우선순위 하향).
+- **기전(§2의 metering 과소방류 나선과 통일)**: 가격은 매 지점에서 국소적으로 옳다
+  (3-interval rollout상 C green↑이 horizon TTT↓) — 그러나 그 방향의 장기 비용은 horizon
+  밖에서 청구되고, 다음 refresh가 더 강한 같은 방향 가격을 산출하는 자기강화.
+  **sweet_190에선 이 표류 방향이 전역 최적(legacy C=80, B1 truth와 일치)과 우연히
+  정렬**되어 이득(−3.4%), sweet_155에선 진짜 최적을 지나쳐 폭주(+10.3%). regime 판별자가
+  정적 상태함수로 안 잡혔던 이유: 차이는 상태가 아니라 **표류 방향과 장기 최적의 정렬
+  여부**다.
+- **처방 재정렬 — trust region/proximal 앵커(다음 구현 1순위)**: 가격의 견인력을 자율
+  (비가격) own-TTS argmin의 이웃으로 제한. 후보 구현: (a) 후보집합 제한 — priced argmin을
+  |p1 − p1_autonomous| ≤ Δ(예: 후보 간격 1~2칸) 안에서만 허용, (b) proximal 항 —
+  `+ κ·(p1 − p1_autonomous)²`를 가격과 함께 주입, (c) 가격 기여 상한 —
+  |g_ext·(p1−ref)| ≤ ε·local_cost. (a)가 가장 단순·판별력 높음: 가격이 "한 칸씩만" 끌 수
+  있으면 매 step 국소 검증을 통과해야 누적 표류가 가능 — 190의 정렬된 표류는 살아남고
+  155의 비정렬 폭주는 plant가 되받아치는 즉시 멈출 것이 가설. 7200s 155/190 동시 검증 필수.
