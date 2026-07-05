@@ -1,0 +1,25 @@
+[
+  {
+    "controller_id": "P-STACK-WU-FAITHFUL-B2BAR50",
+    "total_ttt": 5057.766,
+    "urban_ttt": 4562.218,
+    "freeway_ttt": 495.548,
+    "free_flow_reference_total_ttt": 1725.683,
+    "total_delay": 3332.083,
+    "urban_delay": 3160.704,
+    "freeway_delay": 171.378,
+    "completed_vehicles": 31314.7,
+    "completed_urban_vehicles": 14936.9,
+    "completed_freeway_vehicles": 16377.8,
+    "network_throughput_veh_h": 15657.4,
+    "terminal_total_vehicles": 5459.1,
+    "terminal_urban_vehicles": 5266.3,
+    "terminal_onramp_vehicles": 880.1,
+    "terminal_freeway_vehicles": 179.9,
+    "computation_time_sec": 3260.934,
+    "mean_step_compute_sec": 81.523,
+    "max_step_compute_sec": 104.036,
+    "ttt_improvement_vs_no_control_pct": 0.0,
+    "delay_improvement_vs_no_control_pct": 0.0
+  }
+]

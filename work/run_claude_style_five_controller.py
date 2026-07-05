@@ -121,6 +121,14 @@ def make_controller(controller_id: str, cfg: ExperimentConfig):
         controller.signal_price_enabled = True
         controller.barrier_price_enabled = True
         return controller
+    # B2BAR50: 사용자 제안의 urban critical capacity(0.5·cap 초과분) 기준 —
+    # 발화가 이르고(반차부터) 양방향(2026-07-05 probe: green축 C −0.21, A/B/F +0.03~0.04).
+    if controller_id == "P-STACK-WU-FAITHFUL-B2BAR50":
+        controller = StackelbergWuMeteredController(cfg)
+        controller.signal_price_enabled = True
+        controller.barrier_price_enabled = True
+        controller.barrier_spillback_frac = 0.5
+        return controller
     # B4: B3 + rho_crit barrier 가격(절벽 예고 항) — metering 가격의 과방류 차단.
     if controller_id == "P-STACK-WU-FAITHFUL-B4":
         controller = StackelbergWuMeteredController(cfg)
