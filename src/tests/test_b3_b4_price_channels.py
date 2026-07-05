@@ -123,6 +123,25 @@ class TestMeteringPriceFollower(unittest.TestCase):
                 msg=f"trust must keep {r} within frac*cap of ref",
             )
 
+    def test_metering_trust_preserves_mobility_from_cap(self):
+        # 동결 회귀(2026-07-05 사고): ref=cap일 때 반경 0.25·cap < 첫 분율 간격 0.3·cap이면
+        # 최근접 이웃 보장이 없을 경우 metering이 cap에 얼어붙는다. 큰 양수 가격("조여라")
+        # 하에서 cap 아래 후보로 내려갈 수 있어야 한다.
+        cfg = _build_cfg()
+        leader = LeaderAction(0.0, 6000.0)
+        follower, state, demand, snapshot, coupling, link, owned = _setup_freeway(cfg)
+        refs = {r: float(cfg.network.ramp_capacity_veh_h[r]) for r in owned}  # ref = cap
+        follower.metering_marginal_price = {r: +100.0 for r in owned}  # "방류 줄여" 극단 가격
+        follower.metering_marginal_price_ref = dict(refs)
+        follower.metering_marginal_price_trust_frac = 0.25
+        _, meter, _ = follower._solve_freeway_agent_metered(
+            link, state, coupling, demand, snapshot, leader,
+        )
+        self.assertTrue(
+            any(meter[r] < refs[r] - 1e-6 for r in owned),
+            msg=f"nearest-neighbor guarantee must allow moving below cap: {meter}",
+        )
+
     def test_local_metering_costs_ignores_active_price(self):
         cfg = _build_cfg()
         follower, state, demand, snapshot, coupling, link, owned = _setup_freeway(cfg)

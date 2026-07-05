@@ -1601,17 +1601,27 @@ class WuFaithfulFollower:
                     float(frac) * caps[ramp] for frac in self.ramp_metering_fractions
                 )
                 # B3TR trust region: 가격이 측정된 이웃(|v − ref| ≤ frac·cap) 밖 후보 제외.
-                # 이웃 안 후보 전무 시 전체 fallback(green과 동일 안전장치).
+                # **이동성 보장**: 반경이 격자 간격보다 좁아도 ref의 최근접 아래/위 후보는
+                # 항상 포함한다 — 반경 0.25·cap < 첫 분율 간격 0.3·cap로 metering이 cap에
+                # 동결돼 sweet_190이 no-control로 붕괴한 사고(2026-07-05)의 재발 방지.
                 if (
                     self.metering_marginal_price_trust_frac is not None
                     and ramp in (self.metering_marginal_price or {})
                 ):
                     ref_r = float(self.metering_marginal_price_ref.get(ramp, local_best))
                     trust_r = float(self.metering_marginal_price_trust_frac) * caps[ramp]
+                    clipped_vals = sorted(
+                        {float(np.clip(v, 0.0, caps[ramp])) for v in values}
+                    )
                     trusted = {
-                        v for v in values
-                        if abs(float(np.clip(v, 0.0, caps[ramp])) - ref_r) <= trust_r + 1.0e-9
+                        v for v in clipped_vals if abs(v - ref_r) <= trust_r + 1.0e-9
                     }
+                    below = [v for v in clipped_vals if v < ref_r - 1.0e-9]
+                    above = [v for v in clipped_vals if v > ref_r + 1.0e-9]
+                    if below:
+                        trusted.add(below[-1])
+                    if above:
+                        trusted.add(above[0])
                     if trusted:
                         values = trusted
                 for cand_val in sorted(
@@ -1739,7 +1749,8 @@ class WuFaithfulFollower:
                 if abs(cand_val - best_meter[ramp]) <= 1.0e-9:
                     continue  # 이미 평가된 현재값.
                 # B3TR trust: 가격 활성 시(P-Stack 내부 incumbent 포함) 측정 이웃 밖
-                # 후보는 건너뜀 — 가격의 선형 근사가 유효하지 않은 곳(월권 방지).
+                # 후보는 건너뜀 — 단, ref의 최근접 아래/위 분율은 이동성 보장을 위해
+                # 항상 허용(반경<격자 간격일 때 동결 방지, priced 분기와 동일 규칙).
                 if (
                     self.metering_marginal_price is not None
                     and self.metering_marginal_price_trust_frac is not None
@@ -1748,7 +1759,16 @@ class WuFaithfulFollower:
                     ref_r = float(self.metering_marginal_price_ref.get(ramp, cand_val))
                     trust_r = float(self.metering_marginal_price_trust_frac) * caps[ramp]
                     if abs(cand_val - ref_r) > trust_r + 1.0e-9:
-                        continue
+                        lattice = sorted(f * caps[ramp] for f in self.ramp_metering_fractions)
+                        below = [v for v in lattice if v < ref_r - 1.0e-9]
+                        above = [v for v in lattice if v > ref_r + 1.0e-9]
+                        nearest = set()
+                        if below:
+                            nearest.add(round(below[-1], 9))
+                        if above:
+                            nearest.add(round(above[0], 9))
+                        if round(cand_val, 9) not in nearest:
+                            continue
                 trial = dict(best_meter)
                 trial[ramp] = cand_val
                 vsl_dict, cost, e = _solve_with(trial)
