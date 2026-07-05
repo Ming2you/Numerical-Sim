@@ -1,0 +1,32 @@
+{
+  "B2-ON": {
+    "total_ttt": 12891.0,
+    "urban_ttt": 11339.2,
+    "freeway_ttt": 1551.8,
+    "mean_sum_meter": 4848.0
+  },
+  "B3": {
+    "total_ttt": 14581.1,
+    "urban_ttt": 12986.9,
+    "freeway_ttt": 1594.2,
+    "mean_sum_meter": 3881.0
+  },
+  "B4-w1e-2": {
+    "total_ttt": 14581.1,
+    "urban_ttt": 12986.9,
+    "freeway_ttt": 1594.2,
+    "mean_sum_meter": 3881.0
+  },
+  "B4-w1e-1": {
+    "total_ttt": 14846.8,
+    "urban_ttt": 13205.2,
+    "freeway_ttt": 1641.7,
+    "mean_sum_meter": 3782.0
+  },
+  "B4-w1e0": {
+    "total_ttt": 16233.4,
+    "urban_ttt": 14469.2,
+    "freeway_ttt": 1764.1,
+    "mean_sum_meter": 3373.0
+  }
+}
