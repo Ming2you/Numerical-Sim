@@ -1,0 +1,25 @@
+[
+  {
+    "controller_id": "P-STACK-WU-FAITHFUL-B2TR",
+    "total_ttt": 12522.952,
+    "urban_ttt": 10918.805,
+    "freeway_ttt": 1604.148,
+    "free_flow_reference_total_ttt": 2115.354,
+    "total_delay": 10407.599,
+    "urban_delay": 9200.82,
+    "freeway_delay": 1206.779,
+    "completed_vehicles": 31161.5,
+    "completed_urban_vehicles": 13961.6,
+    "completed_freeway_vehicles": 17199.9,
+    "network_throughput_veh_h": 15580.7,
+    "terminal_total_vehicles": 13875.9,
+    "terminal_urban_vehicles": 12883.4,
+    "terminal_onramp_vehicles": 3168.1,
+    "terminal_freeway_vehicles": 276.0,
+    "computation_time_sec": 3358.752,
+    "mean_step_compute_sec": 83.969,
+    "max_step_compute_sec": 116.113,
+    "ttt_improvement_vs_no_control_pct": 0.0,
+    "delay_improvement_vs_no_control_pct": 0.0
+  }
+]
