@@ -158,3 +158,22 @@ horizon별로 직독:
   (OFF 기준선 포함) → 통과 시 signal_price(+trust) **기본 ON 승격** 결정.
 - 개념 정리: trust region은 "leader 가격 = 방향 제안, plant = 매 refresh 검증자"로 역할을
   재배치한 것 — 분산 가격의 안전한 사용 조건(측정 이웃 내 유효)을 명시한 첫 구성.
+
+## 9. sweet_128 실사 통과 → **green 가격+trust 기본 ON 승격**
+
+sweet_128 7200s(`outputs/_b2tr_sweet128_7200/`): OFF 1561.193 → B2TR **1530.360 (−1.98%)**.
+
+| 7200s | sweet_128 | sweet_155 | sweet_190 |
+|---|---:|---:|---:|
+| B2TR vs OFF | **−1.98%** | **−0.63%** | **−2.52%** |
+
+- **3개 regime 전부 개선 + 연산 절감(후보 축소)** — STOP 관례를 완전 충족하는 최초의 가격
+  구성. `signal_price_enabled=True` + `signal_price_trust_sec=6.0(=δ)`을 P-Stack **기본값**
+  으로 승격(러너 `P-STACK-WU-FAITHFUL` = 구 B2TR). 무제한 가격은 `-B2` 변형으로 강등
+  (155 폭주 재현/비교용). 테스트 30/30.
+- legacy 격차(sweet_190): B2TR 12523.0 → 1794.2 잔존. 무제한 B2(12409.5, 격차 1680.8)가
+  190 특화로는 더 좋으나 155 폭주 리스크 — 기본값은 robust한 B2TR, 무제한은 opt-in.
+- **다음 방향**: (a) trust 반경 스윕(6→9/12: 190 이득 회수 vs 155 안전 트레이드오프 지도),
+  (b) metering price도 trust 걸고 재평가(비볼록 나선도 같은 월권 족속일 가능성 — §2 나선의
+  Σmeter 표류도 이웃 제한이면 멈출 수 있음), (c) 남은 legacy 격차 1794의 재료(offset 등
+  coordinated 레버) 탐색 재개.

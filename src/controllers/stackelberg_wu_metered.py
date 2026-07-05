@@ -45,11 +45,10 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         # + w·g_ext_i·(p1 − p1_ref_i)를 더한다. w=1이 1차 정확값(B1 sweet spot, w=2는
         # overshoot). 이 가격은 전역 rollout이 필요해 leader 전용 — 순수 PFO 러너에는
         # 존재하지 않는다(P-Stack에서만 활성).
-        # ── 기본 False(STOP 관례, 2026-07-04 교차검증): sweet_190에서 −1.84%(3600s)/−3.40%
-        # (7200s)로 강한 이득이나 sweet_155 +1.66%(>1% 악화 기준 위반)·sweet_128 +0.36%.
-        # 중부하 해악의 판별자(가격 크기·refresh 빈도로는 분리 안 됨)를 찾기 전까지 opt-in
-        # (러너 P-STACK-WU-FAITHFUL-B2). P1.5와 동일 처분.
-        self.signal_price_enabled: bool = False
+        # ── 기본 True + trust(2026-07-05 §8 승격): trust region과 함께 3개 regime 전부
+        # 개선(7200s: sweet_128 −1.98% / 155 −0.63% / 190 −2.52%) — STOP 관례 첫 통과.
+        # trust 없는 무제한 가격은 sweet_155 +10.3% 폭주(선형 월권, §7)라 -B2 변형으로만.
+        self.signal_price_enabled: bool = True
         self.signal_price_delta_sec: float = 6.0  # 유한차분 스텝(B1 probe와 동일)
         self.signal_price_weight: float = 1.0
         # event-trigger 재선형화: 운영점(commit green)이 기준점에서 이만큼 이동하면
@@ -57,10 +56,9 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         # 기존 leader_global_refresh cadence에 편승.
         self.signal_price_refresh_threshold_sec: float = 3.0
         # B2.1 trust region(2026-07-05): 가격 유효 범위를 유한차분 이웃으로 제한(폭주 기전
-        # = 선형 가격의 이웃 밖 월권, 진단은 notes 2026-07-05 §6·§7). None=무제한(-B2
-        # 재현용), 값(권장 signal_price_delta_sec=6.0)이면 follower가 |p1−ref|≤trust
-        # 후보만 가격 대상으로 탐색. 러너 -B2TR이 이걸 켠다.
-        self.signal_price_trust_sec: Optional[float] = None
+        # = 선형 가격의 이웃 밖 월권, 진단은 notes 2026-07-05 §6·§7). 기본 = δ(6.0s,
+        # 가격을 측정한 바로 그 이웃 — §8 승격). None=무제한(구 -B2 재현용, 155 폭주).
+        self.signal_price_trust_sec: Optional[float] = 6.0
         # ---------- B3(Codex f18e920 포팅) + B4: metering/VSL 가격 채널 ----------
         # green과 동일 흐름으로 통일: refresh(최초/cadence/event-trigger) 시 **동일 동결
         # 운영점**에서 g_i(전역 rollout)와 d_local(follower 국소 채점)을 모두 계산해

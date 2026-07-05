@@ -103,10 +103,12 @@ def make_controller(controller_id: str, cfg: ExperimentConfig):
         return follower
     if controller_id == "P-STACK-WU-FAITHFUL":
         return StackelbergWuMeteredController(cfg)
-    # B2 marginal price는 기본 OFF(STOP: sweet_155 +1.66%) — 명시 opt-in 변형.
+    # 2026-07-05 §8부터 P-STACK-WU-FAITHFUL 기본 = green 가격 + trust(=B2TR).
+    # -B2 = 무제한 가격(trust 없음, sweet_155 폭주 재현/역사적 비교용).
     if controller_id == "P-STACK-WU-FAITHFUL-B2":
         controller = StackelbergWuMeteredController(cfg)
         controller.signal_price_enabled = True
+        controller.signal_price_trust_sec = None
         return controller
     # B3: green + metering 가격(1차 TTT만 — 음성 판정 재현/비교용).
     if controller_id == "P-STACK-WU-FAITHFUL-B3":
