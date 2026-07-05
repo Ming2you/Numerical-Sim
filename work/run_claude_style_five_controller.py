@@ -114,6 +114,13 @@ def make_controller(controller_id: str, cfg: ExperimentConfig):
         controller.signal_price_enabled = True
         controller.metering_price_enabled = True
         return controller
+    # B2BAR: green 가격 + barrier(선형 fw+spillback) 보정, metering 가격 없음 —
+    # sweet_155 B2 폭발(+10.3%)의 barrier 처방 검증(spillback이 조여질 때만 자동 발화).
+    if controller_id == "P-STACK-WU-FAITHFUL-B2BAR":
+        controller = StackelbergWuMeteredController(cfg)
+        controller.signal_price_enabled = True
+        controller.barrier_price_enabled = True
+        return controller
     # B4: B3 + rho_crit barrier 가격(절벽 예고 항) — metering 가격의 과방류 차단.
     if controller_id == "P-STACK-WU-FAITHFUL-B4":
         controller = StackelbergWuMeteredController(cfg)

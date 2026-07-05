@@ -67,13 +67,22 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         self.vsl_price_enabled: bool = False
         self.vsl_price_delta_kmh: float = 10.0
         self.vsl_price_refresh_threshold_kmh: float = 5.0
-        # B4(사용자 제안): metering 가격에 freeway rho_crit barrier 항의 marginal price를
-        # 합산. barrier = w_f·Σ (excess_veh)²·T_c_h per interval — gradient가 절벽
-        # (capacity drop)을 1차로 예고해, 정상 방류는 TTT 가격이 유도하고 과방류만
-        # 차단한다(soft state constraint의 가격 실현; TTT 밖 별도 항이라 동어반복 아님).
+        # B4(사용자 제안, 2026-07-05 개정): 가격 채널들에 barrier 항의 marginal price를 합산.
+        # ── 개정 이유(2026-07-04 §9 + 2026-07-05 probe): 제곱 barrier는 단위가 veh²·h라
+        # 정체불명 가중치가 필요했고 얕은 초과에서 gradient가 소멸(g_TTT의 1/750)했다.
+        # **선형 hinge·차량수 환산**으로 바꾸면 단위가 veh·h(TTT와 동일)가 되어 w=1이
+        # "임계 초과 차량 1대·1시간 = TTT 1 veh·h"라는 물리적 의미를 갖고, 혼잡 상태
+        # probe에서 gradient가 g_TTT와 같은 자릿수로 산다(fw: metering 축 +0.001~0.010
+        # vs g_TTT −0.002~−0.005; spillback: green 축 A +0.055 vs g_TTT −0.030).
+        # barrier 2종: (a) freeway rho_crit 초과차량(절벽=capacity drop 예고, 주 레버
+        # metering), (b) urban 링크 spillback 여유부족(주 레버 green — B2의 sweet_155
+        # 폭발이 겨냥하는 지점: 링크가 조여질 때만 자동 발화하는 내생적 regime 보정).
         # barrier는 leader 전용 목적항이라 d_local 차감이 없다(follower own-TTS에 부재).
+        # 활성 시 green·metering 두 가격 채널 모두에 합산된다.
         self.barrier_price_enabled: bool = False
-        self.barrier_weight: float = 1.0e-2  # excess_veh²·h → veh·h 급 환산 스케일(스윕 대상)
+        self.barrier_weight: float = 1.0  # 선형·veh·h 단위라 1이 1차 정확값(fudge 아님)
+        # spillback barrier 발화 문턱: 링크 여유공간이 저장고의 이 분율 아래로 떨어지면.
+        self.barrier_spillback_frac: float = 0.2
         self._signal_price_refresh_count: int = 0
         self._signal_price_meta: Dict[str, float] = {}
 
@@ -147,10 +156,14 @@ class StackelbergWuMeteredController(StackelbergMPCController):
     ) -> tuple[float, float]:
         """전역 rollout의 (TTT, barrier). barrier는 B4 활성 시에만 계산(아니면 0).
 
-        barrier = Σ_states Σ_link Σ_seg w_f·(max(0, ρ−ρ_crit)·L_seg·lanes)²·T_c_h —
-        rho_crit 초과분을 세그먼트 초과 차량수로 환산해 제곱(interior-point식 soft
-        state constraint). TTT를 뽑는 같은 rollout의 상태에서 계산하므로 추가 rollout
-        0회 — B4의 metering 가격 유한차분이 TTT와 barrier gradient를 동시에 얻는다."""
+        선형 hinge·차량수 환산(2026-07-05 개정 — 제곱은 단위 veh²·h + 얕은 초과에서
+        gradient 소멸로 기각):
+          barrier = w·Σ_states [ Σ_seg max(0, ρ−ρ_crit)·L_seg·lanes     (freeway 초과차량)
+                               + Σ_link max(0, frac·cap − S_eff(link)) ] · T_c_h  (spillback 부족분)
+        단위가 veh·h로 TTT와 동일 — w=1이 1차 정확값. TTT를 뽑는 같은 rollout의 상태에서
+        계산하므로 추가 rollout 0회(green·metering 유한차분이 두 gradient를 동시에 얻음)."""
+        from src.models.urban_queue_model import _effective_available_space
+
         states, ttt = self._predict(state, control, forecast)
         barrier = 0.0
         if self.barrier_price_enabled:
@@ -158,12 +171,32 @@ class StackelbergWuMeteredController(StackelbergMPCController):
             t_c_h = float(self.cfg.simulation.T_c_h)
             seg_veh = float(net.freeway_segment_length_km) * float(net.freeway_lanes)
             rho_crit = float(net.rho_crit)
+            spill_frac = float(self.barrier_spillback_frac)
             for s in states:
                 for link in net.freeway_links:
                     for rho in s.freeway_density.get(link, []):
                         excess = max(0.0, float(rho) - rho_crit) * seg_veh
-                        barrier += self.barrier_weight * excess * excess * t_c_h
+                        barrier += self.barrier_weight * excess * t_c_h
+                for u_link, cap in net.urban_link_storage_veh.items():
+                    space = float(_effective_available_space(s, self.cfg, u_link))
+                    deficit = max(0.0, spill_frac * float(cap) - space)
+                    barrier += self.barrier_weight * deficit * t_c_h
         return float(ttt), float(barrier)
+
+    def _global_rollout_metrics_with_green(
+        self,
+        state: TrafficState,
+        previous: ControlAction,
+        forecast: List[DemandStep],
+        signal: str,
+        p1: float,
+    ) -> tuple[float, float]:
+        """ego 신호만 green을 p1로 바꾸고 나머지는 previous hold, (TTT, barrier)."""
+        total = float(self.cfg.network.effective_green_total)
+        control = previous.copy()
+        control.green_times[f"{signal}_p1"] = float(p1)
+        control.green_times[f"{signal}_p2"] = float(total - p1)
+        return self._predict_ttt_and_barrier(state, control, forecast)
 
     def _global_rollout_metrics_with_metering(
         self,
@@ -310,15 +343,19 @@ class StackelbergWuMeteredController(StackelbergMPCController):
                 if two_delta <= 1.0e-9:
                     g_ext = 0.0
                 else:
-                    ttt_hi = self._global_rollout_ttt_with_green(
+                    ttt_hi, bar_hi = self._global_rollout_metrics_with_green(
                         state, previous, forecast, signal, p_hi,
                     )
-                    ttt_lo = self._global_rollout_ttt_with_green(
+                    ttt_lo, bar_lo = self._global_rollout_metrics_with_green(
                         state, previous, forecast, signal, p_lo,
                     )
                     g_i = (ttt_hi - ttt_lo) / two_delta
                     cost_lo, cost_hi = local_costs[signal]
                     g_ext = g_i - (cost_hi - cost_lo) / two_delta
+                    if self.barrier_price_enabled:
+                        # B4: spillback/freeway barrier gradient 합산(green 축 —
+                        # 주 신호는 spillback: 하류 링크가 조여질 때 green 증가를 막는다).
+                        g_ext += (bar_hi - bar_lo) / two_delta
                 prices[signal] = float(g_ext)
                 refs[signal] = float(p1_0)
                 meta[f"wu_b2_price_{signal}"] = float(g_ext)
