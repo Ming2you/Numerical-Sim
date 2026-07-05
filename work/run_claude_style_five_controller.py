@@ -138,6 +138,12 @@ def make_controller(controller_id: str, cfg: ExperimentConfig):
     # urban 0.5cap spill hinge + freeway rho_crit hinge. 가격 구성은 기본(B2TR) 그대로.
     if controller_id == "P-STACK-WU-FAITHFUL-F1":
         return F1StackelbergWuMeteredController(cfg)
+    # F1RHO: freeway rho_crit hinge만(urban spill hinge OFF) — F1 혼합 판정(155 +1.26%/
+    # 190 -2.91%)의 분해: 155 후퇴가 spill hinge 몫인지 검증.
+    if controller_id == "P-STACK-WU-FAITHFUL-F1RHO":
+        controller = F1StackelbergWuMeteredController(cfg)
+        controller.nash_solver.f1_spillback_weight = 0.0
+        return controller
     if controller_id == "WU-FAITHFUL-FOLLOWER-F1":
         return F1WuFaithfulFollower(cfg)
     # B2TR: green 가격 + trust region(가격 유효 범위 = 유한차분 이웃 ±6s) —
