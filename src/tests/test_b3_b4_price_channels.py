@@ -142,6 +142,44 @@ class TestMeteringPriceFollower(unittest.TestCase):
             msg=f"nearest-neighbor guarantee must allow moving below cap: {meter}",
         )
 
+    def test_release_certificate_blocks_upward_only(self):
+        # B3CERT: 미인증이면 거대 음수 가격("방류 늘려")도 ref 위로 못 끌어냄, 아래로는 자유.
+        # 인증되면 위로 이동 가능(B3TR 거동).
+        cfg = _build_cfg()
+        leader = LeaderAction(0.0, 6000.0)
+
+        def solve_with(cert, g_ext):
+            follower, state, demand, snapshot, coupling, link, owned = _setup_freeway(cfg)
+            refs = {r: 0.5 * float(cfg.network.ramp_capacity_veh_h[r]) for r in owned}
+            snapshot = snapshot.copy()
+            snapshot.ramp_metering = dict(snapshot.ramp_metering)
+            snapshot.ramp_metering.update(refs)
+            follower.metering_marginal_price = {r: float(g_ext) for r in owned}
+            follower.metering_marginal_price_ref = dict(refs)
+            follower.metering_marginal_price_trust_frac = 0.25
+            follower.metering_release_certified = {r: cert for r in owned}
+            _, meter, _ = follower._solve_freeway_agent_metered(
+                link, state, coupling, demand, snapshot, leader,
+            )
+            return meter, refs
+
+        meter_blocked, refs = solve_with(False, -100.0)
+        for r, ref in refs.items():
+            self.assertLessEqual(
+                meter_blocked[r], ref + 1e-6,
+                msg=f"uncertified ramp {r} must not increase release above ref",
+            )
+        meter_ok, refs = solve_with(True, -100.0)
+        self.assertTrue(
+            any(meter_ok[r] > refs[r] + 1e-6 for r in refs),
+            msg="certified ramps must be able to increase release",
+        )
+        meter_down, refs = solve_with(False, +100.0)
+        self.assertTrue(
+            any(meter_down[r] < refs[r] - 1e-6 for r in refs),
+            msg="tightening must remain free even when uncertified",
+        )
+
     def test_local_metering_costs_ignores_active_price(self):
         cfg = _build_cfg()
         follower, state, demand, snapshot, coupling, link, owned = _setup_freeway(cfg)

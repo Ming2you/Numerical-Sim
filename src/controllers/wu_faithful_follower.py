@@ -177,6 +177,11 @@ class WuFaithfulFollower:
         # trust_r = frac·cap_r, leader의 유한차분 δ_r도 같은 폭으로 측정(허용 이동폭만큼
         # 측정 원칙). None이면 무제한(-B3 재현용, 과소방류 나선).
         self.metering_marginal_price_trust_frac: Optional[float] = None
+        # B3CERT 비대칭 안전 증명서(2026-07-05): capacity drop은 비가역이라 방류 증가
+        # 방향은 탐색으로 검증 불가(B3TR v2 breakdown) — leader가 +δ rollout의 예측 본선
+        # 밀도로 사전 인증한 ramp만 방류 증가 후보 허용. 조임(방류↓)은 가역이라 자유.
+        # None이면 비활성(기존 거동).
+        self.metering_release_certified: Optional[Dict[str, bool]] = None
         # VSL 가격(세그먼트 키 "link__segN"). 주의: VSL은 아직 d_local 미차감(raw g_i —
         # 국소 "고정 VSL 벡터 채점" 프리미티브가 없어 Codex 원안 유지). 기본 OFF이며
         # 활성화 전 g_ext화가 선행 과제.
@@ -1600,10 +1605,26 @@ class WuFaithfulFollower:
                 values.update(
                     float(frac) * caps[ramp] for frac in self.ramp_metering_fractions
                 )
+                # B3CERT(비대칭 안전 증명서): 미인증 ramp는 방류 증가(> ref) 후보 제외.
+                # 조임 방향은 가역이라 항상 허용 — trust 이동성 보장보다 우선한다.
+                cert_ok = True
+                if (
+                    self.metering_release_certified is not None
+                    and ramp in (self.metering_marginal_price or {})
+                ):
+                    cert_ok = bool(self.metering_release_certified.get(ramp, False))
+                    if not cert_ok:
+                        ref_c = float(self.metering_marginal_price_ref.get(ramp, local_best))
+                        kept = {
+                            v for v in values
+                            if float(np.clip(v, 0.0, caps[ramp])) <= ref_c + 1.0e-9
+                        }
+                        if kept:
+                            values = kept
                 # B3TR trust region: 가격이 측정된 이웃(|v − ref| ≤ frac·cap) 밖 후보 제외.
                 # **이동성 보장**: 반경이 격자 간격보다 좁아도 ref의 최근접 아래/위 후보는
-                # 항상 포함한다 — 반경 0.25·cap < 첫 분율 간격 0.3·cap로 metering이 cap에
-                # 동결돼 sweet_190이 no-control로 붕괴한 사고(2026-07-05)의 재발 방지.
+                # 포함한다(위쪽은 인증 시에만) — 반경 0.25·cap < 첫 분율 간격 0.3·cap로
+                # metering이 cap에 동결돼 붕괴한 사고(2026-07-05 §11 v1)의 재발 방지.
                 if (
                     self.metering_marginal_price_trust_frac is not None
                     and ramp in (self.metering_marginal_price or {})
@@ -1620,7 +1641,7 @@ class WuFaithfulFollower:
                     above = [v for v in clipped_vals if v > ref_r + 1.0e-9]
                     if below:
                         trusted.add(below[-1])
-                    if above:
+                    if above and cert_ok:
                         trusted.add(above[0])
                     if trusted:
                         values = trusted
@@ -1748,6 +1769,16 @@ class WuFaithfulFollower:
                 cand_val = frac * caps[ramp]
                 if abs(cand_val - best_meter[ramp]) <= 1.0e-9:
                     continue  # 이미 평가된 현재값.
+                # B3CERT: 미인증 ramp의 방류 증가 후보는 스킵(비대칭, trust보다 우선).
+                if (
+                    self.metering_marginal_price is not None
+                    and self.metering_release_certified is not None
+                    and ramp in self.metering_marginal_price
+                    and not self.metering_release_certified.get(ramp, False)
+                ):
+                    ref_c = float(self.metering_marginal_price_ref.get(ramp, cand_val))
+                    if cand_val > ref_c + 1.0e-9:
+                        continue
                 # B3TR trust: 가격 활성 시(P-Stack 내부 incumbent 포함) 측정 이웃 밖
                 # 후보는 건너뜀 — 단, ref의 최근접 아래/위 분율은 이동성 보장을 위해
                 # 항상 허용(반경<격자 간격일 때 동결 방지, priced 분기와 동일 규칙).

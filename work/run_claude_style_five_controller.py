@@ -118,8 +118,15 @@ def make_controller(controller_id: str, cfg: ExperimentConfig):
         controller.metering_price_enabled = True
         controller.metering_price_trust_frac = None
         return controller
-    # B3TR: 기본(green+trust) + metering 가격+trust(격자 맞춤 δ) — 나선의 월권 처방 검증.
+    # B3TR: 기본(green+trust) + metering 가격+trust, 증명서 없음(§11 v2 재현 — breakdown).
     if controller_id == "P-STACK-WU-FAITHFUL-B3TR":
+        controller = StackelbergWuMeteredController(cfg)
+        controller.metering_price_enabled = True
+        controller.metering_release_cert_enabled = False
+        return controller
+    # B3CERT: metering 가격 + trust + **비대칭 안전 증명서**(방류↑는 leader의 +δ rollout
+    # 예측밀도 인증 시에만, 방류↓는 자유) — "성능은 가격, 절벽 방향은 증명서".
+    if controller_id == "P-STACK-WU-FAITHFUL-B3CERT":
         controller = StackelbergWuMeteredController(cfg)
         controller.metering_price_enabled = True
         return controller

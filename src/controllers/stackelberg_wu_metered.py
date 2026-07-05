@@ -72,6 +72,15 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         # (허용 이동폭만큼 측정: δ_r = trust·cap_r). None=무제한(-B3 재현, 과소방류 나선).
         # 기본 0.25 — metering_price_enabled를 켜면 trust가 함께 걸린다(러너 -B3TR).
         self.metering_price_trust_frac: Optional[float] = 0.25
+        # B3CERT(2026-07-05, 사용자 승인 설계): **비대칭 안전 증명서**. trust의 전제(오류
+        # 가역성)가 capacity drop에선 깨진다(B3TR v2: 한 칸씩 과방류로 걸어가 breakdown,
+        # notes §11). 위험은 한 방향뿐이므로 — 조임(방류↓)은 가역이라 자유, 풂(방류↑)은
+        # 가격 계산에 쓰는 +δ rollout의 예측 본선 밀도가 ρ_crit·(1−margin) 아래일 때만
+        # leader가 인증(추가 rollout 0회). "성능은 가격, 안전-임계 방향은 증명서" —
+        # CBF/safety-filter 구조의 가격 실현. 논문 서사의 통일성 회복(모든 레버가 가격
+        # 프레임 안, 절벽 방향만 인증 동반).
+        self.metering_release_cert_enabled: bool = True
+        self.metering_release_cert_margin: float = 0.1
         self.vsl_price_enabled: bool = False
         self.vsl_price_delta_kmh: float = 10.0
         self.vsl_price_refresh_threshold_kmh: float = 5.0
@@ -173,23 +182,30 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         from src.models.urban_queue_model import _effective_available_space
 
         states, ttt = self._predict(state, control, forecast)
+        return float(ttt), self._barrier_from_states(states)
+
+    def _barrier_from_states(self, states: List[TrafficState]) -> float:
+        """예측 상태 목록에서 barrier 합산(B4 활성 시에만, 아니면 0)."""
+        from src.models.urban_queue_model import _effective_available_space
+
+        if not self.barrier_price_enabled:
+            return 0.0
+        net = self.cfg.network
+        t_c_h = float(self.cfg.simulation.T_c_h)
+        seg_veh = float(net.freeway_segment_length_km) * float(net.freeway_lanes)
+        rho_crit = float(net.rho_crit)
+        spill_frac = float(self.barrier_spillback_frac)
         barrier = 0.0
-        if self.barrier_price_enabled:
-            net = self.cfg.network
-            t_c_h = float(self.cfg.simulation.T_c_h)
-            seg_veh = float(net.freeway_segment_length_km) * float(net.freeway_lanes)
-            rho_crit = float(net.rho_crit)
-            spill_frac = float(self.barrier_spillback_frac)
-            for s in states:
-                for link in net.freeway_links:
-                    for rho in s.freeway_density.get(link, []):
-                        excess = max(0.0, float(rho) - rho_crit) * seg_veh
-                        barrier += self.barrier_weight * excess * t_c_h
-                for u_link, cap in net.urban_link_storage_veh.items():
-                    space = float(_effective_available_space(s, self.cfg, u_link))
-                    deficit = max(0.0, spill_frac * float(cap) - space)
-                    barrier += self.barrier_weight * deficit * t_c_h
-        return float(ttt), float(barrier)
+        for s in states:
+            for link in net.freeway_links:
+                for rho in s.freeway_density.get(link, []):
+                    excess = max(0.0, float(rho) - rho_crit) * seg_veh
+                    barrier += self.barrier_weight * excess * t_c_h
+            for u_link, cap in net.urban_link_storage_veh.items():
+                space = float(_effective_available_space(s, self.cfg, u_link))
+                deficit = max(0.0, spill_frac * float(cap) - space)
+                barrier += self.barrier_weight * deficit * t_c_h
+        return float(barrier)
 
     def _global_rollout_metrics_with_green(
         self,
@@ -213,12 +229,23 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         forecast: List[DemandStep],
         ramp: str,
         value: float,
-    ) -> tuple[float, float]:
-        """해당 ramp만 metering을 value로 바꾸고 나머지는 previous hold, (TTT, barrier)."""
+    ) -> tuple[float, float, float]:
+        """해당 ramp만 metering을 value로 바꾸고 previous hold — (TTT, barrier, max_rho).
+
+        max_rho = 이 ramp가 합류하는 본선 링크의 예측 밀도 최대(전 세그먼트·전 horizon).
+        B3CERT 안전 증명서의 재료: 가격 계산에 이미 쓰는 rollout에서 공짜로 얻는다."""
         control = previous.copy()
         control.ramp_metering = dict(previous.ramp_metering)
         control.ramp_metering[ramp] = float(value)
-        return self._predict_ttt_and_barrier(state, control, forecast)
+        states, ttt = self._predict(state, control, forecast)
+        barrier = self._barrier_from_states(states)
+        link = self.cfg.network.ramp_to_freeway.get(ramp)
+        max_rho = 0.0
+        if link is not None:
+            for s in states:
+                for rho in s.freeway_density.get(link, []):
+                    max_rho = max(max_rho, float(rho))
+        return float(ttt), float(barrier), float(max_rho)
 
     def _global_rollout_ttt_with_vsl(
         self,
@@ -252,6 +279,7 @@ class StackelbergWuMeteredController(StackelbergMPCController):
             follower.signal_marginal_price = None
         if not self.metering_price_enabled:
             follower.metering_marginal_price = None
+            follower.metering_release_certified = None
         if not self.vsl_price_enabled:
             follower.vsl_marginal_price = None
         if not (
@@ -404,15 +432,20 @@ class StackelbergWuMeteredController(StackelbergMPCController):
             local_m = follower.local_metering_costs(m_requests, state, previous, forecast[0])
             m_prices: Dict[str, float] = {}
             m_refs: Dict[str, float] = {}
+            m_certs: Dict[str, bool] = {}
+            rho_cert_limit = float(net.rho_crit) * (
+                1.0 - float(self.metering_release_cert_margin)
+            )
             for ramp, (x0, m_lo, m_hi) in m_pts.items():
                 span = m_hi - m_lo
                 if span <= 1.0e-9:
                     g_ext = 0.0
+                    m_certs[ramp] = False  # 측정 불능이면 방류 증가 미인증(보수적)
                 else:
-                    ttt_hi, bar_hi = self._global_rollout_metrics_with_metering(
+                    ttt_hi, bar_hi, rho_hi = self._global_rollout_metrics_with_metering(
                         state, previous, forecast, ramp, m_hi,
                     )
-                    ttt_lo, bar_lo = self._global_rollout_metrics_with_metering(
+                    ttt_lo, bar_lo, _ = self._global_rollout_metrics_with_metering(
                         state, previous, forecast, ramp, m_lo,
                     )
                     g_i = (ttt_hi - ttt_lo) / span
@@ -422,12 +455,19 @@ class StackelbergWuMeteredController(StackelbergMPCController):
                         # barrier는 leader 전용 목적항 — follower own-TTS에 없으므로
                         # d_local 차감 없이 그대로 합산(B4).
                         g_ext += (bar_hi - bar_lo) / span
+                    # B3CERT: +δ rollout의 본선 최대 예측 밀도가 안전선 아래일 때만
+                    # 방류 증가 방향을 인증(절벽 비가역 — 사후 검증 불가, 사전 인증만).
+                    m_certs[ramp] = bool(rho_hi < rho_cert_limit)
                 m_prices[ramp] = float(g_ext)
                 m_refs[ramp] = float(x0)
                 meta[f"wu_b3_meter_price_{ramp}"] = float(g_ext)
                 meta[f"wu_b3_meter_price_ref_{ramp}"] = float(x0)
+                meta[f"wu_b3cert_{ramp}"] = float(m_certs[ramp])
             follower.metering_marginal_price = m_prices
             follower.metering_marginal_price_ref = m_refs
+            follower.metering_release_certified = (
+                m_certs if self.metering_release_cert_enabled else None
+            )
             follower.metering_marginal_price_trust_frac = (
                 float(self.metering_price_trust_frac)
                 if self.metering_price_trust_frac is not None else None
