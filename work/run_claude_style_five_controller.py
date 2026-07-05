@@ -144,6 +144,13 @@ def make_controller(controller_id: str, cfg: ExperimentConfig):
         controller = F1StackelbergWuMeteredController(cfg)
         controller.nash_solver.f1_spillback_weight = 0.0
         return controller
+    # F1RHO05: rho hinge w=0.5 — hinge는 가격이 아니라 마진 항이라 w가 정당한 노브
+    # (위험 회피 강도). 155 비용(+1.26%) 완화 vs 190 이득 보존의 트레이드오프 측정.
+    if controller_id == "P-STACK-WU-FAITHFUL-F1RHO05":
+        controller = F1StackelbergWuMeteredController(cfg)
+        controller.nash_solver.f1_spillback_weight = 0.0
+        controller.nash_solver.f1_rho_weight = 0.5
+        return controller
     if controller_id == "WU-FAITHFUL-FOLLOWER-F1":
         return F1WuFaithfulFollower(cfg)
     # B2TR: green 가격 + trust region(가격 유효 범위 = 유한차분 이웃 ±6s) —
