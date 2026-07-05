@@ -152,6 +152,14 @@ class WuFaithfulFollower:
         self.signal_marginal_price: Optional[Dict[str, float]] = None
         self.signal_marginal_price_ref: Dict[str, float] = {}
         self.signal_marginal_price_weight: float = 1.0
+        # B2.1 trust region(2026-07-05 진단): 가격이 유효한 범위를 유한차분 이웃으로 제한.
+        # 폭주(sweet_155 C 56→92)의 기전은 g_ext = g_i − d_local(두 큰 수의 차)이 측정
+        # 이웃(±δ) 밖으로 선형 외삽되며 국소 곡률 변화에 월권하는 것 — step36 직독에서
+        # 전역 g_i는 +0.012("줄여라")로 옳았는데 가격 −0.27이 후보 92를 끌어감. None이면
+        # 무제한(기존 거동). 값이 있으면 |p1 − p1_ref| ≤ trust 후보만 가격 대상으로 허용
+        # (이웃 밖 후보는 탐색에서 제외 — 정렬된 개선은 refresh마다 한 이웃씩 plant 검증을
+        # 통과하며 누적, 비정렬 표류는 전역 신호가 반전되는 즉시 정지).
+        self.signal_marginal_price_trust_sec: Optional[float] = None
         # ---------- B3(Codex f18e920 포팅): metering/VSL 가격 채널 ----------
         # green과 동일 규약으로 통일(2026-07-04 병합): leader가 refresh마다 **동일 동결
         # 운영점**에서 g_ext(=g_i − d_local)를 완성해 하달하고, follower는 선형 가격항만
@@ -622,6 +630,21 @@ class WuFaithfulFollower:
             candidates = [float(v) for v in candidates_override]
         else:
             candidates = self._urban_green_candidates(signal, state, coupling, previous)
+            # B2.1 trust region: 가격 활성 + trust 설정 시, 가격의 선형 근사가 유효한
+            # 유한차분 이웃(|p1 − ref| ≤ trust) 밖 후보를 제외한다. 이웃 안 후보가 하나도
+            # 없으면 안전하게 전체 후보로 fallback(가격 월권보다 자율 탐색이 낫다).
+            if (
+                self.signal_marginal_price is not None
+                and self.signal_marginal_price_trust_sec is not None
+                and signal in self.signal_marginal_price
+            ):
+                trust = float(self.signal_marginal_price_trust_sec)
+                ref = float(self.signal_marginal_price_ref.get(signal, prev_p1))
+                trusted = [
+                    p1 for p1 in candidates if abs(p1 - ref) <= trust + 1.0e-9
+                ]
+                if trusted:
+                    candidates = trusted
 
         # Leader N_P 추적. 두 모드:
         #  (A) use_dual_np=True(기본, 듀얼 분해): 후보 비용에 + λ_P·nin_i(green)을 더한다.

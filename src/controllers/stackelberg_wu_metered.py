@@ -56,6 +56,11 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         # 재계산한다(B1 step35류 non-monotone은 재선형화 iteration으로 흡수). 그 외엔
         # 기존 leader_global_refresh cadence에 편승.
         self.signal_price_refresh_threshold_sec: float = 3.0
+        # B2.1 trust region(2026-07-05): 가격 유효 범위를 유한차분 이웃으로 제한(폭주 기전
+        # = 선형 가격의 이웃 밖 월권, 진단은 notes 2026-07-05 §6·§7). None=무제한(-B2
+        # 재현용), 값(권장 signal_price_delta_sec=6.0)이면 follower가 |p1−ref|≤trust
+        # 후보만 가격 대상으로 탐색. 러너 -B2TR이 이걸 켠다.
+        self.signal_price_trust_sec: Optional[float] = None
         # ---------- B3(Codex f18e920 포팅) + B4: metering/VSL 가격 채널 ----------
         # green과 동일 흐름으로 통일: refresh(최초/cadence/event-trigger) 시 **동일 동결
         # 운영점**에서 g_i(전역 rollout)와 d_local(follower 국소 채점)을 모두 계산해
@@ -363,7 +368,15 @@ class StackelbergWuMeteredController(StackelbergMPCController):
             follower.signal_marginal_price = prices
             follower.signal_marginal_price_ref = refs
             follower.signal_marginal_price_weight = float(self.signal_price_weight)
+            follower.signal_marginal_price_trust_sec = (
+                float(self.signal_price_trust_sec)
+                if self.signal_price_trust_sec is not None else None
+            )
             meta["wu_b2_price_delta_sec"] = delta
+            meta["wu_b2_price_trust_sec"] = (
+                float(self.signal_price_trust_sec)
+                if self.signal_price_trust_sec is not None else 0.0
+            )
 
         # ---- metering 채널(B3, B4 barrier 합산 가능) ----
         # g_ext = d(전역TTT)/dx − d(own-TTS)/dx (+ d(barrier)/dx). 세 미분 모두 같은

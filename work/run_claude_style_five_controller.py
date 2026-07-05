@@ -114,6 +114,13 @@ def make_controller(controller_id: str, cfg: ExperimentConfig):
         controller.signal_price_enabled = True
         controller.metering_price_enabled = True
         return controller
+    # B2TR: green 가격 + trust region(가격 유효 범위 = 유한차분 이웃 ±6s) —
+    # B2.1 폭주(선형 가격의 이웃 밖 월권, 2026-07-05 §6·§7 진단)의 원인 직결 처방.
+    if controller_id == "P-STACK-WU-FAITHFUL-B2TR":
+        controller = StackelbergWuMeteredController(cfg)
+        controller.signal_price_enabled = True
+        controller.signal_price_trust_sec = controller.signal_price_delta_sec
+        return controller
     # B2BAR: green 가격 + barrier(선형 fw+spillback) 보정, metering 가격 없음 —
     # sweet_155 B2 폭발(+10.3%)의 barrier 처방 검증(spillback이 조여질 때만 자동 발화).
     if controller_id == "P-STACK-WU-FAITHFUL-B2BAR":

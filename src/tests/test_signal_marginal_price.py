@@ -85,6 +85,33 @@ class TestSignalMarginalPriceFollower(unittest.TestCase):
             msg="positive externality price must push green p1 below the negative-price choice",
         )
 
+    def test_trust_region_bounds_priced_argmin(self):
+        # B2.1: trust 설정 시 거대 가격도 argmin을 ref의 유한차분 이웃 밖으로 못 끌어낸다.
+        cfg = _build_cfg()
+        forecast = _demand(cfg)
+        previous = ControlAction.fixed(cfg)
+        signal = cfg.network.signals[0]
+        ref = float(cfg.network.effective_green_total / 2.0)
+
+        def solve_with(trust):
+            follower = WuFaithfulFollower(cfg)
+            follower.signal_marginal_price = {signal: -100.0}  # "p1 올려라" 극단 가격
+            follower.signal_marginal_price_ref = {signal: ref}
+            follower.signal_marginal_price_trust_sec = trust
+            nash = follower.solve(TrafficState.initial(cfg), None, forecast, previous)
+            return float(nash.control.green_times[f"{signal}_p1"])
+
+        p1_free = solve_with(None)
+        p1_trusted = solve_with(6.0)
+        self.assertGreater(
+            p1_free, ref + 6.0 + 1e-9,
+            msg="unbounded huge price must drag argmin far above ref (sanity)",
+        )
+        self.assertLessEqual(
+            p1_trusted, ref + 6.0 + 1e-9,
+            msg="trust region must keep priced argmin within the FD neighborhood",
+        )
+
     def test_local_green_costs_ignores_active_price(self):
         # d_local은 비가격 own-TTS 기울기여야 한다(순환 방지) — 가격이 설정돼 있어도
         # local_green_costs 결과는 가격 없음과 동일해야 하고, 가격 상태는 복원돼야 한다.
