@@ -172,6 +172,11 @@ class WuFaithfulFollower:
         self.metering_marginal_price_ref: Dict[str, float] = {}
         self.metering_marginal_price_weight: float = 1.0
         self.metering_budget_penalty_weight: float = float(cfg.simulation.T_c_h)
+        # B3TR trust region(2026-07-05 §7과 동일 원리): 가격 유효 범위를 측정 이웃으로 제한.
+        # metering은 후보 격자(0.1~0.3·cap)가 커서 반경을 **cap 분율**로 정의한다 —
+        # trust_r = frac·cap_r, leader의 유한차분 δ_r도 같은 폭으로 측정(허용 이동폭만큼
+        # 측정 원칙). None이면 무제한(-B3 재현용, 과소방류 나선).
+        self.metering_marginal_price_trust_frac: Optional[float] = None
         # VSL 가격(세그먼트 키 "link__segN"). 주의: VSL은 아직 d_local 미차감(raw g_i —
         # 국소 "고정 VSL 벡터 채점" 프리미티브가 없어 Codex 원안 유지). 기본 OFF이며
         # 활성화 전 g_ext화가 선행 과제.
@@ -1595,6 +1600,20 @@ class WuFaithfulFollower:
                 values.update(
                     float(frac) * caps[ramp] for frac in self.ramp_metering_fractions
                 )
+                # B3TR trust region: 가격이 측정된 이웃(|v − ref| ≤ frac·cap) 밖 후보 제외.
+                # 이웃 안 후보 전무 시 전체 fallback(green과 동일 안전장치).
+                if (
+                    self.metering_marginal_price_trust_frac is not None
+                    and ramp in (self.metering_marginal_price or {})
+                ):
+                    ref_r = float(self.metering_marginal_price_ref.get(ramp, local_best))
+                    trust_r = float(self.metering_marginal_price_trust_frac) * caps[ramp]
+                    trusted = {
+                        v for v in values
+                        if abs(float(np.clip(v, 0.0, caps[ramp])) - ref_r) <= trust_r + 1.0e-9
+                    }
+                    if trusted:
+                        values = trusted
                 for cand_val in sorted(
                     float(np.clip(v, 0.0, caps[ramp])) for v in values
                 ):
@@ -1719,6 +1738,17 @@ class WuFaithfulFollower:
                 cand_val = frac * caps[ramp]
                 if abs(cand_val - best_meter[ramp]) <= 1.0e-9:
                     continue  # 이미 평가된 현재값.
+                # B3TR trust: 가격 활성 시(P-Stack 내부 incumbent 포함) 측정 이웃 밖
+                # 후보는 건너뜀 — 가격의 선형 근사가 유효하지 않은 곳(월권 방지).
+                if (
+                    self.metering_marginal_price is not None
+                    and self.metering_marginal_price_trust_frac is not None
+                    and ramp in self.metering_marginal_price
+                ):
+                    ref_r = float(self.metering_marginal_price_ref.get(ramp, cand_val))
+                    trust_r = float(self.metering_marginal_price_trust_frac) * caps[ramp]
+                    if abs(cand_val - ref_r) > trust_r + 1.0e-9:
+                        continue
                 trial = dict(best_meter)
                 trial[ramp] = cand_val
                 vsl_dict, cost, e = _solve_with(trial)

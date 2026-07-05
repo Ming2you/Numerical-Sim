@@ -67,6 +67,11 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         self.metering_price_enabled: bool = False
         self.metering_price_delta_veh_h: float = 60.0  # Codex f18e920과 동일 δ
         self.metering_price_refresh_threshold_veh_h: float = 30.0
+        # B3TR(2026-07-05): metering 가격의 trust region — cap 분율 반경. green과 달리
+        # 후보 격자(0.1~0.3·cap)가 δ(60veh/h)보다 커서, 반경과 **측정폭을 격자에 맞춘다**
+        # (허용 이동폭만큼 측정: δ_r = trust·cap_r). None=무제한(-B3 재현, 과소방류 나선).
+        # 기본 0.25 — metering_price_enabled를 켜면 trust가 함께 걸린다(러너 -B3TR).
+        self.metering_price_trust_frac: Optional[float] = 0.25
         self.vsl_price_enabled: bool = False
         self.vsl_price_delta_kmh: float = 10.0
         self.vsl_price_refresh_threshold_kmh: float = 5.0
@@ -387,8 +392,13 @@ class StackelbergWuMeteredController(StackelbergMPCController):
             m_requests: Dict[str, List[float]] = {}
             for ramp, x0 in op_meter.items():
                 cap = ramp_caps[ramp]
-                m_hi = min(cap, x0 + delta_m)
-                m_lo = max(0.0, x0 - delta_m)
+                # B3TR: trust 설정 시 측정폭을 trust 반경(격자 폭)에 맞춘다 —
+                # 가격이 유효해야 하는 바로 그 구간을 측정하는 secant.
+                d_r = delta_m
+                if self.metering_price_trust_frac is not None:
+                    d_r = max(delta_m, float(self.metering_price_trust_frac) * cap)
+                m_hi = min(cap, x0 + d_r)
+                m_lo = max(0.0, x0 - d_r)
                 m_pts[ramp] = (x0, m_lo, m_hi)
                 m_requests[ramp] = [m_lo, m_hi]
             local_m = follower.local_metering_costs(m_requests, state, previous, forecast[0])
@@ -418,6 +428,10 @@ class StackelbergWuMeteredController(StackelbergMPCController):
                 meta[f"wu_b3_meter_price_ref_{ramp}"] = float(x0)
             follower.metering_marginal_price = m_prices
             follower.metering_marginal_price_ref = m_refs
+            follower.metering_marginal_price_trust_frac = (
+                float(self.metering_price_trust_frac)
+                if self.metering_price_trust_frac is not None else None
+            )
 
         # ---- VSL 채널(B3, raw g_i — d_local 미차감 주의, 기본 OFF) ----
         if self.vsl_price_enabled and op_vsl:

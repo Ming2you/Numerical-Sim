@@ -88,6 +88,41 @@ class TestMeteringPriceFollower(unittest.TestCase):
             msg="negative metering price must yield more release than positive",
         )
 
+    def test_metering_trust_region_bounds_priced_choice(self):
+        # B3TR: trust(frac·cap) 설정 시 거대 가격도 metering을 ref 이웃 밖으로 못 끌어낸다.
+        cfg = _build_cfg()
+        leader = LeaderAction(0.0, 3000.0)
+
+        def solve_with(trust_frac):
+            follower, state, demand, snapshot, coupling, link, owned = _setup_freeway(cfg)
+            refs = {
+                r: 0.5 * float(cfg.network.ramp_capacity_veh_h[r]) for r in owned
+            }
+            snapshot = snapshot.copy()
+            snapshot.ramp_metering = dict(snapshot.ramp_metering)
+            snapshot.ramp_metering.update(refs)
+            follower.metering_marginal_price = {r: -100.0 for r in owned}  # "방류 최대로" 극단 가격
+            follower.metering_marginal_price_ref = dict(refs)
+            follower.metering_marginal_price_trust_frac = trust_frac
+            _, meter, _ = follower._solve_freeway_agent_metered(
+                link, state, coupling, demand, snapshot, leader,
+            )
+            return meter, refs
+
+        meter_free, refs = solve_with(None)
+        self.assertTrue(
+            any(meter_free[r] > refs[r] + 0.25 * float(cfg.network.ramp_capacity_veh_h[r]) + 1e-6
+                for r in refs),
+            msg="unbounded huge price must drag some ramp far above ref (sanity)",
+        )
+        meter_tr, refs = solve_with(0.25)
+        for r, ref in refs.items():
+            cap = float(cfg.network.ramp_capacity_veh_h[r])
+            self.assertLessEqual(
+                abs(meter_tr[r] - ref), 0.25 * cap + 1e-6,
+                msg=f"trust must keep {r} within frac*cap of ref",
+            )
+
     def test_local_metering_costs_ignores_active_price(self):
         cfg = _build_cfg()
         follower, state, demand, snapshot, coupling, link, owned = _setup_freeway(cfg)

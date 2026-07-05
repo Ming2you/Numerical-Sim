@@ -110,10 +110,17 @@ def make_controller(controller_id: str, cfg: ExperimentConfig):
         controller.signal_price_enabled = True
         controller.signal_price_trust_sec = None
         return controller
-    # B3: green + metering 가격(1차 TTT만 — 음성 판정 재현/비교용).
+    # B3: green + metering 가격, trust 없음(과소방류 나선 재현/역사적 비교용).
     if controller_id == "P-STACK-WU-FAITHFUL-B3":
         controller = StackelbergWuMeteredController(cfg)
         controller.signal_price_enabled = True
+        controller.signal_price_trust_sec = None
+        controller.metering_price_enabled = True
+        controller.metering_price_trust_frac = None
+        return controller
+    # B3TR: 기본(green+trust) + metering 가격+trust(격자 맞춤 δ) — 나선의 월권 처방 검증.
+    if controller_id == "P-STACK-WU-FAITHFUL-B3TR":
+        controller = StackelbergWuMeteredController(cfg)
         controller.metering_price_enabled = True
         return controller
     # B2TR: green 가격 + trust region(가격 유효 범위 = 유한차분 이웃 ±6s) —
@@ -138,11 +145,13 @@ def make_controller(controller_id: str, cfg: ExperimentConfig):
         controller.barrier_price_enabled = True
         controller.barrier_spillback_frac = 0.5
         return controller
-    # B4: B3 + rho_crit barrier 가격(절벽 예고 항) — metering 가격의 과방류 차단.
+    # B4: B3 + rho_crit barrier 가격(절벽 예고 항), trust 없음(역사적 재현용 — 무력 판정).
     if controller_id == "P-STACK-WU-FAITHFUL-B4":
         controller = StackelbergWuMeteredController(cfg)
         controller.signal_price_enabled = True
+        controller.signal_price_trust_sec = None
         controller.metering_price_enabled = True
+        controller.metering_price_trust_frac = None
         controller.barrier_price_enabled = True
         return controller
     if controller_id == "P-STACK-WU-FAITHFUL-NOB2":
