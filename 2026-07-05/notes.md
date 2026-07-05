@@ -177,3 +177,59 @@ sweet_128 7200s(`outputs/_b2tr_sweet128_7200/`): OFF 1561.193 → B2TR **1530.36
   (b) metering price도 trust 걸고 재평가(비볼록 나선도 같은 월권 족속일 가능성 — §2 나선의
   Σmeter 표류도 이웃 제한이면 멈출 수 있음), (c) 남은 legacy 격차 1794의 재료(offset 등
   coordinated 레버) 탐색 재개.
+
+---
+
+## 10. 종합 정리 — 가격 채널 아크(B1→B2TR) 완결 보고
+
+### 10a. 아크 타임라인 (probe → 구현 → 실패 → 진단 → 처방 → 승격)
+
+| 단계 | 내용 | 판정 |
+|---|---|---|
+| B1 (07-03) | per-signal externality 가격이 offline probe에서 argmin을 truth로 이동 | 양성(ext 9/15) |
+| B2 (07-03~04) | green 가격 production(동결 운영점 g_ext, hold+event-trigger) | 190 −3.4%, **155 +10.3% 폭주** |
+| B3 (07-04) | metering/VSL 가격 확장 | 음성(과소방류 나선, +2.0%) |
+| B4 제곱 barrier (07-04) | rho_crit 초과² 가격 | 무력(gradient 소멸 1/750) |
+| B4 선형+urban (07-05) | 선형 hinge·veh·h + spillback 항(사용자 교정 2건) | probe 부활, closed-loop 음성(regime 맞교환) |
+| **B2.1 진단 (07-05 §7)** | 폭주점 replay: 전역 g는 옳았음(+0.012) — 원인 = 선형 가격의 측정 이웃 밖 월권 | 기전 확정 |
+| **B2TR (07-05 §8-9)** | trust region: \|p1−ref\| ≤ δ(6s) 후보만 가격 대상 | **3 regime 전부 개선, 기본 ON 승격** |
+
+### 10b. 최종 스코어보드 (7200s, 이 머신, OFF 대비)
+
+| | sweet_128(경) | sweet_155(중) | sweet_190(고) |
+|---|---:|---:|---:|
+| OFF 기준선 | 1561.2 | 4419.7 | 12846.6 |
+| B2 무제한 | (+0.4%\*) | +10.3% | −3.40% |
+| **B2TR(기본값)** | **−1.98%** | **−0.63%** | **−2.52%** |
+| legacy 격차(190) | | | B2TR 1794 / B2 1681 (legacy 10728.8) |
+
+\* 128은 3600s 측정. 무제한 B2는 190 특화 opt-in(`-B2`)으로 존치.
+
+### 10c. 현재 코드 상태 (3cad304)
+
+- **기본값**: `StackelbergWuMeteredController` — `signal_price_enabled=True`,
+  `signal_price_trust_sec=6.0`(=δ). metering/VSL/barrier 가격 전부 기본 OFF(음성 판정).
+- 가격 API(전 채널 공통): leader가 refresh(최초/cadence/event-trigger)마다 **같은 동결
+  운영점**에서 g_i·d_local을 계산해 g_ext 완성·하달, follower는 선형 가격항 + trust 제한.
+- 러너 변형: `-B2`(무제한)/`-NOB2`(OFF)/`-B3`/`-B4`/`-B2BAR(50)`/`-B2TR`(=현 기본과 동일)
+  /`-NUFCAP`/`-STANDALONE(-NUFCAP)`/PFO 계열 `-NOP1`/`-P15SAT`/`-P15AUTO`.
+- 테스트 30/30(+2 skip: legacy trace 머신 전용 anchor).
+
+### 10d. 방법론 교훈 (이 아크에서 두 번 검증된 것)
+
+1. **평가는 7200s(과포화)** — 3600s는 이득·해악 모두 은폐(155 해악 +1.66%→+10.3%).
+2. **probe(open-loop)는 필요조건일 뿐** — barrier는 probe 부활 후 closed-loop에서 배반.
+   반대로 closed-loop 실패도 한 점 진단(궤적 직독 + replay FD)이면 원리적 처방으로 이어짐.
+3. **유한차분 가격은 측정 이웃에서만 유효** — g_ext가 두 큰 수의 차일 때 특히. trust
+   region은 이 원리의 최소 구현이며, "leader=방향 제안, plant=매 refresh 검증자"로
+   역할을 재배치한다.
+4. regime 판별자를 정적 상태함수에서 찾는 시도는 3연속 실패(P1.5 포화도·가격 크기·barrier)
+   — 차이는 상태가 아니라 **표류 방향과 장기 최적의 정렬 여부**였다.
+
+### 10e. 다음 세션 우선순위
+
+1. trust 반경 스윕(6/9/12) — 190 이득 회수 vs 155 안전 지도.
+2. **metering price + trust 재평가** — §2 과소방류 나선도 월권 족속이면 부활 가능
+   (성공 시 N_UF 스칼라 대역폭 문제의 가격 해법이 다시 열림).
+3. legacy 잔존 격차(~1700-1800): offset 등 coordinated 레버 — 가격으로 안 닫힌 몫.
+4. (보류 항목 정리) VSL 가격 g_ext화, P1.5 재검토는 우선순위 하위 유지.
