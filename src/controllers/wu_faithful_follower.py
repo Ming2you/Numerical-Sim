@@ -188,6 +188,17 @@ class WuFaithfulFollower:
         self.vsl_marginal_price: Optional[Dict[str, float]] = None
         self.vsl_marginal_price_ref: Dict[str, float] = {}
         self.vsl_marginal_price_weight: float = 1.0
+        # ---------- F3(2026-07-06): offset 가격 채널 ----------
+        # offset은 selfish 최적화가 corridor를 해치는 순수 조정 레버(2026-06-29 판정으로
+        # 자율 offset OFF, "leader-coordinated 레버로 보존"). F3 = 그 보존된 계획의 실행:
+        # leader가 전역 rollout으로 g_ext_off를 계산·하달하면 offset 탐색이 활성화되고,
+        # 후보 채점 = 자기 phased 비용 + w·g_ext·Δ(원형 최단 변위), trust(그리드 1칸,
+        # cycle/8)로 월권 방지. 기존 offset corridor 가드(realized TTT 검증)는 그대로
+        # 최종 검증자로 작동. None이면 완전 휴면(offset 0 유지, 기존 거동 비트 동일).
+        self.offset_marginal_price: Optional[Dict[str, float]] = None
+        self.offset_marginal_price_ref: Dict[str, float] = {}
+        self.offset_marginal_price_weight: float = 1.0
+        self.offset_marginal_price_trust_sec: Optional[float] = None
         # 신호별 offset 후보 분율(×cycle_length). [0, cycle) 안의 작은 후보집합으로 국소 탐색.
         # 0.0은 현 baseline(offset off). 0~7/8 cycle을 8등분(끝점 cycle 제외).
         self.offset_fractions: tuple[float, ...] = (
@@ -843,6 +854,104 @@ class WuFaithfulFollower:
             self.vsl_marginal_price = saved_vsl_price
         return out
 
+    # ---------- F3: leader가 부르는 국소 offset 비용 조회(가격항 제외) ----------
+
+    def local_offset_costs(
+        self,
+        requests: Mapping[str, Sequence[float]],
+        state: TrafficState,
+        control: ControlAction,
+        demand: DemandStep,
+    ) -> Dict[str, List[float]]:
+        """신호별 offset 후보들의 국소 phased 비용(F3 d_local 유한차분용).
+
+        local_green_costs와 동일 규약(프롤로그 1회, 가격 일시비활성, 영속상태 미변경).
+        채점은 `_solve_offset_local`과 동일 경로 — snapshot 동결 platoon profile(offset
+        불변, 신호당 1회) + 후보 offset의 offset-aware gf로 phased rollout. ramp 신호
+        (D/F)는 offset 탐색 제외 대상이므로 0 반환."""
+        net = self.cfg.network
+        sim = self.cfg.simulation
+        cycle = max(net.cycle_length, 1.0e-9)
+        substeps = max(1, self.cfg.mpc.horizon_steps) * max(1, sim.K_cu)
+        dt_h = sim.T_u_h
+        start_idx = _urban_step_index(state, self.cfg)
+        ctrl = ControlAction.uncontrolled(self.cfg)
+        ctrl.green_times = dict(control.green_times)
+        ctrl.offsets = dict(control.offsets)
+        ctrl.vsl = dict(control.vsl)
+        ctrl.ramp_metering = dict(control.ramp_metering)
+        ctrl.inflow_outflow_allocation = {}
+        coupling = self._wu._coupling(state, ctrl, demand)
+        s_eff_frozen = self._frozen_s_eff(state)
+        snapshot = ControlAction(
+            ramp_metering=dict(ctrl.ramp_metering),
+            vsl=dict(ctrl.vsl),
+            green_times=dict(ctrl.green_times),
+            offsets=dict(ctrl.offsets),
+            inflow_outflow_allocation={},
+        )
+        saved_price = self.offset_marginal_price
+        self.offset_marginal_price = None
+        out: Dict[str, List[float]] = {}
+        try:
+            for signal, offsets in requests.items():
+                model = self._local_models[signal]
+                if model.has_ramps:
+                    out[signal] = [0.0 for _ in offsets]
+                    continue
+                green_p1 = float(ctrl.green_times.get(
+                    f"{signal}_p1", net.effective_green_total / 2.0
+                ))
+                arr_movement = self._per_movement_arrivals(signal, state, snapshot, demand)
+                arr_phase = {
+                    pid: float(coupling.get(f"arr_{signal}_{pid}", 0.0))
+                    for pid in ("p1", "p2")
+                }
+                arr_mv: Dict[str, float] = {}
+                for pid in ("p1", "p2"):
+                    phase_movements = [
+                        m for m in model.movements
+                        if model.phase_of[m] == pid and model.kind_of[m] != "off_ramp"
+                    ]
+                    raw_sum = sum(
+                        max(0.0, float(arr_movement.get(m, 0.0))) for m in phase_movements
+                    )
+                    target = max(0.0, arr_phase[pid])
+                    if raw_sum > 1.0e-12:
+                        scale = target / raw_sum
+                        for m in phase_movements:
+                            arr_mv[m] = max(0.0, float(arr_movement.get(m, 0.0))) * scale
+                    else:
+                        for m in phase_movements:
+                            arr_mv[m] = 0.0
+                q0 = {
+                    m: max(0.0, float(state.urban_movement_queue.get(m, 0.0)))
+                    for m in model.movements
+                }
+                s_eff0 = {
+                    model.receiving_of[m]: float(
+                        s_eff_frozen.get(model.receiving_of[m], 0.0)
+                    )
+                    for m in model.movements
+                    if model.receiving_of[m]
+                }
+                arr_by_substep = self._platoon_arrival_profiles(
+                    signal, state, snapshot, demand, arr_mv, substeps, start_idx,
+                )
+                costs: List[float] = []
+                for off in offsets:
+                    offset = float(off) % cycle
+                    gf_by_substep = self._offset_green_fractions(
+                        signal, green_p1, offset, substeps, start_idx,
+                    )
+                    costs.append(float(rollout_local_tts_phased(
+                        model, q0, arr_by_substep, gf_by_substep, s_eff0, substeps, dt_h,
+                    )))
+                out[signal] = costs
+        finally:
+            self.offset_marginal_price = saved_price
+        return out
+
     # ---------- P1.5 auto 게이트: phase 포화도 ----------
 
     def _ramp_phase_saturation(
@@ -1071,16 +1180,37 @@ class WuFaithfulFollower:
             signal, state, snapshot, demand, arr_mv, substeps, start_idx,
         )
 
+        # F3 offset 가격 준비(설정 시에만). Δ는 원형 최단 변위((-cycle/2, cycle/2]).
+        price_active = (
+            self.offset_marginal_price is not None
+            and signal in self.offset_marginal_price
+        )
+        g_off = (
+            float(self.offset_marginal_price.get(signal, 0.0)) if price_active else 0.0
+        )
+        ref_off = (
+            float(self.offset_marginal_price_ref.get(signal, 0.0)) % cycle
+            if price_active else 0.0
+        )
+        trust = self.offset_marginal_price_trust_sec if price_active else None
+
+        def _circ_delta(off: float) -> float:
+            return ((off - ref_off + cycle / 2.0) % cycle) - cycle / 2.0
+
         best_off, best_obj = 0.0, float("inf")
         evals = 0
         for frac in self.offset_fractions:
             offset = (frac * cycle) % cycle
+            if trust is not None and abs(_circ_delta(offset)) > float(trust) + 1.0e-9:
+                continue  # 가격이 측정된 이웃 밖(월권 방지) — trust는 그리드 1칸으로 설정됨.
             gf_by_substep = self._offset_green_fractions(
                 signal, green_p1, offset, substeps, start_idx,
             )
             obj = rollout_local_tts_phased(
                 model, q0, arr_by_substep, gf_by_substep, s_eff0, substeps, dt_h,
             )
+            if price_active:
+                obj += self.offset_marginal_price_weight * g_off * _circ_delta(offset)
             evals += 1
             if obj < best_obj - 1.0e-9:
                 best_obj, best_off = obj, float(offset)
@@ -2303,7 +2433,10 @@ class WuFaithfulFollower:
         # 본다(corridor 정렬은 상류 green window 위상이 주효과라 1-pass로 충분; 반복은 비용만↑).
         offset_evals = 0
         offsets_off_zero = 0
-        if self.offset_enabled:
+        # F3: offset 가격이 하달돼 있으면 offset 탐색을 활성화(자율 offset은 여전히 OFF —
+        # 가격+trust가 방향과 보폭을 주는 leader-coordinated 모드).
+        offset_active = self.offset_enabled or (self.offset_marginal_price is not None)
+        if offset_active:
             offset_snapshot = dict(control.green_times)
             for signal in net.signals:
                 green_p1 = float(offset_snapshot.get(
@@ -2355,7 +2488,7 @@ class WuFaithfulFollower:
         # offset을 actuator로 두되 그 효과를 closed-loop으로 검증하는 것으로, decisive check와 정합.
         offsets_kept = offsets_off_zero
         if (
-            self.offset_enabled
+            offset_active
             and offsets_off_zero > 0
             and forecast is not None
         ):

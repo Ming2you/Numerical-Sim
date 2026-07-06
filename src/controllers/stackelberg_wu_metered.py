@@ -84,6 +84,14 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         self.vsl_price_enabled: bool = False
         self.vsl_price_delta_kmh: float = 10.0
         self.vsl_price_refresh_threshold_kmh: float = 5.0
+        # ---------- F3(2026-07-06): offset 가격 채널 ----------
+        # offset은 selfish로는 해로운 순수 조정 레버(2026-06-29 판정, leader-coordinated
+        # 레버로 보존) — F3가 그 계획의 실행: leader가 전역 rollout FD로 g_ext_off를
+        # 계산해 하달하면 follower의 offset 탐색이 가격+trust(그리드 1칸=cycle/8) 모드로
+        # 활성화된다. legacy 잔존 격차(오프셋 coordinated 운영점)의 유력 재료. 기본 OFF.
+        self.offset_price_enabled: bool = False
+        self.offset_price_delta_sec: Optional[float] = None  # None=cycle/8(그리드 1칸)
+        self.offset_price_refresh_threshold_sec: float = 7.0  # 그리드 반칸
         # B4(사용자 제안, 2026-07-05 개정): 가격 채널들에 barrier 항의 marginal price를 합산.
         # ── 개정 이유(2026-07-04 §9 + 2026-07-05 probe): 제곱 barrier는 단위가 veh²·h라
         # 정체불명 가중치가 필요했고 얕은 초과에서 gradient가 소멸(g_TTT의 1/750)했다.
@@ -265,6 +273,21 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         _, ttt = self._predict(state, control, forecast)
         return float(ttt)
 
+    def _global_rollout_ttt_with_offset(
+        self,
+        state: TrafficState,
+        previous: ControlAction,
+        forecast: List[DemandStep],
+        signal: str,
+        offset: float,
+    ) -> float:
+        """ego 신호만 offset을 바꾸고 나머지는 previous hold, horizon 전역 rollout TTT."""
+        control = previous.copy()
+        control.offsets = dict(previous.offsets)
+        control.offsets[signal] = float(offset)
+        _, ttt = self._predict(state, control, forecast)
+        return float(ttt)
+
     def _maybe_refresh_signal_prices(
         self,
         state: TrafficState,
@@ -282,10 +305,13 @@ class StackelbergWuMeteredController(StackelbergMPCController):
             follower.metering_release_certified = None
         if not self.vsl_price_enabled:
             follower.vsl_marginal_price = None
+        if not self.offset_price_enabled:
+            follower.offset_marginal_price = None
         if not (
             self.signal_price_enabled
             or self.metering_price_enabled
             or self.vsl_price_enabled
+            or self.offset_price_enabled
         ):
             self._signal_price_meta = {
                 "wu_b2_price_enabled": 0.0,
@@ -325,12 +351,27 @@ class StackelbergWuMeteredController(StackelbergMPCController):
                 for index in range(int(net.freeway_segments_per_link)):
                     key = f"{link}__seg{index}"
                     op_vsl[key] = float(segment_vsl(previous, link, index, self.cfg))
+        cycle = float(net.cycle_length)
+
+        def _circ(a: float, b: float) -> float:
+            d = abs(a - b) % cycle
+            return min(d, cycle - d)
+
+        op_offset: Dict[str, float] = (
+            {
+                s: float(previous.offsets.get(s, 0.0)) % cycle
+                for s in net.signals
+                if not follower._local_models[s].has_ramps
+            }
+            if self.offset_price_enabled else {}
+        )
 
         # ---- refresh 판정: 가격 부재 ∨ cadence ∨ event-trigger(운영점 이동) ----
         refresh = (
             (self.signal_price_enabled and follower.signal_marginal_price is None)
             or (self.metering_price_enabled and follower.metering_marginal_price is None)
             or (self.vsl_price_enabled and follower.vsl_marginal_price is None)
+            or (self.offset_price_enabled and follower.offset_marginal_price is None)
         )
         if not refresh and self._leader_global_refresh_active(state):
             refresh = True
@@ -352,6 +393,12 @@ class StackelbergWuMeteredController(StackelbergMPCController):
             for key, v_now in op_vsl.items():
                 ref = float(follower.vsl_marginal_price_ref.get(key, v_now))
                 if abs(v_now - ref) >= float(self.vsl_price_refresh_threshold_kmh):
+                    refresh = True
+                    break
+        if not refresh:
+            for signal, off_now in op_offset.items():
+                ref = float(follower.offset_marginal_price_ref.get(signal, off_now))
+                if _circ(off_now, ref) >= float(self.offset_price_refresh_threshold_sec):
                     refresh = True
                     break
         if not refresh:
@@ -472,6 +519,42 @@ class StackelbergWuMeteredController(StackelbergMPCController):
                 float(self.metering_price_trust_frac)
                 if self.metering_price_trust_frac is not None else None
             )
+
+        # ---- offset 채널(F3): g_ext = d(전역TTT)/d(off) − d(국소 phased)/d(off) ----
+        # δ·trust = 후보 그리드 1칸(cycle/8) — 허용 이동폭만큼 측정. offset은 원형이라
+        # 클램프 불필요(±δ가 항상 유효), FD span = 2δ 고정.
+        if self.offset_price_enabled and op_offset:
+            meta["wu_f3_offset_price_enabled"] = 1.0
+            delta_o = (
+                float(self.offset_price_delta_sec)
+                if self.offset_price_delta_sec is not None else cycle / 8.0
+            )
+            o_requests = {
+                signal: [(off - delta_o) % cycle, (off + delta_o) % cycle]
+                for signal, off in op_offset.items()
+            }
+            local_o = follower.local_offset_costs(o_requests, state, previous, forecast[0])
+            o_prices: Dict[str, float] = {}
+            o_refs: Dict[str, float] = {}
+            for signal, off0 in op_offset.items():
+                o_lo, o_hi = o_requests[signal]
+                span = 2.0 * delta_o
+                ttt_hi = self._global_rollout_ttt_with_offset(
+                    state, previous, forecast, signal, o_hi,
+                )
+                ttt_lo = self._global_rollout_ttt_with_offset(
+                    state, previous, forecast, signal, o_lo,
+                )
+                g_i = (ttt_hi - ttt_lo) / span
+                cost_lo, cost_hi = local_o[signal]
+                g_ext = g_i - (cost_hi - cost_lo) / span
+                o_prices[signal] = float(g_ext)
+                o_refs[signal] = float(off0)
+                meta[f"wu_f3_offset_price_{signal}"] = float(g_ext)
+                meta[f"wu_f3_offset_ref_{signal}"] = float(off0)
+            follower.offset_marginal_price = o_prices
+            follower.offset_marginal_price_ref = o_refs
+            follower.offset_marginal_price_trust_sec = delta_o
 
         # ---- VSL 채널(B3, raw g_i — d_local 미차감 주의, 기본 OFF) ----
         if self.vsl_price_enabled and op_vsl:

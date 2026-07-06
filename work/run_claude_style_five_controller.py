@@ -151,6 +151,28 @@ def make_controller(controller_id: str, cfg: ExperimentConfig):
         controller.nash_solver.f1_spillback_weight = 0.0
         controller.nash_solver.f1_rho_weight = 0.5
         return controller
+    # F2: F1RHO(ρ hinge가 절벽 방어) + metering 가격+trust+cert — 가격 분기의 후보 채점
+    # (_solve_with → F1의 _solve_freeway_agent_local)에 hinge가 들어가므로, B3 실패
+    # (과방류 후보가 싸게 보임)가 교정된 상태에서 가격이 매끈한 몫만 나르는지 재도전.
+    if controller_id == "P-STACK-WU-FAITHFUL-F2":
+        controller = F1StackelbergWuMeteredController(cfg)
+        controller.nash_solver.f1_spillback_weight = 0.0
+        controller.metering_price_enabled = True
+        return controller
+    # F3: F1RHO + offset 가격(leader FD → follower offset 탐색 가격+trust 활성화) —
+    # legacy 잔존 격차의 coordinated offset 재료 공략.
+    if controller_id == "P-STACK-WU-FAITHFUL-F3":
+        controller = F1StackelbergWuMeteredController(cfg)
+        controller.nash_solver.f1_spillback_weight = 0.0
+        controller.offset_price_enabled = True
+        return controller
+    # F23: F2 + F3 결합(metering·offset 가격 동시).
+    if controller_id == "P-STACK-WU-FAITHFUL-F23":
+        controller = F1StackelbergWuMeteredController(cfg)
+        controller.nash_solver.f1_spillback_weight = 0.0
+        controller.metering_price_enabled = True
+        controller.offset_price_enabled = True
+        return controller
     if controller_id == "WU-FAITHFUL-FOLLOWER-F1":
         return F1WuFaithfulFollower(cfg)
     # B2TR: green 가격 + trust region(가격 유효 범위 = 유한차분 이웃 ±6s) —
