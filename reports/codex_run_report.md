@@ -15172,3 +15172,697 @@ changing what each offset player can see:
    arrival/TTT for the next one-hop signal;
 4. apply that only as a top-K re-ranker so the solve does not become the
    `178-226 s` direct candidate-dependent probe.
+
+## 2026-07-06 - Wu-Faithful Joint Control and Metering-to-Urban Coupling
+
+### Purpose
+
+Ported the missing neighbor-coupling information into the Wu-faithful proposed
+follower path and changed the proposed follower candidate evaluation so coupled
+controls are selected jointly:
+
+- freeway follower: evaluate ramp metering and VSL as joint `(RM, VSL)`
+  candidates instead of independent updates;
+- urban follower: evaluate green time and offset as joint `(green, offset)`
+  candidates instead of separate green and offset stages;
+- metering-to-urban coupling: after the freeway follower selects ramp metering,
+  recompute ramp reservoir drain/space and run one additional urban follower
+  sweep so the urban-side signal player sees the effect of metering before the
+  plant transition.
+
+These features are opt-in and authority-gated. They are enabled only for the
+proposed controllers; `WU-CD-F` remains green/VSL-only and does not receive the
+new RM/offset authority.
+
+### Files Changed
+
+- `src/models/state.py`
+  - added `MPCConfig` flags:
+    - `wu_faithful_joint_freeway_rm_vsl`
+    - `wu_faithful_joint_urban_green_offset`
+    - `wu_faithful_metering_to_urban_ramp_space`
+    - `wu_faithful_joint_metering_split_count`
+- `src/config/default.yaml`
+  - added disabled-by-default config entries for the new flags.
+- `src/experiments/all_scenarios_four_controller_comparison.py`
+- `src/experiments/six_controller_comparison.py`
+  - added CLI switches for the new Wu-faithful joint/coupling modes.
+- `src/controllers/wu_faithful_follower.py`
+  - added joint freeway `(RM, VSL)` candidate search;
+  - added joint urban `(green, offset)` candidate search;
+  - added post-metering urban re-sweep using selected RM-dependent ramp drain;
+  - added diagnostics for joint/coupling activity and post-metering eval counts.
+- `src/tests/test_wu_faithful_follower.py`
+  - added targeted tests for joint freeway search, post-metering urban coupling,
+    and joint green/offset selection.
+
+### Verification
+
+Source compile was used because the sandbox denied `__pycache__` writes for
+normal `py_compile`.
+
+```powershell
+python -B -c "from pathlib import Path; files=[...]; [compile(Path(f).read_text(encoding='utf-8'), f, 'exec') for f in files]; print('source compile ok')"
+```
+
+Result: `source compile ok`.
+
+Targeted tests:
+
+```powershell
+python -B -m unittest `
+  src.tests.test_wu_faithful_follower.TestJointWuFaithfulControls `
+  src.tests.test_wu_faithful_follower.TestLocalRampReleaseOrdering `
+  src.tests.test_constraints.ConstraintTests.test_wu_faithful_freeway_release_uses_start_reservoir_before_current_arrivals
+```
+
+Result: `5 tests OK`.
+
+### Smoke Run
+
+```powershell
+python -B -m src.experiments.all_scenarios_four_controller_comparison `
+  --scenario sweet_155 `
+  --T-total 360 `
+  --controllers WU-CD-F,PROPOSED-FOLLOWERS-ONLY,PROPOSED-STACKELBERG `
+  --output C:\tmp\joint_wu_faithful_sweet155_360_smoke_20260706 `
+  --wu-faithful-joint-freeway-rm-vsl `
+  --wu-faithful-joint-urban-green-offset `
+  --wu-faithful-metering-to-urban-ramp-space
+```
+
+| controller | total TTT (veh-h) | improvement vs no-control |
+|---|---:|---:|
+| NO-CONTROL | `63.950` | - |
+| WU-CD-F | `64.052` | `-0.159%` |
+| PROPOSED-FOLLOWERS-ONLY | `63.251` | `1.093%` |
+| PROPOSED-STACKELBERG | `63.231` | `1.124%` |
+
+Diagnostics confirmed that the joint/coupling flags were active for PFO and
+P-Stack and inactive for WU-CD-F.
+
+### Full Sweet Run
+
+Interpreted "sweet" as `sweet_155`; there is no generic `sweet` scenario in the
+current scenario registry.
+
+```powershell
+python -B -m src.experiments.all_scenarios_four_controller_comparison `
+  --scenario sweet_155 `
+  --T-total 7200 `
+  --controllers WU-CD-F,PROPOSED-FOLLOWERS-ONLY,PROPOSED-STACKELBERG `
+  --output C:\tmp\joint_wu_faithful_sweet155_7200_20260706 `
+  --wu-faithful-joint-freeway-rm-vsl `
+  --wu-faithful-joint-urban-green-offset `
+  --wu-faithful-metering-to-urban-ramp-space
+```
+
+Output directory:
+
+- `C:\tmp\joint_wu_faithful_sweet155_7200_20260706`
+
+| controller | total TTT | freeway TTT | urban TTT | delay | improvement | completed gain | terminal avoided | wall time |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| NO-CONTROL | `8611.785` | `3254.621` | `5357.164` | `6886.102` | - | - | - | `2.403 s` |
+| WU-CD-F | `8713.757` | `3275.752` | `5438.005` | `6988.074` | `-1.184%` | `+96.1` | `+99.2` | `115.909 s` |
+| PROPOSED-FOLLOWERS-ONLY | `4394.806` | `836.284` | `3558.522` | `2669.123` | `48.968%` | `+9574.3` | `+9567.5` | `804.383 s` |
+| PROPOSED-STACKELBERG | `4292.099` | `748.195` | `3543.904` | `2566.415` | `50.160%` | `+9559.4` | `+9550.5` | `1240.569 s` |
+
+P-Stack improved over PFO by `102.707 veh-h` on total TTT in this run.
+
+### Computation Cost
+
+| controller | mean step wall time | max step wall time |
+|---|---:|---:|
+| WU-CD-F | `2.888 s` | `4.206 s` |
+| PROPOSED-FOLLOWERS-ONLY | `20.102 s` | `26.026 s` |
+| PROPOSED-STACKELBERG | `30.999 s` | `48.542 s` |
+
+All controllers remained below the `180 s` control interval in this run, but the
+joint proposed controllers are much heavier than WU-CD-F.
+
+### Control Validation Summary
+
+- `WU-CD-F`: joint RM/VSL and joint green/offset flags remain inactive by
+  authority gate, as intended.
+- `PROPOSED-FOLLOWERS-ONLY`: joint RM/VSL, joint green/offset, and
+  metering-to-urban coupling are active.
+- `PROPOSED-STACKELBERG`: same proposed joint/coupling features are active,
+  with lower TTT than PFO on `sweet_155`.
+- Average total RM:
+  - PFO: `5801.2 veh/h`;
+  - P-Stack: `5828.9 veh/h`.
+- Average mean offset:
+  - PFO: `55.4 s`;
+  - P-Stack: `52.1 s`.
+- Average post-metering urban re-sweep evals:
+  - PFO: `758.2`;
+  - P-Stack: `195.8`.
+
+### Boundary Queue Balancing
+
+Boundary balance non-degradation still fails against no-control:
+
+- PFO mean boundary sum delta vs no-control: `+0.014451`;
+- P-Stack mean boundary sum delta vs no-control: `+0.003097`.
+
+P-Stack has a much smaller boundary-balance degradation than PFO, but the
+formal non-degradation criterion is still not satisfied.
+
+### Failed Criteria and Next Modification
+
+The implementation passes source compile, targeted tests, smoke run, and full
+closed-loop run. The controller does not fully satisfy the acceptance criteria
+because boundary queue balancing is still slightly degraded.
+
+Recommended next modification:
+
+1. run the same joint/coupling mode on `sweet_190` and incident scenarios to
+   check whether the P-Stack > PFO result generalizes beyond `sweet_155`;
+2. inspect boundary-in/boundary-out queue contributions under joint mode to
+   determine whether the residual boundary degradation is caused by offset
+   progression, ramp metering pressure, or leader penalty weights;
+3. consider a boundary-balance tie-breaker only among near-equal TTT candidates,
+   rather than adding a large primary penalty that can distort TTT minimization.
+
+## 2026-07-06 - Sweet 190 Joint Wu-Faithful 7200 s Run
+
+### Purpose
+
+Ran the same joint Wu-faithful proposed mode on `sweet_190` for 7200 seconds to
+check whether the `sweet_155` result, where P-Stack beat PFO on total TTT,
+generalizes to a stronger demand case.
+
+The first output attempt under `C:\tmp` failed due sandbox file-write denial, so
+the final run wrote results under the main workspace output directory.
+
+### Command
+
+```powershell
+python -B -m src.experiments.all_scenarios_four_controller_comparison `
+  --scenario sweet_190 `
+  --T-total 7200 `
+  --controllers WU-CD-F,PROPOSED-FOLLOWERS-ONLY,PROPOSED-STACKELBERG `
+  --output "C:\Users\alsrj\Documents\Numerical Simulation\outputs\joint_wu_faithful_sweet190_7200_20260706" `
+  --wu-faithful-joint-freeway-rm-vsl `
+  --wu-faithful-joint-urban-green-offset `
+  --wu-faithful-metering-to-urban-ramp-space
+```
+
+Output directory:
+
+- `C:\Users\alsrj\Documents\Numerical Simulation\outputs\joint_wu_faithful_sweet190_7200_20260706`
+
+### Results
+
+| controller | total TTT | freeway TTT | urban TTT | delay | improvement | completed gain | terminal avoided | wall time |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| NO-CONTROL | `25170.572` | `9776.594` | `15393.978` | `23055.218` | - | - | - | `2.371 s` |
+| WU-CD-F | `25079.554` | `9828.510` | `15251.043` | `22964.200` | `0.362%` | `+58.0` | `+61.1` | `70.191 s` |
+| PROPOSED-FOLLOWERS-ONLY | `12477.256` | `1631.078` | `10846.179` | `10361.903` | `50.429%` | `+15361.9` | `+15367.8` | `628.246 s` |
+| PROPOSED-STACKELBERG | `12578.609` | `1667.691` | `10910.918` | `10463.255` | `50.027%` | `+15011.4` | `+15044.3` | `1059.802 s` |
+
+PFO beat P-Stack by `101.353 veh-h` total TTT on `sweet_190`.
+
+### Computation Cost
+
+| controller | mean step wall time | max step wall time |
+|---|---:|---:|
+| WU-CD-F | `1.747 s` | `2.583 s` |
+| PROPOSED-FOLLOWERS-ONLY | `15.699 s` | `17.632 s` |
+| PROPOSED-STACKELBERG | `26.480 s` | `44.165 s` |
+
+All controllers remained below the `180 s` control interval. The joint proposed
+controllers were faster than the previous `sweet_155` run in wall-clock terms,
+but P-Stack remained about `1.69x` slower than PFO.
+
+### Boundary Queue Balancing
+
+Boundary balance non-degradation still fails against no-control:
+
+- WU-CD-F mean boundary sum delta vs no-control: `+0.003141`;
+- PFO mean boundary sum delta vs no-control: `+0.037155`;
+- P-Stack mean boundary sum delta vs no-control: `+0.036006`.
+
+P-Stack slightly improves boundary balance relative to PFO, but not enough to
+pass the formal non-degradation criterion.
+
+### Interpretation
+
+On `sweet_190`, both proposed controllers remain very effective relative to
+no-control, cutting total TTT by about `50%` and avoiding roughly `15k` terminal
+vehicles. However, the leader layer did not improve over PFO in this stronger
+demand case:
+
+- P-Stack had slightly higher freeway TTT (`+36.613 veh-h` vs PFO);
+- P-Stack had slightly higher urban TTT (`+64.739 veh-h` vs PFO);
+- P-Stack completed about `350.5` fewer vehicles than PFO and left about
+  `323.5` more terminal vehicles.
+
+This suggests that the current leader search/penalty combination is not
+uniformly better than the PFO anchor under heavier demand. The leader is still
+useful as a coordination layer in `sweet_155`, but `sweet_190` shows that the
+leader adjustment can drift away from the stronger local-response solution.
+
+### Next Modification
+
+Diagnose P-Stack candidate selection on `sweet_190`:
+
+1. compare selected leader targets against the reverse-engineered PFO equivalent
+   `N_P`/`N_UF` trajectory;
+2. inspect whether leader MFD/storage penalty and boundary penalty components
+   are pushing the leader away from PFO-equivalent targets in late steps;
+3. test a stricter PFO-anchor trust-region for heavy-demand cases, where leader
+   search can only accept candidates that beat the incumbent PFO response on the
+   same predicted objective plus a small tolerance.
+
+## 2026-07-06 - Joint Marginal Price P-Stack Sweet-190 Run
+
+### Implementation
+
+Added an opt-in joint marginal-price channel for the Wu-faithful P-Stack
+follower response:
+
+- freeway follower joint control price for `(ramp metering, VSL)`;
+- urban follower joint control price for `(green time, offset)`;
+- scalar B2/B3/F3 price channels are disabled when joint marginal price is
+  enabled to avoid double-counting;
+- on-ramp metering-to-urban information remains active through
+  `wu_faithful_metering_to_urban_ramp_space`, so tightening metering updates
+  ramp reservoir/space before the urban follower is re-solved.
+
+Changed files:
+
+- `src/models/state.py`
+- `src/config/default.yaml`
+- `src/controllers/wu_faithful_follower.py`
+- `src/controllers/stackelberg_wu_metered.py`
+- `src/experiments/all_scenarios_four_controller_comparison.py`
+- `src/experiments/six_controller_comparison.py`
+- `src/tests/test_b3_b4_price_channels.py`
+- `src/tests/test_wu_faithful_follower.py`
+
+### Verification Commands
+
+Compile:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -c "from pathlib import Path; import py_compile; out=Path(r'C:\Users\alsrj\Documents\Numerical Simulation\outputs\compile_pycache'); out.mkdir(parents=True, exist_ok=True); files=['src/models/state.py','src/controllers/wu_faithful_follower.py','src/controllers/stackelberg_wu_metered.py','src/experiments/all_scenarios_four_controller_comparison.py','src/experiments/six_controller_comparison.py','src/tests/test_b3_b4_price_channels.py','src/tests/test_wu_faithful_follower.py']; [py_compile.compile(f, cfile=str(out/(f.replace('/','_')+'.pyc')), doraise=True) for f in files]; print('compile ok')"
+```
+
+Targeted tests:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m unittest src.tests.test_signal_marginal_price src.tests.test_b3_b4_price_channels src.tests.test_wu_faithful_follower
+```
+
+Closed-loop smoke:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.all_scenarios_four_controller_comparison --scenario sweet_190 --T-total 360 --controllers PROPOSED-STACKELBERG --output "C:\Users\alsrj\Documents\Numerical Simulation\outputs\joint_price_wu_faithful_sweet190_smoke_20260706" --wu-faithful-joint-freeway-rm-vsl --wu-faithful-joint-urban-green-offset --wu-faithful-metering-to-urban-ramp-space --wu-faithful-joint-marginal-price
+```
+
+Sweet-190 7200 s run:
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B -m src.experiments.all_scenarios_four_controller_comparison --scenario sweet_190 --T-total 7200 --controllers PROPOSED-FOLLOWERS-ONLY,PROPOSED-STACKELBERG --output "C:\Users\alsrj\Documents\Numerical Simulation\outputs\joint_price_wu_faithful_sweet190_7200_20260706" --wu-faithful-joint-freeway-rm-vsl --wu-faithful-joint-urban-green-offset --wu-faithful-metering-to-urban-ramp-space --wu-faithful-joint-marginal-price
+```
+
+### Test Results
+
+- Compile: PASS.
+- Targeted tests: PASS, `28` tests, `2` skipped.
+- 360 s smoke: PASS, P-Stack total TTT `77.755 veh-h` vs no-control
+  `78.344 veh-h`, improvement `0.752%`.
+- Constraint suite was also run and exposed three pre-existing/unrelated
+  issues: one numerical tolerance issue, one SLSQP availability issue, and one
+  outdated WU-CD-F adapter expectation. These are not caused by the joint-price
+  implementation but should be cleaned up separately.
+
+### Sweet-190 7200 s Result
+
+Output:
+`C:\Users\alsrj\Documents\Numerical Simulation\outputs\joint_price_wu_faithful_sweet190_7200_20260706`
+
+| Controller | Total TTT (veh-h) | Urban TTT | Freeway TTT | Improvement vs no-control | Completed veh | Terminal veh | Computation |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| No control | 25170.572 | 15393.978 | 9776.594 | 0.000% | 15921.5 | 29139.1 | - |
+| PFO | 12477.256 | 10846.179 | 1631.078 | 50.429% | 31283.4 | 13771.3 | 670.320 s |
+| P-Stack + joint price | 18310.338 | 12928.583 | 5381.755 | 27.255% | 23812.5 | 21243.1 | 1259.050 s |
+
+Boundary balance:
+
+- PFO mean `B_sum` delta: `+0.037155`, non-degraded check: FAIL.
+- P-Stack joint-price mean `B_sum` delta: `+0.053413`, non-degraded check:
+  FAIL.
+
+Control validation:
+
+- Joint price diagnostics were logged:
+  `diag_wu_faithful_joint_marginal_price=1.0`.
+- Joint price counts at the first control step:
+  green `5`, metering `4`, VSL `8`, offset `5`.
+- P-Stack mean leader targets:
+  `N_P=1669.990`, `N_UF=5113.571`.
+- P-Stack selected the fallback/PFO incumbent stage in `23` control steps.
+
+### Diagnosis
+
+The joint marginal-price variant did not improve P-Stack. It is still much
+better than no-control, but it is worse than both:
+
+- the same-run PFO by `5833.082 veh-h`;
+- the prior P-Stack without joint marginal price by about `5731.729 veh-h`.
+
+This indicates that the current marginal price formulation is too blunt for the
+Wu-faithful P-Stack setting. The on-ramp metering-to-urban information is
+present, but the joint price appears to bias the leader/follower response toward
+weaker throughput and higher terminal burden in `sweet_190`. A second limitation
+is that the VSL part currently uses a raw global finite-difference gradient
+instead of a fully externality-subtracted B2-style local/global difference.
+
+### Next Modification
+
+Do not treat this joint-price variant as the preferred controller yet. The next
+target should be:
+
+1. decompose the joint price terms by RM, VSL, green, and offset over time;
+2. compare selected P-Stack actions with the same-step PFO anchor action;
+3. replace the VSL price with a true B2-style local-vs-global externality price
+   or keep VSL inside direct joint evaluation only;
+4. test whether the joint price should be diagnostic/reporting-only instead of
+   a hard additive follower objective term.
+
+## 2026-07-06 - Joint-Action Forced Legacy Target Probe
+
+### Purpose
+
+Checked whether the latest Wu-faithful joint-action follower can reproduce the
+legacy P-Stack action when the leader target is forced to the legacy
+`N_P_star/N_UF_star` values. This separates leader search coverage from follower
+response-map mismatch.
+
+### Configuration
+
+- Code branch:
+  `C:\tmp\Numerical-Sim-joint-price-report`
+- Historical traces:
+  `C:\Users\alsrj\Documents\Numerical Simulation\outputs`
+- Scenario/source runs:
+  - current joint-action P-Stack:
+    `joint_wu_faithful_sweet190_7200_20260706`
+  - legacy P-Stack:
+    `legacy_pstack_sweet190_7200_20260702`
+- Key options:
+  - `wu_faithful_joint_freeway_rm_vsl=True`
+  - `wu_faithful_joint_urban_green_offset=True`
+  - `wu_faithful_metering_to_urban_ramp_space=True`
+  - `wu_faithful_joint_marginal_price=False`
+  - serial backend for deterministic probe behavior.
+
+### Output
+
+`C:\Users\alsrj\Documents\Numerical Simulation\outputs\forced_legacy_candidate_probe_joint_action_step20_35_20260706`
+
+### Probe Result
+
+| Step | State | Forced target | Response rollout TTT | Legacy action TTT | Saved PFO TTT | Response + legacy green/offset TTT |
+| --- | --- | --- | ---: | ---: | ---: | ---: |
+| 20 | legacy | legacy `N_P/N_UF` | 803.737 | 784.618 | 799.859 | 785.190 |
+| 35 | legacy | legacy `N_P/N_UF` | 1599.219 | 1594.334 | 1609.971 | 1594.274 |
+
+Action differences under the forced legacy target:
+
+- Step 20:
+  - Ramp total matched: response `6000.000`, legacy `6000.000`.
+  - Green phase-1 sum differed: response `279.000`, legacy `274.000`;
+    absolute distance `103.000`.
+  - Offset active count differed: response `3`, legacy `5`;
+    offset distance `250.000`.
+  - VSL mean differed strongly: response `60.000 km/h`, legacy `90.000 km/h`.
+- Step 35:
+  - Ramp totals were close but not identical by distribution:
+    response `5756.250`, legacy `5756.250`, absolute ramp-distance `243.750`.
+  - Green phase-1 sum differed: response `312.000`, legacy `346.000`;
+    absolute distance `82.000`.
+  - Offset active count matched at `5`, but offset distance remained large:
+    `230.000`.
+  - VSL mean differed: response `55.000 km/h`, legacy `75.000 km/h`.
+
+### Diagnosis
+
+Forcing the legacy leader target is not enough to reproduce the legacy P-Stack
+control. The latest joint-action follower matches the total ramp budget fairly
+well, but it still chooses different VSL, green, and offset actions. The
+ex-post replacement test is especially informative: replacing only the response
+green/offset with the legacy green/offset nearly recovers legacy rollout TTT at
+both inspected steps. Therefore the remaining gap is not only a leader search
+coverage problem; it is also a follower response/scoring problem in the
+joint-action Wu-faithful follower.
+
+### Next Modification
+
+Add a labeled candidate-decomposition probe for selected representative steps:
+
+1. inject the exact legacy `(RM,VSL)` and `(green,offset)` candidates into the
+   current joint-action candidate sets;
+2. log local objective components for selected vs legacy candidates;
+3. separate local TTT, density/rho-critical terms, ramp/urban queue terms, VSL
+   smoothness, offset/phase-resolved benefit, and feasibility guards;
+4. verify whether the legacy candidate is missing from the candidate set or
+   present but mis-scored by the current local objective.
+
+## 2026-07-06 - Legacy-Direction Analysis for Generalizable P-Stack Design
+
+### Purpose
+
+The goal is not to copy legacy actions. The goal is to identify which
+beneficial directions the legacy controller captured, then design
+generalizable price/constraint/response terms that make the current
+Wu-faithful P-Stack find similar directions without using legacy outputs.
+
+### Added Diagnostic Scripts
+
+- `work/joint_action_candidate_decomposition_probe.py`
+- `work/legacy_direction_ablation_probe.py`
+
+These scripts are diagnostic-only. Production controller behavior was not
+changed.
+
+### Commands
+
+```powershell
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B work\joint_action_candidate_decomposition_probe.py --scenario sweet_190 --T-total 7200 --steps 20,35 --np-mode cap --state-source legacy --seed legacy_current --output outputs\joint_action_candidate_decomposition_probe_sweet190_step20_35_v2_20260706
+
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B work\legacy_direction_ablation_probe.py --scenario sweet_190 --T-total 7200 --steps 20,35 --np-mode cap --state-source legacy --output outputs\legacy_direction_ablation_probe_sweet190_step20_35_20260706
+
+& "C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe" -B work\legacy_direction_ablation_probe.py --scenario sweet_190 --T-total 7200 --steps 20,35 --np-mode cap --state-source pfo --output outputs\legacy_direction_ablation_probe_sweet190_step20_35_pfo_state_20260706
+```
+
+### Outputs
+
+- `C:\Users\alsrj\Documents\Numerical Simulation\outputs\joint_action_candidate_decomposition_probe_sweet190_step20_35_v2_20260706`
+- `C:\Users\alsrj\Documents\Numerical Simulation\outputs\legacy_direction_ablation_probe_sweet190_step20_35_20260706`
+- `C:\Users\alsrj\Documents\Numerical Simulation\outputs\legacy_direction_ablation_probe_sweet190_step20_35_pfo_state_20260706`
+
+### Findings
+
+1. Current P-Stack with forced legacy leader targets still fails to reproduce
+   the legacy action. This is not just a leader search issue.
+2. Ramp metering totals are feasible and mostly matched:
+   - step 20: response ramp sum `6000.0`, legacy `6000.0`;
+   - step 35: response ramp sum `5756.25`, legacy `5756.25`, but ramp
+     distribution differs by `243.75 veh/h`.
+3. Segment-level VSL is not the dominant source of the gap:
+   - step 20: response segment VSL mean `90.0`, legacy `90.0`;
+   - step 35: response segment VSL mean `88.75`, legacy `75.0`;
+   - replacing all VSL with legacy VSL changes horizon TTT by only about
+     `+0.053 veh-h` at step 20 and `-0.215 veh-h` at step 35.
+4. The major missing direction is joint signal control, especially green
+   allocation with offset:
+   - legacy-replayed step 20:
+     - current response TTT `803.737`;
+     - legacy green all: `790.409` (`-13.328`);
+     - legacy offset all: `796.382` (`-7.355`);
+     - legacy green+offset all: `785.190` (`-18.547`).
+   - legacy-replayed step 35:
+     - current response TTT `1599.781`;
+     - legacy green all: `1596.518` (`-3.263`);
+     - legacy offset all: `1598.339` (`-1.441`);
+     - legacy green+offset all: `1594.274` (`-5.507`).
+   - PFO-replayed state shows the same broad pattern, although smaller:
+     green all improves by `-8.589` at step 20 and `-3.297` at step 35.
+5. Candidate coverage and scoring:
+   - without injection, the exact legacy green/offset pair is present for only
+     `1/5` signals in the final representative decision;
+   - after injection, all legacy green/offset pairs are present, but the local
+     objective still selects none of them in the final representative decision;
+   - therefore both candidate coverage and local scoring/coverage are issues.
+
+### Design Implication
+
+The next controller improvement should not hard-code legacy actions. The
+generalizable target is a signal-corridor externality term:
+
+- compute candidate-dependent corridor or one-hop neighbor TTT for
+  `(green, offset)` rather than pure own-signal TTT;
+- keep the candidate set sparse by adding direction candidates around the
+  current solution and finite-difference externality gradients;
+- let RM/VSL remain joint, but treat them as secondary in this specific gap
+  because the observed legacy/current gap is dominated by urban
+  green/offset coordination;
+- ensure the added scoring remains cheaper than legacy full grid search.
+
+## 2026-07-06 - Sparse One-Hop Green/Offset Externality for Wu-Faithful PFO/P-Stack
+
+### Purpose
+
+Implement the next design implication from the legacy-direction analysis
+without copying legacy actions: `(green, offset)` candidates are still generated
+sparsely, but their final score can include one-hop or corridor TTS externality
+so a local signal does not select a phase/offset pair that improves only its own
+queue while worsening the downstream/corridor response.
+
+### Implementation
+
+Changed files:
+
+- `src/controllers/wu_faithful_follower.py`
+- `src/models/state.py`
+- `src/config/default.yaml`
+- `src/experiments/all_scenarios_four_controller_comparison.py`
+- `src/experiments/six_controller_comparison.py`
+- `src/tests/test_wu_faithful_follower.py`
+
+Implemented opt-in flags:
+
+- `mpc.wu_faithful_joint_urban_neighbor_tts`
+- `mpc.wu_faithful_joint_urban_neighbor_scope`: `ego`, `ego_neighbor`, or `corridor`
+- `mpc.wu_faithful_joint_urban_neighbor_weight`
+- `mpc.wu_faithful_joint_urban_neighbor_max_green_candidates`
+- `mpc.wu_faithful_joint_urban_neighbor_max_offset_candidates`
+
+Controller behavior:
+
+- Applies only when `wu_faithful_joint_urban_green_offset=true`.
+- Builds one-hop signal neighbors from grid-node adjacency plus shared
+  freeway interface links.
+- Scores a `(green p1, offset)` pair as own local TTS plus weighted
+  neighbor/corridor local TTS.
+- Uses phase-resolved/platoon-aware local rollout for the candidate control,
+  so downstream queue/service effects can change with the candidate.
+- Keeps candidates sparse by taking feasible candidates nearest to current,
+  pressure/default/price anchors and finite-difference directions
+  (`±6/±12 s` green, `±cycle/8` and `±cycle/4` offset).
+- Leaves RM/VSL joint search unchanged.
+
+### Validation Commands
+
+```powershell
+$env:PYTHONPYCACHEPREFIX='C:\Users\alsrj\Documents\Numerical Simulation\.pycache_codex'
+& 'C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' -B -m py_compile src\controllers\wu_faithful_follower.py src\models\state.py src\experiments\all_scenarios_four_controller_comparison.py src\experiments\six_controller_comparison.py src\tests\test_wu_faithful_follower.py
+
+& 'C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' -B -m unittest src.tests.test_wu_faithful_follower src.tests.test_b3_b4_price_channels
+
+& 'C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' -B -m src.experiments.all_scenarios_four_controller_comparison --scenario sweet_190 --T-total 360 --controllers PROPOSED-FOLLOWERS-ONLY,PROPOSED-STACKELBERG --output 'C:\Users\alsrj\Documents\Numerical Simulation\outputs\joint_urban_neighbor_sparse_smoke_sweet190_360_20260706' --wu-faithful-joint-freeway-rm-vsl --wu-faithful-joint-urban-green-offset --wu-faithful-metering-to-urban-ramp-space --wu-faithful-joint-urban-neighbor-tts --wu-faithful-joint-urban-neighbor-scope ego_neighbor --disable-stackelberg-fallback
+
+& 'C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' -B -m src.experiments.all_scenarios_four_controller_comparison --scenario sweet_190 --T-total 1800 --controllers PROPOSED-FOLLOWERS-ONLY,PROPOSED-STACKELBERG --output 'C:\Users\alsrj\Documents\Numerical Simulation\outputs\joint_urban_neighbor_sparse_sweet190_1800_20260706' --wu-faithful-joint-freeway-rm-vsl --wu-faithful-joint-urban-green-offset --wu-faithful-metering-to-urban-ramp-space --wu-faithful-joint-urban-neighbor-tts --wu-faithful-joint-urban-neighbor-scope ego_neighbor --disable-stackelberg-fallback
+```
+
+### Test Results
+
+- `py_compile`: PASS
+- targeted unit tests: PASS, `23` tests run, `2` skipped
+- closed-loop smoke: PASS
+
+Initial non-sparse implementation was too expensive:
+
+- 360 s PFO computation time: `111.83 s`
+- mean PFO follower solve time: about `56 s/step`
+- diagnosis: full green grid by offset grid was being evaluated with neighbor
+  rollout.
+
+After sparse finite-difference candidate limiting:
+
+| Horizon | Controller | Total TTT (veh-h) | Improvement vs no-control | Computation time (s) | Completed veh | Mean B_sum |
+|---:|---|---:|---:|---:|---:|---:|
+| 360 s | No-control | 78.344 | - | 0.00 | 1274.9 | 0.068166 |
+| 360 s | PFO | 77.576 | 0.980% | 29.78 | 1286.2 | 0.060089 |
+| 360 s | P-Stack | 77.821 | 0.668% | 71.62 | 1277.1 | 0.069490 |
+| 1800 s | No-control | 1122.196 | - | 0.00 | 6518.0 | 0.068836 |
+| 1800 s | PFO | 890.347 | 20.660% | 130.33 | 8507.0 | 0.066850 |
+| 1800 s | P-Stack | 898.087 | 19.971% | 370.76 | 8466.9 | 0.069373 |
+
+Mean internal follower costs for the 1800 s run:
+
+- PFO: `1800` neighbor evals/step, `2272` local evals/step,
+  `13.033 s` follower solve time/step.
+- P-Stack selected responses: `780` neighbor evals/step, `1153.2` local
+  evals/step, `7.893 s` follower solve time/step. Total P-Stack wall time is
+  still higher because leader candidate evaluation calls follower responses
+  repeatedly.
+
+### Diagnosis
+
+The one-hop green/offset externality path is functioning and is much cheaper
+after sparse candidate limiting. It also avoids the immediate no-control
+degradation observed in the first dense smoke.
+
+However, P-Stack is still slightly worse than PFO in `sweet_190` at 1800 s:
+
+- P-Stack urban TTT is lower than PFO (`633.171` vs `644.784` veh-h),
+  which suggests the signal-side externality helps urban coordination.
+- P-Stack freeway TTT is higher than PFO (`264.917` vs `245.563` veh-h),
+  so the remaining loss is coming from the freeway/ramp tradeoff rather than
+  only green/offset local scoring.
+- Boundary balance is not fully non-degraded for P-Stack in this 1800 s run:
+  mean `B_sum` is `0.069373` vs no-control `0.068836`.
+
+### Failed Criteria / Next Modification
+
+This is not a final controller pass:
+
+- P-Stack does not outperform PFO in the 1800 s `sweet_190` check.
+- P-Stack boundary balance is slightly degraded vs no-control.
+- Full 7200 s and all-scenario acceptance runs were not rerun after this
+  modification.
+
+Next diagnostic should focus on the remaining freeway-side tradeoff:
+
+- compare PFO and P-Stack selected `N_UF`, ramp distribution, ramp queue, and
+  segment density over the 1800 s run;
+- check whether the leader's N_UF target shifts freeway TTT upward despite the
+  improved urban green/offset response;
+- only then decide whether RM/VSL marginal price, rho-critical hard feasibility,
+  or a leader objective adjustment is the right next step.
+
+### Direct A/B Check: Externality On vs Off
+
+The same `sweet_190`, `1800 s`, fallback-off setup was rerun without
+`--wu-faithful-joint-urban-neighbor-tts`:
+
+```powershell
+& 'C:\Users\alsrj\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe' -B -m src.experiments.all_scenarios_four_controller_comparison --scenario sweet_190 --T-total 1800 --controllers PROPOSED-FOLLOWERS-ONLY,PROPOSED-STACKELBERG --output 'C:\Users\alsrj\Documents\Numerical Simulation\outputs\joint_urban_neighbor_off_sweet190_1800_20260706' --wu-faithful-joint-freeway-rm-vsl --wu-faithful-joint-urban-green-offset --wu-faithful-metering-to-urban-ramp-space --disable-stackelberg-fallback
+```
+
+| Controller | Neighbor externality | Total TTT | Urban TTT | Freeway TTT | Mean B_sum | Computation time |
+|---|---|---:|---:|---:|---:|---:|
+| PFO | off | 886.582 | 640.156 | 246.427 | 0.069743 | 182.36 s |
+| PFO | on | 890.347 | 644.784 | 245.563 | 0.066850 | 130.33 s |
+| P-Stack | off | 888.994 | 637.064 | 251.930 | 0.081210 | 345.80 s |
+| P-Stack | on | 898.087 | 633.171 | 264.917 | 0.069373 | 370.76 s |
+
+Conclusion:
+
+- The externality path definitely changes controller behavior and is logged
+  (`wu_faithful_joint_urban_neighbor_tts=1` with positive neighbor evals).
+- It did **not** improve total TTT in this `sweet_190` 1800 s A/B:
+  - PFO worsened by `+3.765 veh-h`;
+  - P-Stack worsened by `+9.093 veh-h`.
+- It did improve boundary-balance pressure:
+  - PFO mean `B_sum` improved from `0.069743` to `0.066850`;
+  - P-Stack mean `B_sum` improved from `0.081210` to `0.069373`.
+- Therefore the current default-weight externality behaves more like a
+  boundary/corridor regularizer than a proven TTT-improving term. It should
+  remain opt-in while the next calibration checks lower externality weights
+  or state-conditional activation.

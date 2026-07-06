@@ -267,5 +267,49 @@ class TestBarrierAndRefresh(unittest.TestCase):
         )
 
 
+class TestJointMarginalPriceRefresh(unittest.TestCase):
+    def test_joint_price_refresh_disables_scalar_and_hands_joint_prices(self):
+        cfg = ExperimentConfig.from_file(
+            "src/config/default.yaml",
+            {
+                "simulation": {"T_total": 360.0},
+                "mpc": {
+                    "horizon_steps": 1,
+                    "wu_faithful_joint_freeway_rm_vsl": True,
+                    "wu_faithful_joint_urban_green_offset": True,
+                    "wu_faithful_joint_marginal_price": True,
+                    "grid_parallel_backend": "serial",
+                    "stackelberg_leader_parallel_backend": "serial",
+                },
+                "freeway_follower": {
+                    "freeway_prediction_horizon_steps": 1,
+                    "vsl_sequence_search": False,
+                },
+            },
+        )
+        controller = StackelbergWuMeteredController(cfg)
+        state = TrafficState.initial(cfg)
+        state.time_sec = float(cfg.simulation.control_interval)
+        forecast = DemandProfile(
+            cfg,
+            ScenarioConfig("probe", urban_scale=1.0, freeway_scale=1.0, ramp_scale=1.0),
+        ).horizon(0.0, 1)
+        previous = ControlAction.fixed(cfg)
+
+        controller._maybe_refresh_signal_prices(state, forecast, previous)
+        follower = controller.nash_solver
+
+        self.assertIsNone(follower.signal_marginal_price)
+        self.assertIsNone(follower.metering_marginal_price)
+        self.assertIsNotNone(follower.joint_signal_marginal_price)
+        self.assertIsNotNone(follower.joint_offset_marginal_price)
+        self.assertIsNotNone(follower.joint_metering_marginal_price)
+        self.assertIsNotNone(follower.joint_vsl_marginal_price)
+        self.assertEqual(set(follower.joint_signal_marginal_price), set(cfg.network.signals))
+        self.assertEqual(set(follower.joint_metering_marginal_price), set(cfg.network.ramps))
+        self.assertEqual(controller._signal_price_meta["wu_joint_price_enabled"], 1.0)
+        self.assertEqual(controller._signal_price_meta["wu_b2_price_refreshed"], 1.0)
+
+
 if __name__ == "__main__":
     unittest.main()

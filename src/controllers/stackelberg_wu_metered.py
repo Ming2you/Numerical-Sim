@@ -110,6 +110,36 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         self.barrier_spillback_frac: float = 0.2
         self._signal_price_refresh_count: int = 0
         self._signal_price_meta: Dict[str, float] = {}
+        self.joint_price_enabled: bool = bool(getattr(
+            cfg.mpc, "wu_faithful_joint_marginal_price", False
+        ))
+        if self.joint_price_enabled:
+            self.signal_price_enabled = False
+            self.metering_price_enabled = False
+            self.vsl_price_enabled = False
+            self.offset_price_enabled = False
+        self.joint_price_weight: float = float(getattr(
+            cfg.mpc, "wu_faithful_joint_price_weight", 1.0
+        ))
+        self.joint_green_delta_sec: float = float(getattr(
+            cfg.mpc, "wu_faithful_joint_price_green_delta_sec", self.signal_price_delta_sec
+        ))
+        self.joint_offset_delta_sec: float = float(getattr(
+            cfg.mpc, "wu_faithful_joint_price_offset_delta_sec", 15.0
+        ))
+        self.joint_metering_delta_veh_h: float = float(getattr(
+            cfg.mpc, "wu_faithful_joint_price_metering_delta_veh_h",
+            self.metering_price_delta_veh_h,
+        ))
+        self.joint_metering_trust_frac: Optional[float] = float(getattr(
+            cfg.mpc, "wu_faithful_joint_price_metering_trust_frac", 0.25
+        ))
+        self.joint_vsl_delta_kmh: float = float(getattr(
+            cfg.mpc, "wu_faithful_joint_price_vsl_delta_kmh", self.vsl_price_delta_kmh
+        ))
+        self.joint_vsl_trust_kmh: Optional[float] = float(getattr(
+            cfg.mpc, "wu_faithful_joint_price_vsl_trust_kmh", self.joint_vsl_delta_kmh
+        ))
 
     def _make_follower_solver(self, cfg: ExperimentConfig):
         return WuFaithfulFollower(cfg)
@@ -288,6 +318,166 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         _, ttt = self._predict(state, control, forecast)
         return float(ttt)
 
+    def _refresh_joint_marginal_prices(
+        self,
+        follower: WuFaithfulFollower,
+        state: TrafficState,
+        forecast: List[DemandStep],
+        previous: ControlAction,
+        op_green: Dict[str, float],
+        op_meter: Dict[str, float],
+        op_vsl: Dict[str, float],
+        op_offset: Dict[str, float],
+        ramp_caps: Dict[str, float],
+        vsl_lower: float,
+        vsl_upper: float,
+        cycle: float,
+        clamp,
+        meta: Dict[str, float],
+    ) -> None:
+        if not self.joint_price_enabled:
+            return
+        meta["wu_joint_price_weight"] = float(self.joint_price_weight)
+
+        delta_g = float(self.joint_green_delta_sec)
+        g_pts: Dict[str, tuple[float, float, float]] = {}
+        g_requests: Dict[str, List[float]] = {}
+        for signal, p1_0 in op_green.items():
+            p_hi = clamp(p1_0 + delta_g)
+            p_lo = clamp(p1_0 - delta_g)
+            g_pts[signal] = (p1_0, p_lo, p_hi)
+            g_requests[signal] = [p_lo, p_hi]
+        local_g = follower.local_green_costs(g_requests, state, previous, forecast[0])
+        joint_green: Dict[str, float] = {}
+        joint_green_ref: Dict[str, float] = {}
+        for signal, (p1_0, p_lo, p_hi) in g_pts.items():
+            span = p_hi - p_lo
+            if span <= 1.0e-9:
+                g_ext = 0.0
+            else:
+                ttt_hi, bar_hi = self._global_rollout_metrics_with_green(
+                    state, previous, forecast, signal, p_hi,
+                )
+                ttt_lo, bar_lo = self._global_rollout_metrics_with_green(
+                    state, previous, forecast, signal, p_lo,
+                )
+                cost_lo, cost_hi = local_g[signal]
+                g_ext = ((ttt_hi - ttt_lo) - (cost_hi - cost_lo)) / span
+                if self.barrier_price_enabled:
+                    g_ext += (bar_hi - bar_lo) / span
+            joint_green[signal] = float(g_ext)
+            joint_green_ref[signal] = float(p1_0)
+            meta[f"wu_joint_green_price_{signal}"] = float(g_ext)
+            meta[f"wu_joint_green_ref_{signal}"] = float(p1_0)
+
+        delta_o = float(self.joint_offset_delta_sec)
+        o_requests = {
+            signal: [(off - delta_o) % cycle, (off + delta_o) % cycle]
+            for signal, off in op_offset.items()
+        }
+        local_o = follower.local_offset_costs(o_requests, state, previous, forecast[0])
+        joint_offset: Dict[str, float] = {}
+        joint_offset_ref: Dict[str, float] = {}
+        for signal, off0 in op_offset.items():
+            o_lo, o_hi = o_requests[signal]
+            span = max(2.0 * delta_o, 1.0e-9)
+            ttt_hi = self._global_rollout_ttt_with_offset(
+                state, previous, forecast, signal, o_hi,
+            )
+            ttt_lo = self._global_rollout_ttt_with_offset(
+                state, previous, forecast, signal, o_lo,
+            )
+            cost_lo, cost_hi = local_o[signal]
+            g_ext = ((ttt_hi - ttt_lo) - (cost_hi - cost_lo)) / span
+            joint_offset[signal] = float(g_ext)
+            joint_offset_ref[signal] = float(off0)
+            meta[f"wu_joint_offset_price_{signal}"] = float(g_ext)
+            meta[f"wu_joint_offset_ref_{signal}"] = float(off0)
+
+        delta_m = float(self.joint_metering_delta_veh_h)
+        m_pts: Dict[str, tuple[float, float, float]] = {}
+        m_requests: Dict[str, List[float]] = {}
+        for ramp, x0 in op_meter.items():
+            cap = ramp_caps[ramp]
+            d_r = delta_m
+            if self.joint_metering_trust_frac is not None:
+                d_r = max(delta_m, float(self.joint_metering_trust_frac) * cap)
+            m_hi = min(cap, x0 + d_r)
+            m_lo = max(0.0, x0 - d_r)
+            m_pts[ramp] = (x0, m_lo, m_hi)
+            m_requests[ramp] = [m_lo, m_hi]
+        local_m = follower.local_metering_costs(m_requests, state, previous, forecast[0])
+        joint_meter: Dict[str, float] = {}
+        joint_meter_ref: Dict[str, float] = {}
+        for ramp, (x0, m_lo, m_hi) in m_pts.items():
+            span = m_hi - m_lo
+            if span <= 1.0e-9:
+                g_ext = 0.0
+            else:
+                ttt_hi, bar_hi, _ = self._global_rollout_metrics_with_metering(
+                    state, previous, forecast, ramp, m_hi,
+                )
+                ttt_lo, bar_lo, _ = self._global_rollout_metrics_with_metering(
+                    state, previous, forecast, ramp, m_lo,
+                )
+                cost_lo, cost_hi = local_m[ramp]
+                g_ext = ((ttt_hi - ttt_lo) - (cost_hi - cost_lo)) / span
+                if self.barrier_price_enabled:
+                    g_ext += (bar_hi - bar_lo) / span
+            joint_meter[ramp] = float(g_ext)
+            joint_meter_ref[ramp] = float(x0)
+            meta[f"wu_joint_meter_price_{ramp}"] = float(g_ext)
+            meta[f"wu_joint_meter_ref_{ramp}"] = float(x0)
+
+        joint_vsl: Dict[str, float] = {}
+        joint_vsl_ref: Dict[str, float] = {}
+        delta_v = float(self.joint_vsl_delta_kmh)
+        for key, x0 in op_vsl.items():
+            link = key.split("__seg")[0]
+            v_hi = min(vsl_upper, x0 + delta_v)
+            v_lo = max(vsl_lower, x0 - delta_v)
+            span = v_hi - v_lo
+            if span <= 1.0e-9:
+                g_ext = 0.0
+            else:
+                ttt_hi = self._global_rollout_ttt_with_vsl(
+                    state, previous, forecast, link, key, v_hi, vsl_upper,
+                )
+                ttt_lo = self._global_rollout_ttt_with_vsl(
+                    state, previous, forecast, link, key, v_lo, vsl_upper,
+                )
+                g_ext = (ttt_hi - ttt_lo) / span
+            joint_vsl[key] = float(g_ext)
+            joint_vsl_ref[key] = float(x0)
+            meta[f"wu_joint_vsl_price_{key}"] = float(g_ext)
+            meta[f"wu_joint_vsl_ref_{key}"] = float(x0)
+
+        follower.joint_signal_marginal_price = joint_green
+        follower.joint_signal_marginal_price_ref = joint_green_ref
+        follower.joint_signal_marginal_price_trust_sec = delta_g
+        follower.joint_offset_marginal_price = joint_offset
+        follower.joint_offset_marginal_price_ref = joint_offset_ref
+        follower.joint_offset_marginal_price_trust_sec = delta_o
+        follower.joint_metering_marginal_price = joint_meter
+        follower.joint_metering_marginal_price_ref = joint_meter_ref
+        follower.joint_metering_marginal_price_trust_frac = self.joint_metering_trust_frac
+        follower.joint_vsl_marginal_price = joint_vsl
+        follower.joint_vsl_marginal_price_ref = joint_vsl_ref
+        follower.joint_vsl_marginal_price_trust_kmh = self.joint_vsl_trust_kmh
+        follower.joint_marginal_price_weight = float(self.joint_price_weight)
+        meta["wu_joint_price_green_delta_sec"] = delta_g
+        meta["wu_joint_price_offset_delta_sec"] = delta_o
+        meta["wu_joint_price_metering_delta_veh_h"] = delta_m
+        meta["wu_joint_price_metering_trust_frac"] = (
+            float(self.joint_metering_trust_frac)
+            if self.joint_metering_trust_frac is not None else 0.0
+        )
+        meta["wu_joint_price_vsl_delta_kmh"] = delta_v
+        meta["wu_joint_price_vsl_trust_kmh"] = (
+            float(self.joint_vsl_trust_kmh)
+            if self.joint_vsl_trust_kmh is not None else 0.0
+        )
+
     def _maybe_refresh_signal_prices(
         self,
         state: TrafficState,
@@ -307,15 +497,22 @@ class StackelbergWuMeteredController(StackelbergMPCController):
             follower.vsl_marginal_price = None
         if not self.offset_price_enabled:
             follower.offset_marginal_price = None
+        if not self.joint_price_enabled:
+            follower.joint_signal_marginal_price = None
+            follower.joint_offset_marginal_price = None
+            follower.joint_metering_marginal_price = None
+            follower.joint_vsl_marginal_price = None
         if not (
             self.signal_price_enabled
             or self.metering_price_enabled
             or self.vsl_price_enabled
             or self.offset_price_enabled
+            or self.joint_price_enabled
         ):
             self._signal_price_meta = {
                 "wu_b2_price_enabled": 0.0,
                 "wu_b2_price_refreshed": 0.0,
+                "wu_joint_price_enabled": 0.0,
             }
             return
         net = self.cfg.network
@@ -331,7 +528,7 @@ class StackelbergWuMeteredController(StackelbergMPCController):
                 signal: clamp(previous.green_times.get(f"{signal}_p1", total / 2.0))
                 for signal in net.signals
             }
-            if self.signal_price_enabled else {}
+            if (self.signal_price_enabled or self.joint_price_enabled) else {}
         )
         ramp_caps = {r: float(net.ramp_capacity_veh_h[r]) for r in net.ramps}
         op_meter: Dict[str, float] = (
@@ -339,14 +536,14 @@ class StackelbergWuMeteredController(StackelbergMPCController):
                 r: min(max(float(previous.ramp_metering.get(r, ramp_caps[r])), 0.0), ramp_caps[r])
                 for r in net.ramps
             }
-            if self.metering_price_enabled else {}
+            if (self.metering_price_enabled or self.joint_price_enabled) else {}
         )
         ff = self.cfg.freeway_follower
         vsl_values = [float(v) for v in ff.vsl_set]
         vsl_lower = min(vsl_values) if vsl_values else 0.0
         vsl_upper = max(vsl_values) if vsl_values else 0.0
         op_vsl: Dict[str, float] = {}
-        if self.vsl_price_enabled and vsl_values:
+        if (self.vsl_price_enabled or self.joint_price_enabled) and vsl_values:
             for link in net.freeway_links:
                 for index in range(int(net.freeway_segments_per_link)):
                     key = f"{link}__seg{index}"
@@ -361,9 +558,9 @@ class StackelbergWuMeteredController(StackelbergMPCController):
             {
                 s: float(previous.offsets.get(s, 0.0)) % cycle
                 for s in net.signals
-                if not follower._local_models[s].has_ramps
+                if self.joint_price_enabled or not follower._local_models[s].has_ramps
             }
-            if self.offset_price_enabled else {}
+            if (self.offset_price_enabled or self.joint_price_enabled) else {}
         )
 
         # ---- refresh 판정: 가격 부재 ∨ cadence ∨ event-trigger(운영점 이동) ----
@@ -372,6 +569,15 @@ class StackelbergWuMeteredController(StackelbergMPCController):
             or (self.metering_price_enabled and follower.metering_marginal_price is None)
             or (self.vsl_price_enabled and follower.vsl_marginal_price is None)
             or (self.offset_price_enabled and follower.offset_marginal_price is None)
+            or (
+                self.joint_price_enabled
+                and (
+                    follower.joint_signal_marginal_price is None
+                    or follower.joint_metering_marginal_price is None
+                    or follower.joint_vsl_marginal_price is None
+                    or follower.joint_offset_marginal_price is None
+                )
+            )
         )
         if not refresh and self._leader_global_refresh_active(state):
             refresh = True
@@ -379,7 +585,11 @@ class StackelbergWuMeteredController(StackelbergMPCController):
             # event-trigger: 운영점이 선형화 기준점에서 threshold 이상 이동한 레버가 있으면
             # 재선형화(dual ascent/SQP식 iteration — B1 step35 non-monotone 처방).
             for signal, p1_now in op_green.items():
-                ref = float(follower.signal_marginal_price_ref.get(signal, p1_now))
+                ref_map = (
+                    follower.joint_signal_marginal_price_ref
+                    if self.joint_price_enabled else follower.signal_marginal_price_ref
+                )
+                ref = float(ref_map.get(signal, p1_now))
                 if abs(p1_now - ref) >= float(self.signal_price_refresh_threshold_sec):
                     refresh = True
                     break
@@ -404,9 +614,29 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         if not refresh:
             self._signal_price_meta = dict(self._signal_price_meta)
             self._signal_price_meta["wu_b2_price_refreshed"] = 0.0
+            self._signal_price_meta["wu_joint_price_refreshed"] = 0.0
             return
 
-        meta: Dict[str, float] = {"wu_b2_price_enabled": float(self.signal_price_enabled)}
+        meta: Dict[str, float] = {
+            "wu_b2_price_enabled": float(self.signal_price_enabled),
+            "wu_joint_price_enabled": float(self.joint_price_enabled),
+        }
+        self._refresh_joint_marginal_prices(
+            follower,
+            state,
+            forecast,
+            previous,
+            op_green,
+            op_meter,
+            op_vsl,
+            op_offset,
+            ramp_caps,
+            vsl_lower,
+            vsl_upper,
+            cycle,
+            clamp,
+            meta,
+        )
 
         # ---- green 채널(B2) ----
         if self.signal_price_enabled:

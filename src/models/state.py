@@ -410,6 +410,23 @@ class MPCConfig:
     # 2026-07-03 진단: 등식 budget이 P1로 똑똑해진 자율 metering을 덮어써 standalone
     # 악화(14711.8)·bal_med N_UF 폭주를 만든다 — cap이 그 구조적 처방(N_P cap과 대칭).
     wu_faithful_nuf_coordination_mode: str = "equality"
+    wu_faithful_joint_freeway_rm_vsl: bool = False
+    wu_faithful_joint_urban_green_offset: bool = False
+    wu_faithful_joint_urban_neighbor_tts: bool = False
+    wu_faithful_joint_urban_neighbor_scope: str = "ego_neighbor"
+    wu_faithful_joint_urban_neighbor_weight: float = 1.0
+    wu_faithful_joint_urban_neighbor_max_green_candidates: int = 5
+    wu_faithful_joint_urban_neighbor_max_offset_candidates: int = 4
+    wu_faithful_metering_to_urban_ramp_space: bool = False
+    wu_faithful_joint_metering_split_count: int = 11
+    wu_faithful_joint_marginal_price: bool = False
+    wu_faithful_joint_price_weight: float = 1.0
+    wu_faithful_joint_price_green_delta_sec: float = 6.0
+    wu_faithful_joint_price_offset_delta_sec: float = 15.0
+    wu_faithful_joint_price_metering_delta_veh_h: float = 60.0
+    wu_faithful_joint_price_metering_trust_frac: float = 0.25
+    wu_faithful_joint_price_vsl_delta_kmh: float = 10.0
+    wu_faithful_joint_price_vsl_trust_kmh: float = 10.0
 
 
 @dataclass
@@ -635,6 +652,24 @@ class ExperimentConfig:
             )
         if self.mpc.wu_np_arrival_mode not in {"horizon", "current_interval"}:
             raise ValueError("mpc.wu_np_arrival_mode must be horizon or current_interval.")
+        if self.mpc.wu_faithful_joint_urban_neighbor_scope not in {
+            "ego",
+            "ego_neighbor",
+            "corridor",
+        }:
+            raise ValueError(
+                "mpc.wu_faithful_joint_urban_neighbor_scope must be ego, ego_neighbor, or corridor."
+            )
+        if self.mpc.wu_faithful_joint_urban_neighbor_weight < 0.0:
+            raise ValueError("mpc.wu_faithful_joint_urban_neighbor_weight must be non-negative.")
+        if self.mpc.wu_faithful_joint_urban_neighbor_max_green_candidates <= 0:
+            raise ValueError(
+                "mpc.wu_faithful_joint_urban_neighbor_max_green_candidates must be positive."
+            )
+        if self.mpc.wu_faithful_joint_urban_neighbor_max_offset_candidates <= 0:
+            raise ValueError(
+                "mpc.wu_faithful_joint_urban_neighbor_max_offset_candidates must be positive."
+            )
         cap_drop = self.freeway_offramp_capacity_drop
         if cap_drop.lane_reduction < 0.0:
             raise ValueError("freeway_offramp_capacity_drop.lane_reduction must be non-negative.")

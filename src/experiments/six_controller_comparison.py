@@ -594,6 +594,20 @@ def main(argv: Optional[List[str]] = None) -> None:
     parser.add_argument("--wu-np-storage-guard", action="store_true")
     parser.add_argument("--wu-np-arrival-mode", choices=["horizon", "current_interval"], default=None)
     parser.add_argument("--wu-np-phase-substep", action="store_true")
+    parser.add_argument("--wu-faithful-joint-freeway-rm-vsl", action="store_true")
+    parser.add_argument("--wu-faithful-joint-urban-green-offset", action="store_true")
+    parser.add_argument("--wu-faithful-joint-urban-neighbor-tts", action="store_true")
+    parser.add_argument(
+        "--wu-faithful-joint-urban-neighbor-scope",
+        choices=["ego", "ego_neighbor", "corridor"],
+        default=None,
+    )
+    parser.add_argument("--wu-faithful-joint-urban-neighbor-weight", type=float, default=None)
+    parser.add_argument("--wu-faithful-joint-urban-neighbor-max-green-candidates", type=int, default=None)
+    parser.add_argument("--wu-faithful-joint-urban-neighbor-max-offset-candidates", type=int, default=None)
+    parser.add_argument("--wu-faithful-metering-to-urban-ramp-space", action="store_true")
+    parser.add_argument("--wu-faithful-joint-metering-split-count", type=int, default=None)
+    parser.add_argument("--wu-faithful-joint-marginal-price", action="store_true")
     args = parser.parse_args(argv)
 
     overrides: Dict[str, Any] = {}
@@ -715,6 +729,36 @@ def main(argv: Optional[List[str]] = None) -> None:
         overrides.setdefault("mpc", {})["wu_np_arrival_mode"] = args.wu_np_arrival_mode
     if args.wu_np_phase_substep:
         overrides.setdefault("mpc", {})["wu_np_phase_substep"] = True
+    if args.wu_faithful_joint_freeway_rm_vsl:
+        overrides.setdefault("mpc", {})["wu_faithful_joint_freeway_rm_vsl"] = True
+    if args.wu_faithful_joint_urban_green_offset:
+        overrides.setdefault("mpc", {})["wu_faithful_joint_urban_green_offset"] = True
+    if args.wu_faithful_joint_urban_neighbor_tts:
+        overrides.setdefault("mpc", {})["wu_faithful_joint_urban_neighbor_tts"] = True
+    if args.wu_faithful_joint_urban_neighbor_scope is not None:
+        overrides.setdefault("mpc", {})["wu_faithful_joint_urban_neighbor_scope"] = (
+            args.wu_faithful_joint_urban_neighbor_scope
+        )
+    if args.wu_faithful_joint_urban_neighbor_weight is not None:
+        overrides.setdefault("mpc", {})["wu_faithful_joint_urban_neighbor_weight"] = (
+            args.wu_faithful_joint_urban_neighbor_weight
+        )
+    if args.wu_faithful_joint_urban_neighbor_max_green_candidates is not None:
+        overrides.setdefault("mpc", {})["wu_faithful_joint_urban_neighbor_max_green_candidates"] = (
+            args.wu_faithful_joint_urban_neighbor_max_green_candidates
+        )
+    if args.wu_faithful_joint_urban_neighbor_max_offset_candidates is not None:
+        overrides.setdefault("mpc", {})["wu_faithful_joint_urban_neighbor_max_offset_candidates"] = (
+            args.wu_faithful_joint_urban_neighbor_max_offset_candidates
+        )
+    if args.wu_faithful_metering_to_urban_ramp_space:
+        overrides.setdefault("mpc", {})["wu_faithful_metering_to_urban_ramp_space"] = True
+    if args.wu_faithful_joint_metering_split_count is not None:
+        overrides.setdefault("mpc", {})["wu_faithful_joint_metering_split_count"] = (
+            args.wu_faithful_joint_metering_split_count
+        )
+    if args.wu_faithful_joint_marginal_price:
+        overrides.setdefault("mpc", {})["wu_faithful_joint_marginal_price"] = True
     base_cfg = ExperimentConfig.from_file(args.config, overrides)
     scenarios = load_scenarios(args.scenarios_config)
     if args.scenario == "all":

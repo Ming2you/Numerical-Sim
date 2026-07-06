@@ -486,5 +486,149 @@ class TestGreenPriceProbeAnchor(unittest.TestCase):
             self.assertAlmostEqual(p1_none, p1_pfo, places=9)
 
 
+class TestJointWuFaithfulControls(unittest.TestCase):
+    def _cfg(self) -> ExperimentConfig:
+        return ExperimentConfig.from_file(
+            "src/config/default.yaml",
+            {
+                "simulation": {"T_total": 180.0},
+                "mpc": {
+                    "horizon_steps": 1,
+                    "max_nash_iter": 1,
+                    "wu_faithful_joint_freeway_rm_vsl": True,
+                    "wu_faithful_joint_urban_green_offset": True,
+                    "wu_faithful_metering_to_urban_ramp_space": True,
+                },
+                "freeway_follower": {
+                    "freeway_prediction_horizon_steps": 1,
+                    "vsl_sequence_search": False,
+                },
+            },
+        )
+
+    def test_joint_freeway_metering_search_evaluates_cartesian_combo(self):
+        cfg = self._cfg()
+        follower = WuFaithfulFollower(cfg)
+        link = next(
+            link for link, model in follower._local_freeway_models.items()
+            if len(model.owned_ramps) >= 2
+        )
+        ramps = list(follower._local_freeway_models[link].owned_ramps[:2])
+        caps = {r: float(cfg.network.ramp_capacity_veh_h[r]) for r in ramps}
+        target = {ramps[0]: 0.5 * caps[ramps[0]], ramps[1]: 0.35 * caps[ramps[1]]}
+        seen = []
+
+        def fake_local(link_arg, state_arg, coupling_arg, demand_arg, previous_arg):
+            del link_arg, state_arg, coupling_arg, demand_arg
+            meter = {r: float(previous_arg.ramp_metering[r]) for r in ramps}
+            seen.append(meter)
+            cost = 0.0 if all(abs(meter[r] - target[r]) <= 1.0e-9 for r in ramps) else 100.0
+            return ({link: 100.0}, cost, 1)
+
+        follower._solve_freeway_agent_local = fake_local
+        state = TrafficState.initial(cfg)
+        demand = DemandProfile(cfg, ScenarioConfig("probe")).at(0.0)
+        previous = ControlAction.fixed(cfg)
+
+        _, meter, _ = follower._solve_freeway_agent_metered(
+            link, state, {}, demand, previous, leader=None,
+        )
+
+        self.assertTrue(any(all(abs(row[r] - target[r]) <= 1.0e-9 for r in ramps) for row in seen))
+        for ramp in ramps:
+            self.assertAlmostEqual(float(meter[ramp]), target[ramp], places=9)
+
+    def test_metering_to_urban_feedback_recomputes_drain_after_metering(self):
+        cfg = self._cfg()
+        follower = WuFaithfulFollower(cfg)
+        state = TrafficState.initial(cfg)
+        forecast = DemandProfile(cfg, ScenarioConfig("probe")).horizon(0.0, 1)
+        previous = ControlAction.fixed(cfg)
+        drain_metering_snapshots = []
+
+        def fake_local_vsl(link, state_arg, coupling_arg, demand_arg, previous_arg):
+            del state_arg, coupling_arg, demand_arg
+            n_seg = cfg.network.freeway_segments_per_link
+            return ({f"{link}__seg{i}": 100.0 for i in range(n_seg)} | {link: 100.0}, 0.0, 1)
+
+        def fake_metered(link, state_arg, coupling_arg, demand_arg, snapshot_arg, leader=None):
+            del state_arg, coupling_arg, demand_arg, snapshot_arg, leader
+            n_seg = cfg.network.freeway_segments_per_link
+            meter = {
+                r: 0.25 * float(cfg.network.ramp_capacity_veh_h[r])
+                for r in cfg.network.ramps
+                if cfg.network.ramp_to_freeway.get(r) == link
+            }
+            return ({f"{link}__seg{i}": 100.0 for i in range(n_seg)} | {link: 100.0}, meter, 1)
+
+        def fake_drain(state_arg, control_arg, demand_arg):
+            del state_arg, demand_arg
+            drain_metering_snapshots.append(dict(control_arg.ramp_metering))
+            return {
+                r: float(control_arg.ramp_metering.get(r, cfg.network.ramp_capacity_veh_h[r]))
+                for r in cfg.network.ramps
+            }
+
+        follower._solve_freeway_agent_local = fake_local_vsl
+        follower._solve_freeway_agent_metered = fake_metered
+        follower._frozen_reservoir_drain = fake_drain
+
+        result = follower.solve(state, None, forecast, previous)
+        self.assertGreaterEqual(len(drain_metering_snapshots), 2)
+        self.assertLess(
+            min(drain_metering_snapshots[-1].values()),
+            min(drain_metering_snapshots[0].values()),
+        )
+        self.assertGreater(float(result.control.diagnostics["wu_faithful_post_metering_urban_evals"]), 0.0)
+
+    def test_joint_green_offset_helper_selects_offset_candidate(self):
+        cfg = self._cfg()
+        follower = WuFaithfulFollower(cfg)
+        state = TrafficState.initial(cfg)
+        previous = ControlAction.fixed(cfg)
+        signal = cfg.network.signals[0]
+        target_offset = 0.25 * cfg.network.cycle_length
+
+        def fake_green(signal_arg, *args, **kwargs):
+            del signal_arg, args
+            off = float(kwargs.get("offset_override", 0.0))
+            return 44.0, abs(off - target_offset), 1, 0.0
+
+        follower._solve_urban_agent_local = fake_green
+        p1, off, obj, evals, _ = follower._solve_urban_agent_green_offset_local(
+            signal, state, {}, {}, {}, {}, {}, previous, None, 0.0, None, 1.0, None,
+        )
+
+        self.assertEqual(p1, 44.0)
+        self.assertAlmostEqual(off, target_offset, places=9)
+        self.assertEqual(obj, 0.0)
+        self.assertGreater(evals, 1)
+
+    def test_joint_green_offset_neighbor_score_selects_pair(self):
+        cfg = self._cfg()
+        cfg.mpc.wu_faithful_joint_urban_neighbor_tts = True
+        follower = WuFaithfulFollower(cfg)
+        state = TrafficState.initial(cfg)
+        previous = ControlAction.fixed(cfg)
+        signal = cfg.network.signals[0]
+        demand = DemandProfile(cfg, ScenarioConfig("probe")).at(0.0)
+        target_p1 = float(previous.green_times[f"{signal}_p1"])
+        target_offset = 0.25 * cfg.network.cycle_length
+
+        def fake_neighbor_score(signal_arg, p1, offset, *args):
+            del signal_arg, args
+            return abs(float(p1) - target_p1) + abs(float(offset) - target_offset)
+
+        follower._joint_neighbor_green_offset_score = fake_neighbor_score
+        p1, off, obj, evals, _ = follower._solve_urban_agent_green_offset_local(
+            signal, state, {}, {}, {}, {}, {}, previous, None, 0.0, None, 1.0, demand,
+        )
+
+        self.assertAlmostEqual(p1, target_p1, places=9)
+        self.assertAlmostEqual(off, target_offset, places=9)
+        self.assertEqual(obj, 0.0)
+        self.assertGreater(evals, 1)
+
+
 if __name__ == "__main__":
     unittest.main()

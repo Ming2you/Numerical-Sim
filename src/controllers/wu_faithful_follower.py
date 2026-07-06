@@ -16,6 +16,7 @@ leader는 None(PFO 모드)부터 구현한다.
 """
 from __future__ import annotations
 
+from itertools import product
 import time
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence
 
@@ -106,6 +107,34 @@ class WuFaithfulFollower:
         # freeway agent가 탐색할 ramp metering 후보 분율(×capacity). +41.8% 검증 최적(≈0.5)을
         # 중심으로 0.25~1.0을 덮는다. cap=100%(=metering off)부터 강한 metering 25%까지.
         self.ramp_metering_fractions: tuple[float, ...] = (1.0, 0.7, 0.5, 0.35, 0.25)
+        self.joint_freeway_rm_vsl: bool = bool(getattr(
+            cfg.mpc, "wu_faithful_joint_freeway_rm_vsl", False
+        )) and self.metering_enabled
+        self.joint_urban_green_offset: bool = bool(getattr(
+            cfg.mpc, "wu_faithful_joint_urban_green_offset", False
+        )) and authority == "proposed"
+        self.joint_urban_neighbor_tts: bool = bool(getattr(
+            cfg.mpc, "wu_faithful_joint_urban_neighbor_tts", False
+        )) and self.joint_urban_green_offset
+        self.joint_urban_neighbor_scope: str = str(getattr(
+            cfg.mpc, "wu_faithful_joint_urban_neighbor_scope", "ego_neighbor"
+        )).lower()
+        self.joint_urban_neighbor_weight: float = max(0.0, float(getattr(
+            cfg.mpc, "wu_faithful_joint_urban_neighbor_weight", 1.0
+        )))
+        self.joint_urban_neighbor_max_green_candidates: int = max(1, int(getattr(
+            cfg.mpc, "wu_faithful_joint_urban_neighbor_max_green_candidates", 5
+        )))
+        self.joint_urban_neighbor_max_offset_candidates: int = max(1, int(getattr(
+            cfg.mpc, "wu_faithful_joint_urban_neighbor_max_offset_candidates", 4
+        )))
+        self._joint_urban_neighbor_eval_count: int = 0
+        self.metering_to_urban_ramp_space: bool = bool(getattr(
+            cfg.mpc, "wu_faithful_metering_to_urban_ramp_space", False
+        )) and self.metering_enabled
+        self.joint_metering_split_count: int = max(3, int(getattr(
+            cfg.mpc, "wu_faithful_joint_metering_split_count", 11
+        )))
         # freeway agent own-TTS에 urban 상류 blocked 큐(가상)를 포함할지 (P1, 2026-07-03).
         # 진단 근거: sweet_190(중부하)에서 PFO가 D-ramp metering을 ~546 veh/h로 조이면
         # reservoir(≤ramp_queue_max)가 차고 plant가 urban green release를 ramp_space로
@@ -199,6 +228,32 @@ class WuFaithfulFollower:
         self.offset_marginal_price_ref: Dict[str, float] = {}
         self.offset_marginal_price_weight: float = 1.0
         self.offset_marginal_price_trust_sec: Optional[float] = None
+        self.joint_marginal_price_enabled: bool = bool(getattr(
+            cfg.mpc, "wu_faithful_joint_marginal_price", False
+        ))
+        self.joint_marginal_price_weight: float = float(getattr(
+            cfg.mpc, "wu_faithful_joint_price_weight", 1.0
+        ))
+        self.joint_signal_marginal_price: Optional[Dict[str, float]] = None
+        self.joint_signal_marginal_price_ref: Dict[str, float] = {}
+        self.joint_signal_marginal_price_trust_sec: Optional[float] = float(getattr(
+            cfg.mpc, "wu_faithful_joint_price_green_delta_sec", 6.0
+        ))
+        self.joint_offset_marginal_price: Optional[Dict[str, float]] = None
+        self.joint_offset_marginal_price_ref: Dict[str, float] = {}
+        self.joint_offset_marginal_price_trust_sec: Optional[float] = float(getattr(
+            cfg.mpc, "wu_faithful_joint_price_offset_delta_sec", 15.0
+        ))
+        self.joint_metering_marginal_price: Optional[Dict[str, float]] = None
+        self.joint_metering_marginal_price_ref: Dict[str, float] = {}
+        self.joint_metering_marginal_price_trust_frac: Optional[float] = float(getattr(
+            cfg.mpc, "wu_faithful_joint_price_metering_trust_frac", 0.25
+        ))
+        self.joint_vsl_marginal_price: Optional[Dict[str, float]] = None
+        self.joint_vsl_marginal_price_ref: Dict[str, float] = {}
+        self.joint_vsl_marginal_price_trust_kmh: Optional[float] = float(getattr(
+            cfg.mpc, "wu_faithful_joint_price_vsl_trust_kmh", 10.0
+        ))
         # 신호별 offset 후보 분율(×cycle_length). [0, cycle) 안의 작은 후보집합으로 국소 탐색.
         # 0.0은 현 baseline(offset off). 0~7/8 cycle을 8등분(끝점 cycle 제외).
         self.offset_fractions: tuple[float, ...] = (
@@ -228,6 +283,7 @@ class WuFaithfulFollower:
         # 어댑터가 n_agents를 셀 때 쓰는 속성(six_controller 어댑터 호환).
         self.urban_agents = list(cfg.network.signals)
         self.freeway_agents = list(cfg.network.freeway_links)
+        self._signal_neighbors = self._build_signal_neighbors()
 
     # ---------- per-movement 도착 (결합변수 movement 분해) ----------
 
@@ -541,6 +597,7 @@ class WuFaithfulFollower:
         horizon_h: float = 1.0,
         demand: Optional[DemandStep] = None,
         candidates_override: Optional[Sequence[float]] = None,
+        offset_override: Optional[float] = None,
     ) -> tuple[float, float, int, float]:
         """green p1 후보 탐색 — 반환 (p1*, 자기 TTS objective, evaluations, nin_i*).
 
@@ -624,13 +681,18 @@ class WuFaithfulFollower:
             model.has_ramps
             and demand is not None
             and (
-                self.ramp_aware_phase_resolved
+                self.joint_urban_green_offset
+                or self.ramp_aware_phase_resolved
                 or signal in self._phase_resolved_active_signals
             )
         )
         start_idx = _urban_step_index(state, self.cfg)
         # green search 동안 offset은 snapshot 값(직전 best-response)으로 동결한다.
-        offset_for_green = float(previous.offsets.get(signal, 0.0))
+        offset_for_green = (
+            float(offset_override)
+            if offset_override is not None
+            else float(previous.offsets.get(signal, 0.0))
+        )
         arr_by_substep: Dict[str, List[float]] = {}
         if use_phased or use_phased_ramp:
             arr_by_substep = self._platoon_arrival_profiles(
@@ -654,13 +716,24 @@ class WuFaithfulFollower:
             # B2.1 trust region: 가격 활성 + trust 설정 시, 가격의 선형 근사가 유효한
             # 유한차분 이웃(|p1 − ref| ≤ trust) 밖 후보를 제외한다. 이웃 안 후보가 하나도
             # 없으면 안전하게 전체 후보로 fallback(가격 월권보다 자율 탐색이 낫다).
+            priced_green = self.signal_marginal_price
+            priced_ref = self.signal_marginal_price_ref
+            priced_trust = self.signal_marginal_price_trust_sec
             if (
-                self.signal_marginal_price is not None
-                and self.signal_marginal_price_trust_sec is not None
-                and signal in self.signal_marginal_price
+                self.joint_marginal_price_enabled
+                and self.joint_signal_marginal_price is not None
+                and signal in self.joint_signal_marginal_price
             ):
-                trust = float(self.signal_marginal_price_trust_sec)
-                ref = float(self.signal_marginal_price_ref.get(signal, prev_p1))
+                priced_green = self.joint_signal_marginal_price
+                priced_ref = self.joint_signal_marginal_price_ref
+                priced_trust = self.joint_signal_marginal_price_trust_sec
+            if (
+                priced_green is not None
+                and priced_trust is not None
+                and signal in priced_green
+            ):
+                trust = float(priced_trust)
+                ref = float(priced_ref.get(signal, prev_p1))
                 trusted = [
                     p1 for p1 in candidates if abs(p1 - ref) <= trust + 1.0e-9
                 ]
@@ -728,7 +801,7 @@ class WuFaithfulFollower:
             # B2 가격항: leader가 하달한 per-signal externality 가격(설정 시에만).
             # own-TTS는 그대로 두고 선형 가격만 더한다 — Step B1 검증 형태
             # priced = local + w·g_ext_i·(p1 − p1_ref_i). None이면 완전 휴면(비트 동일).
-            if self.signal_marginal_price is not None:
+            if self.signal_marginal_price is not None and not self.joint_marginal_price_enabled:
                 g_ext = self.signal_marginal_price.get(signal)
                 if g_ext is not None:
                     ref = float(self.signal_marginal_price_ref.get(signal, prev_p1))
@@ -1118,6 +1191,631 @@ class WuFaithfulFollower:
                 ]
             gf[m] = phase_gf[pid]
         return gf
+
+    def _offset_circular_delta(self, offset: float, reference: float) -> float:
+        cycle = max(float(self.cfg.network.cycle_length), 1.0e-9)
+        return ((float(offset) - float(reference) + cycle / 2.0) % cycle) - cycle / 2.0
+
+    def _build_signal_neighbors(self) -> Dict[str, List[str]]:
+        net = self.cfg.network
+        signal_set = set(net.signals)
+        neighbors: Dict[str, set[str]] = {signal: set() for signal in net.signals}
+        for signal, by_leg in net.grid_node_legs.items():
+            if signal not in signal_set or not isinstance(by_leg, Mapping):
+                continue
+            for leg in by_leg.values():
+                if not isinstance(leg, Mapping):
+                    continue
+                if leg.get("type") != "grid":
+                    continue
+                node = str(leg.get("node", ""))
+                if node in signal_set and node != signal:
+                    neighbors[signal].add(node)
+                    neighbors[node].add(signal)
+
+        interface_by_freeway: Dict[str, set[str]] = {}
+        for spec in self._specs.values():
+            signal = str(spec.get("signal", ""))
+            if signal not in signal_set:
+                continue
+            ramp = str(spec.get("ramp", ""))
+            if ramp:
+                link = net.ramp_to_freeway.get(ramp, "")
+                if link:
+                    interface_by_freeway.setdefault(link, set()).add(signal)
+            off_ramp = str(spec.get("off_ramp", ""))
+            if off_ramp:
+                link = net.off_ramp_from_freeway.get(off_ramp, "")
+                if link:
+                    interface_by_freeway.setdefault(link, set()).add(signal)
+        for signals in interface_by_freeway.values():
+            for signal in signals:
+                neighbors[signal].update(s for s in signals if s != signal)
+        return {signal: sorted(values) for signal, values in neighbors.items()}
+
+    def _joint_urban_scored_signals(self, signal: str) -> List[str]:
+        if self.joint_urban_neighbor_scope == "ego":
+            return [signal]
+        if self.joint_urban_neighbor_scope == "corridor":
+            return list(self.cfg.network.signals)
+        return [signal] + [
+            neighbor for neighbor in self._signal_neighbors.get(signal, [])
+            if neighbor != signal
+        ]
+
+    def _nearest_linear_candidate(self, candidates: Sequence[float], target: float) -> float:
+        return float(min(candidates, key=lambda value: abs(float(value) - float(target))))
+
+    def _nearest_offset_candidate(self, candidates: Sequence[float], target: float) -> float:
+        cycle = max(float(self.cfg.network.cycle_length), 1.0e-9)
+        wrapped = float(target) % cycle
+        return float(min(
+            candidates,
+            key=lambda value: abs(self._offset_circular_delta(float(value) % cycle, wrapped)),
+        ))
+
+    def _append_unique_linear(
+        self,
+        out: List[float],
+        value: float,
+        limit: int,
+    ) -> None:
+        if len(out) >= limit:
+            return
+        if not any(abs(float(value) - existing) <= 1.0e-9 for existing in out):
+            out.append(float(value))
+
+    def _append_unique_offset(
+        self,
+        out: List[float],
+        value: float,
+        limit: int,
+    ) -> None:
+        if len(out) >= limit:
+            return
+        if not any(abs(self._offset_circular_delta(float(value), existing)) <= 1.0e-9 for existing in out):
+            out.append(float(value))
+
+    def _sparse_joint_neighbor_green_candidates(
+        self,
+        signal: str,
+        state: TrafficState,
+        coupling: Mapping[str, float],
+        previous: ControlAction,
+        candidates: Sequence[float],
+    ) -> List[float]:
+        if len(candidates) <= self.joint_urban_neighbor_max_green_candidates:
+            return [float(v) for v in candidates]
+        net = self.cfg.network
+        sim = self.cfg.simulation
+        model = self._local_models[signal]
+        total = float(net.effective_green_total)
+        substeps = max(1, self.cfg.mpc.horizon_steps) * max(1, sim.K_cu)
+        dt_h = sim.T_u_h
+        q0 = {
+            m: max(0.0, float(state.urban_movement_queue.get(m, 0.0)))
+            for m in model.movements
+        }
+        arr_phase = {
+            pid: float(coupling.get(f"arr_{signal}_{pid}", 0.0))
+            for pid in ("p1", "p2")
+        }
+        p1_pressure = q0_sum(q0, model, "p1") + arr_phase["p1"] * dt_h * substeps
+        p2_pressure = q0_sum(q0, model, "p2") + arr_phase["p2"] * dt_h * substeps
+        anchors = [
+            float(previous.green_times.get(f"{signal}_p1", total / 2.0)),
+            total / 2.0,
+            queue_pressure_green_target(p1_pressure, p2_pressure, self.cfg),
+        ]
+        if (
+            self.signal_marginal_price is not None
+            and not self.joint_marginal_price_enabled
+            and signal in self.signal_marginal_price
+        ):
+            anchors.append(float(self.signal_marginal_price_ref.get(signal, anchors[0])))
+        if (
+            self.joint_marginal_price_enabled
+            and self.joint_signal_marginal_price is not None
+            and signal in self.joint_signal_marginal_price
+        ):
+            anchors.append(float(self.joint_signal_marginal_price_ref.get(signal, anchors[0])))
+
+        limit = self.joint_urban_neighbor_max_green_candidates
+        out: List[float] = []
+        for anchor in anchors:
+            self._append_unique_linear(out, self._nearest_linear_candidate(candidates, anchor), limit)
+        for delta in (6.0, -6.0, 12.0, -12.0):
+            for anchor in anchors:
+                self._append_unique_linear(
+                    out,
+                    self._nearest_linear_candidate(candidates, anchor + delta),
+                    limit,
+                )
+                if len(out) >= limit:
+                    break
+            if len(out) >= limit:
+                break
+        for value in candidates:
+            self._append_unique_linear(out, float(value), limit)
+            if len(out) >= limit:
+                break
+        return sorted(out)
+
+    def _sparse_joint_neighbor_offset_candidates(
+        self,
+        signal: str,
+        previous: ControlAction,
+        candidates: Sequence[float],
+    ) -> List[float]:
+        if len(candidates) <= self.joint_urban_neighbor_max_offset_candidates:
+            return [float(v) for v in candidates]
+        cycle = max(float(self.cfg.network.cycle_length), 1.0e-9)
+        prev_offset = float(previous.offsets.get(signal, 0.0)) % cycle
+        anchors = [prev_offset, 0.0]
+        if self.offset_marginal_price is not None and signal in self.offset_marginal_price:
+            anchors.append(float(self.offset_marginal_price_ref.get(signal, prev_offset)) % cycle)
+        if (
+            self.joint_marginal_price_enabled
+            and self.joint_offset_marginal_price is not None
+            and signal in self.joint_offset_marginal_price
+        ):
+            anchors.append(float(self.joint_offset_marginal_price_ref.get(signal, prev_offset)) % cycle)
+
+        limit = self.joint_urban_neighbor_max_offset_candidates
+        out: List[float] = []
+        for anchor in anchors:
+            self._append_unique_offset(out, self._nearest_offset_candidate(candidates, anchor), limit)
+        for delta in (cycle / 8.0, -cycle / 8.0, cycle / 4.0, -cycle / 4.0):
+            for anchor in anchors:
+                self._append_unique_offset(
+                    out,
+                    self._nearest_offset_candidate(candidates, anchor + delta),
+                    limit,
+                )
+                if len(out) >= limit:
+                    break
+            if len(out) >= limit:
+                break
+        for value in candidates:
+            self._append_unique_offset(out, float(value), limit)
+            if len(out) >= limit:
+                break
+        return sorted(out)
+
+    def _candidate_control_with_green_offset(
+        self,
+        snapshot: ControlAction,
+        signal: str,
+        p1: float,
+        offset: float,
+    ) -> ControlAction:
+        candidate = snapshot.copy()
+        candidate.green_times[f"{signal}_p1"] = float(p1)
+        candidate.green_times[f"{signal}_p2"] = float(
+            self.cfg.network.effective_green_total - p1
+        )
+        candidate.offsets[signal] = float(offset)
+        candidate.inflow_outflow_allocation = {}
+        return candidate
+
+    def _local_signal_tts_for_candidate(
+        self,
+        score_signal: str,
+        state: TrafficState,
+        candidate: ControlAction,
+        demand: DemandStep,
+        s_eff_frozen: Mapping[str, float],
+        reservoir_drain: Mapping[str, float],
+        freeway_congestion: Mapping[str, float],
+    ) -> float:
+        sim = self.cfg.simulation
+        model = self._local_models[score_signal]
+        substeps = max(1, self.cfg.mpc.horizon_steps) * max(1, sim.K_cu)
+        dt_h = sim.T_u_h
+        coupling = self._wu._coupling(state, candidate, demand)
+        arr_movement = self._per_movement_arrivals(score_signal, state, candidate, demand)
+        q0 = {
+            m: max(0.0, float(state.urban_movement_queue.get(m, 0.0)))
+            for m in model.movements
+        }
+        arr_phase = {
+            pid: float(coupling.get(f"arr_{score_signal}_{pid}", 0.0))
+            for pid in ("p1", "p2")
+        }
+
+        offramp_inflow: Dict[str, float] = {}
+        offramp_contrib_phase = {"p1": 0.0, "p2": 0.0}
+        if model.has_ramps:
+            for off_ramp, movements in model.offramp_movements.items():
+                inflow = self._frozen_offramp_inflow(off_ramp, state)
+                offramp_inflow[off_ramp] = inflow
+                for movement in movements:
+                    offramp_contrib_phase[model.phase_of[movement]] += (
+                        model.beta_of[movement] * inflow
+                    )
+
+        arr_mv: Dict[str, float] = {}
+        for phase_id in ("p1", "p2"):
+            phase_movements = [
+                movement
+                for movement in model.movements
+                if model.phase_of[movement] == phase_id
+                and model.kind_of[movement] != "off_ramp"
+            ]
+            raw_sum = sum(
+                max(0.0, float(arr_movement.get(movement, 0.0)))
+                for movement in phase_movements
+            )
+            target = max(0.0, arr_phase[phase_id] - offramp_contrib_phase[phase_id])
+            if raw_sum > 1.0e-12:
+                scale = target / raw_sum
+                for movement in phase_movements:
+                    arr_mv[movement] = (
+                        max(0.0, float(arr_movement.get(movement, 0.0))) * scale
+                    )
+            else:
+                for movement in phase_movements:
+                    arr_mv[movement] = 0.0
+
+        s_eff0 = {
+            model.receiving_of[movement]: float(
+                s_eff_frozen.get(model.receiving_of[movement], 0.0)
+            )
+            for movement in model.movements
+            if model.receiving_of[movement]
+        }
+        green_p1 = float(candidate.green_times.get(
+            f"{score_signal}_p1", self.cfg.network.effective_green_total / 2.0
+        ))
+        green_p2 = float(candidate.green_times.get(
+            f"{score_signal}_p2", self.cfg.network.effective_green_total - green_p1
+        ))
+        offset = float(candidate.offsets.get(score_signal, 0.0))
+        start_idx = _urban_step_index(state, self.cfg)
+
+        arr_by_substep = self._platoon_arrival_profiles(
+            score_signal,
+            state,
+            candidate,
+            demand,
+            arr_mv,
+            substeps,
+            start_idx,
+        )
+        gf_by_substep = self._offset_green_fractions(
+            score_signal,
+            green_p1,
+            offset,
+            substeps,
+            start_idx,
+        )
+        if model.has_ramps:
+            arr_by_substep = {
+                m: prof for m, prof in arr_by_substep.items()
+                if model.kind_of.get(m) != "off_ramp"
+            }
+            offramp_occ0 = {
+                off_ramp: self._offramp_occupancy(off_ramp, state)
+                for off_ramp in model.offramp_movements
+            }
+            ramp_queue0 = {
+                ramp: max(0.0, float(state.ramp_queue.get(ramp, 0.0)))
+                for ramp in model.onramp_movements
+            }
+            return float(rollout_local_tts_ramp_aware(
+                model,
+                q0,
+                arr_mv,
+                s_eff0,
+                offramp_inflow,
+                offramp_occ0,
+                ramp_queue0,
+                reservoir_drain,
+                freeway_congestion,
+                self.ramp_metering_weight,
+                green_p1,
+                green_p2,
+                substeps,
+                dt_h,
+                arr_by_substep=arr_by_substep,
+                gf_by_substep=gf_by_substep,
+            ))
+
+        return float(rollout_local_tts_phased(
+            model,
+            q0,
+            arr_by_substep,
+            gf_by_substep,
+            s_eff0,
+            substeps,
+            dt_h,
+        ))
+
+    def _joint_neighbor_green_offset_score(
+        self,
+        signal: str,
+        p1: float,
+        offset: float,
+        state: TrafficState,
+        snapshot: ControlAction,
+        demand: DemandStep,
+        s_eff_frozen: Mapping[str, float],
+        reservoir_drain: Mapping[str, float],
+        freeway_congestion: Mapping[str, float],
+    ) -> float:
+        candidate = self._candidate_control_with_green_offset(snapshot, signal, p1, offset)
+        scored = self._joint_urban_scored_signals(signal)
+        own_score = 0.0
+        external_score = 0.0
+        for scored_signal in scored:
+            value = self._local_signal_tts_for_candidate(
+                scored_signal,
+                state,
+                candidate,
+                demand,
+                s_eff_frozen,
+                reservoir_drain,
+                freeway_congestion,
+            )
+            if scored_signal == signal:
+                own_score += value
+            else:
+                external_score += value
+        self._joint_urban_neighbor_eval_count += len(scored)
+        return float(own_score + self.joint_urban_neighbor_weight * external_score)
+
+    def _urban_offset_candidates(self, signal: str, snapshot: ControlAction) -> List[float]:
+        cycle = max(float(self.cfg.network.cycle_length), 1.0e-9)
+        previous_offset = float(snapshot.offsets.get(signal, 0.0)) % cycle
+        candidates = {0.0, previous_offset}
+        candidates.update((float(frac) * cycle) % cycle for frac in self.offset_fractions)
+        price_active = self.offset_marginal_price is not None and signal in self.offset_marginal_price
+        joint_price_active = (
+            self.joint_marginal_price_enabled
+            and self.joint_offset_marginal_price is not None
+            and signal in self.joint_offset_marginal_price
+        )
+        if price_active:
+            ref = float(self.offset_marginal_price_ref.get(signal, previous_offset)) % cycle
+            candidates.add(ref)
+            trust = self.offset_marginal_price_trust_sec
+            if trust is not None:
+                trusted = {
+                    off for off in candidates
+                    if abs(self._offset_circular_delta(off, ref)) <= float(trust) + 1.0e-9
+                }
+                if trusted:
+                    candidates = trusted
+        if joint_price_active:
+            ref = float(self.joint_offset_marginal_price_ref.get(signal, previous_offset)) % cycle
+            candidates.add(ref)
+            trust = self.joint_offset_marginal_price_trust_sec
+            if trust is not None:
+                trusted = {
+                    off for off in candidates
+                    if abs(self._offset_circular_delta(off, ref)) <= float(trust) + 1.0e-9
+                }
+                if trusted:
+                    candidates = trusted
+        return sorted(float(v) for v in candidates)
+
+    def _offset_price_cost(self, signal: str, offset: float, previous_offset: float) -> float:
+        if self.joint_marginal_price_enabled:
+            return 0.0
+        if self.offset_marginal_price is None or signal not in self.offset_marginal_price:
+            return 0.0
+        cycle = max(float(self.cfg.network.cycle_length), 1.0e-9)
+        ref = float(self.offset_marginal_price_ref.get(signal, previous_offset)) % cycle
+        g_off = float(self.offset_marginal_price.get(signal, 0.0))
+        return float(self.offset_marginal_price_weight * g_off * self._offset_circular_delta(offset % cycle, ref))
+
+    def _joint_urban_price_cost(
+        self,
+        signal: str,
+        p1: float,
+        offset: float,
+        previous_p1: float,
+        previous_offset: float,
+    ) -> float:
+        if not self.joint_marginal_price_enabled:
+            return 0.0
+        cost = 0.0
+        if self.joint_signal_marginal_price is not None:
+            g_green = self.joint_signal_marginal_price.get(signal)
+            if g_green is not None:
+                ref = float(self.joint_signal_marginal_price_ref.get(signal, previous_p1))
+                cost += float(g_green) * (float(p1) - ref)
+        if self.joint_offset_marginal_price is not None:
+            g_offset = self.joint_offset_marginal_price.get(signal)
+            if g_offset is not None:
+                cycle = max(float(self.cfg.network.cycle_length), 1.0e-9)
+                ref = float(self.joint_offset_marginal_price_ref.get(signal, previous_offset)) % cycle
+                cost += float(g_offset) * self._offset_circular_delta(float(offset) % cycle, ref)
+        return float(self.joint_marginal_price_weight * cost)
+
+    def _joint_freeway_price_cost(
+        self,
+        link: str,
+        meter: Mapping[str, float],
+        vsl_dict: Mapping[str, float],
+        snapshot: ControlAction,
+        caps: Mapping[str, float],
+    ) -> float:
+        if not self.joint_marginal_price_enabled:
+            return 0.0
+        total_price = 0.0
+        if self.joint_metering_marginal_price is not None:
+            for ramp, cap in caps.items():
+                g_meter = self.joint_metering_marginal_price.get(ramp)
+                if g_meter is None:
+                    continue
+                ref = float(self.joint_metering_marginal_price_ref.get(
+                    ramp, float(snapshot.ramp_metering.get(ramp, cap))
+                ))
+                value = float(meter.get(ramp, ref))
+                trust_frac = self.joint_metering_marginal_price_trust_frac
+                if trust_frac is not None:
+                    trust = float(trust_frac) * float(cap)
+                    if abs(value - ref) > trust + 1.0e-9:
+                        return float("inf")
+                total_price += float(g_meter) * (value - ref)
+        if self.joint_vsl_marginal_price is not None:
+            for key, g_vsl in self.joint_vsl_marginal_price.items():
+                if not key.startswith(f"{link}__seg"):
+                    continue
+                ref = float(self.joint_vsl_marginal_price_ref.get(
+                    key, float(snapshot.vsl.get(key, snapshot.vsl.get(link, self.cfg.network.v_free)))
+                ))
+                value = float(vsl_dict.get(key, ref))
+                trust = self.joint_vsl_marginal_price_trust_kmh
+                if trust is not None and abs(value - ref) > float(trust) + 1.0e-9:
+                    return float("inf")
+                total_price += float(g_vsl) * (value - ref)
+        return float(self.joint_marginal_price_weight * total_price)
+
+    def _solve_urban_agent_green_offset_local(
+        self,
+        signal: str,
+        state: TrafficState,
+        coupling: Mapping[str, float],
+        arr_movement: Mapping[str, float],
+        s_eff_frozen: Mapping[str, float],
+        reservoir_drain: Mapping[str, float],
+        freeway_congestion: Mapping[str, float],
+        previous: ControlAction,
+        leader: Optional[object] = None,
+        lambda_p: float = 0.0,
+        forecast_arrivals: Optional[Mapping[str, float]] = None,
+        horizon_h: float = 1.0,
+        demand: Optional[DemandStep] = None,
+    ) -> tuple[float, float, float, int, float]:
+        """Joint local search over (green p1, offset) with the same local TTS proxy."""
+        prev_offset = float(previous.offsets.get(signal, 0.0))
+        best_p1 = float(previous.green_times.get(
+            f"{signal}_p1", self.cfg.network.effective_green_total / 2.0
+        ))
+        best_offset = prev_offset
+        best_obj = float("inf")
+        best_nin = 0.0
+        evals = 0
+        if self.joint_urban_neighbor_tts and demand is not None:
+            net = self.cfg.network
+            total = net.effective_green_total
+            smooth_w = self.cfg.urban_follower.green_smoothness_weight
+            prev_p1 = float(previous.green_times.get(f"{signal}_p1", total / 2.0))
+            p1_candidates = self._urban_green_candidates(signal, state, coupling, previous)
+            p1_candidates = self._sparse_joint_neighbor_green_candidates(
+                signal, state, coupling, previous, p1_candidates
+            )
+            priced_green = self.signal_marginal_price
+            priced_ref = self.signal_marginal_price_ref
+            priced_trust = self.signal_marginal_price_trust_sec
+            if (
+                self.joint_marginal_price_enabled
+                and self.joint_signal_marginal_price is not None
+                and signal in self.joint_signal_marginal_price
+            ):
+                priced_green = self.joint_signal_marginal_price
+                priced_ref = self.joint_signal_marginal_price_ref
+                priced_trust = self.joint_signal_marginal_price_trust_sec
+            if (
+                priced_green is not None
+                and priced_trust is not None
+                and signal in priced_green
+            ):
+                ref = float(priced_ref.get(signal, prev_p1))
+                trusted = [
+                    p1 for p1 in p1_candidates
+                    if abs(float(p1) - ref) <= float(priced_trust) + 1.0e-9
+                ]
+                if trusted:
+                    p1_candidates = trusted
+
+            fa = forecast_arrivals if forecast_arrivals is not None else {}
+            dual_mode = leader is not None and self.use_dual_np
+            legacy_mode = leader is not None and not self.use_dual_np
+            n_p_star = float(getattr(leader, "N_P_star", 0.0)) if leader is not None else 0.0
+            w_p = float(self.cfg.leader.w_P)
+            omega_p = float(self._wu._omega_p.get(signal, 0.0))
+            np_setpoint = omega_p * n_p_star
+            cost_norm = max(
+                1.0e-9,
+                float(max(1, self.cfg.mpc.horizon_steps) * max(1, self.cfg.simulation.K_cu))
+                * self.cfg.simulation.T_u_h,
+            )
+            scored_count = max(1, len(self._joint_urban_scored_signals(signal)))
+            offset_candidates = self._sparse_joint_neighbor_offset_candidates(
+                signal, previous, self._urban_offset_candidates(signal, previous)
+            )
+            for offset in offset_candidates:
+                for p1 in p1_candidates:
+                    p2 = total - float(p1)
+                    if p2 < net.green_min - 1.0e-9 or p2 > net.green_max + 1.0e-9:
+                        continue
+                    obj = self._joint_neighbor_green_offset_score(
+                        signal,
+                        float(p1),
+                        float(offset),
+                        state,
+                        previous,
+                        demand,
+                        s_eff_frozen,
+                        reservoir_drain,
+                        freeway_congestion,
+                    )
+                    obj += smooth_w * abs(float(p1) - prev_p1)
+                    if (
+                        self.signal_marginal_price is not None
+                        and not self.joint_marginal_price_enabled
+                    ):
+                        g_ext = self.signal_marginal_price.get(signal)
+                        if g_ext is not None:
+                            ref = float(self.signal_marginal_price_ref.get(signal, prev_p1))
+                            obj += (
+                                self.signal_marginal_price_weight
+                                * float(g_ext)
+                                * (float(p1) - ref)
+                            )
+                    obj += self._offset_price_cost(signal, float(offset), prev_offset)
+                    obj += self._joint_urban_price_cost(
+                        signal, float(p1), float(offset), prev_p1, prev_offset
+                    )
+                    nin = self._agent_net_inflow_veh(signal, float(p1), state, fa, horizon_h)
+                    if dual_mode:
+                        obj += lambda_p * nin
+                    elif legacy_mode and w_p > 0.0:
+                        mean_accum = obj / cost_norm
+                        obj += w_p * max(0.0, mean_accum - np_setpoint) * cost_norm
+                    evals += scored_count
+                    if obj < best_obj - 1.0e-9:
+                        best_p1, best_offset, best_obj, best_nin = (
+                            float(p1), float(offset), float(obj), float(nin)
+                        )
+            return best_p1, best_offset, best_obj, evals, best_nin
+
+        for offset in self._urban_offset_candidates(signal, previous):
+            p1, obj, e, nin = self._solve_urban_agent_local(
+                signal, state, coupling, arr_movement, s_eff_frozen,
+                reservoir_drain, freeway_congestion, previous, leader,
+                lambda_p, forecast_arrivals, horizon_h, demand,
+                offset_override=offset,
+            )
+            obj += self._offset_price_cost(signal, offset, prev_offset)
+            obj += self._joint_urban_price_cost(
+                signal,
+                p1,
+                offset,
+                float(previous.green_times.get(
+                    f"{signal}_p1", self.cfg.network.effective_green_total / 2.0
+                )),
+                prev_offset,
+            )
+            evals += e
+            if obj < best_obj - 1.0e-9:
+                best_p1, best_offset, best_obj, best_nin = (
+                    float(p1), float(offset), float(obj), float(nin)
+                )
+        return best_p1, best_offset, best_obj, evals, best_nin
 
     # ---------- per-signal 국소 OFFSET 탐색 (PLATOON-AWARE, "proposed" authority 전용) ----------
 
@@ -1599,7 +2297,7 @@ class WuFaithfulFollower:
                 )
             cost += smooth_w * smooth
             # B3 VSL 가격항(설정 시에만): + w·g·(vsl_seg − ref_seg). 기본 None=완전 휴면.
-            if self.vsl_marginal_price:
+            if self.vsl_marginal_price and not self.joint_marginal_price_enabled:
                 for i, value in enumerate(first_vec):
                     key = f"{link}__seg{i}"
                     g_vsl = self.vsl_marginal_price.get(key)
@@ -1692,6 +2390,8 @@ class WuFaithfulFollower:
         )
 
         def _price_metering_cost(meter: Mapping[str, float]) -> float:
+            if self.joint_marginal_price_enabled:
+                return 0.0
             if self.metering_marginal_price is None or not owned_ramps:
                 return 0.0
             total_price = 0.0
@@ -1728,6 +2428,9 @@ class WuFaithfulFollower:
             }
             best_vsl, best_cost, e0 = _solve_with(best_meter)
             best_cost += _price_metering_cost(best_meter)
+            best_cost += self._joint_freeway_price_cost(
+                link, best_meter, best_vsl, snapshot, caps
+            )
             evals_total += e0
             for ramp in owned_ramps:
                 local_best = best_meter[ramp]
@@ -1784,6 +2487,9 @@ class WuFaithfulFollower:
                     trial[ramp] = cand_val
                     vsl_dict, cost, e = _solve_with(trial)
                     cost += _price_metering_cost(trial)
+                    cost += self._joint_freeway_price_cost(
+                        link, trial, vsl_dict, snapshot, caps
+                    )
                     evals_total += e
                     if cost < best_cost:
                         best_cost, best_vsl, local_best = cost, vsl_dict, cand_val
@@ -1830,7 +2536,38 @@ class WuFaithfulFollower:
                     for r in owned_ramps
                 })
                 best_vsl, best_cost, e0 = _solve_with(best_meter)
+                best_cost += self._joint_freeway_price_cost(
+                    link, best_meter, best_vsl, snapshot, caps
+                )
                 evals_total += e0
+                if self.joint_freeway_rm_vsl and owned_ramps:
+                    values_by_ramp: List[List[float]] = []
+                    for ramp in owned_ramps:
+                        values = {float(np.clip(best_meter.get(ramp, caps[ramp]), 0.0, caps[ramp]))}
+                        values.update(
+                            float(np.clip(frac * caps[ramp], 0.0, caps[ramp]))
+                            for frac in self.ramp_metering_fractions
+                        )
+                        values_by_ramp.append(sorted(values))
+                    seen: set[tuple[float, ...]] = {
+                        tuple(round(float(best_meter[r]), 9) for r in owned_ramps)
+                    }
+                    for combo in product(*values_by_ramp):
+                        trial = _project_to_cap({
+                            ramp: float(value) for ramp, value in zip(owned_ramps, combo)
+                        })
+                        key = tuple(round(float(trial[r]), 9) for r in owned_ramps)
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        vsl_dict, cost, e = _solve_with(trial)
+                        cost += self._joint_freeway_price_cost(
+                            link, trial, vsl_dict, snapshot, caps
+                        )
+                        evals_total += e
+                        if cost < best_cost:
+                            best_cost, best_vsl, best_meter = cost, vsl_dict, dict(trial)
+                    return best_vsl, best_meter, evals_total
                 for ramp in owned_ramps:
                     for frac in self.ramp_metering_fractions:
                         trial = dict(best_meter)
@@ -1842,6 +2579,9 @@ class WuFaithfulFollower:
                         ):
                             continue
                         vsl_dict, cost, e = _solve_with(trial)
+                        cost += self._joint_freeway_price_cost(
+                            link, trial, vsl_dict, snapshot, caps
+                        )
                         evals_total += e
                         if cost < best_cost:
                             best_cost, best_vsl, best_meter = cost, vsl_dict, dict(trial)
@@ -1856,6 +2596,9 @@ class WuFaithfulFollower:
                 r0 = owned_ramps[0]
                 meter = {r0: float(np.clip(budget, 0.0, caps[r0]))}
                 best_vsl, best_cost, e = _solve_with(meter)
+                best_cost += self._joint_freeway_price_cost(
+                    link, meter, best_vsl, snapshot, caps
+                )
                 best_meter = meter
                 evals_total += e
             else:
@@ -1868,12 +2611,16 @@ class WuFaithfulFollower:
                 if hi - lo <= 1.0e-9:
                     splits = [lo]
                 else:
-                    splits = [float(v) for v in np.linspace(lo, hi, 7)]
+                    split_count = self.joint_metering_split_count if self.joint_freeway_rm_vsl else 7
+                    splits = [float(v) for v in np.linspace(lo, hi, split_count)]
                 for m1 in splits:
                     m1c = float(np.clip(m1, 0.0, cap1))
                     m2c = float(np.clip(budget - m1c, 0.0, cap2))
                     meter = {r1: m1c, r2: m2c}
                     vsl_dict, cost, e = _solve_with(meter)
+                    cost += self._joint_freeway_price_cost(
+                        link, meter, vsl_dict, snapshot, caps
+                    )
                     evals_total += e
                     if cost < best_cost:
                         best_cost, best_vsl, best_meter = cost, vsl_dict, dict(meter)
@@ -1890,7 +2637,41 @@ class WuFaithfulFollower:
         # 초기 best 비용·VSL(현재 metering에서).
         best_vsl, best_cost, e0 = _solve_with(best_meter)
         best_cost += _price_metering_cost(best_meter)
+        best_cost += self._joint_freeway_price_cost(
+            link, best_meter, best_vsl, snapshot, caps
+        )
         evals_total += e0
+
+        if self.joint_freeway_rm_vsl and owned_ramps:
+            values_by_ramp: List[List[float]] = []
+            for ramp in owned_ramps:
+                values = {float(np.clip(best_meter.get(ramp, caps[ramp]), 0.0, caps[ramp]))}
+                values.update(
+                    float(np.clip(frac * caps[ramp], 0.0, caps[ramp]))
+                    for frac in self.ramp_metering_fractions
+                )
+                values_by_ramp.append(sorted(values))
+            seen: set[tuple[float, ...]] = {
+                tuple(round(float(best_meter[r]), 9) for r in owned_ramps)
+            }
+            for combo in product(*values_by_ramp):
+                key = tuple(round(float(v), 9) for v in combo)
+                if key in seen:
+                    continue
+                seen.add(key)
+                trial = {
+                    ramp: float(np.clip(value, 0.0, caps[ramp]))
+                    for ramp, value in zip(owned_ramps, combo)
+                }
+                vsl_dict, cost, e = _solve_with(trial)
+                cost += _price_metering_cost(trial)
+                cost += self._joint_freeway_price_cost(
+                    link, trial, vsl_dict, snapshot, caps
+                )
+                evals_total += e
+                if cost < best_cost:
+                    best_cost, best_vsl, best_meter = cost, vsl_dict, dict(trial)
+            return best_vsl, best_meter, evals_total
 
         # ramp별 좌표하강: 각 ramp의 5개 분율을 훑어 own-TTS 최저 분율로 갱신.
         for ramp in owned_ramps:
@@ -1934,6 +2715,9 @@ class WuFaithfulFollower:
                 trial[ramp] = cand_val
                 vsl_dict, cost, e = _solve_with(trial)
                 cost += _price_metering_cost(trial)
+                cost += self._joint_freeway_price_cost(
+                    link, trial, vsl_dict, snapshot, caps
+                )
                 evals_total += e
                 if cost < best_cost:
                     best_cost, best_vsl, local_best_meter = cost, vsl_dict, cand_val
@@ -2194,6 +2978,7 @@ class WuFaithfulFollower:
         control = ControlAction.uncontrolled(self.cfg)
         control.green_times = dict(previous.green_times)
         control.vsl = dict(previous.vsl)
+        control.offsets = dict(previous.offsets)
         control.inflow_outflow_allocation = {}
         coupling = self._wu._coupling(state, control, demand)
         if self._prev_coupling is not None:
@@ -2355,15 +3140,24 @@ class WuFaithfulFollower:
                 inflow_outflow_allocation={},
             )
             new_green: Dict[str, float] = {}
+            new_offsets: Dict[str, float] = {}
             new_vsl: Dict[str, float] = {}
             sum_nin = 0.0  # 이 sweep의 Σ_i nin_i(현 λ에서 각 agent가 commit한 net inflow).
             for signal in net.signals:
                 arr_movement = self._per_movement_arrivals(signal, state, snapshot, demand)
-                p1, _, e, nin_i = self._solve_urban_agent_local(
-                    signal, state, coupling, arr_movement, s_eff_frozen,
-                    reservoir_drain, freeway_congestion, snapshot, leader,
-                    lambda_p, forecast_arrivals, horizon_h, demand,
-                )
+                if self.joint_urban_green_offset:
+                    p1, off, _, e, nin_i = self._solve_urban_agent_green_offset_local(
+                        signal, state, coupling, arr_movement, s_eff_frozen,
+                        reservoir_drain, freeway_congestion, snapshot, leader,
+                        lambda_p, forecast_arrivals, horizon_h, demand,
+                    )
+                    new_offsets[signal] = off
+                else:
+                    p1, _, e, nin_i = self._solve_urban_agent_local(
+                        signal, state, coupling, arr_movement, s_eff_frozen,
+                        reservoir_drain, freeway_congestion, snapshot, leader,
+                        lambda_p, forecast_arrivals, horizon_h, demand,
+                    )
                 new_green[f"{signal}_p1"] = p1
                 new_green[f"{signal}_p2"] = net.effective_green_total - p1
                 sum_nin += nin_i
@@ -2379,6 +3173,7 @@ class WuFaithfulFollower:
                 new_vsl.update(vsl_dict)
                 evals += e
             control.green_times.update(new_green)
+            control.offsets.update(new_offsets)
             control.vsl.update(new_vsl)
             # outgoing 결합변수 갱신 후 under-relaxation 합성.
             predicted = self._wu._coupling(state, control, demand)
@@ -2435,7 +3230,9 @@ class WuFaithfulFollower:
         offsets_off_zero = 0
         # F3: offset 가격이 하달돼 있으면 offset 탐색을 활성화(자율 offset은 여전히 OFF —
         # 가격+trust가 방향과 보폭을 주는 leader-coordinated 모드).
-        offset_active = self.offset_enabled or (self.offset_marginal_price is not None)
+        offset_active = (
+            self.offset_enabled or (self.offset_marginal_price is not None)
+        ) and not self.joint_urban_green_offset
         if offset_active:
             offset_snapshot = dict(control.green_times)
             for signal in net.signals:
@@ -2480,6 +3277,42 @@ class WuFaithfulFollower:
                 )
             control.vsl.update(vsl_dict)
             evals += e
+        post_metering_urban_evals = 0
+        if self.metering_to_urban_ramp_space:
+            reservoir_drain = self._frozen_reservoir_drain(state, control, demand)
+            post_snapshot = ControlAction(
+                ramp_metering=dict(control.ramp_metering),
+                vsl=dict(control.vsl),
+                green_times=dict(control.green_times),
+                offsets=dict(control.offsets),
+                inflow_outflow_allocation={},
+            )
+            post_green: Dict[str, float] = {}
+            post_offsets: Dict[str, float] = {}
+            sum_nin = 0.0
+            for signal in net.signals:
+                arr_movement = self._per_movement_arrivals(signal, state, post_snapshot, demand)
+                if self.joint_urban_green_offset:
+                    p1, off, _, e, nin_i = self._solve_urban_agent_green_offset_local(
+                        signal, state, coupling, arr_movement, s_eff_frozen,
+                        reservoir_drain, freeway_congestion, post_snapshot, leader,
+                        lambda_p, forecast_arrivals, horizon_h, demand,
+                    )
+                    post_offsets[signal] = off
+                else:
+                    p1, _, e, nin_i = self._solve_urban_agent_local(
+                        signal, state, coupling, arr_movement, s_eff_frozen,
+                        reservoir_drain, freeway_congestion, post_snapshot, leader,
+                        lambda_p, forecast_arrivals, horizon_h, demand,
+                    )
+                post_green[f"{signal}_p1"] = p1
+                post_green[f"{signal}_p2"] = net.effective_green_total - p1
+                sum_nin += nin_i
+                post_metering_urban_evals += e
+            control.green_times.update(post_green)
+            control.offsets.update(post_offsets)
+            evals += post_metering_urban_evals
+            coupling = self._wu._coupling(state, control, demand)
         # ---- OFFSET corridor 검증 가드(closed-loop, method rule 충실) ----
         # per-signal 국소 offset은 자기 TTS를 줄이지만 selfish라 corridor 전체(realized full-plant
         # 결합)에선 손해일 수 있다(downstream de-align). offset의 가치는 본질적으로 multi-signal
@@ -2554,6 +3387,39 @@ class WuFaithfulFollower:
         control.diagnostics["wu_faithful_offsets_off_zero"] = float(offsets_kept)
         control.diagnostics["wu_faithful_offsets_searched_off_zero"] = float(offsets_off_zero)
         control.diagnostics["wu_faithful_offset_evals"] = float(offset_evals)
+        control.diagnostics["wu_faithful_joint_freeway_rm_vsl"] = float(self.joint_freeway_rm_vsl)
+        control.diagnostics["wu_faithful_joint_urban_green_offset"] = float(self.joint_urban_green_offset)
+        control.diagnostics["wu_faithful_joint_urban_neighbor_tts"] = float(
+            self.joint_urban_neighbor_tts
+        )
+        control.diagnostics["wu_faithful_joint_urban_neighbor_evals"] = float(
+            self._joint_urban_neighbor_eval_count
+        )
+        for scope_name in ("ego", "ego_neighbor", "corridor"):
+            control.diagnostics[f"wu_faithful_joint_urban_neighbor_scope_{scope_name}"] = float(
+                self.joint_urban_neighbor_scope == scope_name
+            )
+        control.diagnostics["wu_faithful_metering_to_urban_ramp_space"] = float(
+            self.metering_to_urban_ramp_space
+        )
+        control.diagnostics["wu_faithful_joint_marginal_price"] = float(
+            self.joint_marginal_price_enabled
+        )
+        control.diagnostics["wu_faithful_joint_price_green_count"] = float(
+            len(self.joint_signal_marginal_price or {})
+        )
+        control.diagnostics["wu_faithful_joint_price_metering_count"] = float(
+            len(self.joint_metering_marginal_price or {})
+        )
+        control.diagnostics["wu_faithful_joint_price_vsl_count"] = float(
+            len(self.joint_vsl_marginal_price or {})
+        )
+        control.diagnostics["wu_faithful_joint_price_offset_count"] = float(
+            len(self.joint_offset_marginal_price or {})
+        )
+        control.diagnostics["wu_faithful_post_metering_urban_evals"] = float(
+            post_metering_urban_evals
+        )
         control.diagnostics.update(self._wu._repair_diagnostics)
         return control, iteration, converged, float(residual), evals
 
@@ -2601,6 +3467,7 @@ class WuFaithfulFollower:
             if previous_control is not None
             else ControlAction.uncontrolled(self.cfg)
         )
+        self._joint_urban_neighbor_eval_count = 0
         control, iteration, converged, residual, evals = self._solve_followers(
             state, first_demand, previous, leader, forecast,
         )

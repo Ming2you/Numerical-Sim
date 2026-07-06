@@ -248,6 +248,23 @@ mpc:
   wu_faithful_np_predictor_mode: legacy
   wu_faithful_np_coordination_mode: cap
   wu_faithful_nuf_coordination_mode: equality
+  wu_faithful_joint_freeway_rm_vsl: false
+  wu_faithful_joint_urban_green_offset: false
+  wu_faithful_joint_urban_neighbor_tts: false
+  wu_faithful_joint_urban_neighbor_scope: ego_neighbor
+  wu_faithful_joint_urban_neighbor_weight: 1.0
+  wu_faithful_joint_urban_neighbor_max_green_candidates: 5
+  wu_faithful_joint_urban_neighbor_max_offset_candidates: 4
+  wu_faithful_metering_to_urban_ramp_space: false
+  wu_faithful_joint_metering_split_count: 11
+  wu_faithful_joint_marginal_price: false
+  wu_faithful_joint_price_weight: 1.0
+  wu_faithful_joint_price_green_delta_sec: 6.0
+  wu_faithful_joint_price_offset_delta_sec: 15.0
+  wu_faithful_joint_price_metering_delta_veh_h: 60.0
+  wu_faithful_joint_price_metering_trust_frac: 0.25
+  wu_faithful_joint_price_vsl_delta_kmh: 10.0
+  wu_faithful_joint_price_vsl_trust_kmh: 10.0
   wu_np_storage_guard: false
   wu_np_arrival_mode: horizon
   wu_np_phase_substep: false
