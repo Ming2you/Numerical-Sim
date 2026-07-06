@@ -245,3 +245,50 @@ bottleneck-level joint value인데, 이를 ramp별 1차 scalar price로 투영�
 - **Step 2 offset 국소**: −158(7%, freeway 악화) → **per-signal offset 불충분(F3 가격+국소 best-response 둘 다 실패)** = **joint 변수 재확증.**
 - **Step 3(진행 중)**: legacy offset 오라클 주입+N_UF 강제로 "나머지 63%=joint offset" 확정 예정.
 - 다음: (1) 방류=urban 압력 leader 신호(일반화), (2) offset=corridor joint 값싼 근사(미해결 핵심).
+
+---
+
+# 이하 Claude 세션 (2026-07-06 야간) — offset 격차의 층위 분리: D/F 레버 활성화(G1)
+
+## 17. offset externality 전파 진단 → D/F offset 활성화(G1) = 신기록
+
+**진단(사용자 질문 "plant/local이 offset externality를 전파하나" 대응, scratchpad
+corridor_graph_check / offset_propagation_diag):**
+- **plant는 offset externality를 모델링함**(urban_queue_model.py:933,966 — offset-aware
+  discharge → 시간분해 arrival_buffer → 하류 서비스). 확인: A offset 스윕이 전역 TTT를
+  움직임(단, 방향 일관·크기 미미).
+- **plant offset 민감도(step24 horizon TTT range)**: **F=10.7 ≫ C 1.56 > D 0.81 > A 0.30
+  > B 0.12.** 가장 큰 offset 레버 2개(F,D)가 **ramp 신호**.
+- **그런데 ramp 신호 offset은 `_solve_offset_local`에서 offset=0 고정**(has_ramps 가드,
+  "storage 동역학 복잡" 단순화)이었다. legacy는 D/F offset을 std 44/35로 씀 → **격차의
+  유력한 몫 = 꺼져 있던 D/F offset 레버.**
+- corridor 그래프(=_upstream_leaving_map, 물리 토폴로지 유도)는 **완전 연결 메시**(A↔B,
+  B↔C, C↔F, A→D, D→A) — 엣지 누락 아님. 전파 코드도 작동(B→C peak 이동 실증). 그래서
+  처방은 "이웃 전파 추가"가 아니라 "**D/F offset 레버 켜기**"였다.
+
+**구현(G1, 커밋 6ae775c)**: `_solve_offset_local_ramp` — ramp-aware phased rollout(P1.5
+use_phased_ramp 경로 재사용, frozen ramp 입력 구성)로 ramp 신호 offset 탐색.
+`ramp_offset_enabled` 플래그(기본 False=비트동일). offset 블록 게이트에 추가 + ramp-only
+격리 모드. corridor 가드(realized horizon TTT) 최종 검증자 유지. 러너 G1DF(D/F만)/
+G1ALL(전 신호). F1RHO base. 테스트 24/24(신규 test_ramp_offset 3건).
+
+**결과(sweet_190 7200s) — D/F offset은 켜기만 하면 이득, A/B/C는 selfish라 해로움:**
+
+| 구성 | total | urban / freeway | 완료 | 잔존 | legacy 격차 |
+|---|---:|---|---:|---:|---:|
+| legacy | 10728.8 | 9201 / 1527 | — | — | — |
+| **G1DF (D/F offset만)** | **11872.9** | **10258 / 1615** | **32023** | **12963** | **1144** |
+| F1RHO (offset 없음) | 12158.6 | 10527 / 1631 | 31480 | 13549 | 1430 |
+| G1ALL (전 신호 offset) | 12638.0 | 11095 / 1543 | 30991 | 14042 | 1909 |
+
+- **G1DF = 신기록.** F1RHO 대비 **−285.7(−2.35%)**, legacy 격차 1430→1144(**−20%**).
+  개선 거의 전량 urban(−269 / freeway −16) — offset=urban 레버 진단 적중. 완료 +543/
+  잔존 −586.
+- **G1ALL(전 신호) = F1RHO보다 +479 악화** — A/B/C offset을 selfish 국소로 얹으면
+  corridor de-coordinate(2026-06-29 finding + Codex Step 2 재확증). **offset 격차는 두 층위**:
+  (a) **D/F = self-contained 레버, 활성화만으로 회수(우리 몫)**, (b) **A/B/C = corridor
+  좌표 문제, selfish 국소는 해로움(Codex 패턴 레인)**. 우리·Codex 작업 경계가 데이터로 선명.
+- **관찰(후속 여지)**: G1DF에서 D/F offset이 40 step 중 **3번만** 비영 커밋(가드가 나머지
+  되돌림)인데도 −285.7 회수 → 가드 마진(0.5%)이 보수적, 완화 시 추가 여지 가능성.
+- **다음**: G1DF 155/128 교차검증(진행 중), 가드 완화 스윕, D/F offset을 leader 좌표
+  신호로 승격(격차의 D/F 몫을 일반화).

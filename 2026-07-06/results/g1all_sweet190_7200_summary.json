@@ -1,0 +1,25 @@
+[
+  {
+    "controller_id": "P-STACK-WU-FAITHFUL-G1ALL",
+    "total_ttt": 12637.998,
+    "urban_ttt": 11095.004,
+    "freeway_ttt": 1542.995,
+    "free_flow_reference_total_ttt": 2115.354,
+    "total_delay": 10522.645,
+    "urban_delay": 9377.019,
+    "freeway_delay": 1145.626,
+    "completed_vehicles": 30990.5,
+    "completed_urban_vehicles": 13819.9,
+    "completed_freeway_vehicles": 17170.6,
+    "network_throughput_veh_h": 15495.3,
+    "terminal_total_vehicles": 14042.4,
+    "terminal_urban_vehicles": 13077.4,
+    "terminal_onramp_vehicles": 3192.4,
+    "terminal_freeway_vehicles": 249.0,
+    "computation_time_sec": 3927.521,
+    "mean_step_compute_sec": 98.188,
+    "max_step_compute_sec": 123.375,
+    "ttt_improvement_vs_no_control_pct": 0.0,
+    "delay_improvement_vs_no_control_pct": 0.0
+  }
+]
