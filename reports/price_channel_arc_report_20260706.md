@@ -73,6 +73,28 @@ breakdown을 막고 있었다**(B2TR onset기: N_UF 4500~4800 하향 → meterin
 경제학 대응: Weitzman(1974) prices-vs-quantities의 경계를 경험적으로 도출 + 경계
 중간형(증명서 가격)이 수량 쪽으로 수렴함을 실험으로 확인.
 
+### 4.1 보강 해석 — 스칼라 가격이 아니라 결합 레버 단위의 response가 필요하다
+
+위 분류는 "metering은 반드시 hard constraint여야 한다"는 뜻이 아니다. legacy 계열이 잘했던
+것은 `rho_crit`을 절대 넘지 못하게 막은 것이 아니라, **RM/VSL/green/offset이 결합된 후보를
+통째로 rollout**해 일시적 밀도 초과와 queue relief, throughput 증가의 교환을 평가했다는 점에
+가깝다. 따라서 F2의 음성 판정은 metering 자체가 price에 부적합하다는 최종 명제라기보다,
+**per-ramp 1차 스칼라 가격**이 freeway bottleneck에서 RM과 VSL이 만드는 대체/보완 관계를
+표현하지 못했다는 진단으로 읽어야 한다.
+
+동일한 논리가 F3에도 적용된다. offset은 단독 신호 하나의 편미분으로는 거의 0이지만, 여러
+신호 offset과 green split이 함께 맞을 때 green-wave/progression 가치가 생긴다. 즉:
+
+| 결합 레버 묶음 | 스칼라 가격의 한계 | 다음 설계 방향 |
+|---|---|---|
+| RM + VSL | 둘 다 bottleneck 유입/충격파를 조절하지만 ramp queue와 mainline speed라는 부작용이 다름. per-ramp price와 per-segment VSL price를 따로 주면 cross term을 잃음. | bottleneck-level shadow price 또는 `(RM, VSL)` joint candidate response |
+| green + offset | green은 서비스량, offset은 서비스 시점을 정하므로 progression 효과는 두 변수의 곱/패턴에서 발생. per-signal offset 가격은 단독 편미분이 0에 가까움. | corridor-level phase pattern 또는 `(green, offset)` joint candidate response |
+
+따라서 이 아크의 더 안전한 결론은: **완만한 단독 green 조정에는 B2TR식 marginal price가
+효과적이지만, 물리적으로 결합된 레버는 per-actuator scalar price보다 결합 묶음 단위의
+candidate-level response 평가가 필요하다**는 것이다. `N_UF` 등식/ceiling과 F1RHO hinge는
+그 joint response를 안전하게 좁히는 quantity-guided coordination으로 해석한다.
+
 ## 5. trust region의 성공 기전과 설계 규칙 (B2TR)
 
 - 폭주(155: green_C 56→92 단조 표류, 재선형화된 가격이 매번 더 세게 같은 방향)의

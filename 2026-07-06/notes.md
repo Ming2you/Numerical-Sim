@@ -92,6 +92,29 @@ offset을 쓴 것은 전역 응답의 통째 평가(joint) 덕분.
 | offset | **joint 결합** | per-signal 가격 불가 — 패턴 수준 조정 필요(미해결) | F3 null |
 | urban spillback | cross-agent | N_P 제약 채널 | F1 분해 |
 
+### 6.1 보강 해석 — per-actuator price의 한계와 joint response
+
+F2/F3 판정은 "metering은 hard constraint만 가능" 또는 "offset은 무가치"라는 의미가 아니다.
+legacy가 성능을 냈던 구조는 `rho_crit`을 절대 제약으로 둔 것이 아니라, RM/VSL/green/offset
+후보를 더 joint하게 rollout해 **일시적 밀도 초과, ramp/urban queue relief, throughput 증가**의
+교환을 직접 평가했다는 쪽에 가깝다.
+
+따라서 F2 음성의 더 정확한 해석은: metering의 한계가치는 VSL과 함께 정의되는 freeway
+bottleneck-level joint value인데, 이를 ramp별 1차 scalar price로 투영하면서 RM-VSL의
+대체/보완 관계(cross term)를 잃었다는 것이다. 마찬가지로 F3의 offset null은 offset이
+무의미해서가 아니라, green split과 여러 신호 offset이 함께 맞을 때만 progression 가치가
+나오는 **joint corridor variable**을 per-signal 편미분으로 본 결과다.
+
+다음 설계 원칙:
+
+| 묶음 | 권장 response 단위 | 이유 |
+|---|---|---|
+| RM + VSL | bottleneck-level `(RM, VSL)` joint candidate 또는 shadow price | 둘 다 유효 유입/충격파를 조절하지만 ramp queue와 mainline speed 부작용이 달라 cross term 필요 |
+| green + offset | corridor-level `(green, offset)` phase pattern 후보 | green은 서비스량, offset은 서비스 시점 — progression은 결합 패턴에서 발생 |
+
+즉 현재 결론은 "가격 채널 폐기"가 아니라 **단독·완만 레버(green)는 B2TR scalar price,
+결합 레버(RM/VSL, green/offset)는 joint candidate-level response**로 분류하는 쪽이 더 안전하다.
+
 ## 7. TODO
 - [ ] **기본값 전환 여부 = 사용자 결정 대기**(원본 무수정 유지 중). 메뉴: (a) F1RHO05
   기본(약우월) + -F1RHO(w=1) opt-in, (b) 현상 유지(B2TR), (c) w=0.75 knee 후 결정.
