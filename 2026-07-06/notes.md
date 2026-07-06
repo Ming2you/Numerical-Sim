@@ -122,3 +122,126 @@ bottleneck-level joint value인데, 이를 ramp별 1차 scalar price로 투영�
   위상 패턴(예: A·C 동시 offset 조합 후보)을 직접 후보 평가 — legacy식 joint 평가의
   저렴판. 잔여 legacy 격차(F1RHO 기준 1430)의 유력 재료이나 별도 설계 필요.
 - [ ] 러너 -F2/-F3/-F23은 기록용 보존(전부 음성/무효 판정).
+
+---
+
+# 이하 Claude 세션 (2026-07-06 후반) — 개념·전략 종합 (코드 변경 없음, 방향 확정)
+
+가격 채널 아크 종결 후, cost·trust·horizon·value·전략 논의를 종합. 실험 없이 개념 정리 +
+기여 프레이밍 확정. 다음 세션이 재유도 없이 집도록 남김.
+
+## 8. Cost 분석 — B2는 legacy와 같은 order(~2배 쌈), 주범은 follower 아닌 leader
+
+- 실측/추정(sweet_190 7200s): PFO(leader 없음) ~4s/step, **B2 전체 decide ~44s/step**(follower
+  3s + leader ~41s), **legacy 96s/step**. → B2는 legacy 대비 **~2배 쌈, 그러나 같은 order**.
+  TTT는 legacy가 더 좋음(10729 < 12523). 즉 현 B2 = **"조금 싸고 성능은 나쁨"** — raw로는 어느
+  축도 압도 못 함. 사용자 지적 정당.
+- **비용 주범 = leader의 전역 rollout**(candidate search + price FD), follower는 진짜 쌈(분산).
+  legacy든 B2든 "leader가 전역 rollout"이 지배적이라 같은 order가 됨.
+- **점근 차별점(진짜 가치)**: legacy = O(후보수 × 전역), B2 price FD = **O(신호수) 고정**. 큰
+  네트워크·고해상도서 B2가 이김. 지금 규모선 비슷. → cost 우위 주장은 **점근/확장성**으로.
+
+## 9. Trust region 재조명 — successive linearization + 보폭 문제 + 3축 정당화
+
+- 사용자 통찰: "이웃 밖 최적이면 경계서 재측정" = **successive linearization(trust-region SQP)**.
+  현 B2TR이 이미 **control step을 건너서** 그렇게 함(event-trigger가 새 운영점서 재측정). trust
+  region은 재측정을 *막는* 게 아니라 **각 스텝을 안전하게(한 이웃씩) 만드는 짝**.
+- **핵심 정정**: 폭주는 "얼마나 멀리 계산"이 아니라 **"한 step에 commit하는 보폭"** 문제.
+  receding: 9분 horizon이라도 **3분마다 첫 interval만 commit** → plant가 매 3분 검증. 무제한 B2가
+  폭주한 건 한 step 보폭이 커서(선형 월권, 155서 68→86 18s 점프) plant 검증이 못 따라잡아서.
+  trust = 보폭 제한 = plant가 매 step 따라잡게. 사용자 결론: **traffic 통념(신호 급변 금지)과
+  정렬되므로 보폭 제한이 맞다.**
+- **trust region 3축 정당화(논문용)**: 같은 δ가 (1) 선형 가격 유효반경(수학), (2) 신호 rate
+  제약 |Δg|≤Δg_max(공학 통념), (3) 분산 결합 안정성(게임이론)에서 동시 수렴. "세 근거가 한
+  δ로 만난다"는 강한 서사.
+
+## 10. Horizon 확장 — 선형 비용, green엔 무익, 단 metering엔 다름(재개방)
+
+- 9분→15분 = 3→5 interval = rollout당 **~1.67배**(선형, 폭발 아님). B2 44→~73s/step → legacy(96s)
+  대비 2.2배 우위가 **1.3배로 축소**. cost 관점 불리.
+- **green**: §7(07-05)서 폭주점의 h=3 gradient 이미 옳음 → horizon 문제 아님, 확장 무익.
+  장기비용 걱정이면 확장 말고 **terminal cost**가 싼 레버.
+- **metering은 다름(중요)**: 절벽 breakdown이 **지연**(누적 ~30분)이라 horizon에 진짜 민감.
+  9분에선 막을 수 있는 순간(절벽 전) breakdown이 창 밖 → 눈멂. **긴 horizon + metering 가격은
+  실패한 5구성(9분)에 없음** → 미검증. 단 caveat: secant-across-불연속(부호만 맞고 크기 노이즈),
+  ~3.3배 비용, own-TTS 방류 유인, trust-walk도 절벽 넘음. 깨끗한 해법 아니나 "9분이 죽였나"는
+  기록이 안 닫은 물음.
+
+## 11. Metering 가격 왜 눈머나 — 미분 vs 값, 지연이 살인범
+
+- 가격 = raw TTT 아니라 **레버에 대한 기울기(미분)**. 롤아웃은 jam을 값으로 보지만, 가격은 그
+  값의 접선을 떼 내려주는데 **절벽서 3국면 전부 무의미**: 절벽 전=약함(±δ가 절벽 못 닿음,
+  boiling frog), 절벽 위=쓰레기(불연속 secant, 부호반전 −0.447), 절벽 후=0(jam 포화, 평평).
+- **비유**: 안개 절벽 — 평지 기울기 ~0("안전"), 끝에선 정의불가, 떨어진 뒤 또 0. 기울기만
+  보고 걸으면 떨어짐. 고도 지도(value)를 알아야 안 떨어짐.
+- **지연이 핵심 살인범**(사용자 진단, 정당): 막을 수 있는 순간(절벽 전)엔 breakdown이 9분 밖 →
+  안 보임. 보이는 순간(절벽 위)엔 이미 넘음 → 미분 쓰레기 + 비가역. **즉각적이면 ±δ가 절벽
+  가로질러 잡힘** — 지연이 없으면 가격화됨. 지연(누적 원인)이 갭을 만듦.
+- **고차식(2차)도 절벽엔 무력**: Taylor는 매끄러운 국소 도구, 절벽은 문턱(비국소·비다항식).
+  ±δ probe 밖 문턱은 몇 차든 못 봄(창을 넓히는 게 아니라 창 안을 다듬음). 절벽 위선 2차가
+  오히려 악화(뒤집힌 포물선→경계로 더 빨리). **"고차식으로 문턱 잡기"의 극한 = 제약**(=F1RHO
+  N_UF ceiling, §12 퇴화 정리와 일치). 단 **green(매끄러움)엔 2차 가격 유효**(Newton·자기정지,
+  미시도 카드).
+
+## 12. Value function/ADP — parked 다음 스텝, 그러나 짓지 않음
+
+- 개념: 가격(∇V, 기울기)이 아니라 **V(값) 자체**를 하달. follower가 "결과 상태"를 V로 채점 →
+  레버 독립(green/offset/metering 통일), 비볼록·절벽·근시를 값 차원서 우회.
+- **제어이론 프레임**: 가격 g_ext = **costate/adjoint = ∇V**(Pontryagin/PMP). value = **V(Bellman/
+  DP)**. 우리는 PMP식 adjoint 조정을 해왔고 Bellman이 대안. 절벽서 가격 죽고 value 사는 이유를
+  이 이분법이 예언(adjoint 국소1차 vs Bellman 전역).
+- **비용**: value는 비용을 **online→offline**으로 이동. V가 **분해(구역별+경계)되면** online 저렴
+  (함수 조회)·legacy 우위. **안 분해되면 legacy 비용 회귀**(사용자 직감 맞는 지점). → **관문
+  질문 = "이 망서 V가 구역별로 분해되나"**(VDN/QMIX·MFG에서 빌림).
+- **general 함정**: **legacy 해로 fit한 V = 비general(기생), 폐기.** 단 terminal cost 자체는 legacy
+  의존 아님 — 출처가 marginal과 같은 leader 모델 rollout. 자기 위로 오르려면 **policy iteration(ADP,
+  모델만으로)**, legacy는 벤치마크로 강등.
+
+## 13. **전략 확정 — price-based externality를 기여로, value/RL은 회귀 위험이라 안 감**
+
+- **결정**: value function 시스템을 지어 SOTA RL과 성능 경쟁 → **포화·열세 시장 회귀 위험**. 안 감.
+  value는 **"1차 가격이 못 넘는 경계 너머 = Bellman/DP"** 로 **이론적 지목만**(HJI/MFG/max-pressure
+  인용), 짓지 않음.
+- **기여의 정체 = 조정의 지도**(컨트롤러가 아님): 언제 가격으로 되고(볼록·가역=green), 언제
+  제약으로 퇴화하고(절벽·비가역=metering), 언제 원리적으로 1차 분산 조정이 못 닿나(joint=offset).
+  RL-for-traffic 문헌에 **없는** 특성화.
+- **왕관 이론 = Weitzman "Prices vs. Quantities"(1974)**: green=price instrument, metering=quantity
+  instrument가 **곡률·가역성이 결정하는 Weitzman 경계**의 제어이론적 실현. + Pontryagin/Bellman
+  이분법. → 얕은 실험이 아니라 깊은 이론.
+- **리뷰어 방어 3가드(반드시)**:
+  1. Weitzman·Pontryagin/Bellman을 **전면 이론**으로.
+  2. **congestion/road pricing과 명시 구별** — 그건 수요/운전자 가격(60년 됨), 우리는 **제어
+     행동의 externality를 agent 간 coordination signal로**(액추에이터 가격). "controller-externality".
+  3. **centralized 대비 = Pareto(비용/확장/해석), 성능 우위 주장 금지**(legacy TTT가 더 좋음:
+     10729<12523). **decentralized(PFO 13627) 대비는 ~8% 성능 개선 = 당당히 주장.**
+- 격차 수치(sweet_190 7200s): PFO 13627 > B2-OFF 12790 > **B2TR 12523** > F1RHO 12158 ≫ legacy
+  10729. 잔여 격차(~1430-1794) = **1차 분산 조정이 회수 못 한 joint 몫**(value/DP 영역, 지목만).
+
+## 14. Contribution statement 초안 (§13 기반)
+
+> 혼합 urban-freeway 네트워크의 분산 Stackelberg MPC에서, leader가 각 분산 follower에게
+> **제어 행동의 전역 externality를 Pigouvian marginal price(g_ext = 전역한계 − 자기한계)로
+> 하달**하는 조정 원리를 제시한다. 이 1차 가격이 **볼록·가역 레버(신호 green split)에선 분산
+> 조정을 중앙에 근접**시키나(무부하/중부하/고부하 3 regime 개선, 순수 분산 대비 ~8%),
+> **절벽·비가역 레버(ramp metering)에선 제약으로 퇴화**하고(Weitzman prices-vs-quantities의
+> 제어이론적 실현), **joint 결합 변수(offset)에선 편미분이 구조적으로 결합 패턴을 못 봄**을
+> 이론(Pontryagin adjoint=∇V의 한계)과 실험으로 특성화한다. 중앙(joint) 대비 성능이 아니라
+> **비용·확장성(O(신호) vs O(후보))·해석가능성의 Pareto 개선**으로, 1차 분산 조정이 회수
+> 가능한 조정 가치의 경계를 규명한다.
+
+## 15. TODO (다음)
+- [ ] 위 contribution statement를 논문 §1/§요약으로 다듬기(3가드 반영).
+- [ ] Weitzman·Pontryagin/Bellman·max-pressure·MFG 관련문헌 정식 인용 정리.
+- [ ] (parked) value/ADP: "V가 구역별 분해되나" 5분 진단 — 열면 별도 트랙, 짓기 전 관문.
+- [ ] green 2차 가격(Newton·자기정지) 미시도 카드 — 곡률 부호·잡음 probe 먼저.
+
+## 16. Legacy 격차 실측 분해 (별도 리포트) — 희생 아님, 방류+joint offset
+
+`reports/legacy_gap_decomposition_20260706.md` 참조. 핵심:
+- **plant 동일성 확정**: legacy 현재 HEAD 재실행 = Jul-3과 비트 동일(10728.8), 비교 유효.
+- **격차(2162)는 전량 urban, freeway 동률(1527 vs 1552)** → **beyond-cliff 희생 해 아님(Route 1 폐기).**
+- **Step 1 방류 lever**: N_UF 강제↑(4848→5176) → 총 −650(30%), urban·freeway 동시 개선, 556s≪legacy.
+  under-release 원인 = leader 9분 horizon이 방류의 장기 urban 배수 이득 못 봄 → **urban 압력 신호**로 일반화 가능.
+- **Step 2 offset 국소**: −158(7%, freeway 악화) → **per-signal offset 불충분(F3 가격+국소 best-response 둘 다 실패)** = **joint 변수 재확증.**
+- **Step 3(진행 중)**: legacy offset 오라클 주입+N_UF 강제로 "나머지 63%=joint offset" 확정 예정.
+- 다음: (1) 방류=urban 압력 leader 신호(일반화), (2) offset=corridor joint 값싼 근사(미해결 핵심).
