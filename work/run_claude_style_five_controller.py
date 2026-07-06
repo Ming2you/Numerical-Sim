@@ -21,6 +21,10 @@ from src.controllers.f1_wu_faithful_follower import (
     F1StackelbergWuMeteredController,
     F1WuFaithfulFollower,
 )
+from src.controllers.joint_wu_controllers import (
+    JointB2TRController,
+    JointF1Controller,
+)
 from src.controllers.stackelberg_wu_metered import StackelbergWuMeteredController
 from src.controllers.wu_faithful_follower import WuFaithfulFollower
 from src.models.demand import DemandProfile, apply_scenario_network_overrides, load_scenarios
@@ -173,6 +177,22 @@ def make_controller(controller_id: str, cfg: ExperimentConfig):
         controller.metering_price_enabled = True
         controller.offset_price_enabled = True
         return controller
+    # ---- Joint 모드(2026-07-06 스펙): 두 objective baseline을 각각 보존한 joint 탐색 ----
+    # JB2TR = B2TR objective(hinge 없음) + RM full cross-grid + (green,offset) 패턴 joint.
+    if controller_id == "P-STACK-WU-FAITHFUL-JB2TR":
+        controller = JointB2TRController(cfg)
+        controller.offset_joint_enabled = True
+        return controller
+    # JF1 = F1RHO objective(ρ hinge) + RM full cross-grid + (green,offset) 패턴 joint.
+    if controller_id == "P-STACK-WU-FAITHFUL-JF1":
+        controller = JointF1Controller(cfg)
+        controller.offset_joint_enabled = True
+        return controller
+    # freeway joint만(urban joint 없이 — 성분 분해용).
+    if controller_id == "P-STACK-WU-FAITHFUL-JB2TR-FW":
+        return JointB2TRController(cfg)
+    if controller_id == "P-STACK-WU-FAITHFUL-JF1-FW":
+        return JointF1Controller(cfg)
     if controller_id == "WU-FAITHFUL-FOLLOWER-F1":
         return F1WuFaithfulFollower(cfg)
     # B2TR: green 가격 + trust region(가격 유효 범위 = 유한차분 이웃 ±6s) —
@@ -320,10 +340,10 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
             "leader_full_evaluated_count": float(control.diagnostics.get("leader_candidate_full_evaluated_count", 0.0)),
             "leader_serial_override": float(control.diagnostics.get("leader_candidate_wu_metered_serial_override", 0.0)),
         }
-        # 가격(wu_b2_/wu_b3_/wu_b4_)·P1.5 포화도(wu_p15_*) 진단은 control_row에 안 실리므로 여기서 수집.
+        # 가격(wu_b2_/b3_/b4_/f3_)·P1.5(wu_p15_)·joint(wu_j_) 진단은 control_row에 안 실리므로 수집.
         decision.update({
             k: float(v) for k, v in control.diagnostics.items()
-            if k.startswith(("wu_b2_", "wu_b3_", "wu_b4_", "wu_p15_"))
+            if k.startswith(("wu_b2_", "wu_b3_", "wu_b4_", "wu_p15_", "wu_f3_", "wu_j_"))
             and isinstance(v, (int, float, bool))
         })
         decision_rows.append(decision)

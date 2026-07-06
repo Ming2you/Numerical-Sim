@@ -92,6 +92,20 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         self.offset_price_enabled: bool = False
         self.offset_price_delta_sec: Optional[float] = None  # None=cycle/8(그리드 1칸)
         self.offset_price_refresh_threshold_sec: float = 7.0  # 그리드 반칸
+        # ---------- J1(2026-07-06): joint offset 패턴 ----------
+        # F3 판정(offset 단독 편미분 = 0)의 처방: leader가 비-ramp 신호들의 offset
+        # **조합**(3^k 패턴, 격자 {0, ±cycle/8})을 통째로 rollout 평가해 최선 조합을
+        # directive로 하달 — 결합의 가치는 조합 후보에서만 보인다(legacy joint 평가의
+        # 저렴판). 채택 마진은 corridor 가드와 동일 철학(미세 개선은 transient 손해).
+        self.offset_joint_enabled: bool = False
+        self.offset_joint_step_sec: Optional[float] = None  # None=cycle/8
+        self.offset_joint_margin: float = 0.005
+        # (green, offset) 결합: 상위 K 패턴에 대해 비-ramp p1 ±δ 공동 이동 변형을 함께
+        # 평가 — 패턴 단독으론 안 보여도 green과 결합하면 이기는 조합을 채택 기준에
+        # 반영한다(채택 후 green 자체는 가격+trust가 새 offset 운영점에서 재선형화되며
+        # 따라감 — 계층적 joint). 변형 이득은 진단으로 기록.
+        self.offset_joint_green_delta_sec: float = 6.0
+        self.offset_joint_green_top_k: int = 3
         # B4(사용자 제안, 2026-07-05 개정): 가격 채널들에 barrier 항의 marginal price를 합산.
         # ── 개정 이유(2026-07-04 §9 + 2026-07-05 probe): 제곱 barrier는 단위가 veh²·h라
         # 정체불명 가중치가 필요했고 얕은 초과에서 gradient가 소멸(g_TTT의 1/750)했다.
@@ -307,11 +321,14 @@ class StackelbergWuMeteredController(StackelbergMPCController):
             follower.vsl_marginal_price = None
         if not self.offset_price_enabled:
             follower.offset_marginal_price = None
+        if not self.offset_joint_enabled:
+            follower.offset_directive = None
         if not (
             self.signal_price_enabled
             or self.metering_price_enabled
             or self.vsl_price_enabled
             or self.offset_price_enabled
+            or self.offset_joint_enabled
         ):
             self._signal_price_meta = {
                 "wu_b2_price_enabled": 0.0,
@@ -372,6 +389,7 @@ class StackelbergWuMeteredController(StackelbergMPCController):
             or (self.metering_price_enabled and follower.metering_marginal_price is None)
             or (self.vsl_price_enabled and follower.vsl_marginal_price is None)
             or (self.offset_price_enabled and follower.offset_marginal_price is None)
+            or (self.offset_joint_enabled and follower.offset_directive is None)
         )
         if not refresh and self._leader_global_refresh_active(state):
             refresh = True
@@ -555,6 +573,77 @@ class StackelbergWuMeteredController(StackelbergMPCController):
             follower.offset_marginal_price = o_prices
             follower.offset_marginal_price_ref = o_refs
             follower.offset_marginal_price_trust_sec = delta_o
+
+        # ---- J1 joint offset 패턴(결합 후보 통째 평가 — F3 편미분=0의 처방) ----
+        if self.offset_joint_enabled:
+            step_o = (
+                float(self.offset_joint_step_sec)
+                if self.offset_joint_step_sec is not None else cycle / 8.0
+            )
+            joint_signals = [
+                s for s in net.signals if not follower._local_models[s].has_ramps
+            ]
+            grid = (0.0, step_o % cycle, (cycle - step_o) % cycle)
+            patterns: List[Dict[str, float]] = [{}]
+            for s in joint_signals:
+                patterns = [
+                    dict(pat, **{s: g}) for pat in patterns for g in grid
+                ]
+            # 직전 committed 패턴도 후보에 포함(히스테리시스 — 채택된 조합의 유지 평가).
+            patterns.append({
+                s: float(previous.offsets.get(s, 0.0)) % cycle for s in joint_signals
+            })
+            def _pattern_ttt(pat: Dict[str, float], green_shift: float = 0.0) -> float:
+                control_p = previous.copy()
+                control_p.offsets = dict(previous.offsets)
+                for s, off in pat.items():
+                    control_p.offsets[s] = float(off)
+                if abs(green_shift) > 1.0e-9:
+                    control_p.green_times = dict(previous.green_times)
+                    for s in joint_signals:
+                        p1 = float(previous.green_times.get(f"{s}_p1", total / 2.0))
+                        p1n = clamp(p1 + green_shift)
+                        control_p.green_times[f"{s}_p1"] = p1n
+                        control_p.green_times[f"{s}_p2"] = total - p1n
+                _, ttt_p = self._predict(state, control_p, forecast)
+                return float(ttt_p)
+
+            scored = []
+            zero_ttt = float("inf")
+            for pat in patterns:
+                ttt_p = _pattern_ttt(pat)
+                if all(abs(v) < 1.0e-9 for v in pat.values()):
+                    zero_ttt = min(zero_ttt, ttt_p)
+                scored.append((ttt_p, pat))
+            scored.sort(key=lambda t: t[0])
+            # 2단계 (green, offset) 결합: 상위 K 패턴에 green 공동 이동(±δ) 변형을 평가 —
+            # 패턴 점수 = min(기본, 변형들). green 결합으로만 이기는 조합도 채택 가능.
+            g_delta = float(self.offset_joint_green_delta_sec)
+            top_k = max(1, int(self.offset_joint_green_top_k))
+            best_ttt, best_pat, best_shift = float("inf"), {}, 0.0
+            for ttt_base, pat in scored[:top_k]:
+                variants = [(ttt_base, 0.0)]
+                if g_delta > 1.0e-9:
+                    variants.append((_pattern_ttt(pat, +g_delta), +g_delta))
+                    variants.append((_pattern_ttt(pat, -g_delta), -g_delta))
+                v_ttt, v_shift = min(variants, key=lambda t: t[0])
+                if v_ttt < best_ttt:
+                    best_ttt, best_pat, best_shift = v_ttt, dict(pat), v_shift
+            gain = zero_ttt - best_ttt
+            adopt = gain > float(self.offset_joint_margin) * max(zero_ttt, 1.0e-9)
+            directive = (
+                best_pat if adopt else {s: 0.0 for s in joint_signals}
+            )
+            follower.offset_directive = directive
+            # joint 가치 신호(관찰 목적): 패턴 예측 이득·채택 조합·green 결합 기여 기록 —
+            # per-signal 편미분이 0이던 자리에서 조합 방향의 유한 차이가 갖는 값.
+            # (green 이동 자체는 directive하지 않는다 — 채택된 offset 운영점에서 다음
+            # refresh의 green 가격이 재선형화되며 trust 보폭으로 따라간다.)
+            meta["wu_j_off_gain"] = float(gain)
+            meta["wu_j_off_adopted"] = float(adopt)
+            meta["wu_j_green_shift_at_best"] = float(best_shift)
+            for s, off in directive.items():
+                meta[f"wu_j_off_{s}"] = float(off)
 
         # ---- VSL 채널(B3, raw g_i — d_local 미차감 주의, 기본 OFF) ----
         if self.vsl_price_enabled and op_vsl:

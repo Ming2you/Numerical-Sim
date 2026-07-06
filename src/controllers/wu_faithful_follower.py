@@ -199,6 +199,13 @@ class WuFaithfulFollower:
         self.offset_marginal_price_ref: Dict[str, float] = {}
         self.offset_marginal_price_weight: float = 1.0
         self.offset_marginal_price_trust_sec: Optional[float] = None
+        # ---------- J1(2026-07-06): joint offset 패턴 directive ----------
+        # F3 판정: offset은 joint 결합 변수라 per-signal 가격(편미분)이 구조적으로 0.
+        # J1 = leader가 corridor 패턴(여러 신호 offset 조합)을 통째로 rollout 평가해
+        # 최선 조합을 directive로 하달 — legacy의 joint 평가를 패턴 후보로 저렴화.
+        # 설정 시 per-signal offset 탐색 대신 directive를 그대로 적용하고, 기존
+        # corridor 가드(realized TTT 검증)가 최종 검증자로 남는다. None=완전 휴면.
+        self.offset_directive: Optional[Dict[str, float]] = None
         # 신호별 offset 후보 분율(×cycle_length). [0, cycle) 안의 작은 후보집합으로 국소 탐색.
         # 0.0은 현 baseline(offset off). 0~7/8 cycle을 8등분(끝점 cycle 제외).
         self.offset_fractions: tuple[float, ...] = (
@@ -2435,22 +2442,35 @@ class WuFaithfulFollower:
         offsets_off_zero = 0
         # F3: offset 가격이 하달돼 있으면 offset 탐색을 활성화(자율 offset은 여전히 OFF —
         # 가격+trust가 방향과 보폭을 주는 leader-coordinated 모드).
-        offset_active = self.offset_enabled or (self.offset_marginal_price is not None)
+        # J1: joint 패턴 directive가 있으면 per-signal 탐색 대신 그대로 적용(leader가
+        # 조합을 통째로 평가했으므로 국소 재탐색은 조합을 되깨뜨릴 뿐) — 가드는 유지.
+        offset_active = (
+            self.offset_enabled
+            or (self.offset_marginal_price is not None)
+            or (self.offset_directive is not None)
+        )
         if offset_active:
-            offset_snapshot = dict(control.green_times)
-            for signal in net.signals:
-                green_p1 = float(offset_snapshot.get(
-                    f"{signal}_p1", net.effective_green_total / 2.0
-                ))
-                arr_movement = self._per_movement_arrivals(signal, state, control, demand)
-                off, e = self._solve_offset_local(
-                    signal, green_p1, state, coupling, arr_movement, s_eff_frozen,
-                    control, demand,
-                )
-                control.offsets[signal] = float(off)
-                offset_evals += e
-                if abs(off) > 1.0e-6:
-                    offsets_off_zero += 1
+            if self.offset_directive is not None:
+                for signal in net.signals:
+                    off = float(self.offset_directive.get(signal, 0.0))
+                    control.offsets[signal] = off
+                    if abs(off) > 1.0e-6:
+                        offsets_off_zero += 1
+            else:
+                offset_snapshot = dict(control.green_times)
+                for signal in net.signals:
+                    green_p1 = float(offset_snapshot.get(
+                        f"{signal}_p1", net.effective_green_total / 2.0
+                    ))
+                    arr_movement = self._per_movement_arrivals(signal, state, control, demand)
+                    off, e = self._solve_offset_local(
+                        signal, green_p1, state, coupling, arr_movement, s_eff_frozen,
+                        control, demand,
+                    )
+                    control.offsets[signal] = float(off)
+                    offset_evals += e
+                    if abs(off) > 1.0e-6:
+                        offsets_off_zero += 1
             evals += offset_evals
         # ---- freeway agent ramp_metering 좌표하강(step당 1회, 수렴된 결합값 기준) ----
         # metering 탐색은 비싸므로(VSL probe sweep ×5분율) Jacobi 루프 밖에서 1회만 돈다.
