@@ -66,9 +66,36 @@ hinge 무발화 — 위험 0의 이상적 실사 결과).
 
 **F1RHO05는 B2TR을 약우월(weakly dominate)** — 전 시나리오 STOP-clean.
 
-## 6. TODO
-- [ ] **기본값 전환 여부 = 사용자 결정 대기**(이번 지시는 "사본으로 관찰" — 원본 무수정
-  유지 중). 메뉴: (a) F1RHO05를 기본으로(약우월, 안전) + -F1RHO(w=1)는 중부하-희박
-  배치용 opt-in, (b) 현상 유지(B2TR). (c) w=0.75 knee 정밀화 후 결정.
-- [ ] F2(metering 가격+trust 재도전)는 F1RHO 채택 후 재평가 — ρ hinge가 절벽을 지키는
-  상태에서 가격이 매끈한 몫만 나르는지. F3(offset 가격, legacy 격차 1430~1794) 대기.
+## 6. F2·F3 판정 (sweet_190 7200s, 기준 F1RHO 12158.6)
+
+**F2(metering 가격 + hinge 방어) = 음성**: 19074.1 — B3CERT와 동일 붕괴(freeway 5607,
+Σmeter 5411). 같은 hinge로 등식 budget이면 신기록(F1RHO 5001)인데 가격이면 붕괴 —
+**차이는 hinge가 아니라 권한(07-05 §14)**: 가격 모드의 soft budget이 leader 권한을 끊고,
+follower 국소 onset 창은 좁으며 거기서 절벽-맹인 가격이 hinge와 싸우고, jam 후엔 국소
+hinge도 후보 불변(3국면의 국소판). **metering 가격 = 4구성(B3/TR/CERT/F2) 전패, 영구
+아카이브.** metering 조정 최종 = leader 등식/ceiling + hinge-informed 응답(F1RHO).
+
+**F3(offset per-signal 가격) = 무효(null)**: 12158.622 — F1RHO와 비트 동일, 커밋 offset
+0/120. 이중 무효화: (i) **leader의 offset 한계가치 ≈ 0**(전 신호·전 step 0.0000 — 신호
+하나의 ±14s는 9분 전역 TTT를 안 움직임), (ii) 가격 0이라 탐색이 selfish로 퇴화(103회
+비영 제안) → corridor 가드가 전부 기각(2026-06-29 판정의 가드 작동). **기전: offset은
+joint 결합 변수** — green wave 가치는 여러 신호의 offset이 함께 맞을 때 생기고 단독
+이동의 편미분은 ~0. per-signal 가격(편미분)은 구조적으로 결합 패턴을 발견 불가. legacy가
+offset을 쓴 것은 전역 응답의 통째 평가(joint) 덕분.
+
+**조정 수단 분류 최종판**:
+
+| 레버 | 성질 | 정답 수단 | 실증 |
+|---|---|---|---|
+| green | 완만·가역·개별 | 가격+trust | B2TR(3 regime 개선) |
+| metering | 절벽·비가역 | leader 등식 + hinge-informed 응답 | F1RHO(190 신기록) |
+| offset | **joint 결합** | per-signal 가격 불가 — 패턴 수준 조정 필요(미해결) | F3 null |
+| urban spillback | cross-agent | N_P 제약 채널 | F1 분해 |
+
+## 7. TODO
+- [ ] **기본값 전환 여부 = 사용자 결정 대기**(원본 무수정 유지 중). 메뉴: (a) F1RHO05
+  기본(약우월) + -F1RHO(w=1) opt-in, (b) 현상 유지(B2TR), (c) w=0.75 knee 후 결정.
+- [ ] **offset의 남은 길 = joint/패턴 조정**: per-signal 가격이 아니라 leader가 corridor
+  위상 패턴(예: A·C 동시 offset 조합 후보)을 직접 후보 평가 — legacy식 joint 평가의
+  저렴판. 잔여 legacy 격차(F1RHO 기준 1430)의 유력 재료이나 별도 설계 필요.
+- [ ] 러너 -F2/-F3/-F23은 기록용 보존(전부 음성/무효 판정).
