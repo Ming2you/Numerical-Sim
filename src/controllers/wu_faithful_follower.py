@@ -206,6 +206,13 @@ class WuFaithfulFollower:
         # 설정 시 per-signal offset 탐색 대신 directive를 그대로 적용하고, 기존
         # corridor 가드(realized TTT 검증)가 최종 검증자로 남는다. None=완전 휴면.
         self.offset_directive: Optional[Dict[str, float]] = None
+        # ---------- G1(2026-07-06): ramp 신호(D/F) offset 활성화 ----------
+        # 진단(scratchpad corridor_graph_check): plant offset 민감도가 F=10.7 ≫ 비-ramp
+        # (A 0.30/B 0.12/C 1.56) — 가장 큰 offset 레버 F/D가 ramp 신호라는 이유로
+        # `_solve_offset_local`에서 offset=0 고정(단순화)돼 있었다. legacy는 D/F offset을
+        # std 44/35로 씀. G1은 ramp 신호도 phase-resolved ramp-aware rollout으로 offset을
+        # 탐색한다(P1.5의 use_phased_ramp 채점 경로 재사용). 기본 False → 기존 비트 동일.
+        self.ramp_offset_enabled: bool = False
         # 신호별 offset 후보 분율(×cycle_length). [0, cycle) 안의 작은 후보집합으로 국소 탐색.
         # 0.0은 현 baseline(offset off). 0~7/8 cycle을 8등분(끝점 cycle 제외).
         self.offset_fractions: tuple[float, ...] = (
@@ -1147,12 +1154,18 @@ class WuFaithfulFollower:
         후보 offset마다 offset-aware gf만 갱신해 채점한다. offset이 platoon 도착 window와 자기 green
         window를 정렬할수록 stop-delay(자기 TTS)가 낮아져 비용 최소 offset이 선택된다.
 
-        ramp-aware(D/F) 신호는 offset 탐색 대상에서 제외(storage 동역학 복잡) → offset 0."""
+        ramp-aware(D/F) 신호는 기본 offset 0(storage 동역학 복잡). G1(ramp_offset_enabled)이면
+        ramp-aware phased rollout로 offset 탐색(아래 _solve_offset_local_ramp)."""
         net = self.cfg.network
         sim = self.cfg.simulation
         model = self._local_models[signal]
         if model.has_ramps:
-            return 0.0, 0
+            if not self.ramp_offset_enabled:
+                return 0.0, 0
+            return self._solve_offset_local_ramp(
+                signal, green_p1, state, coupling, arr_movement,
+                s_eff_frozen, snapshot, demand,
+            )
         cycle = max(net.cycle_length, 1.0e-9)
         substeps = max(1, self.cfg.mpc.horizon_steps) * max(1, sim.K_cu)
         dt_h = sim.T_u_h
@@ -1215,6 +1228,122 @@ class WuFaithfulFollower:
             )
             obj = rollout_local_tts_phased(
                 model, q0, arr_by_substep, gf_by_substep, s_eff0, substeps, dt_h,
+            )
+            if price_active:
+                obj += self.offset_marginal_price_weight * g_off * _circ_delta(offset)
+            evals += 1
+            if obj < best_obj - 1.0e-9:
+                best_obj, best_off = obj, float(offset)
+        return best_off, evals
+
+    def _solve_offset_local_ramp(
+        self,
+        signal: str,
+        green_p1: float,
+        state: TrafficState,
+        coupling: Mapping[str, float],
+        arr_movement: Mapping[str, float],
+        s_eff_frozen: Mapping[str, float],
+        snapshot: ControlAction,
+        demand: DemandStep,
+    ) -> tuple[float, int]:
+        """ramp 신호(D/F) offset 국소 탐색 — ramp-aware phased rollout 채점(G1).
+
+        `_solve_urban_agent_local`의 ramp 셋업(offramp_inflow·occ0·ramp_queue0·reservoir_drain·
+        freeway_congestion·arr 재정규화)을 재사용하고, `_solve_offset_local`의 offset 후보 루프
+        구조를 미러링한다. platoon arr_by_substep은 offset 불변(상류 snapshot 의존)이라 1회 계산,
+        후보 offset마다 offset-aware gf_by_substep만 갱신해 rollout_local_tts_ramp_aware로 채점한다.
+        offset 가격(F3) 설정 시 가격항·trust도 non-ramp와 동일하게 적용."""
+        net = self.cfg.network
+        sim = self.cfg.simulation
+        model = self._local_models[signal]
+        cycle = max(net.cycle_length, 1.0e-9)
+        substeps = max(1, self.cfg.mpc.horizon_steps) * max(1, sim.K_cu)
+        dt_h = sim.T_u_h
+        start_idx = _urban_step_index(state, self.cfg)
+        total = net.effective_green_total
+
+        # frozen ramp 입력(snapshot을 control로).
+        reservoir_drain = self._frozen_reservoir_drain(state, snapshot, demand)
+        freeway_congestion = self._frozen_freeway_congestion(state)
+
+        arr_phase = {pid: float(coupling.get(f"arr_{signal}_{pid}", 0.0)) for pid in ("p1", "p2")}
+        offramp_inflow: Dict[str, float] = {}
+        offramp_contrib_phase = {"p1": 0.0, "p2": 0.0}
+        for off_ramp, movements in model.offramp_movements.items():
+            inflow = self._frozen_offramp_inflow(off_ramp, state)
+            offramp_inflow[off_ramp] = inflow
+            for m in movements:
+                offramp_contrib_phase[model.phase_of[m]] += model.beta_of[m] * inflow
+        arr_mv: Dict[str, float] = {}
+        for pid in ("p1", "p2"):
+            phase_movements = [
+                m for m in model.movements
+                if model.phase_of[m] == pid and model.kind_of[m] != "off_ramp"
+            ]
+            raw_sum = sum(max(0.0, float(arr_movement.get(m, 0.0))) for m in phase_movements)
+            target = max(0.0, arr_phase[pid] - offramp_contrib_phase[pid])
+            if raw_sum > 1.0e-12:
+                scale = target / raw_sum
+                for m in phase_movements:
+                    arr_mv[m] = max(0.0, float(arr_movement.get(m, 0.0))) * scale
+            else:
+                for m in phase_movements:
+                    arr_mv[m] = 0.0
+        offramp_occ0 = {
+            off_ramp: self._offramp_occupancy(off_ramp, state)
+            for off_ramp in model.offramp_movements
+        }
+        ramp_queue0 = {
+            ramp: max(0.0, float(state.ramp_queue.get(ramp, 0.0)))
+            for ramp in model.onramp_movements
+        }
+        s_eff0 = {
+            model.receiving_of[m]: float(s_eff_frozen.get(model.receiving_of[m], 0.0))
+            for m in model.movements
+            if model.receiving_of[m]
+        }
+        q0 = {m: max(0.0, float(state.urban_movement_queue.get(m, 0.0))) for m in model.movements}
+        # platoon arr(offset 불변) — off_ramp movement 제외(storage 유입 별도).
+        arr_by_substep = self._platoon_arrival_profiles(
+            signal, state, snapshot, demand, arr_mv, substeps, start_idx,
+        )
+        arr_by_substep = {
+            m: prof for m, prof in arr_by_substep.items()
+            if model.kind_of.get(m) != "off_ramp"
+        }
+        p2 = total - green_p1
+
+        price_active = (
+            self.offset_marginal_price is not None
+            and signal in self.offset_marginal_price
+        )
+        g_off = float(self.offset_marginal_price.get(signal, 0.0)) if price_active else 0.0
+        ref_off = (
+            float(self.offset_marginal_price_ref.get(signal, 0.0)) % cycle
+            if price_active else 0.0
+        )
+        trust = self.offset_marginal_price_trust_sec if price_active else None
+
+        def _circ_delta(off: float) -> float:
+            return ((off - ref_off + cycle / 2.0) % cycle) - cycle / 2.0
+
+        best_off, best_obj = 0.0, float("inf")
+        evals = 0
+        for frac in self.offset_fractions:
+            offset = (frac * cycle) % cycle
+            if trust is not None and abs(_circ_delta(offset)) > float(trust) + 1.0e-9:
+                continue
+            gf_by_substep = self._offset_green_fractions(
+                signal, green_p1, offset, substeps, start_idx,
+            )
+            obj = rollout_local_tts_ramp_aware(
+                model, q0, arr_mv, s_eff0,
+                offramp_inflow, offramp_occ0, ramp_queue0, reservoir_drain,
+                freeway_congestion, self.ramp_metering_weight,
+                green_p1, p2, substeps, dt_h,
+                arr_by_substep=arr_by_substep,
+                gf_by_substep=gf_by_substep,
             )
             if price_active:
                 obj += self.offset_marginal_price_weight * g_off * _circ_delta(offset)
@@ -2446,6 +2575,7 @@ class WuFaithfulFollower:
         # 조합을 통째로 평가했으므로 국소 재탐색은 조합을 되깨뜨릴 뿐) — 가드는 유지.
         offset_active = (
             self.offset_enabled
+            or self.ramp_offset_enabled
             or (self.offset_marginal_price is not None)
             or (self.offset_directive is not None)
         )
@@ -2458,7 +2588,16 @@ class WuFaithfulFollower:
                         offsets_off_zero += 1
             else:
                 offset_snapshot = dict(control.green_times)
+                # ramp_offset_enabled 단독(offset_enabled=False, 가격 없음)이면 ramp 신호만
+                # 탐색(D/F offset 격리 실험). offset_enabled True거나 F3 가격 설정 시엔 전부.
+                ramp_only = (
+                    (not self.offset_enabled)
+                    and (self.offset_marginal_price is None)
+                    and self.ramp_offset_enabled
+                )
                 for signal in net.signals:
+                    if ramp_only and not self._local_models[signal].has_ramps:
+                        continue
                     green_p1 = float(offset_snapshot.get(
                         f"{signal}_p1", net.effective_green_total / 2.0
                     ))

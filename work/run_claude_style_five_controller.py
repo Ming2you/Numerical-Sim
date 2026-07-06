@@ -193,6 +193,20 @@ def make_controller(controller_id: str, cfg: ExperimentConfig):
         return JointB2TRController(cfg)
     if controller_id == "P-STACK-WU-FAITHFUL-JF1-FW":
         return JointF1Controller(cfg)
+    # ---- G1(2026-07-06): ramp 신호(D/F) offset 활성화 (F1RHO base) ----
+    # G1DF = D/F offset만 활성(A/B/C offset은 0 유지) — plant 민감도 F=10.7 레버 격리.
+    if controller_id == "P-STACK-WU-FAITHFUL-G1DF":
+        controller = F1StackelbergWuMeteredController(cfg)
+        controller.nash_solver.f1_spillback_weight = 0.0
+        controller.nash_solver.ramp_offset_enabled = True
+        return controller
+    # G1ALL = 전 신호 offset 활성(A/B/C 국소 + D/F ramp-aware) — legacy 전체 offset 비교.
+    if controller_id == "P-STACK-WU-FAITHFUL-G1ALL":
+        controller = F1StackelbergWuMeteredController(cfg)
+        controller.nash_solver.f1_spillback_weight = 0.0
+        controller.nash_solver.offset_enabled = True
+        controller.nash_solver.ramp_offset_enabled = True
+        return controller
     if controller_id == "WU-FAITHFUL-FOLLOWER-F1":
         return F1WuFaithfulFollower(cfg)
     # B2TR: green 가격 + trust region(가격 유효 범위 = 유한차분 이웃 ±6s) —
