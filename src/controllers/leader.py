@@ -6,7 +6,8 @@ from typing import Dict, Iterable, List, Optional, Tuple
 import numpy as np
 
 from src.models.demand import DemandStep, merge_freeway_lane_loss
-from src.models.state import ControlAction, ExperimentConfig, TrafficState
+from src.models.metanet import effective_rho_crit
+from src.models.state import ControlAction, ExperimentConfig, TrafficState, segment_vsl
 from src.models.urban_queue_model import (
     estimate_onramp_green_release_flows,
     movement_forecast_arrivals_veh,
@@ -677,7 +678,9 @@ class Leader:
                 0.0,
                 1.0,
             ))
-            density_headroom = max(0.0, net.rho_crit - rho_merge)
+            # two_branch면 merge VSL이 옮긴 ρ_crit(VSL)로 headroom — VSL이 임계 올리면 더 방류 허용.
+            rho_c_merge = effective_rho_crit(net, segment_vsl(control, link, merge_idx, self.cfg))
+            density_headroom = max(0.0, rho_c_merge - rho_merge)
             headroom_flow = (
                 density_headroom
                 * net.freeway_segment_length_km
@@ -749,11 +752,17 @@ class Leader:
                 excluded += state.boundary_leg_vehicles(net)
         return float(base), float(excluded)
 
-    def _density_penalty(self, states: Iterable[TrafficState]) -> tuple[float, float]:
+    def _density_penalty(
+        self, states: Iterable[TrafficState], action: Optional[ControlAction] = None
+    ) -> tuple[float, float]:
         """Spec 4.2 freeway density 초과 penalty.
 
         기본은 nominal lane 수를 쓰되, lane-drop으로 lambda_eff가 실제로 nominal과
         달라진 segment에서만 effective lane weight를 사용한다.
+
+        two_branch면 segment별 초과 기준을 ρ_crit(VSL)로 — VSL이 임계를 올린 segment의 고밀도는
+        더 이상 "초과"가 아니므로 leader가 VSL-enabled 밀도를 오벌점하지 않는다(정합성). action=None
+        이거나 two_branch OFF면 nominal net.rho_crit → 비트 동일.
         """
         net = self.cfg.network
         use_effective = self.cfg.leader.use_effective_lanes_for_density_penalty
@@ -770,10 +779,14 @@ class Leader:
                         if abs(candidate - net.freeway_lanes) > 1.0e-9:
                             lane_weight = candidate
                             effective_weight_count += 1.0
+                    rho_c = (
+                        effective_rho_crit(net, segment_vsl(action, link, idx, self.cfg))
+                        if action is not None else float(net.rho_crit)
+                    )
                     penalty += (
                         net.freeway_segment_length_km
                         * lane_weight
-                        * max(0.0, rho - net.rho_crit)
+                        * max(0.0, rho - rho_c)
                     )
         return float(penalty), float(effective_weight_count)
 
@@ -869,7 +882,7 @@ class Leader:
         boundary_in_queue_penalty = (
             lc.w_boundary_in * boundary_in_queue_veh * accumulation_penalty_scale
         )
-        density_excess, density_effective_count = self._density_penalty(states)
+        density_excess, density_effective_count = self._density_penalty(states, action)
         density_penalty = lc.w_F * density_excess * accumulation_penalty_scale
         # ramp-queue terminal cost: 방류가 ramp를 배수해 이 항을 낮춘다(flat 깨는 신호).
         ramp_queue_penalty = lc.w_ramp_queue * ramp_queue_veh * accumulation_penalty_scale

@@ -30,12 +30,32 @@ def two_branch_vsl_speed_kmh(
     VSL(=자유류 속도)로 회전시킨다. 임계밀도 rho_c = 두 branch 접점이므로 VSL이 낮아지면
     rho_c는 오르고 capacity(=VSL·rho_c)는 내린다 — capacity-drop 회피의 물리적 근거.
     VSL=v_free에서 접점=nominal rho_crit이 되도록 backward-wave 속도 w를 앵커한다."""
-    w = v_free * rho_crit / max(rho_jam - rho_crit, 1.0e-9)  # 고정 backward-wave 속도
     s = max(vsl, 1.0e-9)                                      # 자유류 branch 속도 = VSL
-    rho_c = w * rho_jam / max(s + w, 1.0e-9)                  # VSL 의존 임계밀도(접점)
+    rho_c = rho_crit_for_vsl(vsl, v_free, rho_crit, rho_jam)  # VSL 의존 임계밀도(접점)
     if rho <= rho_c:
         return float(s)
+    w = v_free * rho_crit / max(rho_jam - rho_crit, 1.0e-9)   # 고정 backward-wave 속도
     return float(max(0.0, w * max(rho_jam - rho, 0.0) / max(rho, 1.0e-9)))
+
+
+def rho_crit_for_vsl(vsl: float, v_free: float, rho_crit: float, rho_jam: float) -> float:
+    """two-branch FD에서 VSL이 옮긴 임계밀도 ρ_crit(VSL)=두 branch 접점.
+
+    w = v_free·rho_crit/(rho_jam−rho_crit)(고정 backward-wave), ρ_c(vsl)=w·rho_jam/(vsl+w).
+    VSL=v_free이면 ρ_c=nominal rho_crit(정확히 앵커). VSL↓ → ρ_c↑(감속으로 더 촘촘히 = 임계↑).
+    rho_crit(VSL)의 유일 출처 — plant/leader/follower의 모든 rho_crit 소비처가 정합하게 이걸 쓴다."""
+    w = v_free * rho_crit / max(rho_jam - rho_crit, 1.0e-9)
+    return float(w * rho_jam / max(max(vsl, 1.0e-9) + w, 1.0e-9))
+
+
+def effective_rho_crit(net, vsl: float) -> float:
+    """net 설정에 따른 유효 임계밀도. two_branch면 ρ_crit(VSL), 아니면 고정 nominal rho_crit.
+
+    기본(vsl_fd_two_branch=False)이면 net.rho_crit 그대로 → 비트 동일. vsl=None/음수 방어."""
+    if not getattr(net, "vsl_fd_two_branch", False):
+        return float(net.rho_crit)
+    v = float(vsl) if vsl is not None else float(net.v_free)
+    return rho_crit_for_vsl(v, float(net.v_free), float(net.rho_crit), float(net.rho_max))
 
 
 def effective_desired_speed_kmh(
@@ -89,14 +109,17 @@ def metanet_speed_update_kmh(
     return float(max(v_min, speed + relaxation + convection + anticipation))
 
 
-def select_anticipation_nu(rho: float, net) -> float:
+def select_anticipation_nu(rho: float, net, vsl: float = None) -> float:
     """Arora & Kattan modified METANET(eq 9): 혼잡 regime(ρ>ρ_crit)에서 anticipation ν를
     ν_cong로 전환해 capacity drop을 표현. toggle off면 단일 ν_free.
 
     anticipation 항은 음수(하류가 더 혼잡할 때 감속)이므로 ν_cong>ν_free면 혼잡 시 감속이 커져
     속도·flow가 더 떨어진다(capacity drop 방향).
-    """
-    if getattr(net, "capacity_drop_anticipation", False) and rho > net.rho_crit:
+
+    two_branch면 capacity-drop 발화 임계를 ρ_crit(VSL)로 — VSL이 임계를 올려 merge를 subcritical로
+    지키면 nu-drop을 실제로 피한다(VSL의 교과서 이득). vsl=None이면 nominal(비트 동일)."""
+    rho_c = effective_rho_crit(net, vsl) if vsl is not None else float(net.rho_crit)
+    if getattr(net, "capacity_drop_anticipation", False) and rho > rho_c:
         return float(net.metanet_nu_cong_km2_h)
     return float(net.metanet_nu_km2_h)
 
@@ -248,8 +271,11 @@ def compute_ramp_release_flows(
         link = net.ramp_to_freeway[ramp]
         merge_idx = _ramp_merge_index(cfg, ramp, len(state.freeway_density[link]))
         rho_merge = state.freeway_density[link][merge_idx]
+        # two_branch면 merge segment의 VSL이 옮긴 ρ_crit(VSL)로 수용력 계산 — VSL이 임계를 올리면
+        # (rho_max−ρ_crit(VSL))↓ → receiving_factor↑ → freeway가 더 받음(VSL의 방류-허용 이득).
+        rho_c_merge = effective_rho_crit(net, segment_vsl(control, link, merge_idx, cfg))
         receiving_factor = _clip(
-            (net.rho_max - rho_merge) / max(net.rho_max - net.rho_crit, 1.0e-9),
+            (net.rho_max - rho_merge) / max(net.rho_max - rho_c_merge, 1.0e-9),
             0.0,
             1.0,
         )
@@ -490,7 +516,7 @@ def freeway_substep(
                 dt_h,
                 net.freeway_segment_length_km,
                 net.metanet_tau_h,
-                select_anticipation_nu(rho, net),
+                select_anticipation_nu(rho, net, vsl_i),
                 net.metanet_kappa_veh_km_lane,
                 net.v_min,
             )

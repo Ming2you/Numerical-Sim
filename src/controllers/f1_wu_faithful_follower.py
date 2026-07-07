@@ -26,6 +26,7 @@ from src.controllers.local_freeway_plant import freeway_substep_local
 from src.controllers.stackelberg_wu_metered import StackelbergWuMeteredController
 from src.controllers.wu_faithful_follower import WuFaithfulFollower
 from src.models.demand import DemandStep
+from src.models.metanet import effective_rho_crit
 from src.models.state import ControlAction, ExperimentConfig, TrafficState, segment_vsl
 
 
@@ -529,7 +530,13 @@ class F1WuFaithfulFollower(WuFaithfulFollower):
                     ) * dt_h
                     # F1 ρ_crit hinge: 자기 본선 예측 밀도의 임계 초과 차량수를 선형 가산 —
                     # 절벽 정보가 미분 없이 후보 단위로 평가된다(후보가 절벽을 넘기면 통째로 비쌈).
-                    excess = sum(max(0.0, float(r) - rho_crit) for r in rhos)
+                    # two_branch면 segment별 임계를 후보 VSL(first_vec)이 옮긴 ρ_crit(VSL)로 — VSL이
+                    # 임계 올린 segment의 고밀도는 초과 아님(정합성). OFF면 nominal → 비트 동일.
+                    excess = sum(
+                        max(0.0, float(r) - effective_rho_crit(
+                            net, first_vec[i] if i < len(first_vec) else net.v_free))
+                        for i, r in enumerate(rhos)
+                    )
                     if excess > 0.0:
                         cost += w_rho * excess * seg_veh * dt_h
             smooth = sum(abs(first_vec[i] - prev_vec[i]) for i in range(min(n_seg, len(first_vec))))
