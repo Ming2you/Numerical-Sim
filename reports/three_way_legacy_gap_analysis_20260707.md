@@ -78,10 +78,12 @@ legacy는 이 전부를 **한 번에** 푼다. 분기점 둘:
 1. **leader 목적에 urban-pressure/terminal 항**: urban 총 accumulation(또는 boundary+storage 큐)에
    비례한 cost-to-go를 더해, 방류의 장기 배수 이득을 horizon 안으로 당김. (w_boundary_in이 현재 **0**
    — 켜는 것부터.)
-2. **rho_crit 억제 3종 재조정**: F1 hinge / density_headroom 캡 / w_F density penalty. 단 NORHO
-   예비 결과(step30 +100 악화)는 **캡만 풀면 오히려 나빠짐**을 시사 — leader가 *원해서* 방류하는 게
-   아니라 dynamics가 밀어붙여 capacity drop. → **캡 제거가 아니라 목적함수 보정(1)이 정답**이라는
-   방증. (i)(ii)는 완화하되 (iii)+(1)로 leader가 스스로 고방류를 *선택*하게.
+2. **rho_crit 억제 3종 재조정**: F1 hinge / density_headroom 캡 / w_F density penalty. **NORHO
+   최종 결과(F1 hinge + density_headroom 캡 2종 제거) = 12252.9, g1df 대비 +380(+3.2%) 악화,
+   STOP 위반.** 결정적: **N_UF가 4983으로 오히려 g1df(5084)보다 낮음** — 캡을 풀어도 leader가
+   방류를 더 안 한다. → **rho_crit 캡은 under-release 원인이 아니다**(leader의 horizon+payoff가
+   원인). 캡 제거는 freeway 안전만 잃어 late-congestion서 +380 악화. → **캡 제거가 아니라 목적함수
+   보정(1)이 정답**임을 실증. leader가 *원해서* 고방류를 *선택*하게 하는 payoff 항이 핵심.
 
 ### Route B — arterial green×offset 공동설계(~70%): 진짜 남은 격차
 사용자 가설의 처방 = **green을 offset과 함께 움직이게** 만들기. 후보(비용 오름차순):
