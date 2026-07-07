@@ -206,6 +206,14 @@ class WuFaithfulFollower:
         # 설정 시 per-signal offset 탐색 대신 directive를 그대로 적용하고, 기존
         # corridor 가드(realized TTT 검증)가 최종 검증자로 남는다. None=완전 휴면.
         self.offset_directive: Optional[Dict[str, float]] = None
+        # LEADER-OFFSET(2026-07-07): directive가 leader의 전역 joint 결정(권위적)이면 follower의
+        # corridor 검증 가드(아래 offset_keep_margin)를 우회한다. 근거: (i) 가드는 per-signal
+        # selfish 국소 탐색이 corridor 전체를 해칠 위험을 막으려는 것인데, leader가 이미 global
+        # rollout으로 joint 최적화했으므로 selfish 위험이 없다(가드 명분 소멸). (ii) 사용자 요지 —
+        # 단일 스텝 이득이 작아도(가드 0.5% 마진 미달) 누적되어 혼잡을 예방 — 를 가드가 정면으로
+        # 죽인다(작은 이득 = 되돌림). leader가 offset을 "소유"한다는 건 follower가 재검증(veto)하지
+        # 않는다는 뜻. 안전망은 leader의 adopt 판정(global gain>margin)과 실험의 STOP(>1% 악화) 기준.
+        self.offset_directive_authoritative: bool = False
         # ---------- G1(2026-07-06): ramp 신호(D/F) offset 활성화 ----------
         # 진단(scratchpad corridor_graph_check): plant offset 민감도가 F=10.7 ≫ 비-ramp
         # (A 0.30/B 0.12/C 1.56) — 가장 큰 offset 레버 F/D가 ramp 신호라는 이유로
@@ -2715,10 +2723,15 @@ class WuFaithfulFollower:
         # 같은 `run_coupled_interval`로 비교해 **개선될 때만** 유지한다(아니면 0으로 되돌림). 이는
         # offset을 actuator로 두되 그 효과를 closed-loop으로 검증하는 것으로, decisive check와 정합.
         offsets_kept = offsets_off_zero
+        # leader 권위 directive면 가드 우회(leader가 이미 global joint 평가 — follower veto 금지).
+        directive_authoritative = (
+            self.offset_directive is not None and self.offset_directive_authoritative
+        )
         if (
             offset_active
             and offsets_off_zero > 0
             and forecast is not None
+            and not directive_authoritative
         ):
             ttt_on, _, _ = self._rollout_horizon_ttt(state, control, forecast)
             zero_control = control.copy()

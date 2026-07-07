@@ -207,6 +207,20 @@ def make_controller(controller_id: str, cfg: ExperimentConfig):
         controller.nash_solver.offset_enabled = True
         controller.nash_solver.ramp_offset_enabled = True
         return controller
+    # ---- LEADER-OFFSET(2026-07-07): offset 소유권 follower→leader (green은 follower 유지) ----
+    # G-LEAD-OFF-MPC = F1RHO(ρ hinge)+B2TR green price base + leader가 전 신호 offset을 MPC
+    # joint rollout(corridor lag seed + 좌표하강)으로 결정. follower offset 탐색은 완전 OFF
+    # (offset_enabled/ramp_offset_enabled/offset_marginal_price 모두 기본 OFF → directive만 동결).
+    # 진단 처방: offset은 joint 변수라 follower 국소 best-response론 못 정한다(F3 per-signal
+    # 가격≈0, g1all 12638 de-coordinate) → 전역 joint 평가자(leader)가 결정.
+    if controller_id == "P-STACK-WU-FAITHFUL-GLEADOFF-MPC":
+        controller = F1StackelbergWuMeteredController(cfg)
+        controller.nash_solver.f1_spillback_weight = 0.0
+        controller.leader_offset_enabled = True
+        controller.leader_offset_method = "mpc"
+        # leader가 offset 소유 → follower corridor 가드 우회(veto 금지, 작은 이득 누적 허용).
+        controller.nash_solver.offset_directive_authoritative = True
+        return controller
     # ---- 실험 ①(2026-07-07): N_UF dual λ_UF (등식→dual 가격, λ_P와 대칭) ----
     # G1DF base(신기록) + N_UF를 hard 등식 대신 signed dual 가격으로. 통일성 검증:
     # metering 절벽 레버가 수량 dual로도 되나(과방류 breakdown 위험 가설).

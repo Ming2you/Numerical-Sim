@@ -106,6 +106,25 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         # 따라감 — 계층적 joint). 변형 이득은 진단으로 기록.
         self.offset_joint_green_delta_sec: float = 6.0
         self.offset_joint_green_top_k: int = 3
+        # ---------- LEADER-OFFSET(2026-07-07): offset 소유권을 follower→leader로 이전 ----------
+        # 배경: offset은 joint 변수 — per-signal 가격≈0(F3 null), follower 국소 best-response는
+        # de-coordinate(g1all 12638 > b2tr 12523), 양방향 mesh는 offset 하나로 두 방향 green-wave를
+        # 못 맞춘다(MAXBAND=전역 bandwidth). 즉 follower(신호 하나)로는 원리적으로 못 정한다.
+        # → offset 결정을 leader(전역 joint 평가자)로 옮긴다. green split은 국소라 follower 유지.
+        # J1(offset_joint)과의 차이: (i) 전 신호(D/F ramp 포함), (ii) grid {0,±c/8,±c/4},
+        # (iii) corridor 진행방향 lag 패턴 seed + 좌표하강(조합폭발 회피), (iv) follower offset
+        # 탐색 완전 OFF(directive만 동결). 기본 OFF = 비트동일.
+        self.leader_offset_enabled: bool = False
+        self.leader_offset_method: str = "mpc"  # {"mpc", "maxband_lp"}
+        # grid 분율(|frac|·cycle): {0, ±c/8, ±c/4}. legacy offset_std 28~45 커버.
+        self.leader_offset_grid_fracs: tuple = (0.125, 0.25)
+        # 채택 마진: 0.0 = per-step 개선이면 무조건 적용(단일 스텝 이득이 작아도 누적으로
+        # 혼잡을 예방한다는 가설 — J1의 0.5% 마진이 0/40 채택을 낸 원인 제거).
+        self.leader_offset_margin: float = 0.0
+        # Stackelberg green×offset 결합: 최선 패턴에 green ±δ 공동이동 변형 평가(채점 반영).
+        self.leader_offset_green_delta_sec: float = 6.0
+        # 좌표하강 라운드(green-wave 결합은 라운드로 창발 — corridor_joint_offset_probe 검증).
+        self.leader_offset_cd_rounds: int = 2
         # B4(사용자 제안, 2026-07-05 개정): 가격 채널들에 barrier 항의 marginal price를 합산.
         # ── 개정 이유(2026-07-04 §9 + 2026-07-05 probe): 제곱 barrier는 단위가 veh²·h라
         # 정체불명 가중치가 필요했고 얕은 초과에서 gradient가 소멸(g_TTT의 1/750)했다.
@@ -302,6 +321,127 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         _, ttt = self._predict(state, control, forecast)
         return float(ttt)
 
+    # 상단 arterial A-B-C / 하단 D-(E)-F / 수직 A-D·C-F(E는 비신호 통과) — 진행방향 lag seed용.
+    _OFFSET_CORRIDORS = (("A", "B", "C"), ("D", "F"), ("A", "D"), ("C", "F"))
+
+    def _solve_leader_offset(
+        self,
+        state: TrafficState,
+        previous: ControlAction,
+        forecast: List[DemandStep],
+    ) -> tuple[Dict[str, float], Dict[str, float]]:
+        """LEADER-OFFSET(2A, MPC joint rollout): 전 신호 offset을 leader가 전역 rollout으로
+        공동 결정한다. 후보 = corridor 진행방향 lag seed + 좌표하강(조합폭발 회피), grid
+        {0,±c/8,±c/4}. 각 후보를 _predict 전역 rollout으로 채점(green×offset 결합은 최선
+        패턴의 green ±δ 변형으로 반영 — Stackelberg follower green 반응 근사). 최소 TTT 패턴을
+        offset_directive로 반환(가격 아닌 고정값). green split은 follower 유지."""
+        net = self.cfg.network
+        cycle = float(net.cycle_length)
+        total = float(net.effective_green_total)
+        signals = list(net.signals)
+        lo, hi = self._signal_price_p1_bounds()
+
+        def clamp(v: float) -> float:
+            return max(lo, min(hi, float(v)))
+
+        # grid = {0, ±frac·cycle}(중복 제거, 순서 보존).
+        grid: List[float] = []
+        for g in [0.0] + [
+            sign * f * cycle
+            for f in self.leader_offset_grid_fracs
+            for sign in (1.0, -1.0)
+        ]:
+            gv = round(float(g) % cycle, 6)
+            if gv not in grid:
+                grid.append(gv)
+
+        memo: Dict[tuple, float] = {}
+
+        def key(pat: Dict[str, float]) -> tuple:
+            return tuple(round(float(pat.get(s, 0.0)) % cycle, 3) for s in signals)
+
+        def score(pat: Dict[str, float], green_shift: float = 0.0) -> float:
+            k = (key(pat), round(float(green_shift), 3))
+            if k in memo:
+                return memo[k]
+            control = previous.copy()
+            control.offsets = dict(previous.offsets)
+            for s in signals:
+                control.offsets[s] = float(pat.get(s, 0.0)) % cycle
+            if abs(green_shift) > 1.0e-9:
+                control.green_times = dict(previous.green_times)
+                for s in signals:
+                    p1 = float(previous.green_times.get(f"{s}_p1", total / 2.0))
+                    p1n = clamp(p1 + green_shift)
+                    control.green_times[f"{s}_p1"] = p1n
+                    control.green_times[f"{s}_p2"] = total - p1n
+            _, ttt = self._predict(state, control, forecast)
+            memo[k] = float(ttt)
+            return float(ttt)
+
+        zero_pat = {s: 0.0 for s in signals}
+        zero_ttt = score(zero_pat)
+
+        # ---- seed: corridor 진행방향 lag 패턴(양방향) + 직전 committed(hysteresis) ----
+        seeds: List[Dict[str, float]] = [dict(zero_pat)]
+        seeds.append({s: float(previous.offsets.get(s, 0.0)) % cycle for s in signals})
+        sig_set = set(signals)
+        for corr in self._OFFSET_CORRIDORS:
+            seq0 = [s for s in corr if s in sig_set]
+            if len(seq0) < 2:
+                continue
+            for seq in (seq0, list(reversed(seq0))):
+                for f in self.leader_offset_grid_fracs:
+                    tau = (f * cycle) % cycle
+                    pat = dict(zero_pat)
+                    for i, s in enumerate(seq):
+                        pat[s] = (i * tau) % cycle
+                    seeds.append(pat)
+        best_pat = min(seeds, key=score)
+        best_ttt = score(best_pat)
+
+        # ---- 좌표하강 refinement(전 신호, green-wave 결합은 라운드로 창발) ----
+        cur = dict(best_pat)
+        for _ in range(max(0, int(self.leader_offset_cd_rounds))):
+            improved = False
+            for s in signals:
+                base_v = float(cur.get(s, 0.0))
+                best_v, best_s = base_v, score(cur)
+                for g in grid:
+                    trial = dict(cur)
+                    trial[s] = g
+                    t = score(trial)
+                    if t < best_s - 1.0e-9:
+                        best_s, best_v = t, g
+                if abs(best_v - base_v) > 1.0e-9:
+                    cur[s] = best_v
+                    improved = True
+            if not improved:
+                break
+        cd_ttt = score(cur)
+        if cd_ttt < best_ttt - 1.0e-9:
+            best_pat, best_ttt = dict(cur), cd_ttt
+
+        # ---- Stackelberg green×offset 결합: 최선 패턴의 green ±δ 변형을 채점 반영 ----
+        g_delta = float(self.leader_offset_green_delta_sec)
+        best_shift = 0.0
+        if g_delta > 1.0e-9:
+            for sh in (g_delta, -g_delta):
+                t = score(best_pat, sh)
+                if t < best_ttt - 1.0e-9:
+                    best_ttt, best_shift = t, sh
+
+        gain = zero_ttt - best_ttt
+        adopt = gain > float(self.leader_offset_margin) * max(zero_ttt, 1.0e-9)
+        directive = dict(best_pat) if adopt else dict(zero_pat)
+        diag = {
+            "gain": float(gain),
+            "adopt": float(bool(adopt)),
+            "green_shift": float(best_shift),
+            "n_eval": float(len(memo)),
+        }
+        return directive, diag
+
     def _maybe_refresh_signal_prices(
         self,
         state: TrafficState,
@@ -321,7 +461,7 @@ class StackelbergWuMeteredController(StackelbergMPCController):
             follower.vsl_marginal_price = None
         if not self.offset_price_enabled:
             follower.offset_marginal_price = None
-        if not self.offset_joint_enabled:
+        if not self.offset_joint_enabled and not self.leader_offset_enabled:
             follower.offset_directive = None
         if not (
             self.signal_price_enabled
@@ -329,6 +469,7 @@ class StackelbergWuMeteredController(StackelbergMPCController):
             or self.vsl_price_enabled
             or self.offset_price_enabled
             or self.offset_joint_enabled
+            or self.leader_offset_enabled
         ):
             self._signal_price_meta = {
                 "wu_b2_price_enabled": 0.0,
@@ -390,6 +531,7 @@ class StackelbergWuMeteredController(StackelbergMPCController):
             or (self.vsl_price_enabled and follower.vsl_marginal_price is None)
             or (self.offset_price_enabled and follower.offset_marginal_price is None)
             or (self.offset_joint_enabled and follower.offset_directive is None)
+            or (self.leader_offset_enabled and follower.offset_directive is None)
         )
         if not refresh and self._leader_global_refresh_active(state):
             refresh = True
@@ -644,6 +786,28 @@ class StackelbergWuMeteredController(StackelbergMPCController):
             meta["wu_j_green_shift_at_best"] = float(best_shift)
             for s, off in directive.items():
                 meta[f"wu_j_off_{s}"] = float(off)
+
+        # ---- LEADER-OFFSET 채널(2026-07-07): offset 소유권을 leader로 이전 ----
+        # J1과 별개 채널(전 신호·finer grid·corridor lag seed·follower 탐색 완전 OFF).
+        # 최선 offset 패턴을 offset_directive로 하달 → follower는 그 값으로 동결(탐색 없음).
+        if self.leader_offset_enabled:
+            if self.leader_offset_method == "mpc":
+                lead_directive, lead_diag = self._solve_leader_offset(
+                    state, previous, forecast,
+                )
+            else:
+                raise NotImplementedError(
+                    f"leader_offset_method={self.leader_offset_method!r} 미구현 "
+                    "(현재 'mpc'만 지원 — maxband_lp는 2B, 별도 스펙 필요)."
+                )
+            follower.offset_directive = lead_directive
+            meta["wu_lead_off_enabled"] = 1.0
+            meta["wu_lead_off_gain"] = float(lead_diag["gain"])
+            meta["wu_lead_off_adopted"] = float(lead_diag["adopt"])
+            meta["wu_lead_off_green_shift"] = float(lead_diag["green_shift"])
+            meta["wu_lead_off_n_eval"] = float(lead_diag["n_eval"])
+            for s, off in lead_directive.items():
+                meta[f"wu_lead_off_{s}"] = float(off)
 
         # ---- VSL 채널(B3, raw g_i — d_local 미차감 주의, 기본 OFF) ----
         if self.vsl_price_enabled and op_vsl:
