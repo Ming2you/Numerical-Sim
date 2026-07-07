@@ -231,6 +231,10 @@ class WuFaithfulFollower:
         # 듀얼 모드 사용 여부(leader present일 때만 ON). 고정가중 패널티(w_P) 대체.
         # True면 _solve_urban_agent_local의 N_P 항이 fixed-weight가 아니라 λ·nin_i가 된다.
         self.use_dual_np: bool = True
+        # N_P 가격/패널티 항 전체 게이트(2026-07-07, green 이중가격 격리용). False면 green
+        # 비용에서 N_P 항(dual λ_P·nin 또는 legacy w_P 패널티)을 완전히 뺀다 — g_ext(B2
+        # green 가격)만 남겨 "N_P가 g_ext와 이중계상돼 잉여/충돌인가"를 판정. 기본 True.
+        self.np_price_enabled: bool = True
         # subgradient 스텝 정규화 상수(차원무관 O(1); 시나리오 비의존). 실제 스텝 α는
         # 매 step 측정한 듀얼 gain G=|dΣnin/dλ|로 α = dual_step_c·cost_norm/max(G,G_floor)
         # 로 자기보정한다(스케일 인지·과적합 방지). 아래 _solve_followers 참고.
@@ -760,9 +764,9 @@ class WuFaithfulFollower:
                     cost += self.signal_marginal_price_weight * float(g_ext) * (float(p1) - ref)
             # nin_i(green)은 리더 setpoint와 비교 가능한 net-inflow(듀얼·진단 공통).
             nin = self._agent_net_inflow_veh(signal, p1, state, fa, horizon_h)
-            if dual_mode:
+            if self.np_price_enabled and dual_mode:
                 cost += lambda_p * nin
-            elif legacy_mode and w_p > 0.0:
+            elif self.np_price_enabled and legacy_mode and w_p > 0.0:
                 mean_accum = cost / cost_norm
                 cost += w_p * max(0.0, mean_accum - np_setpoint) * cost_norm
             evals += 1
@@ -2503,7 +2507,7 @@ class WuFaithfulFollower:
             control.diagnostics["wu_p15_auto_active_count"] = float(
                 len(self._phase_resolved_active_signals)
             )
-        dual_active = leader is not None and self.use_dual_np
+        dual_active = leader is not None and self.use_dual_np and self.np_price_enabled
         n_p_star = float(getattr(leader, "N_P_star", 0.0)) if leader is not None else 0.0
         lambda_p = float(self._lambda_P) if dual_active else 0.0  # warm-start(직전 step 수렴값).
         sum_nin = 0.0

@@ -216,6 +216,15 @@ def make_controller(controller_id: str, cfg: ExperimentConfig):
         controller.nash_solver.f1_spillback_weight = 0.0
         controller.nash_solver.ramp_offset_enabled = True
         return controller
+    # ---- 실험 ③(2026-07-07): green 이중가격 격리 — N_P가 g_ext와 이중계상/충돌인가 ----
+    # G1DF(신기록) + N_P 항 전체 OFF(np_price_enabled=False). g_ext만 남김. 비슷하면
+    # N_P 잉여(g_ext가 다 함), 나빠지면 N_P가 horizon 밖 보호를 실제 수행(시간대 분업).
+    if controller_id == "P-STACK-WU-FAITHFUL-G1DF-NOLAMP":
+        controller = F1StackelbergWuMeteredController(cfg)
+        controller.nash_solver.f1_spillback_weight = 0.0
+        controller.nash_solver.ramp_offset_enabled = True
+        controller.nash_solver.np_price_enabled = False
+        return controller
     # ---- 실험 ②(2026-07-07): blocked_q 격리 — metering price가 blocked_q와 간섭했나 ----
     # F2(metering price + hinge) 구성에서 count_blocked_ramp_inflow=False.
     # F2(19074, blocked_q ON)와 비교: 개선되면 간섭, 그대로면 절벽(§12) 재확인.
