@@ -22,3 +22,20 @@
   단일점 비교는 동일 머신만.
 - 다음(다른 계정): leader-offset(MPC/MAXBAND-LP) 채널 구현 + LP vs rollout cost-perf frontier +
   joint cross-term probe + skew 검증.
+
+## 2. Ramp = hidden space (리포트) — 방류 under-release의 근본 원인
+
+`reports/ramp_hidden_space_20260707.md` 참조. 핵심:
+
+- leader가 방류를 legacy(5700)만큼 안 올리는(4800) 근본 = **objective(realized TTT + 9분)의 결함.**
+- **realized TTT는 차의 위치 구분 못 함** → ramp 큐가 **hidden space**: 차 숨기면 (a)TTT엔 잡히나
+  (b)어느 penalty에도 없고(leader.py:882 objective에 ramp 큐 항 부재) (c)9분 안 complete 안 하면
+  방류해도 같은 TTT. → **방류=ramp→freeway 이동(net 0)**, 진짜 이득(exit)은 9분 밖 → leader가
+  ramp에 park(합리적) → under-release.
+- **증거**: proxy로 N_UF 스윕 시 objective·follower_ttt가 4275→6000 내내 <0.1% flat(방류 무감각).
+- **배제 확정**: hinge(−211 소폭)·headroom(무효)·density_penalty(<1%)·offset·urban-price 전부 증상.
+- **처방**: objective에 **선형 ramp-큐 항**(terminal cost proxy — ramp=exit 가장 먼 차=deferred
+  비용) 추가 → 방류가 신호를 가짐. weight로 freeway 절벽 균형. 0.5*N_cap hinge는 under-count(선형이 맞음).
+- **일반화**: realized-TTT-only면 horizon이 network 통과시간에 비례해야 → 일반화 붕괴. terminal
+  cost/큐목적이 horizon을 크기와 분리. 대형망 MPC 문헌도 terminal cost/큐목적/집계상태로 해결(긴 horizon 아님).
+- 다음: leader objective에 선형 ramp-큐 항 + weight 스윕(다른 계정). h15는 임시 확인용.
