@@ -207,6 +207,18 @@ def make_controller(controller_id: str, cfg: ExperimentConfig):
         controller.nash_solver.offset_enabled = True
         controller.nash_solver.ramp_offset_enabled = True
         return controller
+    # ---- G1DF-NORHO(2026-07-07): g1df에서 rho_crit 안전장치 2종 제거 — 진단 ----
+    # 사용자 진단: freeway follower의 F1 ρ_crit hinge(own-TTS penalty)와 leader의 density_headroom
+    # 캡(N_UF 예산을 merge 밀도가 rho_crit 닿는 flow로 상한)이 freeway 유입을 과하게 조여 격차의
+    # 원인인가(legacy N_UF 5700 vs 우리 ~5084). 둘 다 제거하고 g1df 재실행 → 유입 증가가 격차를
+    # 닫나 vs capacity-drop 붕괴하나. base=g1df(F1RHO+D/F offset).
+    if controller_id == "P-STACK-WU-FAITHFUL-G1DF-NORHO":
+        controller = F1StackelbergWuMeteredController(cfg)
+        controller.nash_solver.f1_spillback_weight = 0.0
+        controller.nash_solver.f1_rho_weight = 0.0           # F1 ρ_crit hinge 제거
+        controller.nash_solver.ramp_offset_enabled = True
+        controller.leader.rho_headroom_cap_enabled = False   # leader density_headroom 캡 제거
+        return controller
     # ---- LEADER-OFFSET(2026-07-07): offset 소유권 follower→leader (green은 follower 유지) ----
     # G-LEAD-OFF-MPC = F1RHO(ρ hinge)+B2TR green price base + leader가 전 신호 offset을 MPC
     # joint rollout(corridor lag seed + 좌표하강)으로 결정. follower offset 탐색은 완전 OFF

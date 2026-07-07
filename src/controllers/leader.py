@@ -50,6 +50,10 @@ class LeaderCandidateBounds:
 class Leader:
     def __init__(self, cfg: ExperimentConfig):
         self.cfg = cfg
+        # rho_crit headroom 캡(2026-07-07 진단용 토글): _feasible_nuf_capacity에서 각 ramp
+        # 유입을 merge 밀도가 rho_crit에 닿는 flow(headroom_flow)로 상한한다. False면 그 항을
+        # min()에서 제거 → freeway 유입 예산(N_UF)을 rho_crit로 조이지 않는다. 기본 True=비트동일.
+        self.rho_headroom_cap_enabled: bool = True
 
     def _forecast_demand_summary(self, forecast: list[DemandStep]) -> DemandStep:
         """horizon 수요 요약 DemandStep — 후보 생성이 첫 스텝이 아닌 예측 수요압을 보게 한다.
@@ -684,12 +688,15 @@ class Leader:
                 state.ramp_queue.get(ramp, 0.0) / max(sim.T_f_h, 1.0e-9)
                 + green_inflow.get(ramp, 0.0)
             )
-            feasible += min(
+            bounds = [
                 net.ramp_capacity_veh_h[ramp],
                 max(0.0, available),
                 q_cap * receiving_factor,
-                max(0.0, headroom_flow),
-            )
+            ]
+            # rho_crit headroom 캡(진단 토글): 끄면 이 항을 min()에서 제거.
+            if self.rho_headroom_cap_enabled:
+                bounds.append(max(0.0, headroom_flow))
+            feasible += min(bounds)
         return float(max(0.0, feasible * self.cfg.leader.N_UF_feasible_margin))
 
     def _heuristic_nuf_target(
