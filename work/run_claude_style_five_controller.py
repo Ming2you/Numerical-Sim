@@ -251,6 +251,23 @@ def make_controller(controller_id: str, cfg: ExperimentConfig):
         _apply_h15(); return _base_norho()
     if controller_id == "P-STACK-WU-FAITHFUL-NORHO-FULLEVAL":
         _apply_fulleval(); return _base_norho()
+    # ---- RAMPQ(2026-07-07): leader에 선형 ramp-queue terminal cost 추가 (Codex "ramp=hidden space") ----
+    # realized TTT의 위치 불변성(방류=차 이동, net-0)이 만든 under-release를, ramp 큐 선형 penalty로
+    # 깬다. 보정(rampq_calib): 피크는 freeway 포화로 flat(자연 collapse 방지), buildup서 방류↑ →
+    # 큐 폭발 예방. weight=8(보정상 buildup N_UF를 legacy 5700 방향으로). freeway follower는 단일
+    # segment라 leader-단 항만으로 충분(사용자 지적). base: {GLEADOFF, NORHO}.
+    _RAMPQ_W = 8.0
+    if controller_id == "P-STACK-WU-FAITHFUL-NORHO-RQ":
+        cfg.leader.w_ramp_queue = _RAMPQ_W
+        return _base_norho()
+    if controller_id == "P-STACK-WU-FAITHFUL-GLEADOFF-RQ":
+        cfg.leader.w_ramp_queue = _RAMPQ_W
+        c = F1StackelbergWuMeteredController(cfg)
+        c.nash_solver.f1_spillback_weight = 0.0
+        c.leader_offset_enabled = True
+        c.leader_offset_method = "mpc"
+        c.nash_solver.offset_directive_authoritative = True
+        return c
     # ---- LEADER-OFFSET(2026-07-07): offset 소유권 follower→leader (green은 follower 유지) ----
     # G-LEAD-OFF-MPC = F1RHO(ρ hinge)+B2TR green price base + leader가 전 신호 offset을 MPC
     # joint rollout(corridor lag seed + 좌표하강)으로 결정. follower offset 탐색은 완전 OFF

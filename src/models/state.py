@@ -420,6 +420,12 @@ class LeaderConfig:
     w_L: float = 0.0
     # Step D: boundary_in 큐 비용은 진단용으로 계산하되 leader_total_objective에는 더하지 않는다.
     w_boundary_in: float = 0.0
+    # ramp-queue terminal cost (2026-07-07, "ramp = hidden space" 처방): on-ramp 큐에 stuck된
+    # 차 = exit에서 가장 먼 차 = 최대 deferred 비용. leader objective에 선형 ramp-큐 항을 더하면
+    # 방류(N_UF↑)가 ramp를 배수해 penalty↓ → realized-TTT의 위치 불변성(방류=차 이동, net-0)이
+    # 만든 flat을 깨고 방류 신호를 준다. terminal cost = 무한지평 cost-to-go 근사(짧은 horizon을
+    # 무한지평처럼 — Mayne et al. 2000; store-and-forward 큐목적과 정합). 기본 0=비트동일.
+    w_ramp_queue: float = 0.0
     mfd_penalty_mode: str = "all_urban_halfcap"
     mfd_storage_threshold_ratio: float = 0.5
     mfd_storage_weight: float = 1.0

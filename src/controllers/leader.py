@@ -847,8 +847,11 @@ class Leader:
         use_protected_exceed = mfd_mode in {"protected_exceed", "combined"}
         use_all_urban_halfcap = mfd_mode in {"all_urban_halfcap", "combined"}
         boundary_in_queue_veh = 0.0
+        ramp_queue_veh = 0.0
         for s in states:
             n_p = s.protected_accumulation_veh(net)
+            # ramp = hidden space: on-ramp 큐 차량을 terminal cost로 계상(방류 신호).
+            ramp_queue_veh += sum(max(0.0, float(v)) for v in s.ramp_queue.values())
             # follower_ttt 모드의 base는 veh*h이므로 accumulation 초과 항도 T_c_h로 맞춘다.
             if use_protected_exceed:
                 target_penalty += lc.w_P * max(0.0, n_p - lc.N_P_crit_veh) * accumulation_penalty_scale
@@ -868,6 +871,8 @@ class Leader:
         )
         density_excess, density_effective_count = self._density_penalty(states)
         density_penalty = lc.w_F * density_excess * accumulation_penalty_scale
+        # ramp-queue terminal cost: 방류가 ramp를 배수해 이 항을 낮춘다(flat 깨는 신호).
+        ramp_queue_penalty = lc.w_ramp_queue * ramp_queue_veh * accumulation_penalty_scale
         # Leader action smoothness is diagnostic-disabled. Medium-demand
         # injection diagnostics showed it can dominate lower rollout TTT
         # candidates and keep the leader pinned to the previous target.
@@ -885,8 +890,11 @@ class Leader:
             + mfd_storage_penalty
             + boundary_in_queue_penalty
             + density_penalty
+            + ramp_queue_penalty
         )
         return {
+            "leader_ramp_queue_veh": float(ramp_queue_veh),
+            "leader_ramp_queue_penalty": float(ramp_queue_penalty),
             "leader_base_accumulation": float(state_base),
             "leader_objective_base": float(base),
             "leader_state_accumulation_base": float(state_base),
