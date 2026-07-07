@@ -191,6 +191,8 @@ def main() -> None:
     for scenario_name in [s.strip() for s in args.scenarios.split(",") if s.strip()]:
         scenario = scenarios[scenario_name]
         cfg = apply_scenario_network_overrides(base_cfg.with_updates({}), scenario)
+        if os.environ.get("VSL_FD") == "1":
+            cfg.network.vsl_fd_two_branch = True  # two_branch VSL-FD 활성(진단)
         reference = compute_free_flow_reference(cfg, scenario)
         result = run_legacy_stackelberg(
             cfg,

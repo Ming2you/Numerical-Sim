@@ -425,7 +425,10 @@ def summarize(controller_id: str, cfg: ExperimentConfig, sim: MixedTrafficSimula
 
 
 def run_one(controller_id: str, scenario_name: str, t_total: float, output_root: Path, reference) -> Dict[str, Any]:
+    import os as _os
     cfg, scenario = build_cfg(scenario_name, t_total)
+    if _os.environ.get("VSL_FD") == "1":
+        cfg.network.vsl_fd_two_branch = True  # two_branch VSL-FD 활성(진단)
     profile = DemandProfile(cfg, scenario)
     sim = MixedTrafficSimulator(cfg)
     controller = make_controller(controller_id, cfg)
