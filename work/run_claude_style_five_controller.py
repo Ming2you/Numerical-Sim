@@ -442,6 +442,8 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
     cfg, scenario = build_cfg(scenario_name, t_total)
     if _os.environ.get("VSL_FD") == "1":
         cfg.network.vsl_fd_two_branch = True  # two_branch VSL-FD 활성(진단)
+    if _os.environ.get("RHO_CRIT_TB"):
+        cfg.network.rho_crit_two_branch = float(_os.environ["RHO_CRIT_TB"])  # 삼각형 capacity 재calibration(예 19.6→cap 1950)
     if _os.environ.get("HORIZON"):
         cfg.mpc.horizon_steps = int(_os.environ["HORIZON"])  # V 깊이 sweep: leader eval+price+follower 동시 연장
     profile = DemandProfile(cfg, scenario)

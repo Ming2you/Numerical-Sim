@@ -193,6 +193,8 @@ def main() -> None:
         cfg = apply_scenario_network_overrides(base_cfg.with_updates({}), scenario)
         if os.environ.get("VSL_FD") == "1":
             cfg.network.vsl_fd_two_branch = True  # two_branch VSL-FD 활성(진단)
+        if os.environ.get("RHO_CRIT_TB"):
+            cfg.network.rho_crit_two_branch = float(os.environ["RHO_CRIT_TB"])  # 삼각형 capacity 재calibration
         reference = compute_free_flow_reference(cfg, scenario)
         result = run_legacy_stackelberg(
             cfg,

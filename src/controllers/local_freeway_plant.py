@@ -244,6 +244,7 @@ def freeway_substep_local(
         v_eff = effective_desired_speed_kmh(
             rho, net.v_free, net.rho_crit, vsl_i, net.alpha_vsl, vsl_active_i, net.metanet_a_m,
             getattr(net, "vsl_fd_two_branch", False), net.rho_max,
+            float(getattr(net, "rho_crit_two_branch", 0.0) or 0.0),
         )
         v_new = metanet_speed_update_kmh(
             speeds[i], upstream_speed, rho, downstream_rho, v_eff, dt_h,

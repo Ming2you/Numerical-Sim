@@ -48,6 +48,16 @@ def rho_crit_for_vsl(vsl: float, v_free: float, rho_crit: float, rho_jam: float)
     return float(w * rho_jam / max(max(vsl, 1.0e-9) + w, 1.0e-9))
 
 
+def two_branch_nominal_rho_crit(net) -> float:
+    """two-branch 삼각형 FD의 nominal 임계밀도(VSL=v_free 앵커).
+
+    삼각형 capacity = v_free·rho_crit이라 exponential용 rho_crit(33.5)을 그대로 쓰면 capacity가
+    뻥튀기됨(3350). `rho_crit_two_branch`(예: 19.6)를 설정하면 삼각형 capacity를 현실값(~1950)으로
+    재calibration. 미설정(0/None)이면 net.rho_crit로 fallback(=구 동작)."""
+    tb = float(getattr(net, "rho_crit_two_branch", 0.0) or 0.0)
+    return tb if tb > 0.0 else float(net.rho_crit)
+
+
 def effective_rho_crit(net, vsl: float) -> float:
     """net 설정에 따른 유효 임계밀도. two_branch면 ρ_crit(VSL), 아니면 고정 nominal rho_crit.
 
@@ -55,7 +65,7 @@ def effective_rho_crit(net, vsl: float) -> float:
     if not getattr(net, "vsl_fd_two_branch", False):
         return float(net.rho_crit)
     v = float(vsl) if vsl is not None else float(net.v_free)
-    return rho_crit_for_vsl(v, float(net.v_free), float(net.rho_crit), float(net.rho_max))
+    return rho_crit_for_vsl(v, float(net.v_free), two_branch_nominal_rho_crit(net), float(net.rho_max))
 
 
 def effective_desired_speed_kmh(
@@ -68,14 +78,17 @@ def effective_desired_speed_kmh(
     a: float = 1.867,
     two_branch: bool = False,
     rho_jam: float = 0.0,
+    rho_crit_tb: float = 0.0,
 ) -> float:
     """Compute V_eff from the split spec's VSL desired-speed rule.
 
     two_branch=True면 speed-cap(min form) 대신 VSL이 임계밀도를 옮기는 two-branch FD를
-    쓴다(기본 False → 기존 동작·테스트 불변). vsl_active=False면 VSL=v_free의 nominal FD."""
-    if two_branch and rho_jam > rho_crit:
+    쓴다(기본 False → 기존 동작·테스트 불변). vsl_active=False면 VSL=v_free의 nominal FD.
+    rho_crit_tb>0이면 삼각형 nominal 임계밀도로 그 값을 씀(capacity 재calibration; 0이면 rho_crit)."""
+    if two_branch and rho_jam > 0.0:
+        nominal = rho_crit_tb if rho_crit_tb > 0.0 else rho_crit
         return two_branch_vsl_speed_kmh(
-            rho, v_free, rho_crit, rho_jam, vsl if vsl_active else v_free
+            rho, v_free, nominal, rho_jam, vsl if vsl_active else v_free
         )
     no_vsl = desired_speed_kmh(rho, v_free, rho_crit, a)
     if not vsl_active:
@@ -506,6 +519,7 @@ def freeway_substep(
                 net.metanet_a_m,
                 getattr(net, "vsl_fd_two_branch", False),
                 net.rho_max,
+                float(getattr(net, "rho_crit_two_branch", 0.0) or 0.0),
             )
             v_new = metanet_speed_update_kmh(
                 speeds[i],
