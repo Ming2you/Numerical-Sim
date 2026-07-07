@@ -243,8 +243,11 @@ bottleneck-level joint value인데, 이를 ramp별 1차 scalar price로 투영�
 - **Step 1 방류 lever**: N_UF 강제↑(4848→5176) → 총 −650(30%), urban·freeway 동시 개선, 556s≪legacy.
   under-release 원인 = leader 9분 horizon이 방류의 장기 urban 배수 이득 못 봄 → **urban 압력 신호**로 일반화 가능.
 - **Step 2 offset 국소**: −158(7%, freeway 악화) → **per-signal offset 불충분(F3 가격+국소 best-response 둘 다 실패)** = **joint 변수 재확증.**
-- **Step 3(진행 중)**: legacy offset 오라클 주입+N_UF 강제로 "나머지 63%=joint offset" 확정 예정.
-- 다음: (1) 방류=urban 압력 leader 신호(일반화), (2) offset=corridor joint 값싼 근사(미해결 핵심).
+- **Step 3 offset 값 이식 = 순net 무효(단, 층위 혼합)**: N_UF 강제+legacy offset 전신호 주입 =
+  12298(Step1 12241보다 약간 나쁨). 단 이는 아래 §17이 밝힌 **두 층위 상쇄** — D/F(회수 가능)+
+  A/B/C(해로움). 정적 값 이식으론 D/F 이득도 못 살림(green과 co-adapt 부재).
+- **최종 분해(2162) 정정**: 방류 ~650(30%, 일반화 가능) + offset **두 층위**: **D/F ramp offset
+  ~285(§17 G1DF, 국소 활성화로 회수)** + A/B/C urban corridor joint(분리 불가). 희생 아님.
 
 ---
 

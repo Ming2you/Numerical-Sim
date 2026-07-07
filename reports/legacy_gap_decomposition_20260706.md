@@ -89,20 +89,49 @@ under-release**(절벽 때와 같은 horizon 절단). 따라서 legacy·오라�
 | offset **국소** | ~158 (7%, freeway 악화) | **불충분(per-signal 실패)** | **joint 메커니즘 필요** |
 | 나머지 ~1350 (63%) | (Step 3에서 확정 중) | **joint offset + 완전 방류** 유력 | — |
 
-## 6. Step 3 — 확정 probe (진행 중)
+## 6. Step 3 — 확정 probe: legacy offset 값 이식은 **무효** (핵심)
 
-"나머지 ~63%가 정말 joint offset이냐"를 못박기 위해 **legacy의 offset 궤적(joint green-wave
-패턴)을 오라클 주입 + N_UF 강제**로 B2TR을 돌려 legacy(urban 9201)에 붙는지 본다.
-- **붙으면** → 격차 = **방류(일반화 신호로 해결 가능) + joint offset(joint 메커니즘 필요)** 둘로
-  완전 설명. 이후 연구과제가 명확해진다.
-- **안 붙으면** → 제3의 몫 존재(추가 진단).
+legacy의 offset 궤적을 오라클 주입 + N_UF 강제로 B2TR에 얹음.
 
-(결과는 완료 후 §6에 갱신 예정.)
+| | total | urban | freeway |
+|---|---:|---:|---:|
+| baseline | 12891 | 11339 | 1552 |
+| Step1 N_UF 강제 | 12241 | 10744 | 1497 |
+| **Step3 N_UF 강제 + legacy offset** | **12298** | **10836** | 1461 |
+| legacy | 10729 | 9201 | 1527 |
+
+- **legacy offset 값을 그대로 주입했는데 오히려 약간 나빠짐**(12298 > Step1 12241, urban 10836 >
+  10744). compute 653s ≪ legacy 3494s.
+- **핵심 결론 4 — offset 값 단독으로는 legacy를 못 따라간다.** legacy offset은 legacy의 green
+  split과 **함께** 최적화된 값이라, B2의 다른 green 위에 얹으면 green wave가 안 맞아 어긋난다.
+  즉 offset은 신호 간 joint일 뿐 아니라 **green split과도 joint** — 값만 떼서 이식 불가.
+- **offset 3전패 확정**: (1) F3 per-signal 가격 무효, (2) Step2 per-signal 국소 best-response
+  무효, (3) Step3 offset 값 이식 무효. → 남은 격차는 **green+offset을 함께 푸는 joint corridor
+  조정**이라 per-signal 어떤 방법으로도 분해 불가.
+
+### 6.1 최종 격차 분해 (2162) — offset은 **두 층위**
+
+병렬 세션(Codex §17, notes 2026-07-06)이 offset을 **신호별로 분리**해 결정적 정정을 냈다:
+ramp 신호(D/F)의 offset은 **국소 활성화만으로 회수**(G1DF −285, legacy 격차 1430→1144)되나,
+urban 신호(A/B/C)의 offset은 국소로 켜면 **오히려 해로움**(corridor de-coordinate). 즉 Step2/3의
+"offset 국소·값이식 무효"는 **A/B/C 층에만** 해당하고, D/F 층은 self-contained 레버였다.
+
+| 몫 | 크기(추정) | 성질 | 다음 |
+|---|---:|---|---|
+| **방류(N_UF↑)** | **~650 (30%)** | 분리·일반화 가능 | urban 압력 신호를 leader 목적에 |
+| **D/F ramp offset** | **~285** | **self-contained, 국소 활성화로 회수(G1DF)** | leader 좌표 신호로 승격(일반화) |
+| **A/B/C urban corridor joint** | 나머지 | **분리 불가**(per-signal 국소·값이식 실패) | corridor joint 평가의 값싼 분산 근사 |
+
+주의(방법론): Step3의 offset 주입은 decide 후 override(green 재최적화 없음) + **전 신호 일괄**이라,
+순net 무효는 D/F(회수 가능)와 A/B/C(해로움)의 **상쇄**였다. offset "값 비이식성"은 A/B/C에 대해
+확증하나, D/F는 국소 최적화(값 이식이 아니라)로 회수됨이 G1DF로 실증. A/B/C의 joint (green,offset)
+공동 최적화 상한은 별도 corridor build로만 측정 가능(미해결 핵심).
 
 ## 7. 함의 — 기여와 다음 과제
 
-- **격차의 정체가 데이터로 확정**: 희생 아님. **(A) 방류 under-release(horizon 절단 기인, 일반화
-  신호로 회수 가능) + (B) joint offset(per-signal 불가, 두 번 확증)**.
+- **격차의 정체가 데이터로 확정**: 희생 아님. **(A) 방류 under-release ~30%(horizon 절단 기인,
+  일반화 신호로 회수 가능) + (B) JOINT urban 조정(green+offset corridor) ~70%(per-signal 3전패,
+  분리 불가)**.
 - **원칙 4 여유 재확인**: 두 probe 모두 556s·760s로 legacy 3494s의 1/5~1/6.
 - **다음 과제 두 갈래**:
   1. **방류**: leader가 스스로 고방류를 택하게 하는 **urban 압력항/terminal 신호**(망 무관 일반화).
