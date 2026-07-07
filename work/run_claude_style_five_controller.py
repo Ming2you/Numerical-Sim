@@ -219,6 +219,38 @@ def make_controller(controller_id: str, cfg: ExperimentConfig):
         controller.nash_solver.ramp_offset_enabled = True
         controller.leader.rho_headroom_cap_enabled = False   # leader density_headroom 캡 제거
         return controller
+    # ---- LEADER PROXY 격리(2026-07-07): rollout horizon vs candidate pruning, 2×2 ----
+    # 사용자 4-run: {G1DF, NORHO} × {H15, FULLEVAL}. leader가 true global TTT가 아니라 proxy로
+    # 후보를 채점하는 두 지점을 분리 검증:
+    #   H15      = horizon_steps 3→5 (180s×5=900s=15분). leader가 더 긴 진짜 rollout으로 채점 →
+    #              방류의 장기 배수 이득을 horizon 안으로. (penalty는 그대로 — 15분은 완만해
+    #              cost-to-go 이중계상 경미; 필요시 별도 실험.)
+    #   FULLEVAL = continuous prefilter의 proxy 사전선별 제거 — 샘플 후보 전부 full 평가
+    #              (top_k=samples, max_evals 충분). proxy가 좋은 고방류 후보를 pruning하는지 검증.
+    def _base_g1df():
+        c = F1StackelbergWuMeteredController(cfg)
+        c.nash_solver.f1_spillback_weight = 0.0
+        c.nash_solver.ramp_offset_enabled = True
+        return c
+    def _base_norho():
+        c = _base_g1df()
+        c.nash_solver.f1_rho_weight = 0.0
+        c.leader.rho_headroom_cap_enabled = False
+        return c
+    def _apply_h15():
+        cfg.mpc.horizon_steps = 5  # 180s × 5 = 15분
+    def _apply_fulleval():
+        cfg.mpc.leader_continuous_prefilter_top_k = int(cfg.mpc.leader_continuous_prefilter_samples)
+        cfg.mpc.leader_continuous_local_prefilter_top_k = int(cfg.mpc.leader_continuous_local_prefilter_samples)
+        cfg.mpc.leader_continuous_max_evals = max(64, int(cfg.mpc.leader_continuous_prefilter_samples))
+    if controller_id == "P-STACK-WU-FAITHFUL-G1DF-H15":
+        _apply_h15(); return _base_g1df()
+    if controller_id == "P-STACK-WU-FAITHFUL-G1DF-FULLEVAL":
+        _apply_fulleval(); return _base_g1df()
+    if controller_id == "P-STACK-WU-FAITHFUL-NORHO-H15":
+        _apply_h15(); return _base_norho()
+    if controller_id == "P-STACK-WU-FAITHFUL-NORHO-FULLEVAL":
+        _apply_fulleval(); return _base_norho()
     # ---- LEADER-OFFSET(2026-07-07): offset 소유권 follower→leader (green은 follower 유지) ----
     # G-LEAD-OFF-MPC = F1RHO(ρ hinge)+B2TR green price base + leader가 전 신호 offset을 MPC
     # joint rollout(corridor lag seed + 좌표하강)으로 결정. follower offset 탐색은 완전 OFF
