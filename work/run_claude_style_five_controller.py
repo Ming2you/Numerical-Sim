@@ -207,6 +207,19 @@ def make_controller(controller_id: str, cfg: ExperimentConfig):
         controller.nash_solver.offset_enabled = True
         controller.nash_solver.ramp_offset_enabled = True
         return controller
+    # ---- ALLPRICE(2026-07-07): 모든 lever가 ∂(TTT+V)/∂lever — 통일 marginal price ----
+    # 사용자 설계 수렴: green·offset(urban) + VSL·metering(freeway) 전부 marginal price로.
+    # V(terminal cost)는 HORIZON env로 rollout 깊이를 늘려 근사(horizon_steps↑ → leader eval +
+    # 모든 price rollout + follower가 uniform하게 (9+d)분 → price=∂(TTT+V)/∂lever). base=F1RHO
+    # (ρ hinge, VSL-FD plant서 rho_crit(VSL) 반영) + green price(B2TR 기본) + metering + VSL price.
+    # VSL_FD=1 + HORIZON=k와 함께 실행. 깊이 sweep으로 legacy 회수율 frontier.
+    if controller_id == "P-STACK-WU-FAITHFUL-ALLPRICE":
+        controller = F1StackelbergWuMeteredController(cfg)
+        controller.nash_solver.f1_spillback_weight = 0.0
+        controller.signal_price_enabled = True   # green (B2TR 기본이지만 명시)
+        controller.metering_price_enabled = True # RM
+        controller.vsl_price_enabled = True      # VSL
+        return controller
     # ---- G1DF-NORHO(2026-07-07): g1df에서 rho_crit 안전장치 2종 제거 — 진단 ----
     # 사용자 진단: freeway follower의 F1 ρ_crit hinge(own-TTS penalty)와 leader의 density_headroom
     # 캡(N_UF 예산을 merge 밀도가 rho_crit 닿는 flow로 상한)이 freeway 유입을 과하게 조여 격차의
@@ -429,6 +442,8 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
     cfg, scenario = build_cfg(scenario_name, t_total)
     if _os.environ.get("VSL_FD") == "1":
         cfg.network.vsl_fd_two_branch = True  # two_branch VSL-FD 활성(진단)
+    if _os.environ.get("HORIZON"):
+        cfg.mpc.horizon_steps = int(_os.environ["HORIZON"])  # V 깊이 sweep: leader eval+price+follower 동시 연장
     profile = DemandProfile(cfg, scenario)
     sim = MixedTrafficSimulator(cfg)
     controller = make_controller(controller_id, cfg)
