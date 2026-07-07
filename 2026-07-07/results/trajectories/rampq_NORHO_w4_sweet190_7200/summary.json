@@ -1,0 +1,25 @@
+[
+  {
+    "controller_id": "P-STACK-WU-FAITHFUL-NORHO-RQ",
+    "total_ttt": 12381.921,
+    "urban_ttt": 11061.252,
+    "freeway_ttt": 1320.669,
+    "free_flow_reference_total_ttt": 2115.354,
+    "total_delay": 10266.568,
+    "urban_delay": 9343.268,
+    "freeway_delay": 923.3,
+    "completed_vehicles": 31244.1,
+    "completed_urban_vehicles": 14013.8,
+    "completed_freeway_vehicles": 17230.2,
+    "network_throughput_veh_h": 15622.0,
+    "terminal_total_vehicles": 13737.4,
+    "terminal_urban_vehicles": 12988.6,
+    "terminal_onramp_vehicles": 3204.4,
+    "terminal_freeway_vehicles": 264.6,
+    "computation_time_sec": 3674.0,
+    "mean_step_compute_sec": 91.85,
+    "max_step_compute_sec": 113.633,
+    "ttt_improvement_vs_no_control_pct": 0.0,
+    "delay_improvement_vs_no_control_pct": 0.0
+  }
+]
