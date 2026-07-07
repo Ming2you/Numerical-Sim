@@ -256,7 +256,8 @@ def make_controller(controller_id: str, cfg: ExperimentConfig):
     # 깬다. 보정(rampq_calib): 피크는 freeway 포화로 flat(자연 collapse 방지), buildup서 방류↑ →
     # 큐 폭발 예방. weight=8(보정상 buildup N_UF를 legacy 5700 방향으로). freeway follower는 단일
     # segment라 leader-단 항만으로 충분(사용자 지적). base: {GLEADOFF, NORHO}.
-    _RAMPQ_W = 8.0
+    import os as _os
+    _RAMPQ_W = float(_os.environ.get("RAMPQ_W", "8.0"))  # 스윕용 env override
     if controller_id == "P-STACK-WU-FAITHFUL-NORHO-RQ":
         cfg.leader.w_ramp_queue = _RAMPQ_W
         return _base_norho()
