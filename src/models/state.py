@@ -597,8 +597,8 @@ class ExperimentConfig:
             raise ValueError("mpc.relaxed_rounding_mode must be floor or nearest.")
         if self.mpc.wu_faithful_np_coordination_mode not in {"equality", "cap"}:
             raise ValueError("mpc.wu_faithful_np_coordination_mode must be equality or cap.")
-        if self.mpc.wu_faithful_nuf_coordination_mode not in {"equality", "cap"}:
-            raise ValueError("mpc.wu_faithful_nuf_coordination_mode must be equality or cap.")
+        if self.mpc.wu_faithful_nuf_coordination_mode not in {"equality", "cap", "dual"}:
+            raise ValueError("mpc.wu_faithful_nuf_coordination_mode must be equality, cap, or dual.")
         if self.mpc.grid_global_refresh_sec <= 0.0:
             raise ValueError("mpc.grid_global_refresh_sec must be positive.")
         if self.mpc.grid_parallel_backend not in {"serial", "thread", "process"}:

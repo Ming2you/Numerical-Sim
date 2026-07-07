@@ -207,6 +207,24 @@ def make_controller(controller_id: str, cfg: ExperimentConfig):
         controller.nash_solver.offset_enabled = True
         controller.nash_solver.ramp_offset_enabled = True
         return controller
+    # ---- 실험 ①(2026-07-07): N_UF dual λ_UF (등식→dual 가격, λ_P와 대칭) ----
+    # G1DF base(신기록) + N_UF를 hard 등식 대신 signed dual 가격으로. 통일성 검증:
+    # metering 절벽 레버가 수량 dual로도 되나(과방류 breakdown 위험 가설).
+    if controller_id == "P-STACK-WU-FAITHFUL-NUFDUAL":
+        cfg.mpc.wu_faithful_nuf_coordination_mode = "dual"
+        controller = F1StackelbergWuMeteredController(cfg)
+        controller.nash_solver.f1_spillback_weight = 0.0
+        controller.nash_solver.ramp_offset_enabled = True
+        return controller
+    # ---- 실험 ②(2026-07-07): blocked_q 격리 — metering price가 blocked_q와 간섭했나 ----
+    # F2(metering price + hinge) 구성에서 count_blocked_ramp_inflow=False.
+    # F2(19074, blocked_q ON)와 비교: 개선되면 간섭, 그대로면 절벽(§12) 재확인.
+    if controller_id == "P-STACK-WU-FAITHFUL-F2NOBLK":
+        controller = F1StackelbergWuMeteredController(cfg)
+        controller.nash_solver.f1_spillback_weight = 0.0
+        controller.nash_solver.count_blocked_ramp_inflow = False
+        controller.metering_price_enabled = True
+        return controller
     if controller_id == "WU-FAITHFUL-FOLLOWER-F1":
         return F1WuFaithfulFollower(cfg)
     # B2TR: green 가격 + trust region(가격 유효 범위 = 유한차분 이웃 ±6s) —

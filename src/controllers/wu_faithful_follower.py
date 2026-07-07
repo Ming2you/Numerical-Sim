@@ -239,6 +239,17 @@ class WuFaithfulFollower:
         # 진단(2026-07-02): λ 응답 임계 ≈1, Σnin 바닥 도달 ≈10 — cap은 바닥 기준.
         self.lambda_np_step_gain: float = 0.01
         self.lambda_np_cap: float = 10.0
+        # ---------- N_UF dual λ_UF(2026-07-07, 사용자 제안 — λ_P와 대칭) ----------
+        # N_UF 조정을 hard 등식이 아니라 **결합제약 Σmeter = N_UF*의 dual 가격**으로 푼다
+        # (wu_faithful_nuf_coordination_mode="dual"). freeway agent 비용에 λ_UF·Σ(owned
+        # metering)을 더하고(등식 dual의 per-link 분해; link_budget 상수는 argmin 무관),
+        # λ_UF는 control step 간 적분 갱신: λ_next = clip(λ + gain·(Σmeter − N_UF*), −cap,
+        # +cap). **signed**(N_UF는 두 방향 target — Σmeter<target이면 λ<0로 방류 보상,
+        # >target이면 λ>0로 억제). λ_P(비음수·유입 억제)와 달리 양방향. metering이 절벽
+        # 레버라 방류 보상이 과방류→breakdown을 부를 수 있음(가설 검증 대상). warm-start.
+        self._lambda_UF: float = 0.0
+        self.lambda_uf_step_gain: float = 1.0e-5
+        self.lambda_uf_cap: float = 1.0
         # 어댑터가 n_agents를 셀 때 쓰는 속성(six_controller 어댑터 호환).
         self.urban_agents = list(cfg.network.signals)
         self.freeway_agents = list(cfg.network.freeway_links)
@@ -1949,6 +1960,37 @@ class WuFaithfulFollower:
             nuf_mode = str(getattr(
                 self.cfg.mpc, "wu_faithful_nuf_coordination_mode", "equality"
             ))
+            if nuf_mode == "dual":
+                # N_UF dual: 자율 좌표하강(등식 강제 없음) + 비용에 λ_UF·Σowned_meter 추가.
+                # λ_UF>0면 방류 억제(Σmeter가 target 초과), <0면 방류 보상(target 미달).
+                lam_uf = float(self._lambda_UF)
+
+                def _price_uf(meter: Mapping[str, float]) -> float:
+                    return lam_uf * sum(float(meter.get(r, 0.0)) for r in owned_ramps)
+
+                best_meter = {
+                    r: float(np.clip(snapshot.ramp_metering.get(r, caps[r]), 0.0, caps[r]))
+                    for r in owned_ramps
+                }
+                best_vsl, best_cost, e0 = _solve_with(best_meter)
+                best_cost += _price_uf(best_meter)
+                evals_total += e0
+                for ramp in owned_ramps:
+                    local_best = best_meter[ramp]
+                    for frac in self.ramp_metering_fractions:
+                        cand_val = frac * caps[ramp]
+                        if abs(cand_val - best_meter[ramp]) <= 1.0e-9:
+                            continue
+                        trial = dict(best_meter)
+                        trial[ramp] = cand_val
+                        vsl_dict, cost, e = _solve_with(trial)
+                        cost += _price_uf(trial)
+                        evals_total += e
+                        if cost < best_cost:
+                            best_cost, best_vsl, local_best = cost, vsl_dict, cand_val
+                    best_meter[ramp] = local_best
+                return best_vsl, best_meter, evals_total
+
             if nuf_mode == "cap":
                 def _project_to_cap(meter: Mapping[str, float]) -> Dict[str, float]:
                     clipped = {
@@ -2639,6 +2681,29 @@ class WuFaithfulFollower:
                 )
             control.vsl.update(vsl_dict)
             evals += e
+        # ---- N_UF dual λ_UF 적분 갱신(dual 모드 + leader present) ----
+        # 커밋된 총 metering(Σmeter)과 N_UF* 오차로 λ_UF를 signed 적분 갱신. solve() 내
+        # 영속 상태(self._lambda_UF)는 건드리지 않고 diagnostic으로만 노출 — 선택된 후보의
+        # λ_UF만 컨트롤러가 commit(λ_P와 동일 규약, 후보별 solve 오염 방지).
+        nuf_dual_active = (
+            leader is not None
+            and str(getattr(self.cfg.mpc, "wu_faithful_nuf_coordination_mode", "equality")) == "dual"
+        )
+        lambda_uf_next = float(self._lambda_UF)
+        if nuf_dual_active:
+            n_uf_star = float(getattr(leader, "N_UF_star", 0.0))
+            sum_meter = sum(float(v) for v in control.ramp_metering.values())
+            lambda_uf_next = min(
+                max(
+                    -self.lambda_uf_cap,
+                    float(self._lambda_UF) + self.lambda_uf_step_gain * (sum_meter - n_uf_star),
+                ),
+                self.lambda_uf_cap,
+            )
+            control.diagnostics["wu_faithful_lambda_uf_next"] = float(lambda_uf_next)
+            control.diagnostics["wu_faithful_lambda_uf"] = float(self._lambda_UF)
+            control.diagnostics["wu_faithful_sum_meter"] = float(sum_meter)
+            control.diagnostics["wu_faithful_nuf_target"] = float(n_uf_star)
         # ---- OFFSET corridor 검증 가드(closed-loop, method rule 충실) ----
         # per-signal 국소 offset은 자기 TTS를 줄이지만 selfish라 corridor 전체(realized full-plant
         # 결합)에선 손해일 수 있다(downstream de-align). offset의 가치는 본질적으로 multi-signal

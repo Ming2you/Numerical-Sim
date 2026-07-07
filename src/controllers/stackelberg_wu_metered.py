@@ -965,6 +965,11 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         if lam_next is not None:
             self.nash_solver._lambda_P = float(lam_next)
         metadata["leader_lambda_np_committed"] = float(lam_next is not None)
+        # N_UF dual λ_UF도 선택된 후보의 값만 commit(λ_P와 동일 규약).
+        lam_uf_next = best.nash.control.diagnostics.get("wu_faithful_lambda_uf_next")
+        if lam_uf_next is not None:
+            self.nash_solver._lambda_UF = float(lam_uf_next)
+        metadata["leader_lambda_uf_committed"] = float(lam_uf_next is not None)
         return best, metadata
 
     def _proxy_score_candidate(
