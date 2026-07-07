@@ -1,0 +1,25 @@
+[
+  {
+    "controller_id": "WU-FAITHFUL-FOLLOWER-NOP1",
+    "total_ttt": 10013.363,
+    "urban_ttt": 9386.701,
+    "freeway_ttt": 626.662,
+    "free_flow_reference_total_ttt": 2115.354,
+    "total_delay": 7898.009,
+    "urban_delay": 7668.716,
+    "freeway_delay": 229.293,
+    "completed_vehicles": 33835.8,
+    "completed_urban_vehicles": 14961.3,
+    "completed_freeway_vehicles": 18874.6,
+    "network_throughput_veh_h": 16917.9,
+    "terminal_total_vehicles": 11183.2,
+    "terminal_urban_vehicles": 10825.3,
+    "terminal_onramp_vehicles": 1581.2,
+    "terminal_freeway_vehicles": 172.3,
+    "computation_time_sec": 499.822,
+    "mean_step_compute_sec": 12.496,
+    "max_step_compute_sec": 16.117,
+    "ttt_improvement_vs_no_control_pct": 0.0,
+    "delay_improvement_vs_no_control_pct": 0.0
+  }
+]
