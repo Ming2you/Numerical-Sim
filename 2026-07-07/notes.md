@@ -39,3 +39,21 @@
 - **일반화**: realized-TTT-only면 horizon이 network 통과시간에 비례해야 → 일반화 붕괴. terminal
   cost/큐목적이 horizon을 크기와 분리. 대형망 MPC 문헌도 terminal cost/큐목적/집계상태로 해결(긴 horizon 아님).
 - 다음: leader objective에 선형 ramp-큐 항 + weight 스윕(다른 계정). h15는 임시 확인용.
+
+## 3. VSL two-branch FD 구현 + 두 terminal cost 계획 (리포트)
+
+`reports/vsl_fd_and_terminal_cost_plan_20260707.md` 참조. 핵심:
+
+- **forced-VSL 실측**: 지속 VSL 100→60이면 total −292·urban −349·방류 +322. VSL은 살아있는 lever인데
+  컨트롤러가 상한 방치(temporal myopia — 이득이 9분 밖).
+- **two-branch VSL-FD 구현(완료, gated OFF 기본)**: `metanet.py` `two_branch_vsl_speed_kmh` +
+  `effective_desired_speed_kmh(two_branch,rho_jam)`. Newell/삼각형, VSL=자유류속도, 혼잡branch 고정,
+  ρ_crit=접점. 단위검증 PASS(VSL 100→50: ρ_crit 33.5→49.5↑, capacity 3350→2475↓).
+- **caveat 2건**: (1) 삼각형 capacity 3350≠exponential 1961 → ON시 전면 재baseline. (2) nu_cong·
+  receiving가 아직 고정 ρ_crit 사용 → ρ_crit(VSL) 전파 필요(안 하면 FD 이득 부분만).
+- **두 terminal cost**: 안2=free-flow time-to-exit(Bellman T(loc), release/hidden-space, generalize·
+  no legacy), 안1=measured marginal(혼잡-aware, VSL 채널, 무겁다). 둘 다 구현해 비교.
+- **joint g probe 판정**: metering 안 죽음이나 작고 peak flat, VSL 상보 약함 → price 부차, terminal
+  cost 주. receiving→0/(2)죽음/joint코어 **철회**.
+- baseline: PFO 실행중, legacy는 process-pool로 harness 필요.
+- 다음: FD coupling(ρ_crit(VSL) 전파) → 안2 구현·verdict 재판정 → 안1 → 4-컨트롤러 풀런.

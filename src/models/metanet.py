@@ -17,6 +17,27 @@ def desired_speed_kmh(rho: float, v_free: float, rho_crit: float, a: float = 1.8
     return float(v_free * math.exp(-(1.0 / a) * (ratio ** a)))
 
 
+def two_branch_vsl_speed_kmh(
+    rho: float,
+    v_free: float,
+    rho_crit: float,
+    rho_jam: float,
+    vsl: float,
+) -> float:
+    """VSL이 임계밀도를 옮기는 two-branch(삼각형/Newell) FD의 속도.
+
+    혼잡(right) branch는 (rho_crit, rho_jam)로 고정하고, 자유류(left) branch의 기울기를
+    VSL(=자유류 속도)로 회전시킨다. 임계밀도 rho_c = 두 branch 접점이므로 VSL이 낮아지면
+    rho_c는 오르고 capacity(=VSL·rho_c)는 내린다 — capacity-drop 회피의 물리적 근거.
+    VSL=v_free에서 접점=nominal rho_crit이 되도록 backward-wave 속도 w를 앵커한다."""
+    w = v_free * rho_crit / max(rho_jam - rho_crit, 1.0e-9)  # 고정 backward-wave 속도
+    s = max(vsl, 1.0e-9)                                      # 자유류 branch 속도 = VSL
+    rho_c = w * rho_jam / max(s + w, 1.0e-9)                  # VSL 의존 임계밀도(접점)
+    if rho <= rho_c:
+        return float(s)
+    return float(max(0.0, w * max(rho_jam - rho, 0.0) / max(rho, 1.0e-9)))
+
+
 def effective_desired_speed_kmh(
     rho: float,
     v_free: float,
@@ -25,8 +46,17 @@ def effective_desired_speed_kmh(
     alpha_vsl: float = 0.0,
     vsl_active: bool = True,
     a: float = 1.867,
+    two_branch: bool = False,
+    rho_jam: float = 0.0,
 ) -> float:
-    """Compute V_eff from the split spec's VSL desired-speed rule."""
+    """Compute V_eff from the split spec's VSL desired-speed rule.
+
+    two_branch=True면 speed-cap(min form) 대신 VSL이 임계밀도를 옮기는 two-branch FD를
+    쓴다(기본 False → 기존 동작·테스트 불변). vsl_active=False면 VSL=v_free의 nominal FD."""
+    if two_branch and rho_jam > rho_crit:
+        return two_branch_vsl_speed_kmh(
+            rho, v_free, rho_crit, rho_jam, vsl if vsl_active else v_free
+        )
     no_vsl = desired_speed_kmh(rho, v_free, rho_crit, a)
     if not vsl_active:
         return no_vsl
@@ -448,6 +478,8 @@ def freeway_substep(
                 net.alpha_vsl,
                 vsl_active_i,
                 net.metanet_a_m,
+                getattr(net, "vsl_fd_two_branch", False),
+                net.rho_max,
             )
             v_new = metanet_speed_update_kmh(
                 speeds[i],
