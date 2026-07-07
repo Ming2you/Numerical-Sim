@@ -1,0 +1,25 @@
+[
+  {
+    "controller_id": "P-STACK-WU-FAITHFUL-GLEADOFF-MPC",
+    "total_ttt": 12403.978,
+    "urban_ttt": 10872.829,
+    "freeway_ttt": 1531.149,
+    "free_flow_reference_total_ttt": 2115.354,
+    "total_delay": 10288.624,
+    "urban_delay": 9154.844,
+    "freeway_delay": 1133.78,
+    "completed_vehicles": 31186.8,
+    "completed_urban_vehicles": 14025.7,
+    "completed_freeway_vehicles": 17161.1,
+    "network_throughput_veh_h": 15593.4,
+    "terminal_total_vehicles": 13827.3,
+    "terminal_urban_vehicles": 12845.6,
+    "terminal_onramp_vehicles": 3200.2,
+    "terminal_freeway_vehicles": 266.1,
+    "computation_time_sec": 4026.215,
+    "mean_step_compute_sec": 100.655,
+    "max_step_compute_sec": 135.121,
+    "ttt_improvement_vs_no_control_pct": 0.0,
+    "delay_improvement_vs_no_control_pct": 0.0
+  }
+]
