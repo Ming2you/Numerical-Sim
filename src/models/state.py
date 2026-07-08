@@ -338,6 +338,11 @@ class CapacityDropConfig:
 @dataclass
 class MPCConfig:
     horizon_steps: int = 3
+    # leader value-function 깊이(2026-07-08): leader의 full rollout(_predict)을 horizon_steps 너머
+    # 이만큼 더 굴려 terminal cost V를 계산한다. **_predict은 leader 전용**(follower는 자기 local
+    # rollout) → follower는 myopic-3 그대로, leader만 (3+d) full coupled rollout으로 후보 랭킹·price를
+    # 매긴다 = ∂(TTT+V)/∂lever, V=leader full rollout tail. 기본 0=비트동일.
+    leader_value_depth: int = 0
     leader_search_mode: str = "continuous"
     leader_candidate_count: int = 49
     leader_refinement_candidate_count: int = 25

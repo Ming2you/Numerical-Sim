@@ -446,6 +446,8 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
         cfg.network.rho_crit_two_branch = float(_os.environ["RHO_CRIT_TB"])  # 삼각형 capacity 재calibration(예 19.6→cap 1950)
     if _os.environ.get("HORIZON"):
         cfg.mpc.horizon_steps = int(_os.environ["HORIZON"])  # V 깊이 sweep: leader eval+price+follower 동시 연장
+    if _os.environ.get("LEADER_V_DEPTH"):
+        cfg.mpc.leader_value_depth = int(_os.environ["LEADER_V_DEPTH"])  # leader full-rollout V 깊이(follower myopic 유지)
     profile = DemandProfile(cfg, scenario)
     sim = MixedTrafficSimulator(cfg)
     controller = make_controller(controller_id, cfg)
@@ -460,7 +462,7 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
     print(f"=== {controller_id} ===", flush=True)
     for step in range(steps):
         t = step * cfg.simulation.control_interval
-        forecast = profile.horizon(t, cfg.mpc.horizon_steps)
+        forecast = profile.horizon(t, cfg.mpc.horizon_steps + max(0, cfg.mpc.leader_value_depth))
         t0 = time.perf_counter()
         control = decide(controller_id, controller, sim, forecast, previous, cfg, step)
         compute_time = time.perf_counter() - t0

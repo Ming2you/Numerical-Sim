@@ -1986,6 +1986,10 @@ class StackelbergMPCController:
         states, rollout_ttt = self._predict(state, nash.control, forecast)
         if self.cfg.leader.objective_mode == "state_accumulation":
             return states, rollout_ttt, True
+        # leader_value_depth>0면 leader의 full (3+d) rollout TTT를 base로(=TTT_3+V). follower는
+        # myopic-3로 control을 정하고, leader가 그 control을 full rollout으로 랭킹·pricing(∂(TTT+V)/∂lever).
+        if int(getattr(self.cfg.mpc, "leader_value_depth", 0)) > 0:
+            return states, rollout_ttt, True
         if float(nash.control.diagnostics.get("leader_response_closure_use_rollout_objective", 0.0)) >= 0.5:
             return states, rollout_ttt, True
         return states, float(nash.objective_value), True
@@ -2004,7 +2008,10 @@ class StackelbergMPCController:
         s = state.copy()
         states: list[TrafficState] = []
         total_ttt = 0.0
-        for demand in forecast[: self.cfg.mpc.horizon_steps]:
+        # leader full rollout: horizon + leader_value_depth 만큼(V 포함). _predict은 leader 전용이라
+        # follower myopia에 영향 없음. depth=0이면 기존과 동일.
+        depth = self.cfg.mpc.horizon_steps + max(0, int(getattr(self.cfg.mpc, "leader_value_depth", 0)))
+        for demand in forecast[:depth]:
             result = run_coupled_interval(s, control, demand, self.cfg)
             s.time_sec += self.cfg.simulation.control_interval
             total_ttt += result.freeway_ttt + result.urban_ttt
