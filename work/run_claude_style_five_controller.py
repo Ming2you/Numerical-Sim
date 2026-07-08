@@ -451,6 +451,8 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
     profile = DemandProfile(cfg, scenario)
     sim = MixedTrafficSimulator(cfg)
     controller = make_controller(controller_id, cfg)
+    if _os.environ.get("PRICE_ITER") and hasattr(controller, "price_iter_max"):
+        controller.price_iter_max = int(_os.environ["PRICE_ITER"])  # B: leader↔follower dual-ascent 반복 횟수
     previous: Optional[ControlAction] = None
     steps = max(1, int(round(cfg.simulation.T_total / cfg.simulation.control_interval)))
     run_rows: List[Dict[str, Any]] = []

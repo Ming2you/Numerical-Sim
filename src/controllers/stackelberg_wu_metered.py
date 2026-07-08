@@ -143,6 +143,12 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         self.barrier_spillback_frac: float = 0.2
         self._signal_price_refresh_count: int = 0
         self._signal_price_meta: Dict[str, float] = {}
+        # ---- B: leader↔follower price↔response ADMM/dual-ascent iteration ----
+        # single-shot price(=1)는 절벽·상보성서 joint를 못 재현(실측: 실제혼잡 ALLPRICE<PFO).
+        # >1이면 price를 response에 되먹여 수렴까지 재선형화(under-relaxation으로 안정화).
+        self.price_iter_max: int = 1
+        self.price_iter_relax: float = 0.5
+        self.price_iter_tol: float = 1.0e-2  # 상대 control 변화 수렴 문턱
 
     def _make_follower_solver(self, cfg: ExperimentConfig):
         return WuFaithfulFollower(cfg)
@@ -172,12 +178,61 @@ class StackelbergWuMeteredController(StackelbergMPCController):
             if self.previous_control is not None
             else ControlAction.fixed(self.cfg)
         )
-        self._maybe_refresh_signal_prices(state, forecast, previous)
-        result = super().decide_with_info(state, forecast, previous_control, config)
+        max_iter = max(1, int(self.price_iter_max))
+        if max_iter <= 1:
+            # single-shot(기존): price 1회 → follower 응답 1회 → commit.
+            self._maybe_refresh_signal_prices(state, forecast, previous)
+            result = super().decide_with_info(state, forecast, previous_control, config)
+        else:
+            # B: leader↔follower price↔response 반복(dual ascent). 매 iteration마다 현재
+            # response 운영점에서 price 재선형화 → leader 재최적 → under-relaxation으로 되먹임.
+            current = previous
+            result = None
+            k = 0
+            for k in range(max_iter):
+                self._maybe_refresh_signal_prices(state, forecast, current, force=True)
+                # config는 최상단서 이미 적용 → super엔 None(재init 방지). previous=current(선형화점).
+                result = super().decide_with_info(state, forecast, current, None)
+                new = result.control
+                if k > 0 and self._price_iter_converged(current, new):
+                    break
+                current = self._price_iter_relax(current, new, self.price_iter_relax)
+            self._signal_price_meta = dict(self._signal_price_meta)
+            self._signal_price_meta["wu_price_iter_count"] = float(k + 1)
         if self._signal_price_meta:
             result.metadata.update(self._signal_price_meta)
             result.control.diagnostics.update(self._signal_price_meta)
         return result
+
+    def _price_iter_relax(
+        self, old: ControlAction, new: ControlAction, alpha: float
+    ) -> ControlAction:
+        """다음 선형화점 = (1−α)·old + α·new (under-relaxation, 절벽 진동 억제)."""
+        c = new.copy()
+        b = 1.0 - alpha
+        c.N_UF_star = b * float(old.N_UF_star) + alpha * float(new.N_UF_star)
+        c.N_P_star = b * float(old.N_P_star) + alpha * float(new.N_P_star)
+        for attr in ("green_times", "vsl", "offsets", "ramp_metering"):
+            od = getattr(old, attr, {}) or {}
+            nd = dict(getattr(new, attr, {}) or {})
+            for key, val in list(nd.items()):
+                if key in od:
+                    nd[key] = b * float(od[key]) + alpha * float(val)
+            setattr(c, attr, nd)
+        return c
+
+    def _price_iter_converged(self, old: ControlAction, new: ControlAction) -> bool:
+        """핵심 레버(N_UF·VSL·green)의 상대 변화가 tol 미만이면 수렴."""
+        tol = float(self.price_iter_tol)
+        if abs(float(old.N_UF_star) - float(new.N_UF_star)) / max(abs(float(old.N_UF_star)), 1.0) > tol:
+            return False
+        for attr, scale in (("vsl", 100.0), ("green_times", 120.0), ("ramp_metering", 1500.0)):
+            od = getattr(old, attr, {}) or {}
+            nd = getattr(new, attr, {}) or {}
+            for key, val in nd.items():
+                if key in od and abs(float(od[key]) - float(val)) / scale > tol:
+                    return False
+        return True
 
     def _signal_price_p1_bounds(self) -> tuple[float, float]:
         # p1 pair-feasible 범위: p1∈[green_min, green_max] ∧ p2=total−p1∈[green_min, green_max].
@@ -447,6 +502,7 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         state: TrafficState,
         forecast: List[DemandStep],
         previous: ControlAction,
+        force: bool = False,
     ) -> None:
         follower = self.nash_solver
         if not isinstance(follower, WuFaithfulFollower):
@@ -524,8 +580,8 @@ class StackelbergWuMeteredController(StackelbergMPCController):
             if self.offset_price_enabled else {}
         )
 
-        # ---- refresh 판정: 가격 부재 ∨ cadence ∨ event-trigger(운영점 이동) ----
-        refresh = (
+        # ---- refresh 판정: 강제(ADMM iteration) ∨ 가격 부재 ∨ cadence ∨ event-trigger(운영점 이동) ----
+        refresh = force or (
             (self.signal_price_enabled and follower.signal_marginal_price is None)
             or (self.metering_price_enabled and follower.metering_marginal_price is None)
             or (self.vsl_price_enabled and follower.vsl_marginal_price is None)
