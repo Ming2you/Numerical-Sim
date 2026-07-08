@@ -2021,14 +2021,15 @@ class StackelbergMPCController:
         g_cong = float(getattr(self.cfg.mpc, "leader_mfd_far_g_cong", 500.0))
         g_u = g_free if n_u < n_crit else g_cong
         far = (n_u * n_u) * tc_h / (2.0 * max(g_u, 1.0))
-        # ---- freeway reservoir(나): 본선 선형 통과 ----
+        # ---- freeway reservoir(나): 본선도 exit 병목 큐잉 → 2차(urban과 대칭) ----
+        # 실측 freeway exit ~300/interval capacity-flat → 혼잡 시 본선도 병목 뒤 큐잉.
+        # 선형(N·T, free-flow)은 urban(2차) 대비 8배 과소평가 → urban 과보호. 2차로 정정.
         seg_len = float(net.freeway_segment_length_km)
         v_free = float(net.v_free)
         ramp_total = sum(max(0.0, float(state.ramp_queue.get(r, 0.0))) for r in net.ramps)
         n_main = max(0.0, float(state.total_freeway_vehicles(net)) - ramp_total)
-        n_seg = len(next(iter(state.freeway_density.values()))) if state.freeway_density else 4
-        t_traverse_main = 0.5 * (n_seg * seg_len / max(v_free, 1.0))  # 평균 잔여 통과(절반)
-        far += n_main * t_traverse_main
+        g_fw = float(getattr(self.cfg.mpc, "leader_mfd_far_g_fw", 300.0))
+        far += (n_main * n_main) * tc_h / (2.0 * max(g_fw, 1.0))
         # ---- freeway reservoir(나): ramp 큐 merge-병목 대기 + 통과 ----
         for ramp in net.ramps:
             q = max(0.0, float(state.ramp_queue.get(ramp, 0.0)))
