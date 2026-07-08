@@ -2015,7 +2015,9 @@ class StackelbergMPCController:
         tc_h = float(self.cfg.simulation.T_c_h)
         w = float(getattr(self.cfg.mpc, "leader_mfd_far_weight", 1.0))
         # ---- urban reservoir ----
-        n_u = float(state.protected_accumulation_veh(net))
+        # boundary_in 큐도 accumulation에 포함: gating(유입 조임)은 차를 boundary 큐로 옮길 뿐
+        # (여전히 TTT 발생)이라, in-network(N_P)만 세면 gating이 far상 공짜로 보여 leader가 과-gate.
+        n_u = float(state.protected_accumulation_veh(net)) + float(state.boundary_in_queue_vehicles(net))
         n_crit = float(getattr(self.cfg.mpc, "leader_mfd_far_ncrit", 1700.0))
         g_free = float(getattr(self.cfg.mpc, "leader_mfd_far_g_free", 640.0))
         g_cong = float(getattr(self.cfg.mpc, "leader_mfd_far_g_cong", 500.0))
