@@ -1,0 +1,44 @@
+=== P-STACK-WU-FAITHFUL-G1DF ===
+P-STACK-WU-FAITHFUL-G1DF step 1/40 cum_ttt=27.922 step_ttt=27.922 solve=175789ms
+P-STACK-WU-FAITHFUL-G1DF step 2/40 cum_ttt=72.899 step_ttt=44.976 solve=193861ms
+P-STACK-WU-FAITHFUL-G1DF step 3/40 cum_ttt=125.684 step_ttt=52.786 solve=195211ms
+P-STACK-WU-FAITHFUL-G1DF step 4/40 cum_ttt=184.742 step_ttt=59.057 solve=194157ms
+P-STACK-WU-FAITHFUL-G1DF step 5/40 cum_ttt=250.841 step_ttt=66.100 solve=201038ms
+P-STACK-WU-FAITHFUL-G1DF step 6/40 cum_ttt=324.572 step_ttt=73.730 solve=191427ms
+P-STACK-WU-FAITHFUL-G1DF step 7/40 cum_ttt=406.905 step_ttt=82.333 solve=193454ms
+P-STACK-WU-FAITHFUL-G1DF step 8/40 cum_ttt=499.348 step_ttt=92.443 solve=210345ms
+P-STACK-WU-FAITHFUL-G1DF step 9/40 cum_ttt=602.426 step_ttt=103.078 solve=178382ms
+P-STACK-WU-FAITHFUL-G1DF step 10/40 cum_ttt=716.196 step_ttt=113.770 solve=195432ms
+P-STACK-WU-FAITHFUL-G1DF step 11/40 cum_ttt=841.376 step_ttt=125.180 solve=160768ms
+P-STACK-WU-FAITHFUL-G1DF step 12/40 cum_ttt=978.110 step_ttt=136.734 solve=182054ms
+P-STACK-WU-FAITHFUL-G1DF step 13/40 cum_ttt=1126.415 step_ttt=148.305 solve=156473ms
+P-STACK-WU-FAITHFUL-G1DF step 14/40 cum_ttt=1286.922 step_ttt=160.507 solve=172886ms
+P-STACK-WU-FAITHFUL-G1DF step 15/40 cum_ttt=1459.982 step_ttt=173.060 solve=178195ms
+P-STACK-WU-FAITHFUL-G1DF step 16/40 cum_ttt=1645.725 step_ttt=185.743 solve=190155ms
+P-STACK-WU-FAITHFUL-G1DF step 17/40 cum_ttt=1844.758 step_ttt=199.033 solve=180545ms
+P-STACK-WU-FAITHFUL-G1DF step 18/40 cum_ttt=2056.484 step_ttt=211.726 solve=143995ms
+P-STACK-WU-FAITHFUL-G1DF step 19/40 cum_ttt=2281.449 step_ttt=224.965 solve=152470ms
+P-STACK-WU-FAITHFUL-G1DF step 20/40 cum_ttt=2522.268 step_ttt=240.819 solve=183623ms
+P-STACK-WU-FAITHFUL-G1DF step 21/40 cum_ttt=2779.639 step_ttt=257.371 solve=165143ms
+P-STACK-WU-FAITHFUL-G1DF step 22/40 cum_ttt=3053.205 step_ttt=273.567 solve=188969ms
+P-STACK-WU-FAITHFUL-G1DF step 23/40 cum_ttt=3343.926 step_ttt=290.721 solve=146472ms
+P-STACK-WU-FAITHFUL-G1DF step 24/40 cum_ttt=3654.532 step_ttt=310.605 solve=169301ms
+P-STACK-WU-FAITHFUL-G1DF step 25/40 cum_ttt=3986.096 step_ttt=331.564 solve=162981ms
+P-STACK-WU-FAITHFUL-G1DF step 26/40 cum_ttt=4337.826 step_ttt=351.730 solve=147635ms
+P-STACK-WU-FAITHFUL-G1DF step 27/40 cum_ttt=4708.983 step_ttt=371.157 solve=189465ms
+P-STACK-WU-FAITHFUL-G1DF step 28/40 cum_ttt=5099.511 step_ttt=390.528 solve=202092ms
+P-STACK-WU-FAITHFUL-G1DF step 29/40 cum_ttt=5510.655 step_ttt=411.144 solve=186851ms
+P-STACK-WU-FAITHFUL-G1DF step 30/40 cum_ttt=5942.587 step_ttt=431.932 solve=202157ms
+P-STACK-WU-FAITHFUL-G1DF step 31/40 cum_ttt=6395.726 step_ttt=453.139 solve=184920ms
+P-STACK-WU-FAITHFUL-G1DF step 32/40 cum_ttt=6868.836 step_ttt=473.110 solve=180301ms
+P-STACK-WU-FAITHFUL-G1DF step 33/40 cum_ttt=7361.705 step_ttt=492.869 solve=171672ms
+P-STACK-WU-FAITHFUL-G1DF step 34/40 cum_ttt=7873.901 step_ttt=512.196 solve=172888ms
+P-STACK-WU-FAITHFUL-G1DF step 35/40 cum_ttt=8406.092 step_ttt=532.192 solve=164695ms
+P-STACK-WU-FAITHFUL-G1DF step 36/40 cum_ttt=8958.471 step_ttt=552.378 solve=162457ms
+P-STACK-WU-FAITHFUL-G1DF step 37/40 cum_ttt=9530.179 step_ttt=571.708 solve=159074ms
+P-STACK-WU-FAITHFUL-G1DF step 38/40 cum_ttt=10120.652 step_ttt=590.473 solve=176470ms
+P-STACK-WU-FAITHFUL-G1DF step 39/40 cum_ttt=10729.219 step_ttt=608.568 solve=160032ms
+P-STACK-WU-FAITHFUL-G1DF step 40/40 cum_ttt=11356.234 step_ttt=627.014 solve=198983ms
+
+========== SUMMARY ==========
+P-STACK-WU-FAITHFUL-G1DF: total_ttt=11356.234 delay=9240.880 impr=+0.00% completed=32348.6 terminal=12611.0 mean_solve=178.071s
