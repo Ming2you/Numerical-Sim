@@ -448,6 +448,10 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
         cfg.mpc.horizon_steps = int(_os.environ["HORIZON"])  # V 깊이 sweep: leader eval+price+follower 동시 연장
     if _os.environ.get("LEADER_V_DEPTH"):
         cfg.mpc.leader_value_depth = int(_os.environ["LEADER_V_DEPTH"])  # leader full-rollout V 깊이(follower myopic 유지)
+    if _os.environ.get("MFD_FAR") == "1":
+        cfg.mpc.leader_mfd_far_enabled = True  # far(MFD tail) cost-to-go 가산 → near 깊이 절감 검증
+    if _os.environ.get("MFD_FAR_W"):
+        cfg.mpc.leader_mfd_far_weight = float(_os.environ["MFD_FAR_W"])
     profile = DemandProfile(cfg, scenario)
     sim = MixedTrafficSimulator(cfg)
     controller = make_controller(controller_id, cfg)
