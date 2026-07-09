@@ -216,13 +216,14 @@ class WuFaithfulFollower:
         self.vsl_meter_cross_price: Optional[Dict[str, float]] = None    # ramp → h_ext
         self.vsl_meter_cross_ref: Dict[str, tuple] = {}                  # ramp → (meter_ref, vsl_ref)
         self.vsl_meter_cross_weight: float = 1.0
-        # ---------- PRICE-TR(2026-07-09, 사용자 지시): 가격 모드 = trust region만, 마찰 0 ----------
-        # 가격이 활성인 레버는 smoothness(proximal 마찰)를 0으로 하고 trust region(선형화
-        # 유효 반경)이 보폭을 제약한다 — SLP/Frank-Wolfe 표준형. 근거: 실측 green g_ext
-        # 0.03~0.055 < smooth_w 0.1이라 가격 신호 대부분이 마찰 deadband에 검열되던 문제.
-        # 가격이 없는 레버/PFO는 smoothness 유지(price 부재로 자기게이트). VSL은 trust가
-        # 없었으므로 컨트롤러가 vsl_price_trust_kmh(±10km/h)를 신설 하달한다.
-        self.price_smoothness_disabled: bool = True
+        # ---------- PRICE-TR(2026-07-09): 가격 모드 = trust region만, 마찰 0 (기본 OFF 복귀) ----------
+        # ON이면 가격 활성 레버의 smoothness(proximal 마찰)를 0으로 — SLP/Frank-Wolfe 표준형.
+        # 실측 판정(같은 날): 마찰 deadband는 저SNR 가격 신호의 **암묵적 신호검정**이었다.
+        # 제거하자 노이즈성 gradient까지 매 스텝 trust 보폭으로 행동 → G1DF +139, APJOINT
+        # 13493 참사. 평시 레짐(green g_ext 0.03~0.055 < 0.1)에선 마찰 유지가 우세 —
+        # 원리적 대체는 dead zone(|g_ext|<θ 무시)이며 강신호 레짐(포화×skew·사고)용 옵션.
+        # VSL trust(±10km/h, vsl_price_trust_kmh)는 보폭 제한이라 마찰과 무관하게 유지.
+        self.price_smoothness_disabled: bool = False
         self.vsl_marginal_price_trust_kmh: Optional[float] = None
         # ---------- J1(2026-07-06): joint offset 패턴 directive ----------
         # F3 판정: offset은 joint 결합 변수라 per-signal 가격(편미분)이 구조적으로 0.

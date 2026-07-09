@@ -110,9 +110,11 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         # "far는 수량 신호(N_UF_star)만 똑똑하게 하고 가격(gradient)엔 안 들어간다". 활성 시
         # 모든 가격·cross rollout이 TTT + far(terminal state)로 채점된다. far는 leader 전용
         # 목적항이라 d_local 차감 없음(barrier와 동일 규약 — follower own-TTS에 대응물 부재).
-        # 2026-07-09 기본 ON(사용자 지시: far 기본 + price far + N_UF dual 표준 구성).
+        # 2026-07-09 기본 OFF 복귀: far-in-price는 gradient 크기와 노이즈를 함께 증폭 —
+        # 마찰 문턱과 결합해 G1DF +139/APJOINT 13493 실측 악화(같은 날 ablation).
+        # far는 leader 후보 채점(V=near+far)에서만 기본 작동. 켜면 E1(far도 가격에).
         # far 자체는 leader_mfd_far_enabled로도 게이트(내부 0 반환).
-        self.price_far_enabled: bool = True
+        self.price_far_enabled: bool = False
         # ---------- LINK-SHARE(2026-07-09, 사용자 지시): network→link 배분 자유도 개방 ----------
         # ω_F 고정 균등분할(1/n_links)이 link 간 budget 배분을 pressure 무관하게 강제하던
         # 것을 개방. dual의 "link 간 재배분" 자유를 가격이 아닌 수량 채널로 흡수.
