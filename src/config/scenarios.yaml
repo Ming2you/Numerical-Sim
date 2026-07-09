@@ -72,6 +72,30 @@
       "incident_capacity_factor": 1.0,
       "required": false
     },
+    "sweet_170_incident": {
+      "urban_scale": 1.7,
+      "freeway_scale": 1.7,
+      "ramp_scale": 1.7,
+      "incident_capacity_factor": 1.0,
+      "freeway_lane_closures": [
+        {
+          "link": "FW_E",
+          "segment": 3,
+          "lane_loss": 1.0,
+          "start_sec": 2400.0,
+          "end_sec": 4800.0
+        }
+      ],
+      "required": false
+    },
+    "sweet_155_skew": {
+      "urban_scale": 1.55,
+      "freeway_scale": 1.55,
+      "ramp_scale": 1.55,
+      "incident_capacity_factor": 1.0,
+      "urban_west_east_ratio": 2.0,
+      "required": false
+    },
     "sweet_190": {
       "urban_scale": 1.9,
       "freeway_scale": 1.9,
