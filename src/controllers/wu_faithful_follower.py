@@ -182,9 +182,9 @@ class WuFaithfulFollower:
         # 밀도로 사전 인증한 ramp만 방류 증가 후보 허용. 조임(방류↓)은 가역이라 자유.
         # None이면 비활성(기존 거동).
         self.metering_release_certified: Optional[Dict[str, bool]] = None
-        # VSL 가격(세그먼트 키 "link__segN"). 주의: VSL은 아직 d_local 미차감(raw g_i —
-        # 국소 "고정 VSL 벡터 채점" 프리미티브가 없어 Codex 원안 유지). 기본 OFF이며
-        # 활성화 전 g_ext화가 선행 과제.
+        # VSL 가격(세그먼트 키 "link__segN"). E2(2026-07-09): vsl_override 프리미티브로
+        # local_vsl_costs(고정 VSL 벡터 국소 채점)가 생겨 g_ext = g_i − d_local로 정렬됨
+        # (기존 raw g_i의 own 성분 이중계상 결함 해소). 기본 OFF.
         self.vsl_marginal_price: Optional[Dict[str, float]] = None
         self.vsl_marginal_price_ref: Dict[str, float] = {}
         self.vsl_marginal_price_weight: float = 1.0
@@ -1140,6 +1140,50 @@ class WuFaithfulFollower:
                     )
                     costs.append(float(cost))
                 out[ramp] = costs
+        finally:
+            self.metering_marginal_price = saved_meter
+            self.vsl_marginal_price = saved_vsl
+            self.vsl_meter_cross_price = saved_cross
+        return out
+
+    # ---------- E2: leader가 부르는 국소 VSL 벡터 비용 조회(가격항 제외) ----------
+
+    def local_vsl_costs(
+        self,
+        requests: Mapping[str, Sequence[Sequence[float]]],
+        state: TrafficState,
+        control: ControlAction,
+        demand: DemandStep,
+    ) -> Dict[str, List[float]]:
+        """link별 VSL 벡터 후보들의 freeway-agent 국소 own-TTS — B3 VSL 가격 g_ext화(E2).
+
+        vsl_override로 벡터를 고정 채점(단일 시퀀스) — 그간 "국소 고정 VSL 벡터 채점
+        프리미티브 부재"로 VSL 가격이 raw g_i(d_local 미차감)였던 결함의 해소 재료.
+        규약은 local_metering_costs와 동일: 프롤로그 1회, 가격 일시 비활성, 영속 상태 미변경."""
+        ctrl = ControlAction.uncontrolled(self.cfg)
+        ctrl.green_times = dict(control.green_times)
+        ctrl.offsets = dict(control.offsets)
+        ctrl.vsl = dict(control.vsl)
+        ctrl.ramp_metering = dict(control.ramp_metering)
+        ctrl.inflow_outflow_allocation = {}
+        coupling = self._wu._coupling(state, ctrl, demand)
+        saved_meter = self.metering_marginal_price
+        saved_vsl = self.vsl_marginal_price
+        saved_cross = self.vsl_meter_cross_price
+        self.metering_marginal_price = None
+        self.vsl_marginal_price = None
+        self.vsl_meter_cross_price = None
+        out: Dict[str, List[float]] = {}
+        try:
+            for link, vectors in requests.items():
+                costs: List[float] = []
+                for vec in vectors:
+                    _, cost, _ = self._solve_freeway_agent_local(
+                        link, state, coupling, demand, ctrl,
+                        vsl_override=[float(v) for v in vec],
+                    )
+                    costs.append(float(cost))
+                out[link] = costs
         finally:
             self.metering_marginal_price = saved_meter
             self.vsl_marginal_price = saved_vsl

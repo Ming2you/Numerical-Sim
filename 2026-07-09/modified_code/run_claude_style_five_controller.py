@@ -474,6 +474,8 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
     controller = make_controller(controller_id, cfg)
     if _os.environ.get("PRICE_ITER") and hasattr(controller, "price_iter_max"):
         controller.price_iter_max = int(_os.environ["PRICE_ITER"])  # B: leader↔follower dual-ascent 반복 횟수
+    if _os.environ.get("MFD_FAR_PRICE") == "1" and hasattr(controller, "price_far_enabled"):
+        controller.price_far_enabled = True  # E1: 가격 FD에도 far 합산(MFD_FAR=1 필요)
     previous: Optional[ControlAction] = None
     steps = max(1, int(round(cfg.simulation.T_total / cfg.simulation.control_interval)))
     run_rows: List[Dict[str, Any]] = []

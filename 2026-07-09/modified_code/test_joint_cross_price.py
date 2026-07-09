@@ -102,6 +102,61 @@ class TestJointCrossPrice(unittest.TestCase):
         for v in list(f.green_offset_cross_price.values()) + list(f.vsl_meter_cross_price.values()):
             self.assertTrue(v == v and v not in (float("inf"), -float("inf")))
 
+    def test_e2_vsl_price_subtracts_local_gradient(self):
+        # E2: VSL 채널이 raw g_i가 아니라 g_ext = g_i − d_local. d_local 재료인
+        # local_vsl_costs가 유한하고, 채널 출력도 유한해야 한다.
+        cfg = _build_cfg()
+        controller = StackelbergWuMeteredController(cfg)
+        controller.signal_price_enabled = False
+        controller.vsl_price_enabled = True
+        state = TrafficState.initial(cfg)
+        state.time_sec = float(cfg.simulation.control_interval)
+        controller._maybe_refresh_signal_prices(
+            state, _demand(cfg), ControlAction.fixed(cfg),
+        )
+        f = controller.nash_solver
+        net = cfg.network
+        self.assertIsNotNone(f.vsl_marginal_price)
+        expected_keys = {
+            f"{link}__seg{i}"
+            for link in net.freeway_links
+            for i in range(int(net.freeway_segments_per_link))
+        }
+        self.assertEqual(set(f.vsl_marginal_price), expected_keys)
+        for v in f.vsl_marginal_price.values():
+            self.assertTrue(v == v and v not in (float("inf"), -float("inf")))
+        # d_local 프리미티브 자체도 직접 검증(전 링크, 벡터 override 유한).
+        vhi = max(cfg.freeway_follower.vsl_set)
+        n_seg = int(net.freeway_segments_per_link)
+        reqs = {link: [[vhi] * n_seg] for link in net.freeway_links}
+        costs = f.local_vsl_costs(reqs, state, ControlAction.fixed(cfg), _demand(cfg)[0])
+        for link in net.freeway_links:
+            self.assertEqual(len(costs[link]), 1)
+            self.assertGreaterEqual(costs[link][0], 0.0)
+
+    def test_e1_price_far_changes_price_rollout_only_when_enabled(self):
+        # E1: price_far_enabled+leader_mfd_far_enabled면 가격 rollout 채점이 TTT+far,
+        # 아니면 TTT 그대로(비트동일). 혼잡 state를 만들어 far>0로 확인.
+        cfg = _build_cfg()
+        cfg.mpc.leader_mfd_far_enabled = True
+        controller = StackelbergWuMeteredController(cfg)
+        state = TrafficState.initial(cfg)
+        # urban accumulation을 인위적으로 채워 far>0 유도.
+        for m in list(state.urban_movement_queue):
+            state.urban_movement_queue[m] = 40.0
+        net = cfg.network
+        sig = net.signals[0]
+        p1 = float(net.effective_green_total) / 2.0
+        base = controller._global_rollout_ttt_with_green(
+            state, ControlAction.fixed(cfg), _demand(cfg), sig, p1,
+        )
+        controller.price_far_enabled = True
+        with_far = controller._global_rollout_ttt_with_green(
+            state, ControlAction.fixed(cfg), _demand(cfg), sig, p1,
+        )
+        self.assertGreater(with_far, base,
+                           msg="price_far ON이면 가격 rollout 채점에 far가 가산돼야 한다")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -101,6 +101,13 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         self.green_offset_cross_weight: float = 1.0
         self.vsl_meter_cross_price_enabled: bool = False
         self.vsl_meter_cross_weight: float = 1.0
+        # ---------- E1(2026-07-09): 가격 FD에 far(MFD tail) 합산 ----------
+        # 비대칭 해소(사용자 지시): far는 leader 후보 채점에만 있고 가격 rollout엔 없었다 —
+        # "far는 수량 신호(N_UF_star)만 똑똑하게 하고 가격(gradient)엔 안 들어간다". 활성 시
+        # 모든 가격·cross rollout이 TTT + far(terminal state)로 채점된다. far는 leader 전용
+        # 목적항이라 d_local 차감 없음(barrier와 동일 규약 — follower own-TTS에 대응물 부재).
+        # 기본 OFF = 비트동일. far 자체는 leader_mfd_far_enabled로도 게이트(내부 0 반환).
+        self.price_far_enabled: bool = False
         # ---------- J1(2026-07-06): joint offset 패턴 ----------
         # F3 판정(offset 단독 편미분 = 0)의 처방: leader가 비-ramp 신호들의 offset
         # **조합**(3^k 패턴, 격자 {0, ±cycle/8})을 통째로 rollout 평가해 최선 조합을
@@ -267,8 +274,8 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         control = previous.copy()
         control.green_times[f"{signal}_p1"] = float(p1)
         control.green_times[f"{signal}_p2"] = float(total - p1)
-        _, ttt = self._predict(state, control, forecast)
-        return float(ttt)
+        states, ttt = self._predict(state, control, forecast)
+        return self._price_ttt(states, ttt)
 
     def _predict_ttt_and_barrier(
         self,
@@ -287,7 +294,7 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         from src.models.urban_queue_model import _effective_available_space
 
         states, ttt = self._predict(state, control, forecast)
-        return float(ttt), self._barrier_from_states(states)
+        return self._price_ttt(states, ttt), self._barrier_from_states(states)
 
     def _barrier_from_states(self, states: List[TrafficState]) -> float:
         """예측 상태 목록에서 barrier 합산(B4 활성 시에만, 아니면 0)."""
@@ -311,6 +318,15 @@ class StackelbergWuMeteredController(StackelbergMPCController):
                 deficit = max(0.0, spill_frac * float(cap) - space)
                 barrier += self.barrier_weight * deficit * t_c_h
         return float(barrier)
+
+    def _price_ttt(self, states: List[TrafficState], ttt: float) -> float:
+        """가격 FD용 rollout 채점 — E1 활성 시 TTT + far(terminal state의 MFD tail).
+
+        leader 후보 채점(_leader_evaluation_base)과 같은 V=near+far 형태로 가격을 정렬한다.
+        far는 leader 전용 목적항이라 d_local 차감 없음(B4 barrier와 동일 규약). 기본 OFF."""
+        if self.price_far_enabled and states:
+            ttt += self._mfd_far_cost_to_go(states[-1])
+        return float(ttt)
 
     def _global_rollout_metrics_with_green(
         self,
@@ -350,7 +366,7 @@ class StackelbergWuMeteredController(StackelbergMPCController):
             for s in states:
                 for rho in s.freeway_density.get(link, []):
                     max_rho = max(max_rho, float(rho))
-        return float(ttt), float(barrier), float(max_rho)
+        return self._price_ttt(states, ttt), float(barrier), float(max_rho)
 
     def _global_rollout_ttt_with_vsl(
         self,
@@ -367,8 +383,8 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         control.vsl = dict(previous.vsl)
         control.vsl[seg_key] = float(value)
         control.vsl[link] = min(float(control.vsl.get(link, vsl_upper)), float(value))
-        _, ttt = self._predict(state, control, forecast)
-        return float(ttt)
+        states, ttt = self._predict(state, control, forecast)
+        return self._price_ttt(states, ttt)
 
     def _global_rollout_ttt_with_offset(
         self,
@@ -382,8 +398,8 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         control = previous.copy()
         control.offsets = dict(previous.offsets)
         control.offsets[signal] = float(offset)
-        _, ttt = self._predict(state, control, forecast)
-        return float(ttt)
+        states, ttt = self._predict(state, control, forecast)
+        return self._price_ttt(states, ttt)
 
     def _global_rollout_ttt_with_green_offset(
         self,
@@ -397,15 +413,15 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         """ego 신호의 green(p1)·offset을 동시에 바꾸고 나머지 hold — horizon 전역 rollout TTT.
 
         JOINT green×offset cross-term 4-corner 스텐실용(h_global). green price와 동일하게
-        `_predict`(leader_value_depth로 3+d 깊이, analytic far 미포함) TTT를 쓴다."""
+        `_predict`(leader_value_depth로 3+d 깊이) TTT + E1 활성 시 far를 쓴다."""
         total = float(self.cfg.network.effective_green_total)
         control = previous.copy()
         control.green_times[f"{signal}_p1"] = float(p1)
         control.green_times[f"{signal}_p2"] = float(total - p1)
         control.offsets = dict(previous.offsets)
         control.offsets[signal] = float(offset)
-        _, ttt = self._predict(state, control, forecast)
-        return float(ttt)
+        states, ttt = self._predict(state, control, forecast)
+        return self._price_ttt(states, ttt)
 
     def _global_rollout_ttt_with_vsl_meter(
         self,
@@ -430,8 +446,8 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         for index in range(int(net.freeway_segments_per_link)):
             control.vsl[f"{link}__seg{index}"] = float(vsl)
         control.vsl[link] = float(vsl)
-        _, ttt = self._predict(state, control, forecast)
-        return float(ttt)
+        states, ttt = self._predict(state, control, forecast)
+        return self._price_ttt(states, ttt)
 
     # 상단 arterial A-B-C / 하단 D-(E)-F / 수직 A-D·C-F(E는 비신호 통과) — 진행방향 lag seed용.
     _OFFSET_CORRIDORS = (("A", "B", "C"), ("D", "F"), ("A", "D"), ("C", "F"))
@@ -930,19 +946,44 @@ class StackelbergWuMeteredController(StackelbergMPCController):
             for s, off in lead_directive.items():
                 meta[f"wu_lead_off_{s}"] = float(off)
 
-        # ---- VSL 채널(B3, raw g_i — d_local 미차감 주의, 기본 OFF) ----
+        # ---- VSL 채널(B3, E2로 g_ext화: g_ext = g_i − d_local, 기본 OFF) ----
+        # 기존 raw g_i는 follower가 own-TTS로 이미 보는 성분을 이중계상(알려진 결함,
+        # "활성화 전 g_ext화가 선행 과제"). vsl_override 프리미티브(local_vsl_costs)로
+        # d_local(고정 VSL 벡터 own-TTS의 유한차분)을 차감해 다른 채널과 규약 정렬.
         if self.vsl_price_enabled and op_vsl:
             meta["wu_b3_vsl_price_enabled"] = 1.0
             delta_v = float(self.vsl_price_delta_kmh)
+            n_seg_v = int(net.freeway_segments_per_link)
+            # per-link 고정벡터 요청: seg i의 ±δ 두 벡터씩(순서 [hi_i, lo_i] × seg).
+            v_corners: Dict[str, tuple] = {}
+            v_requests: Dict[str, List[List[float]]] = {}
+            for link in net.freeway_links:
+                base = [
+                    float(op_vsl.get(f"{link}__seg{i}", vsl_upper)) for i in range(n_seg_v)
+                ]
+                reqs: List[List[float]] = []
+                for i in range(n_seg_v):
+                    key = f"{link}__seg{i}"
+                    if key not in op_vsl:
+                        continue
+                    x0 = base[i]
+                    v_hi = min(vsl_upper, x0 + delta_v)
+                    v_lo = max(vsl_lower, x0 - delta_v)
+                    v_corners[key] = (x0, v_lo, v_hi, link, len(reqs))
+                    hi_vec = list(base)
+                    hi_vec[i] = v_hi
+                    lo_vec = list(base)
+                    lo_vec[i] = v_lo
+                    reqs.extend([hi_vec, lo_vec])
+                if reqs:
+                    v_requests[link] = reqs
+            local_v = follower.local_vsl_costs(v_requests, state, previous, forecast[0])
             v_prices: Dict[str, float] = {}
             v_refs: Dict[str, float] = {}
-            for key, x0 in op_vsl.items():
-                link = key.split("__seg")[0]
-                v_hi = min(vsl_upper, x0 + delta_v)
-                v_lo = max(vsl_lower, x0 - delta_v)
+            for key, (x0, v_lo, v_hi, link, req_idx) in v_corners.items():
                 span = v_hi - v_lo
                 if span <= 1.0e-9:
-                    g_i = 0.0
+                    g_ext = 0.0
                 else:
                     ttt_hi = self._global_rollout_ttt_with_vsl(
                         state, previous, forecast, link, key, v_hi, vsl_upper,
@@ -951,7 +992,13 @@ class StackelbergWuMeteredController(StackelbergMPCController):
                         state, previous, forecast, link, key, v_lo, vsl_upper,
                     )
                     g_i = (ttt_hi - ttt_lo) / span
-                v_prices[key] = float(g_i)
+                    lc = local_v.get(link, [])
+                    if req_idx + 1 < len(lc):
+                        d_local = (lc[req_idx] - lc[req_idx + 1]) / span
+                    else:
+                        d_local = 0.0
+                    g_ext = g_i - d_local
+                v_prices[key] = float(g_ext)
                 v_refs[key] = float(x0)
             follower.vsl_marginal_price = v_prices
             follower.vsl_marginal_price_ref = v_refs
