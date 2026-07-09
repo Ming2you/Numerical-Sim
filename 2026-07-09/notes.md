@@ -110,7 +110,20 @@ far는 leader **후보 채점에만** 있었고 follower에 하달되는 **가�
 | G1DF (b5sjjfsfu) | **OFF(PRICE-TR)** | 마찰 검열 해제 효과 |
 | APJOINT (bwwseo6gc) | **OFF(PRICE-TR)** | 풀스택(사용자 표준 구성) |
 
+## λ_UF BOOTSTRAP DEADLOCK 발견·수정 (641f0bf)
+
+dual(마찰 ON) 결과: G1DF 11665(+382 vs equality 11283), APJOINT 12260(+406 vs 11854).
+**원인은 dual 자체가 아니라 자기잠금**: λ=0 → dual 항 0 → leader 후보 ≈ PFO incumbent
+→ tie-break가 incumbent 선택(31/40, tie 19) → incumbent 경로는 λ 미commit(9/40만)
+→ λ 영영 0. APJOINT는 anchor를 λ로 대체했으므로 **수량 신호 전무** 상태로 퇴화.
+수정: incumbent 선택 스텝에도 실현 Σmeter − leader-stage 최선 N_UF*로 λ 무조건 적분
+(수량 오차는 커밋 주체 무관 관측되는 새 정보 — "λ는 새 정보 없다"던 기존 주석이
+λ_UF에는 오류). 스모크: incumbent 스텝 bootstrap=1, 오차 0 구간 λ=0 유지(정상).
+
+## 실행 중 (수정 후 확정런: far+pricefar+dual+PRICE-TR+bootstrap, d3)
+- G1DF (b31dbxba8), APJOINT (bci1q5mak) ← **사용자 표준 구성 확정판**
+- (구코드) PRICE-TR without bootstrap: b5sjjfsfu/bwwseo6gc — deadlock regime ablation
+
 ## TODO
-- [ ] 4런 판정 — dual 복원 효과 × 마찰 검열 해제 효과 분해
-- [ ] λ_UF 궤적 확인(경부하≈0/절벽 발화 시그니처 = "선형화 오차의 가격" 입증)
+- [ ] 확정런 2개 판정 + λ_UF 궤적(경부하≈0/절벽 발화 = "선형화 오차의 가격" 입증)
 - [ ] 결과 정리 후 push

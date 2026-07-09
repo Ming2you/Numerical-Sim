@@ -2245,12 +2245,6 @@ class WuFaithfulFollower:
             float(np.clip(omega_f_price * n_uf_star, 0.0, cap_sum_price))
             if cap_sum_price > 0.0 else 0.0
         )
-        priced_metering = (
-            self.metering_marginal_price is not None
-            and leader is not None
-            and n_uf_star > 0.0
-            and bool(owned_ramps)
-        )
         # DUAL×PRICE(2026-07-09, 사용자 지시): nuf dual 모드면 가격 분기에서도 soft anchor
         # 대신 λ_UF·Σmeter를 쓴다 — leader의 수량 target(N_UF*)을 추적하는 dual이 marginal
         # 가격(g_ext)과 공존. anchor(|Σ−budget|, w=T_c_h≈0.05)는 사실상 무력해 far-informed
@@ -2258,6 +2252,23 @@ class WuFaithfulFollower:
         nuf_mode_priced = str(getattr(
             self.cfg.mpc, "wu_faithful_nuf_coordination_mode", "equality"
         ))
+        # DUAL-STANDING(2026-07-09 windup 수정): λ_UF는 follower의 **영속 가격** — green/vsl
+        # 가격처럼 leader 부재 solve(PFO incumbent probe)에도 적용돼야 한다. 기존(leader
+        # 있을 때만)은 incumbent가 λ-면제라 적분 루프에 액추에이터가 없었다: incumbent가
+        # 이기는 동안 실현 Σmeter가 λ에 무반응 → 오차 양수 지속 → λ가 cap(1.0)까지 windup
+        # → leader 후보만 오염(metering→0) → incumbent 선택 고착(실측 G1DF 11909/APJOINT
+        # 13116, 전 스텝 incumbent). 순수 PFO 컨트롤러는 λ를 설정하지 않아(=0) 무영향.
+        dual_standing = (
+            nuf_mode_priced == "dual" and abs(float(self._lambda_UF)) > 1.0e-12
+        )
+        priced_metering = (
+            self.metering_marginal_price is not None
+            and bool(owned_ramps)
+            and (
+                (leader is not None and n_uf_star > 0.0)
+                or dual_standing
+            )
+        )
 
         def _price_metering_cost(meter: Mapping[str, float]) -> float:
             if self.metering_marginal_price is None or not owned_ramps:
@@ -2369,7 +2380,11 @@ class WuFaithfulFollower:
         # 최소화한다. 2 ramp이면 1-D 탐색: meter_R1 ∈ [max(0,B−cap2), min(cap1,B)], R2 = B−R1.
         # 이 분기는 (a) leader의 N_UF를 정확히 실현하고, (b) full grid보다 훨씬 작은 탐색이며,
         # (c) 이전 soft penalty hack을 없앤다.
-        if leader is not None and n_uf_star > 0.0 and owned_ramps:
+        # DUAL-STANDING: dual 모드는 leader 부재(incumbent probe)에도 λ≠0이면 진입 —
+        # incumbent가 λ에 반응해야 적분 루프가 닫힌다(windup 수정, 위 priced 주석 참조).
+        if owned_ramps and (
+            (leader is not None and n_uf_star > 0.0) or dual_standing
+        ):
             omega_f = float(self._wu._omega_f.get(link, 0.0))
             cap_sum = sum(caps[r] for r in owned_ramps)
             # link budget을 가용 영역 [0, Σcap]으로 clamp(나머지는 follower가 분배).
@@ -2382,9 +2397,7 @@ class WuFaithfulFollower:
             # link 합 ≤ budget으로 비례 투영한다: 자율 최적이 budget 미만이면 leader가
             # 건드리지 않고(자율 존중), 초과할 때만 boundary(합=budget)로 눌린다.
             # N_P cap(wu_faithful_np_coordination_mode)과 대칭. 기본 equality(기존 거동).
-            nuf_mode = str(getattr(
-                self.cfg.mpc, "wu_faithful_nuf_coordination_mode", "equality"
-            ))
+            nuf_mode = nuf_mode_priced
             if nuf_mode == "dual":
                 # N_UF dual: 자율 좌표하강(등식 강제 없음) + 비용에 λ_UF·Σowned_meter 추가.
                 # λ_UF>0면 방류 억제(Σmeter가 target 초과), <0면 방류 보상(target 미달).
