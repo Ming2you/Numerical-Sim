@@ -106,8 +106,9 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         # "far는 수량 신호(N_UF_star)만 똑똑하게 하고 가격(gradient)엔 안 들어간다". 활성 시
         # 모든 가격·cross rollout이 TTT + far(terminal state)로 채점된다. far는 leader 전용
         # 목적항이라 d_local 차감 없음(barrier와 동일 규약 — follower own-TTS에 대응물 부재).
-        # 기본 OFF = 비트동일. far 자체는 leader_mfd_far_enabled로도 게이트(내부 0 반환).
-        self.price_far_enabled: bool = False
+        # 2026-07-09 기본 ON(사용자 지시: far 기본 + price far + N_UF dual 표준 구성).
+        # far 자체는 leader_mfd_far_enabled로도 게이트(내부 0 반환).
+        self.price_far_enabled: bool = True
         # ---------- J1(2026-07-06): joint offset 패턴 ----------
         # F3 판정(offset 단독 편미분 = 0)의 처방: leader가 비-ramp 신호들의 offset
         # **조합**(3^k 패턴, 격자 {0, ±cycle/8})을 통째로 rollout 평가해 최선 조합을

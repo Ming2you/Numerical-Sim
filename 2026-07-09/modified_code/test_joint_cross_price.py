@@ -147,6 +147,7 @@ class TestJointCrossPrice(unittest.TestCase):
         net = cfg.network
         sig = net.signals[0]
         p1 = float(net.effective_green_total) / 2.0
+        controller.price_far_enabled = False  # 기본 True(2026-07-09) — OFF 기준선 명시
         base = controller._global_rollout_ttt_with_green(
             state, ControlAction.fixed(cfg), _demand(cfg), sig, p1,
         )

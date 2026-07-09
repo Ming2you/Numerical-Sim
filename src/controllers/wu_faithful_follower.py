@@ -2214,6 +2214,13 @@ class WuFaithfulFollower:
             and n_uf_star > 0.0
             and bool(owned_ramps)
         )
+        # DUAL×PRICE(2026-07-09, 사용자 지시): nuf dual 모드면 가격 분기에서도 soft anchor
+        # 대신 λ_UF·Σmeter를 쓴다 — leader의 수량 target(N_UF*)을 추적하는 dual이 marginal
+        # 가격(g_ext)과 공존. anchor(|Σ−budget|, w=T_c_h≈0.05)는 사실상 무력해 far-informed
+        # 수량 결정이 집행 안 되던 구멍을 λ_UF(적분 피드백)가 메운다.
+        nuf_mode_priced = str(getattr(
+            self.cfg.mpc, "wu_faithful_nuf_coordination_mode", "equality"
+        ))
 
         def _price_metering_cost(meter: Mapping[str, float]) -> float:
             if self.metering_marginal_price is None or not owned_ramps:
@@ -2232,12 +2239,16 @@ class WuFaithfulFollower:
                     * (float(meter.get(ramp, ref)) - ref)
                 )
             if priced_metering:
-                # 가격 모드에선 leader budget을 hard로 강제하지 않고 soft anchor로만
-                # 남긴다(|Σ−budget| 페널티, w=T_c_h — Codex f18e920 설계 유지).
                 total_meter = sum(float(meter.get(r, 0.0)) for r in owned_ramps)
-                total_price += self.metering_budget_penalty_weight * abs(
-                    total_meter - budget_price
-                )
+                if nuf_mode_priced == "dual":
+                    # dual: λ_UF·Σmeter — G1DF dual 분기와 동일 신호(수량 target 추적).
+                    total_price += float(self._lambda_UF) * total_meter
+                else:
+                    # 가격 모드에선 leader budget을 hard로 강제하지 않고 soft anchor로만
+                    # 남긴다(|Σ−budget| 페널티, w=T_c_h — Codex f18e920 설계 유지).
+                    total_price += self.metering_budget_penalty_weight * abs(
+                        total_meter - budget_price
+                    )
             return float(total_price)
 
         # ---- B3 가격 모드 leader 분기: soft budget + 자율 후보 sweep ----
