@@ -232,16 +232,17 @@ def make_controller(controller_id: str, cfg: ExperimentConfig):
     #                  cross 가격만 freeway 채점에 추가.
     # LEADER_V_DEPTH=k와 함께 실행(far는 leader 채점 기본 ON, 가격 far=E1은 env 옵션).
     if controller_id == "P-STACK-WU-FAITHFUL-ALLPRICE-JOINT":
-        # DEFAULT DEPTH = d1(12분) — 2026-07-09 사용자 확정(컨트롤러 동결).
-        # 가격 전송 구조의 최적 선형화 깊이: depth 곡선 d0 22698(붕괴) → d1 11814(최적)
-        # → d2 12006 → d3 12043. 깊을수록 가격 FD에 궤적 노이즈 누적, 얕으면 절벽 못 봄
-        # → 스윗스팟 = 절벽이 보이는 최소 깊이. env LEADER_V_DEPTH 지정 시 그 값 우선
-        # (명시적 0 포함 — d0 셀 실험 가능해야 하므로 env 부재 시에만 기본 d1 적용).
+        # DEFAULT = SPLIT-PRICE v2 + DEPTH d3(18분) — 2026-07-09 최종 확정.
+        # 플래그십 = hybrid v2(총량 equality + 배분 own_TTS+가격 + incumbent 가격-레벨
+        # 배제): d3 = 11893, d0 무붕괴(13079 — level의 d0 22698 붕괴와 대조), 사용자
+        # 스펙 정합. 수량 전송 구조라 depth 곡선이 G1DF형(깊어야 후보 랭킹 안정) →
+        # 기본 d3. 구 level 모드(가격-레벨, 고원 11.7~12.0k)는 METER_PRICE_MODE=level.
+        # env LEADER_V_DEPTH 지정 시 그 값 우선(명시적 0 포함).
         import os as _os_ap
         if "LEADER_V_DEPTH" not in _os_ap.environ and int(
             getattr(cfg.mpc, "leader_value_depth", 0)
         ) == 0:
-            cfg.mpc.leader_value_depth = 1
+            cfg.mpc.leader_value_depth = 3
         controller = F1StackelbergWuMeteredController(cfg)
         controller.nash_solver.f1_spillback_weight = 0.0
         controller.signal_price_enabled = True
