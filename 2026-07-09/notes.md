@@ -287,3 +287,18 @@ depth 0에서** 나옴. "deep V의 공"의 과반은 채점형태+far의 공이�
 - [ ] 플래그십 APJOINT d1 교차검증(155/128) 후 공식 depth 확정
 - [ ] 풀매트릭스(legacy/PFO/Wu/G1DF/APJOINT × 3-5 시나리오) — 논문 결과표
 - [ ] incident 시나리오(레짐 확장), dead-zone θ(가격 유의성 필터) 옵션
+
+## 컨트롤러 동결 (2026-07-09, 사용자 선언: "컨트롤러와의 싸움은 끝")
+
+**플래그십 = P-STACK-WU-FAITHFUL-ALLPRICE-JOINT, 기본 depth d1(12분)** — env 없이 실행
+시 자동 적용. 동결 구성(전부 코드 디폴트):
+- 가격: 전 lever g_ext(= g_i − d_local, E2 정합 공식) + 2쌍 cross + joint 2D + 마찰 ON
+- 수량: N_UF equality + link-share density(headroom 비례) / N_P dual λ_P
+- 평가: leader rollout(H3+D1=12분) + far, follower 9분
+- 제외 확정: E1(far-in-price), VSL trust, N_UF dual, PRICE-TR, subset-price
+- 공식 수치: d1 = 11814 (sweet_190 d3 12043·raw 11854 대비 최적)
+
+챔피언(ablation 상한) = G1DF, 최적 d3~d4(11283/11230) — env LEADER_V_DEPTH로 지정.
+
+이후 작업은 컨트롤러 수술이 아니라 검증·집필: ① APJOINT d1 교차검증(155/128),
+② 풀매트릭스(5 컨트롤러 × 3-5 시나리오) = 논문 결과표, ③ incident 레짐(선택).

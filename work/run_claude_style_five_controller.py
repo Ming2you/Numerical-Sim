@@ -232,6 +232,12 @@ def make_controller(controller_id: str, cfg: ExperimentConfig):
     #                  cross 가격만 freeway 채점에 추가.
     # LEADER_V_DEPTH=k와 함께 실행(far는 leader 채점 기본 ON, 가격 far=E1은 env 옵션).
     if controller_id == "P-STACK-WU-FAITHFUL-ALLPRICE-JOINT":
+        # DEFAULT DEPTH = d1(12분) — 2026-07-09 사용자 확정(컨트롤러 동결).
+        # 가격 전송 구조의 최적 선형화 깊이: depth 곡선 d0 22698(붕괴) → d1 11814(최적)
+        # → d2 12006 → d3 12043. 깊을수록 가격 FD에 궤적 노이즈 누적, 얕으면 절벽 못 봄
+        # → 스윗스팟 = 절벽이 보이는 최소 깊이. env LEADER_V_DEPTH 지정 시 그 값 우선.
+        if int(getattr(cfg.mpc, "leader_value_depth", 0)) == 0:
+            cfg.mpc.leader_value_depth = 1
         controller = F1StackelbergWuMeteredController(cfg)
         controller.nash_solver.f1_spillback_weight = 0.0
         controller.signal_price_enabled = True
@@ -478,6 +484,8 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
     if _os.environ.get("OPT12") == "1":
         cfg.mpc.leader_skip_local_refinement = True  # OPT1: local 스텝 refined 재정련 생략
         cfg.mpc.leader_rollout_early_stop = True     # OPT2: incumbent 초과 rollout exact 조기절단
+    if _os.environ.get("OPT2") == "1":
+        cfg.mpc.leader_rollout_early_stop = True     # OPT2 단독(exact, 성능 무손실)
     if _os.environ.get("OPT3") == "1":
         cfg.mpc.leader_proxy_near_far = True         # OPT3: proxy=near(horizon)+far 랭킹
     profile = DemandProfile(cfg, scenario)
