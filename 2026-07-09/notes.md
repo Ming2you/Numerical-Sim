@@ -120,10 +120,28 @@ dual(마찰 ON) 결과: G1DF 11665(+382 vs equality 11283), APJOINT 12260(+406 v
 (수량 오차는 커밋 주체 무관 관측되는 새 정보 — "λ는 새 정보 없다"던 기존 주석이
 λ_UF에는 오류). 스모크: incumbent 스텝 bootstrap=1, 오차 0 구간 λ=0 유지(정상).
 
-## 실행 중 (수정 후 확정런: far+pricefar+dual+PRICE-TR+bootstrap, d3)
-- G1DF (b31dbxba8), APJOINT (bci1q5mak) ← **사용자 표준 구성 확정판**
-- (구코드) PRICE-TR without bootstrap: b5sjjfsfu/bwwseo6gc — deadlock regime ablation
+## bootstrap 결과 = WINDUP (2차 구조 결함, 2d067ce로 수정)
+
+boot 런: G1DF 11909(+626 vs equality), APJOINT 13116(+1262). λ 궤적: 0→cap(1.0) 단조
+windup, incumbent 전 스텝 선택, 실현 Σmeter는 λ 무반응. **원인: incumbent(PFO probe)가
+λ-면제**(dual 항이 leader-게이트) → 적분 루프에 액추에이터 부재 → λ는 leader 후보만
+오염(metering→0) → incumbent 고착 심화. 교훈: 가격 조정은 모든 경로가 같은 가격을
+마주해야 한다(green/vsl 가격은 follower 속성이라 이미 그랬음 — λ만 예외였다).
+
+수정(DUAL-STANDING): λ≠0이면 leader 부재 solve에도 dual 적용(영속 가격 규약).
+검증: leader=None, λ=0.5 → Σmeter 6000→1500(루프 닫힘); λ=0 → PFO 비트동일. 45/45.
+
+## dual 시도의 누적 실측 (d3, sweet_190)
+| 세대 | G1DF | APJOINT | 병리 |
+|---|---:|---:|---|
+| equality (기준) | **11283** | 11854(cross) | — |
+| dual v1 | 11665 | 12260 | bootstrap deadlock(λ 영영 0) |
+| dual v2 (+bootstrap) | 11909 | 13116 | windup(λ→cap, incumbent λ-면제) |
+| dual v3 (+standing) | 실행중(ba5rp8sew) | 실행중(b1z9e7h3y) | ← 첫 공정한 테스트 |
+
+v3도 equality에 밀리면: 디폴트를 equality로 되돌리고 dual은 3단 병리(deadlock→windup→?)
+와 함께 부정결과로 문서화하는 게 정직한 수순(Weitzman: 절벽 레버는 수량이 지배).
 
 ## TODO
-- [ ] 확정런 2개 판정 + λ_UF 궤적(경부하≈0/절벽 발화 = "선형화 오차의 가격" 입증)
+- [ ] v3 판정 + λ_UF 궤적(안착 여부)
 - [ ] 결과 정리 후 push

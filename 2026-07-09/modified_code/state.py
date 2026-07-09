@@ -417,10 +417,13 @@ class MPCConfig:
     wu_faithful_np_coordination_mode: str = "cap"
     # N_UF 조정 모드: "equality"=leader link budget으로 metering 합을 hard 고정,
     # "cap"=budget을 상한으로만 쓰고 자율 metering 좌표하강을 존중(합 ≤ budget 투영),
-    # "dual"=λ_UF(signed, step 간 적분)로 Σmeter가 N_UF*를 추적 — 가격 분기(ALLPRICE)
-    # 에서도 anchor 대신 λ_UF·Σmeter로 결합(2026-07-09). 기본 dual(사용자 지시:
-    # far 기본 ON + price far + N_UF dual을 표준 구성으로).
-    wu_faithful_nuf_coordination_mode: str = "dual"
+    # "dual"=λ_UF(signed, step 간 적분)로 Σmeter가 N_UF*를 추적.
+    # 기본 equality(2026-07-09 복귀 — 사전등록 기준). dual은 3세대 검증 끝에 부정결과:
+    # v1 bootstrap deadlock(λ 영영 0) → v2 windup(incumbent λ-면제) → v3 공정 테스트
+    # (λ 정상 작동, 루프 닫힘)에서도 equality에 +583 패배. 원인: leader target(N_UF*)이
+    # 매 스텝 움직이는데 적분 dual은 저역통과 전송이라 항상 지연 — equality는 무지연.
+    # (Weitzman: 절벽 레버는 수량 지배 + 비정상 target은 수량이 전송 우위.)
+    wu_faithful_nuf_coordination_mode: str = "equality"
 
 
 @dataclass
