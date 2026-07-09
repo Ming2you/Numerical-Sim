@@ -272,6 +272,33 @@ class TestJointCrossPrice(unittest.TestCase):
                         msg="가격 차이가 배분을 기울여야 한다(비싼 ramp 몫 감소)")
         f.metering_marginal_price = None
 
+    def test_split_price_ignored_in_autonomous_branch(self):
+        # SPLIT-PRICE v2: split 모드(기본)에선 leader=None(incumbent/PFO probe) 자율
+        # 분기의 총량 탐색에 가격이 개입하지 않는다 — 극단 가격을 걸어도 무가격과 동일.
+        cfg = _build_cfg()
+        f = F1WuFaithfulFollower(cfg)
+        net = cfg.network
+        state = TrafficState.initial(cfg)
+        ctrl = ControlAction.fixed(cfg)
+        dem = _demand(cfg)[0]
+        coupling = f._wu._coupling(state, ctrl, dem)
+        link = net.freeway_links[0]
+        owned = [r for r in net.ramps if net.ramp_to_freeway.get(r) == link]
+        _, m_none, _ = f._solve_freeway_agent_metered(
+            link, state, coupling, dem, ctrl, None,
+        )
+        f.metering_marginal_price = {r: -100.0 for r in owned}  # "방류 최대로" 극단
+        f.metering_marginal_price_ref = {r: 0.0 for r in owned}
+        _, m_priced, _ = f._solve_freeway_agent_metered(
+            link, state, coupling, dem, ctrl, None,
+        )
+        for r in owned:
+            self.assertAlmostEqual(
+                m_priced[r], m_none[r], places=9,
+                msg="split 모드의 자율 분기는 가격에 무반응이어야 한다(레벨은 own-TTS만)",
+            )
+        f.metering_marginal_price = None
+
     def test_subset_price_restricts_priced_signals(self):
         # SUBSET-PRICE: signal_price_signals={'D'}면 D만 가격 계산·하달, 나머지는 무가격.
         cfg = _build_cfg()

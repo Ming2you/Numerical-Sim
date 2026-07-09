@@ -2292,6 +2292,13 @@ class WuFaithfulFollower:
         def _price_metering_cost(meter: Mapping[str, float]) -> float:
             if self.metering_marginal_price is None or not owned_ramps:
                 return 0.0
+            # SPLIT-PRICE 정합 v2(2026-07-09): split 모드에선 가격이 '총량'을 정하는
+            # 경로를 컨트롤러 어디에도 두지 않는다 — leader=None(incumbent/PFO probe)
+            # 자율 분기의 레벨 탐색에서도 가격항 제외. 실측 병리: incumbent(가격-레벨)와
+            # leader 후보(budget)가 스텝마다 교대 커밋되며 레짐 플래핑(Σmeter TV 1.74×)
+            # + 과소방류(평균 −800) 유발. dual-standing(λ_UF)은 windup 수정이라 보존.
+            if self.metering_price_split and leader is None and not dual_standing:
+                return 0.0
             total_price = 0.0
             for ramp in owned_ramps:
                 g_ext = self.metering_marginal_price.get(ramp)
