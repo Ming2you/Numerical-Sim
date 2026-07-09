@@ -348,6 +348,9 @@ class MPCConfig:
     # boundary 큐 포함) + freeway(본선 N²/2G_fw + ramp 큐 bilinear). weight=1이 물리 정확값.
     leader_mfd_far_enabled: bool = True
     leader_mfd_far_weight: float = 1.0
+    # FAR-D0(2026-07-09): depth=0에서도 rollout TTT + far로 후보 채점(역사적 d0는
+    # follower 응답 proxy 랭킹 — 채점 형태 고정한 "얕은 leader" 검정용). 기본 False.
+    leader_mfd_far_at_d0: bool = False
     leader_search_mode: str = "continuous"
     leader_candidate_count: int = 49
     leader_refinement_candidate_count: int = 25

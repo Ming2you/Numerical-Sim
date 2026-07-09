@@ -473,6 +473,13 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
         cfg.mpc.leader_mfd_far_enabled = True  # far(MFD tail) cost-to-go 가산 → near 깊이 절감 검증
     if _os.environ.get("MFD_FAR_W"):
         cfg.mpc.leader_mfd_far_weight = float(_os.environ["MFD_FAR_W"])
+    if _os.environ.get("FAR_D0") == "1":
+        cfg.mpc.leader_mfd_far_at_d0 = True  # depth=0에서도 rollout+far 채점(얕은 leader 검정)
+    if _os.environ.get("OPT12") == "1":
+        cfg.mpc.leader_skip_local_refinement = True  # OPT1: local 스텝 refined 재정련 생략
+        cfg.mpc.leader_rollout_early_stop = True     # OPT2: incumbent 초과 rollout exact 조기절단
+    if _os.environ.get("OPT3") == "1":
+        cfg.mpc.leader_proxy_near_far = True         # OPT3: proxy=near(horizon)+far 랭킹
     profile = DemandProfile(cfg, scenario)
     sim = MixedTrafficSimulator(cfg)
     controller = make_controller(controller_id, cfg)

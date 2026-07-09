@@ -569,7 +569,13 @@ class StackelbergMPCController:
             incumbent_obj=fallback_incumbent_obj,
         )
         coarse_best = min(coarse_evaluations, key=lambda item: item.objective)
-        refined_candidates = self._unique_leader_actions(
+        # OPT1: local(비-global) 스텝은 coarse-local 자체가 previous 주변 trust-region이라
+        # refined 재정련이 중복(nash 5s×~5회) — 생략해 스텝 비용 절반. global 스텝은 유지.
+        skip_refine = (
+            not global_refresh
+            and bool(getattr(self.cfg.mpc, "leader_skip_local_refinement", False))
+        )
+        refined_candidates = [] if skip_refine else self._unique_leader_actions(
             self.leader.refined_candidates(
                 state,
                 coarse_best.action,
@@ -1200,6 +1206,7 @@ class StackelbergMPCController:
             state,
             nash,
             forecast,
+            incumbent_obj=incumbent_obj,
         )
         objective_terms = self.leader.objective_terms(
             predicted_states,
@@ -1973,6 +1980,7 @@ class StackelbergMPCController:
         state: TrafficState,
         nash: NashResult,
         forecast: list[DemandStep],
+        incumbent_obj: float = float("inf"),
     ) -> tuple[list[TrafficState], float, bool]:
         """Leader 기본 평가는 follower response objective를 그대로 사용한다.
 
@@ -1983,12 +1991,24 @@ class StackelbergMPCController:
         """
         # In follower_ttt mode, keep the follower response as the base objective
         # but evaluate leader penalties on future MPC rollout states.
-        states, rollout_ttt = self._predict(state, nash.control, forecast)
+        abort_above = None
+        if (
+            bool(getattr(self.cfg.mpc, "leader_rollout_early_stop", False))
+            and incumbent_obj != float("inf")
+        ):
+            abort_above = float(incumbent_obj)
+        states, rollout_ttt = self._predict(state, nash.control, forecast, abort_above=abort_above)
         if self.cfg.leader.objective_mode == "state_accumulation":
             return states, rollout_ttt, True
         # leader_value_depth>0면 leader의 full (3+d) rollout TTT를 base로(=TTT_3+V). follower는
         # myopic-3로 control을 정하고, leader가 그 control을 full rollout으로 랭킹·pricing(∂(TTT+V)/∂lever).
-        if int(getattr(self.cfg.mpc, "leader_value_depth", 0)) > 0:
+        # FAR-D0(2026-07-09): leader_mfd_far_at_d0=True면 depth=0에서도 같은 형태
+        # (H-step rollout TTT + far)로 채점 — 역사적 d0는 rollout이 아니라 follower 응답
+        # proxy로 랭킹했으므로, "얕은 leader + far가 충분한가"를 채점 형태를 고정한 채
+        # 검정하려면 이 게이트가 필요하다. 기본 False = 비트동일(legacy/proxy 경로 보존).
+        if int(getattr(self.cfg.mpc, "leader_value_depth", 0)) > 0 or bool(
+            getattr(self.cfg.mpc, "leader_mfd_far_at_d0", False)
+        ):
             # far(MFD tail): near rollout 끝(states[-1]) 잔여 accumulation의 배수 cost-to-go를
             # 해석적으로 가산(§3.2). far가 temporal tail을 싸게 담으면 near 깊이 d를 줄일 수 있다.
             return states, rollout_ttt + self._mfd_far_cost_to_go(states[-1]), True
@@ -2054,6 +2074,8 @@ class StackelbergMPCController:
         state: TrafficState,
         control: ControlAction,
         forecast: list[DemandStep],
+        abort_above: Optional[float] = None,
+        depth_override: Optional[int] = None,
     ) -> tuple[list[TrafficState], float]:
         from src.simulation.coupling import run_coupled_interval
 
@@ -2063,9 +2085,15 @@ class StackelbergMPCController:
         # leader full rollout: horizon + leader_value_depth 만큼(V 포함). _predict은 leader 전용이라
         # follower myopia에 영향 없음. depth=0이면 기존과 동일.
         depth = self.cfg.mpc.horizon_steps + max(0, int(getattr(self.cfg.mpc, "leader_value_depth", 0)))
+        if depth_override is not None:
+            depth = max(1, int(depth_override))
         for demand in forecast[:depth]:
             result = run_coupled_interval(s, control, demand, self.cfg)
             s.time_sec += self.cfg.simulation.control_interval
             total_ttt += result.freeway_ttt + result.urban_ttt
             states.append(s.copy())
+            # OPT2: TTT는 비음 누적 + 모든 penalty/far ≥0 → 부분합이 incumbent를 넘으면 이
+            # 후보의 최종 objective도 반드시 초과 = exact pruning(argmin 불변). inf로 즉시 기각.
+            if abort_above is not None and total_ttt > abort_above:
+                return states, float("inf")
         return states, float(total_ttt)

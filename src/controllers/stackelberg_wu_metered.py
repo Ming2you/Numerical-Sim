@@ -1584,7 +1584,15 @@ class StackelbergWuMeteredController(StackelbergMPCController):
                     share = budget * (caps[ramp] / cap_sum)
                     control.ramp_metering[ramp] = float(min(max(share, 0.0), caps[ramp]))
         # N_UF_star<=0이면 follower autonomous 분기에 대응 — previous.ramp_metering 유지.
-        states, rollout_ttt = self._predict(state, control, forecast)
+        # OPT3: proxy를 near(horizon)+far(MFD tail)로 — full depth(3+d)의 절반 비용으로
+        # far-aware 랭킹(현행 proxy는 far 무시라 방류 후보 misrank). 기본 OFF=기존 그대로.
+        if bool(getattr(self.cfg.mpc, "leader_proxy_near_far", False)):
+            states, rollout_ttt = self._predict(
+                state, control, forecast, depth_override=self.cfg.mpc.horizon_steps
+            )
+            rollout_ttt += self._mfd_far_cost_to_go(states[-1])
+        else:
+            states, rollout_ttt = self._predict(state, control, forecast)
         terms = self.leader.objective_terms(
             states,
             control,
