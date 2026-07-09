@@ -485,6 +485,11 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
     if _os.environ.get("VSL_TRUST") and hasattr(controller, "vsl_price_trust_kmh"):
         _vt = _os.environ["VSL_TRUST"]  # "none"=trust 해제, 숫자=반경(kmh) — E2 분리 실험용
         controller.vsl_price_trust_kmh = None if _vt.lower() == "none" else float(_vt)
+    if _os.environ.get("PRICE_SIGNALS") and hasattr(controller, "signal_price_signals"):
+        # SUBSET-PRICE: 강결합 신호만 가격(예: "D,F") — 나머지는 own-TTS 자율.
+        controller.signal_price_signals = {
+            s.strip() for s in _os.environ["PRICE_SIGNALS"].split(",") if s.strip()
+        }
     previous: Optional[ControlAction] = None
     steps = max(1, int(round(cfg.simulation.T_total / cfg.simulation.control_interval)))
     run_rows: List[Dict[str, Any]] = []

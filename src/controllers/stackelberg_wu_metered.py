@@ -59,6 +59,12 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         # = 선형 가격의 이웃 밖 월권, 진단은 notes 2026-07-05 §6·§7). 기본 = δ(6.0s,
         # 가격을 측정한 바로 그 이웃 — §8 승격). None=무제한(구 -B2 재현용, 155 폭주).
         self.signal_price_trust_sec: Optional[float] = 6.0
+        # ---------- SUBSET-PRICE(2026-07-09): 가격 대상 신호 선택 ----------
+        # None=전 신호(기존). 집합 지정 시 해당 신호만 가격 계산·하달 — 나머지는 own-TTS
+        # 자율(+마찰). 근거: 챔피언 런 실측 |g_ext| 계층이 극단적(F 4.07 ≫ D 0.32 ≫
+        # A/B/C 0.16-0.20, 20배) — externality가 ramp interface에 집중. 강결합 신호만
+        # 가격하면 refresh당 전역 rollout이 신호 수에 비례해 절감(대규모 망 스케일 논거).
+        self.signal_price_signals: Optional[set] = None
         # ---------- B3(Codex f18e920 포팅) + B4: metering/VSL 가격 채널 ----------
         # green과 동일 흐름으로 통일: refresh(최초/cadence/event-trigger) 시 **동일 동결
         # 운영점**에서 g_i(전역 rollout)와 d_local(follower 국소 채점)을 모두 계산해
@@ -679,10 +685,13 @@ class StackelbergWuMeteredController(StackelbergMPCController):
             return max(lo, min(hi, float(v)))
 
         # ---- 운영점 스냅샷: 모든 채널이 같은 previous(동결 운영점)를 본다 ----
+        # SUBSET-PRICE: signal_price_signals 지정 시 그 신호만 가격 대상(나머지 자율).
+        _price_sigs = self.signal_price_signals
         op_green: Dict[str, float] = (
             {
                 signal: clamp(previous.green_times.get(f"{signal}_p1", total / 2.0))
                 for signal in net.signals
+                if _price_sigs is None or signal in _price_sigs
             }
             if self.signal_price_enabled else {}
         )

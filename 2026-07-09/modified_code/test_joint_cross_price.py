@@ -238,6 +238,20 @@ class TestJointCrossPrice(unittest.TestCase):
             self.assertLessEqual(abs(chosen - ref_v), 10.0 + 1e-6,
                                  msg="VSL trust(±10km/h)가 보폭을 제한해야 한다")
 
+    def test_subset_price_restricts_priced_signals(self):
+        # SUBSET-PRICE: signal_price_signals={'D'}면 D만 가격 계산·하달, 나머지는 무가격.
+        cfg = _build_cfg()
+        controller = StackelbergWuMeteredController(cfg)
+        controller.signal_price_signals = {"D"}
+        state = TrafficState.initial(cfg)
+        state.time_sec = float(cfg.simulation.control_interval)
+        controller._maybe_refresh_signal_prices(
+            state, _demand(cfg), ControlAction.fixed(cfg),
+        )
+        f = controller.nash_solver
+        self.assertIsNotNone(f.signal_marginal_price)
+        self.assertEqual(set(f.signal_marginal_price), {"D"})
+
     def test_link_share_omega_density_responds_to_headroom(self):
         # LINK-SHARE(density): 균등 밀도 → 균등 분할, 한 링크 혼잡 → 그 링크 몫 축소,
         # 전 링크 임계 초과 → 균등 fallback.
