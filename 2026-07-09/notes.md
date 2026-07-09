@@ -328,3 +328,13 @@ depth 0에서** 나옴. "deep V의 공"의 과반은 채점형태+far의 공이�
   attractor로 수렴 = leader 품질 저하 시 공통 귀착점). 남은 알고리즘적 후보(미시도·위험 중간):
   follower nash의 후보 간 warm-start(지배항 직접 공략), APJOINT 한정 adjoint 가격, event-trigger
   leader cadence. 코드: OPT1/2/3 전부 gated(기본 OFF=비트동일), env OPT1/OPT2/OPT3/OPT12.
+
+## ⚠ 정정 (compute 절감 3안 — "기각"은 오판, 전부 유효)
+
+- 직전 섹션의 "+1021~1073 손실"은 **동시 코드 변경 교란**이었음: 같은 트리에서 다른 세션의
+  채점형태 변경·컨트롤러 동결 커밋으로 **G1DF d3 baseline 자체가 11283→12304로 이동**
+  (재검증 런 g1df_baseline_recheck=12304). OPT들은 그 위에서 돌아 무고하게 기각됨.
+- **정정 판정(baseline 12304 기준)**: OPT2 ±0(exact 입증)·OPT3 +15(노이즈)·OPT1 +48(0.4%),
+  **OPT1+2+3 = +52(0.4%)에 compute 58.6→34.8s(−41%)** — 성능 유지+대폭 절감 성립.
+- ⚠ 조율 필요: 현재 HEAD의 G1DF d3=12304(어제 11283 대비 +1021 퇴행) — 채점형태 변경이
+  APJOINT(−728 이득) 기준으로 동결되며 G1DF 경로가 퇴행했을 가능성. 다른 세션과 확인 요.
