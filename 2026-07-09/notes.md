@@ -93,10 +93,24 @@ far는 leader **후보 채점에만** 있었고 follower에 하달되는 **가�
   ramp 큐 배수 효과가 gradient에 잡히기 시작.
 - 검증: 타깃 회귀 41/41(E1 테스트만 새 기본값 반영해 OFF 기준선 명시로 수정).
 
-## 실행 중 런 (새 디폴트: far+pricefar+dual, d3)
-- G1DF d3 (btqteov88) — 수량 equality→dual 전환 효과. vs 11283(equality).
-- ALLPRICE-JOINT d3 (b6w0cc24n) — cross+E1E2+dual 총결합. vs 11854(cross만).
+## PRICE-TR (f940d02, 사용자 지시)
+
+"1차식 가격이면 smoothness(마찰) 빼고 trust boundary로 제약" — SLP/Frank-Wolfe 표준형.
+- 실측 근거: green g_ext 0.03~0.055 < smooth_w 0.1 → **가격 신호가 마찰 deadband에
+  검열**되고 있었음(테스트 입증: 1e6 마찰에서도 PRICE-TR ON이면 가격이 green을 움직임).
+- 가격 활성 레버만 smoothness=0(자기게이트 — PFO/무가격 레버는 마찰 유지).
+- VSL trust ±10km/h 신설(`vsl_price_trust_kmh`, 기존엔 smoothness가 유일 damper).
+- 레거시 앵커 테스트 2건(0가격≡None, B2 probe 앵커)은 flag OFF로 옛 의미론 고정.
+
+## 실행 중 런 매트릭스 (전부 d3, far+pricefar+dual 디폴트)
+| run | smoothness | 목적 |
+|---|---|---|
+| G1DF (btqteov88) | ON(마찰) | dual 전환 효과 vs 11283(equality) |
+| APJOINT (b6w0cc24n) | ON(마찰) | cross+E1E2+dual vs 11854(cross만) |
+| G1DF (b5sjjfsfu) | **OFF(PRICE-TR)** | 마찰 검열 해제 효과 |
+| APJOINT (bwwseo6gc) | **OFF(PRICE-TR)** | 풀스택(사용자 표준 구성) |
 
 ## TODO
-- [ ] 새 디폴트 d3 2런 판정 — dual이 far-informed 수량을 가격 구조에 복원하는가
+- [ ] 4런 판정 — dual 복원 효과 × 마찰 검열 해제 효과 분해
+- [ ] λ_UF 궤적 확인(경부하≈0/절벽 발화 시그니처 = "선형화 오차의 가격" 입증)
 - [ ] 결과 정리 후 push

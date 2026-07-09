@@ -1405,10 +1405,39 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         if lam_next is not None:
             self.nash_solver._lambda_P = float(lam_next)
         metadata["leader_lambda_np_committed"] = float(lam_next is not None)
-        # N_UF dual λ_UF도 선택된 후보의 값만 commit(λ_P와 동일 규약).
+        # N_UF dual λ_UF: 선택 후보 diagnostics에서 commit(λ_P와 동일 규약)하되,
+        # BOOTSTRAP(2026-07-09): incumbent/fallback 선택으로 diagnostics에 λ_next가 없어도
+        # **무조건 적분**한다. 실측(g1df dual d3): λ=0 → dual 항 0 → leader 후보 ≈ PFO
+        # incumbent → tie-break가 incumbent 선택(31/40, tie 19) → λ commit 9/40 → λ가
+        # 영영 0 부근에 잠기는 자기잠금. 수량 오차(실현 Σmeter − leader-stage 최선 후보의
+        # N_UF*)는 커밋 주체와 무관하게 관측되는 새 정보이므로 스텝마다 λ를 적분한다.
         lam_uf_next = best.nash.control.diagnostics.get("wu_faithful_lambda_uf_next")
         if lam_uf_next is not None:
             self.nash_solver._lambda_UF = float(lam_uf_next)
+        else:
+            follower = self.nash_solver
+            nuf_mode = str(getattr(
+                self.cfg.mpc, "wu_faithful_nuf_coordination_mode", "equality"
+            ))
+            if nuf_mode == "dual" and isinstance(follower, WuFaithfulFollower):
+                leader_best = None
+                for ev in leader_evaluations:
+                    if leader_best is None or float(ev.objective) < float(leader_best.objective):
+                        leader_best = ev
+                if leader_best is not None:
+                    target = float(leader_best.action.N_UF_star)
+                    sum_meter = sum(
+                        float(v) for v in best.nash.control.ramp_metering.values()
+                    )
+                    lam = float(follower._lambda_UF) + float(
+                        follower.lambda_uf_step_gain
+                    ) * (sum_meter - target)
+                    follower._lambda_UF = float(min(
+                        max(lam, -float(follower.lambda_uf_cap)),
+                        float(follower.lambda_uf_cap),
+                    ))
+                    metadata["leader_lambda_uf_bootstrap_updated"] = 1.0
+                    metadata["leader_lambda_uf_value"] = float(follower._lambda_UF)
         metadata["leader_lambda_uf_committed"] = float(lam_uf_next is not None)
         return best, metadata
 
