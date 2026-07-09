@@ -180,3 +180,36 @@ link 배분. 성능 챔피언은 G1DF(11283 d3)이며 ablation 상한으로 병�
 ## TODO
 - [ ] 4런 판정 → APJOINT 교정판 최종 수치 확정
 - [ ] 오늘 전체 서사 리포트 작성
+
+---
+
+# (별도 세션) Stage1 5×4 매트릭스 + incident 재모델 + VSL 발화 원리
+
+## A. sweet_155_incident 재모델 — 본선 차로 폐쇄
+- incident_capacity_factor(유입만 조임 → no-control 역설적 개선 8612→4823) 폐기,
+  freeway_lane_closures로 FW_E seg3 1차로 2400~4800s 폐쇄. no-control 8612→10207(+1595) 스트레스 실재.
+
+## B. Stage1 매트릭스 (docs/literature_grounded_post_analysis_plan §2.6/§15 규격)
+- 산출: 2026-07-09/results/stage1_matrix/{stage1_summary,paired_comparisons}.csv,
+  집계기 work/aggregate_stage1_matrix.py. exponential, 7200s, 동일머신.
+
+| scenario | NO-CTRL | PFO | APJOINT(d3+far) | G1DF(d3+far) | LEGACY |
+|---|---:|---:|---:|---:|---:|
+| sweet_122 | 1434 | 1384 | 1357 | 1357 | 1331 |
+| sweet_155 | 8612 | 4514 | 4385 | 4292 | 4052 |
+| 155_incident | 10207 | 9169 | 9011 | 8962 | 8879 |
+| sweet_190 | 25171 | 13627 | 12014 | 11283 | 10729 |
+
+- 갭 회수율(vs PFO→legacy): APJOINT 28~56%, G1DF 48~81%. 전 시나리오 PFO<x<legacy 순위 보존.
+- throughput/terminal 동반 개선(190: completed 29.7k→31.7k→32.4k→33.3k) — §2.6 규칙 충족.
+- compute/step: PFO ~5s, G1DF 58~72s, APJOINT 72~79s, legacy 28~96s.
+- ⚠ sweet_122 delay 음수(G1DF/APJOINT −2, legacy −27) — §2.6상 개선 주장 금지, 경부하 reference 간극.
+- 타임시리즈: outputs/_4x3/, _apjoint/, _3way/, legacy_pstack_*/runs/ (fig2~5 소스 완비).
+
+## C. 부속 발견
+- WU-CD-F sweet_190=18618: no-control 대비 −26%(악화 아님), PFO 대비 +4990=권한 결핍(metering)의 값.
+- VSL 발화 원리(ablation): 중간 밀도 band(임계초과~jam이전)서 국소 own-TTS capacity-drop 회피로
+  자발 발화(hinge 무관·seg0 우선). jam선 cap 안 물려 무차별, 자유류선 순비용. incident서
+  P-Stack/legacy 0%=metering이 band 아래로 눌러놔서.
+- incident jam은 1스텝 내 완성(rho 29→85) → 반응형 VSL 불가. far는 경보 정확(ramp항 폭증)하나
+  leader lever gradient 0 → action space 결함. 선제 VSL 검증은 far×VSL price 세션에 이관.
