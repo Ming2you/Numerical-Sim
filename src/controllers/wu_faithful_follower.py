@@ -216,6 +216,14 @@ class WuFaithfulFollower:
         self.vsl_meter_cross_price: Optional[Dict[str, float]] = None    # ramp → h_ext
         self.vsl_meter_cross_ref: Dict[str, tuple] = {}                  # ramp → (meter_ref, vsl_ref)
         self.vsl_meter_cross_weight: float = 1.0
+        # ---------- PRICE-TR(2026-07-09, 사용자 지시): 가격 모드 = trust region만, 마찰 0 ----------
+        # 가격이 활성인 레버는 smoothness(proximal 마찰)를 0으로 하고 trust region(선형화
+        # 유효 반경)이 보폭을 제약한다 — SLP/Frank-Wolfe 표준형. 근거: 실측 green g_ext
+        # 0.03~0.055 < smooth_w 0.1이라 가격 신호 대부분이 마찰 deadband에 검열되던 문제.
+        # 가격이 없는 레버/PFO는 smoothness 유지(price 부재로 자기게이트). VSL은 trust가
+        # 없었으므로 컨트롤러가 vsl_price_trust_kmh(±10km/h)를 신설 하달한다.
+        self.price_smoothness_disabled: bool = True
+        self.vsl_marginal_price_trust_kmh: Optional[float] = None
         # ---------- J1(2026-07-06): joint offset 패턴 directive ----------
         # F3 판정: offset은 joint 결합 변수라 per-signal 가격(편미분)이 구조적으로 0.
         # J1 = leader가 corridor 패턴(여러 신호 offset 조합)을 통째로 rollout 평가해
@@ -778,7 +786,13 @@ class WuFaithfulFollower:
                 cost = rollout_local_tts(
                     model, q0, arr_mv, s_eff0, p1, p2, substeps, dt_h,
                 )
-            cost += smooth_w * abs(p1 - prev_p1)
+            # PRICE-TR: 가격 활성 신호는 smoothness 마찰 0(trust region이 보폭 제약).
+            if not (
+                self.price_smoothness_disabled
+                and self.signal_marginal_price is not None
+                and signal in self.signal_marginal_price
+            ):
+                cost += smooth_w * abs(p1 - prev_p1)
             # B2 가격항: leader가 하달한 per-signal externality 가격(설정 시에만).
             # own-TTS는 그대로 두고 선형 가격만 더한다 — Step B1 검증 형태
             # priced = local + w·g_ext_i·(p1 − p1_ref_i). None이면 완전 휴면(비트 동일).
@@ -1475,7 +1489,11 @@ class WuFaithfulFollower:
             if p2 < net.green_min - 1.0e-9 or p2 > net.green_max + 1.0e-9:
                 continue
             nin = self._agent_net_inflow_veh(signal, p1, state, fa, horizon_h)
-            green_lin = smooth_w * abs(p1 - prev_p1)
+            # PRICE-TR: 가격 활성이면 smoothness 마찰 0(trust가 보폭 제약).
+            green_lin = (
+                0.0 if (self.price_smoothness_disabled and g_green is not None)
+                else smooth_w * abs(p1 - prev_p1)
+            )
             if g_green is not None:
                 green_lin += self.signal_marginal_price_weight * g_green * (p1 - green_ref)
             if self.np_price_enabled and dual_mode:
@@ -1967,6 +1985,23 @@ class WuFaithfulFollower:
             if len(fixed_vec) < n_seg:
                 fixed_vec += [float(fixed_vec[-1] if fixed_vec else vsl_max)] * (n_seg - len(fixed_vec))
             vsl_sequences = [[list(fixed_vec) for _ in range(horizon)]]
+        # PRICE-TR: VSL 가격 활성 시 trust region(±vsl_marginal_price_trust_kmh) 밖 후보 제외
+        # (선형화 유효 반경 — 가격이 측정된 이웃만). 전무 시 전체 fallback(이동성 보장).
+        elif self.vsl_marginal_price and self.vsl_marginal_price_trust_kmh is not None:
+            trust_v = float(self.vsl_marginal_price_trust_kmh)
+            kept = []
+            for seq in vsl_sequences:
+                fv = seq[0] if seq else []
+                ok = True
+                for i, v in enumerate(fv):
+                    ref = self.vsl_marginal_price_ref.get(f"{link}__seg{i}")
+                    if ref is not None and abs(float(v) - float(ref)) > trust_v + 1.0e-9:
+                        ok = False
+                        break
+                if ok:
+                    kept.append(seq)
+            if kept:
+                vsl_sequences = kept
 
         # 후보 무관 초기 스냅샷(이 link 권역만).
         rhos0 = list(state.freeway_density.get(link, []))
@@ -2107,7 +2142,9 @@ class WuFaithfulFollower:
                     abs(next_step[i] - prev_step[i])
                     for i in range(min(len(prev_step), len(next_step), n_seg))
                 )
-            cost += smooth_w * smooth
+            # PRICE-TR: VSL 가격 활성이면 smoothness 마찰 0(trust ±10km/h가 보폭 제약).
+            if not (self.price_smoothness_disabled and self.vsl_marginal_price):
+                cost += smooth_w * smooth
             # B3 VSL 가격항(설정 시에만): + w·g·(vsl_seg − ref_seg). 기본 None=완전 휴면.
             if self.vsl_marginal_price:
                 for i, value in enumerate(first_vec):

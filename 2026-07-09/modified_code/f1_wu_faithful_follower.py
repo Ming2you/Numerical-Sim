@@ -424,6 +424,22 @@ class F1WuFaithfulFollower(WuFaithfulFollower):
             if len(fixed_vec) < n_seg:
                 fixed_vec += [float(fixed_vec[-1] if fixed_vec else vsl_max)] * (n_seg - len(fixed_vec))
             vsl_sequences = [[list(fixed_vec) for _ in range(horizon)]]
+        # PRICE-TR: VSL 가격 활성 시 trust region 밖 후보 제외(base와 동일 규약).
+        elif self.vsl_marginal_price and self.vsl_marginal_price_trust_kmh is not None:
+            trust_v = float(self.vsl_marginal_price_trust_kmh)
+            kept = []
+            for seq in vsl_sequences:
+                fv = seq[0] if seq else []
+                ok = True
+                for i, v in enumerate(fv):
+                    ref = self.vsl_marginal_price_ref.get(f"{link}__seg{i}")
+                    if ref is not None and abs(float(v) - float(ref)) > trust_v + 1.0e-9:
+                        ok = False
+                        break
+                if ok:
+                    kept.append(seq)
+            if kept:
+                vsl_sequences = kept
 
         rhos0 = list(state.freeway_density.get(link, []))
         speeds0 = list(state.freeway_speed.get(link, []))
@@ -554,7 +570,9 @@ class F1WuFaithfulFollower(WuFaithfulFollower):
                     abs(next_step[i] - prev_step[i])
                     for i in range(min(len(prev_step), len(next_step), n_seg))
                 )
-            cost += smooth_w * smooth
+            # PRICE-TR: VSL 가격 활성이면 smoothness 마찰 0(trust가 보폭 제약, base와 동일).
+            if not (self.price_smoothness_disabled and self.vsl_marginal_price):
+                cost += smooth_w * smooth
             if self.vsl_marginal_price:
                 for i, value in enumerate(first_vec):
                     key = f"{link}__seg{i}"

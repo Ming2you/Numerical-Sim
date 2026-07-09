@@ -84,6 +84,10 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         self.vsl_price_enabled: bool = False
         self.vsl_price_delta_kmh: float = 10.0
         self.vsl_price_refresh_threshold_kmh: float = 5.0
+        # PRICE-TR(2026-07-09): VSL trust region(±kmh) — 가격이 측정된 이웃 밖 후보 제외.
+        # VSL엔 trust가 없어 smoothness가 유일한 damper였는데, 가격 모드 smoothness=0
+        # 전환(사용자 지시)과 함께 신설. FD delta(±10)와 동일 반경.
+        self.vsl_price_trust_kmh: Optional[float] = 10.0
         # ---------- F3(2026-07-06): offset 가격 채널 ----------
         # offset은 selfish로는 해로운 순수 조정 레버(2026-06-29 판정, leader-coordinated
         # 레버로 보존) — F3가 그 계획의 실행: leader가 전역 rollout FD로 g_ext_off를
@@ -589,6 +593,7 @@ class StackelbergWuMeteredController(StackelbergMPCController):
             follower.metering_release_certified = None
         if not self.vsl_price_enabled:
             follower.vsl_marginal_price = None
+            follower.vsl_marginal_price_trust_kmh = None
         if not self.offset_price_enabled:
             follower.offset_marginal_price = None
         if not self.offset_joint_enabled and not self.leader_offset_enabled:
@@ -1003,6 +1008,11 @@ class StackelbergWuMeteredController(StackelbergMPCController):
                 v_refs[key] = float(x0)
             follower.vsl_marginal_price = v_prices
             follower.vsl_marginal_price_ref = v_refs
+            # PRICE-TR: VSL trust region 하달(±kmh — 가격이 측정된 이웃 밖 후보 제외).
+            follower.vsl_marginal_price_trust_kmh = (
+                float(self.vsl_price_trust_kmh)
+                if self.vsl_price_trust_kmh is not None else None
+            )
 
         # ---- JOINT green×offset cross(2026-07-09): h_ext = h_global − h_local, 4-corner ----
         # non-ramp 신호만(ramp는 storage 동역학 복잡 → follower joint 제외). δp=green delta,

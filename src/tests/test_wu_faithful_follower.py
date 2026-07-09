@@ -408,6 +408,8 @@ class TestGreenPriceProbeAnchor(unittest.TestCase):
 
         # probe가 계산한 per-signal g_ext_i(externality 가격)와 기준점 p1_0을 그대로 주입 —
         # production 가격항 w·g_ext·(p1−p1_ref)가 probe priced 곡선과 정확히 같은 식이 된다.
+        # probe 기록은 smoothness 포함 곡선이므로 레거시 마찰 의미론(PRICE-TR OFF)으로 고정.
+        follower.price_smoothness_disabled = False
         follower.signal_marginal_price = {
             sig: float(s20[sig]["g_ext_i"]) for sig in net.signals
         }

@@ -158,6 +158,84 @@ class TestJointCrossPrice(unittest.TestCase):
         self.assertGreater(with_far, base,
                            msg="price_far ON이면 가격 rollout 채점에 far가 가산돼야 한다")
 
+    def test_price_tr_smoothness_censoring_removed(self):
+        # PRICE-TR: 가격 활성 신호는 smoothness 마찰 0 — 거대 마찰(1e6)에서도 가격이
+        # green을 움직인다. 플래그 OFF면 마찰이 가격을 검열(deadband)해 움직이지 못한다.
+        cfg = ExperimentConfig.from_file(
+            "src/config/default.yaml",
+            {
+                "simulation": {"T_total": 360.0},
+                "mpc": {
+                    "horizon_steps": 1,
+                    "relaxed_quantized_controls": True,
+                    "grid_parallel_backend": "serial",
+                    "leader_global_refresh_sec": 1.0e9,
+                },
+                "freeway_follower": {
+                    "freeway_prediction_horizon_steps": 1,
+                    "vsl_sequence_search": False,
+                },
+                "urban_follower": {"green_smoothness_weight": 1.0e6},
+            },
+        )
+        net = cfg.network
+        total = float(net.effective_green_total)
+
+        def _solve(disabled: bool) -> float:
+            f = WuFaithfulFollower(cfg)
+            f.price_smoothness_disabled = disabled
+            sig = [s for s in net.signals if not f._local_models[s].has_ramps][0]
+            prev = ControlAction.fixed(cfg)
+            p0 = float(prev.green_times.get(f"{sig}_p1", total / 2.0))
+            f.signal_marginal_price = {sig: -100.0}  # "p1을 키워라"
+            f.signal_marginal_price_ref = {sig: p0}
+            f.signal_marginal_price_trust_sec = 6.0
+            nash = f.solve(TrafficState.initial(cfg), None, _demand(cfg), prev)
+            return float(nash.control.green_times.get(f"{sig}_p1", p0)) - p0
+
+        moved = _solve(disabled=True)
+        censored = _solve(disabled=False)
+        self.assertGreater(abs(moved), 1e-9,
+                           msg="마찰 무시(PRICE-TR)면 가격이 green을 움직여야 한다")
+        self.assertLess(abs(censored), 1e-9,
+                        msg="마찰 유지면 1e6 smoothness가 가격을 검열해야 한다")
+
+    def test_vsl_trust_handed_down_and_bounds_moves(self):
+        # PRICE-TR: 컨트롤러가 vsl trust(±10)를 하달하고, follower의 VSL 선택이
+        # ref에서 trust 반경 이내로 제한된다.
+        cfg = _build_cfg()
+        controller = StackelbergWuMeteredController(cfg)
+        controller.signal_price_enabled = False
+        controller.vsl_price_enabled = True
+        state = TrafficState.initial(cfg)
+        state.time_sec = float(cfg.simulation.control_interval)
+        controller._maybe_refresh_signal_prices(
+            state, _demand(cfg), ControlAction.fixed(cfg),
+        )
+        f = controller.nash_solver
+        self.assertEqual(f.vsl_marginal_price_trust_kmh, 10.0)
+        # follower 단독: 거대 음수 가격("VSL 올려라")에도 trust가 보폭을 ±10으로 제한.
+        net = cfg.network
+        link = net.freeway_links[0]
+        n_seg = int(net.freeway_segments_per_link)
+        vlo = min(cfg.freeway_follower.vsl_set)
+        ref_v = vlo + 0.0  # 낮은 ref에서 시작
+        f2 = WuFaithfulFollower(cfg)
+        f2.vsl_marginal_price = {f"{link}__seg{i}": -1.0e6 for i in range(n_seg)}
+        f2.vsl_marginal_price_ref = {f"{link}__seg{i}": ref_v for i in range(n_seg)}
+        f2.vsl_marginal_price_trust_kmh = 10.0
+        prev = ControlAction.fixed(cfg)
+        for i in range(n_seg):
+            prev.vsl[f"{link}__seg{i}"] = ref_v
+        prev.vsl[link] = ref_v
+        ctrl_dem = _demand(cfg)[0]
+        coupling = f2._wu._coupling(state, prev, ctrl_dem)
+        vsl_dict, _, _ = f2._solve_freeway_agent_local(link, state, coupling, ctrl_dem, prev)
+        for i in range(n_seg):
+            chosen = float(vsl_dict.get(f"{link}__seg{i}", ref_v))
+            self.assertLessEqual(abs(chosen - ref_v), 10.0 + 1e-6,
+                                 msg="VSL trust(±10km/h)가 보폭을 제한해야 한다")
+
 
 if __name__ == "__main__":
     unittest.main()

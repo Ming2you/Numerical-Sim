@@ -41,6 +41,9 @@ class TestSignalMarginalPriceFollower(unittest.TestCase):
     """follower 가격항: None=완전 휴면(비트동일), 0가격=무영향, 부호가 argmin을 민다."""
 
     def test_zero_price_identical_to_none(self):
+        # PRICE-TR(2026-07-09) 이후 "0가격 ≡ None"은 마찰 의미론(flag OFF)에서만 성립 —
+        # 가격 모드 기본은 smoothness=0이라 0가격도 regularizer가 달라진다(trust만).
+        # 이 테스트는 레거시 마찰 의미론의 채널 격리를 계속 고정한다.
         cfg = _build_cfg()
         forecast = _demand(cfg)
         previous = ControlAction.fixed(cfg)
@@ -49,6 +52,7 @@ class TestSignalMarginalPriceFollower(unittest.TestCase):
         base = f_none.solve(TrafficState.initial(cfg), None, forecast, previous)
 
         f_zero = WuFaithfulFollower(cfg)
+        f_zero.price_smoothness_disabled = False
         f_zero.signal_marginal_price = {s: 0.0 for s in cfg.network.signals}
         f_zero.signal_marginal_price_ref = {
             s: float(previous.green_times.get(f"{s}_p1", 0.0))
