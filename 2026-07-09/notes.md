@@ -142,6 +142,25 @@ windup, incumbent 전 스텝 선택, 실현 Σmeter는 λ 무반응. **원인: i
 v3도 equality에 밀리면: 디폴트를 equality로 되돌리고 dual은 3단 병리(deadlock→windup→?)
 와 함께 부정결과로 문서화하는 게 정직한 수순(Weitzman: 절벽 레버는 수량이 지배).
 
+## v3 판정 = dual 최종 부정결과, equality 복귀 (2f08e3b)
+
+v3(dual-standing): G1DF 11866(+583), APJOINT 13184. **λ는 정상 작동**(G1DF: λ 0~0.037
+오르내리며 Σmeter 6000→4575 실반응, windup 없음 — 공정 테스트 성립). 그래도 패배.
+기계적 원인 확정: **leader target(N_UF*)이 매 스텝 이동**(6000→5550→5100→4800…)하는데
+적분 dual은 저역통과 전송이라 항상 지연 — equality는 무지연. 논문 한 줄: "수량 도구 =
+비정상 target의 무지연 전송, dual 가격 = 저역통과 — target이 빨리 움직이는 피크 과도기에
+정확히 진다"(Weitzman 보강). APJOINT v3의 λ≈0(오차 부호 교대)이므로 13184의 참사는
+dual이 아니라 **E1E2+PRICE-TR 스택**이 원인(11854 → 13116/13184 일관 악화).
+
+디폴트 equality 복귀(사전등록 기준 이행). dual 코드는 NUFDUAL로 보존(3결함 수정 완료
+상태 — deadlock/windup/standing 모두 해결된 "정상 작동 dual"로 문서화).
+
+## 실행 중: equality 기반 ablation (d3)
+- G1DF (b9zywwail): equality + far + pricefar(green) + PRICE-TR(green) — vs 11283.
+  pricefar/PRICE-TR가 챔피언 위에서 득인지 실인지 격리.
+- APJOINT (bz9hn2qzb): equality(soft anchor 복원) + cross + E1E2 + PRICE-TR — vs 11854.
+  E1E2/PRICE-TR가 anchor 레짐에서도 해로운지 격리.
+
 ## TODO
-- [ ] v3 판정 + λ_UF 궤적(안착 여부)
-- [ ] 결과 정리 후 push
+- [ ] ablation 판정 → 나머지 디폴트(pricefar/PRICE-TR) 유지/철회 결정
+- [ ] 오늘 전체 서사 리포트 작성 + push

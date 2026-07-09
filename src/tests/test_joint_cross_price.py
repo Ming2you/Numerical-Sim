@@ -236,6 +236,29 @@ class TestJointCrossPrice(unittest.TestCase):
             self.assertLessEqual(abs(chosen - ref_v), 10.0 + 1e-6,
                                  msg="VSL trust(±10km/h)가 보폭을 제한해야 한다")
 
+    def test_link_share_omega_density_responds_to_headroom(self):
+        # LINK-SHARE(density): 균등 밀도 → 균등 분할, 한 링크 혼잡 → 그 링크 몫 축소,
+        # 전 링크 임계 초과 → 균등 fallback.
+        cfg = _build_cfg()
+        controller = StackelbergWuMeteredController(cfg)
+        net = cfg.network
+        l0, l1 = net.freeway_links[0], net.freeway_links[1]
+        state = TrafficState.initial(cfg)
+        omega = controller._link_share_omega(state)
+        self.assertAlmostEqual(omega[l0], 0.5, places=6)
+        self.assertAlmostEqual(sum(omega.values()), 1.0, places=9)
+        # l0 혼잡(임계 근접) → l0 몫 < 0.5.
+        rho_crit = float(net.rho_crit)
+        state.freeway_density[l0] = [rho_crit * 0.9 for _ in state.freeway_density[l0]]
+        omega = controller._link_share_omega(state)
+        self.assertLess(omega[l0], 0.5)
+        self.assertAlmostEqual(sum(omega.values()), 1.0, places=9)
+        # 전 링크 임계 초과 → headroom 0 → 균등 fallback.
+        for l in (l0, l1):
+            state.freeway_density[l] = [rho_crit * 1.5 for _ in state.freeway_density[l]]
+        omega = controller._link_share_omega(state)
+        self.assertAlmostEqual(omega[l0], 0.5, places=6)
+
 
 if __name__ == "__main__":
     unittest.main()

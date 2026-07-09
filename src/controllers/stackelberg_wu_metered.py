@@ -113,6 +113,18 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         # 2026-07-09 기본 ON(사용자 지시: far 기본 + price far + N_UF dual 표준 구성).
         # far 자체는 leader_mfd_far_enabled로도 게이트(내부 0 반환).
         self.price_far_enabled: bool = True
+        # ---------- LINK-SHARE(2026-07-09, 사용자 지시): network→link 배분 자유도 개방 ----------
+        # ω_F 고정 균등분할(1/n_links)이 link 간 budget 배분을 pressure 무관하게 강제하던
+        # 것을 개방. dual의 "link 간 재배분" 자유를 가격이 아닌 수량 채널로 흡수.
+        #  - "density"(기본): 본선 headroom(ρ_crit까지 남은 수용량 veh, λ_eff 반영) 비례로
+        #    매 스텝 상태 피드백 분할 — 비용 0, 연속 반응, HERO류 occupancy-배분 계열.
+        #    λ_eff 반영이라 사고(유효차로 하락) 시 그 링크 몫이 자동 축소.
+        #  - "search": 선택된 (N_P*,N_UF*) 위에서 s(첫 링크 몫) 좌표하강(grid, +2 eval/step,
+        #    deep rollout+far로 채점 — 예측형이나 성긴 격자·추가비용). A/B ablation용.
+        #  - "off": 기존 고정 균등(비트동일).
+        self.nuf_link_share_mode: str = "density"
+        self.nuf_link_share_grid: tuple = (0.35, 0.65)
+        self._link_share_ctx = None
         # ---------- J1(2026-07-06): joint offset 패턴 ----------
         # F3 판정(offset 단독 편미분 = 0)의 처방: leader가 비-ramp 신호들의 offset
         # **조합**(3^k 패턴, 격자 {0, ±cycle/8})을 통째로 rollout 평가해 최선 조합을
@@ -199,6 +211,17 @@ class StackelbergWuMeteredController(StackelbergMPCController):
             if self.previous_control is not None
             else ControlAction.fixed(self.cfg)
         )
+        # LINK-SHARE(2026-07-09): mode에 따라 step 시작 시 ω_F 설정.
+        #  density → headroom 비례(상태 피드백), search/off → 균등(후보 평가 일관성).
+        follower_ls = self.nash_solver
+        if isinstance(follower_ls, WuFaithfulFollower):
+            if self.nuf_link_share_mode == "density":
+                follower_ls._wu._omega_f = self._link_share_omega(state)
+            else:
+                links_ls = list(self.cfg.network.freeway_links)
+                n_l = max(len(links_ls), 1)
+                follower_ls._wu._omega_f = {l: 1.0 / n_l for l in links_ls}
+        self._link_share_ctx = (state, forecast, previous)
         max_iter = max(1, int(self.price_iter_max))
         if max_iter <= 1:
             # single-shot(기존): price 1회 → follower 응답 1회 → commit.
@@ -223,7 +246,35 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         if self._signal_price_meta:
             result.metadata.update(self._signal_price_meta)
             result.control.diagnostics.update(self._signal_price_meta)
+        # LINK-SHARE 진단: 이 step의 ω_F(밀도 기반이면 headroom 비례값)를 기록.
+        if isinstance(self.nash_solver, WuFaithfulFollower):
+            for link, w in self.nash_solver._wu._omega_f.items():
+                result.control.diagnostics[f"leader_nuf_omega_{link}"] = float(w)
         return result
+
+    def _link_share_omega(self, state: TrafficState) -> Dict[str, float]:
+        """본선 headroom 비례 link budget 분할 — ω_l ∝ Σ_seg max(0, ρ_crit−ρ)·L·λ_eff.
+
+        "임계까지 남은 수용량(veh)"이 큰 링크가 방류 예산을 더 받는다(절벽까지의 여유
+        비례 — HERO류 occupancy-기반 배분 계열). λ_eff 반영이라 사고(유효차로 하락) 시
+        해당 링크 몫이 자동 축소. 양쪽 다 여유 0(전부 임계 초과)이면 균등 fallback."""
+        net = self.cfg.network
+        rho_crit = float(net.rho_crit)
+        seg_len = float(net.freeway_segment_length_km)
+        headroom: Dict[str, float] = {}
+        for link in net.freeway_links:
+            rhos = state.freeway_density.get(link, [])
+            lanes = state.freeway_effective_lanes.get(link, [])
+            h = 0.0
+            for i, rho in enumerate(rhos):
+                lam = float(lanes[i]) if i < len(lanes) else float(net.freeway_lanes)
+                h += max(0.0, rho_crit - float(rho)) * seg_len * lam
+            headroom[link] = h
+        total = sum(headroom.values())
+        n_l = max(len(net.freeway_links), 1)
+        if total <= 1.0e-9:
+            return {link: 1.0 / n_l for link in net.freeway_links}
+        return {link: h / total for link, h in headroom.items()}
 
     def _price_iter_relax(
         self, old: ControlAction, new: ControlAction, alpha: float
@@ -1397,6 +1448,37 @@ class StackelbergWuMeteredController(StackelbergMPCController):
                 pfo_eval is not None and getattr(self, "_pfo_incumbent_center", None) is not None
             ),
         })
+        # ---- LINK-SHARE 스윕(mode="search" 전용): 선택된 leader 후보 위에서 s 좌표하강 ----
+        # incumbent(PFO) 선택이면 skip(자율 metering이라 ω 무관). 균등(0.5)은 best가 이미
+        # 그 값으로 평가된 결과이므로 grid 2점만 추가 평가. 개선 시 best 교체 + ω 고정.
+        if (
+            self.nuf_link_share_mode == "search"
+            and self._link_share_ctx is not None
+            and best.stage != "fallback_pfo"
+            and float(best.action.N_UF_star) > 0.0
+            and isinstance(self.nash_solver, WuFaithfulFollower)
+            and len(self.cfg.network.freeway_links) == 2
+        ):
+            ls_state, ls_forecast, ls_previous = self._link_share_ctx
+            links = list(self.cfg.network.freeway_links)
+            best_s = 1.0 / len(links)
+            for s in self.nuf_link_share_grid:
+                self.nash_solver._wu._omega_f = {
+                    links[0]: float(s), links[1]: 1.0 - float(s),
+                }
+                trial = self._evaluate_full_candidate(
+                    9000 + int(round(float(s) * 100)), best.action,
+                    ls_state, ls_forecast, ls_previous, stage="link_share",
+                )
+                if float(trial.objective) < float(best.objective):
+                    best = trial
+                    best_s = float(s)
+            # 커밋되는 best와 일치하는 ω로 고정(다음 step 시작 시 균등 리셋).
+            self.nash_solver._wu._omega_f = {
+                links[0]: float(best_s), links[1]: 1.0 - float(best_s),
+            }
+            metadata["leader_nuf_link_share"] = float(best_s)
+            metadata["leader_nuf_link_share_adopted"] = float(abs(best_s - 0.5) > 1e-9)
         # λ step 간 적분 갱신(A1+A2): **선택된 후보**의 λ_next만 follower 영속 가격에 commit한다
         # (후보별 solve는 diagnostics로만 λ_next를 내놓고 self._lambda_P를 건드리지 않는다).
         # PFO incumbent 선택 시(stage=="fallback_pfo", leader=None이라 lambda_next 없음) λ는 갱신
