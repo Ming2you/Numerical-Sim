@@ -221,12 +221,16 @@ def make_controller(controller_id: str, cfg: ExperimentConfig):
         controller.vsl_price_enabled = True      # VSL
         return controller
     # ---- ALLPRICE-JOINT(2026-07-09): per-lever 선형가격 + bilinear cross-term 가격 ----
+    # ★ DEFAULT P-STACK(2026-07-09 사용자 결정): 논문 정합성 기준 기본 구성 —
+    #   전 lever 통일 marginal price(g_ext = g_i − d_local, E2로 VSL도 정합) + 2쌍 cross
+    #   + N_UF equality anchor + link-share density(headroom 비례, 컨트롤러 기본).
+    #   성능 챔피언은 G1DF(green price only, 11283 d3)이며 ablation 상한으로 병기.
     # ALLPRICE(green·metering·vsl per-lever price) 위에 lever쌍 교차곡률을 얹는다:
     #   green×offset — leader h_ext 하달 + follower가 non-ramp 신호를 2D 공동탐색
     #                  (coordinate descent면 cross 퇴화 → joint_green_offset_enabled 필수).
     #   vsl×metering — leader h_ext 하달, follower 탐색구조 불변(primal joint 이미 포착)에
     #                  cross 가격만 freeway 채점에 추가.
-    # LEADER_V_DEPTH=k + MFD_FAR=1과 함께 실행(가격 rollout은 far 미포함=기존 규약).
+    # LEADER_V_DEPTH=k와 함께 실행(far는 leader 채점 기본 ON, 가격 far=E1은 env 옵션).
     if controller_id == "P-STACK-WU-FAITHFUL-ALLPRICE-JOINT":
         controller = F1StackelbergWuMeteredController(cfg)
         controller.nash_solver.f1_spillback_weight = 0.0
@@ -476,6 +480,8 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
         controller.price_iter_max = int(_os.environ["PRICE_ITER"])  # B: leader↔follower dual-ascent 반복 횟수
     if _os.environ.get("MFD_FAR_PRICE") == "1" and hasattr(controller, "price_far_enabled"):
         controller.price_far_enabled = True  # E1: 가격 FD에도 far 합산(MFD_FAR=1 필요)
+    if _os.environ.get("LINK_SHARE") and hasattr(controller, "nuf_link_share_mode"):
+        controller.nuf_link_share_mode = str(_os.environ["LINK_SHARE"])  # {density, search, off}
     previous: Optional[ControlAction] = None
     steps = max(1, int(round(cfg.simulation.T_total / cfg.simulation.control_interval)))
     run_rows: List[Dict[str, Any]] = []

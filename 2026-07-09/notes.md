@@ -161,6 +161,22 @@ dual이 아니라 **E1E2+PRICE-TR 스택**이 원인(11854 → 13116/13184 일�
 - APJOINT (bz9hn2qzb): equality(soft anchor 복원) + cross + E1E2 + PRICE-TR — vs 11854.
   E1E2/PRICE-TR가 anchor 레짐에서도 해로운지 격리.
 
+## 마찰/E1 디폴트 복귀 + DEFAULT P-STACK 지정 (사용자 결정)
+
+ablation 판정 반영: 마찰 복원(deadband=암묵적 신호검정), E1 디폴트 OFF(far 증분의
+저SNR — G1DF +139, APJOINT eq 13493). E2(VSL g_ext화)는 공식 교정이라 채널에 내장 유지.
+
+**DEFAULT P-STACK = APJOINT + density link-share** (사용자 결정, 논문 정합성 기준):
+전 lever 통일 marginal price(g_ext) + 2쌍 cross + N_UF equality anchor + headroom 비례
+link 배분. 성능 챔피언은 G1DF(11283 d3)이며 ablation 상한으로 병기 — "통일 가격 체계
+(주 구성) vs 최소 구성(성능 상한)"의 대비 자체가 조정 지도의 본문.
+
+## 실행 중 (판정 대기)
+- G1DF+E1(마찰 ON) d3 (b739car6z) vs 11283 — far 증분 순수 격리
+- APJOINT+E1E2(마찰 ON) d3 (b8cbbog8d) vs E2-only — E1 효과
+- APJOINT+E2(마찰 ON) d3 (bd72iimrg) vs 11854 — E2+trust 교정 효과
+- G1DF density link-share d3 (b68c3rezt, 구 스택 베이스) vs 11422
+
 ## TODO
-- [ ] ablation 판정 → 나머지 디폴트(pricefar/PRICE-TR) 유지/철회 결정
-- [ ] 오늘 전체 서사 리포트 작성 + push
+- [ ] 4런 판정 → APJOINT 교정판 최종 수치 확정
+- [ ] 오늘 전체 서사 리포트 작성
