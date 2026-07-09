@@ -476,6 +476,8 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
         controller.price_iter_max = int(_os.environ["PRICE_ITER"])  # B: leader↔follower dual-ascent 반복 횟수
     if _os.environ.get("MFD_FAR_PRICE") == "1" and hasattr(controller, "price_far_enabled"):
         controller.price_far_enabled = True  # E1: 가격 FD에도 far 합산(MFD_FAR=1 필요)
+    if _os.environ.get("LINK_SHARE") and hasattr(controller, "nuf_link_share_mode"):
+        controller.nuf_link_share_mode = str(_os.environ["LINK_SHARE"])  # {density, search, off}
     previous: Optional[ControlAction] = None
     steps = max(1, int(round(cfg.simulation.T_total / cfg.simulation.control_interval)))
     run_rows: List[Dict[str, Any]] = []
