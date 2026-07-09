@@ -302,3 +302,29 @@ depth 0에서** 나옴. "deep V의 공"의 과반은 채점형태+far의 공이�
 
 이후 작업은 컨트롤러 수술이 아니라 검증·집필: ① APJOINT d1 교차검증(155/128),
 ② 풀매트릭스(5 컨트롤러 × 3-5 시나리오) = 논문 결과표, ③ incident 레짐(선택).
+
+---
+
+# (별도 세션) P-Stack compute 절감 시도 — 3안 전부 기각 (정직한 음성 결과)
+
+목표: G1DF d3+far(11283, 58.4s/step)의 성능 유지 + 알고리즘적 비용 절감. sweet_190 ablation.
+
+| 구성 | TTT | Δ성능 | mean s/step |
+|---|---:|---:|---:|
+| baseline | 11283 | — | 58.4 |
+| OPT1(local refinement 생략) 단독 | 12352 | +1069 | 40.1 |
+| OPT2(rollout 조기절단) 버그판/수정판 | 12304/12304 | +1021 | 56.7/61.9 |
+| OPT3(proxy=near+far 랭킹) 단독 | 12319 | +1036 | 44.3 |
+| 조합들(12/123/23) | 12319~12356 | +1036~1073 | 34.8~51.1 |
+
+판정 및 교훈:
+- **OPT1 기각**: coarse-local best 주변 refined 재정련은 중복이 아니라 실제 최적화(−18s에 +1069는 나쁜 거래).
+- **OPT2 기각**: fallback incumbent 스케일 혼입 버그 수정(같은-스케일 incumbent로) 후에도 +1021 —
+  "exact" pruning조차 inf-오염 metadata(objective spread→stress/적응탐색)로 후속 결정을 교란. 절감도
+  미미(rollout은 후보당 ~1s뿐).
+- **OPT3 기각**: far는 level(corr 0.98)은 맞아도 **후보 랭킹은 못 함**(far 실험 교훈 재확인). full-depth
+  rollout만이 방류 후보를 옳게 순위화.
+- **결론: leader 층의 ~58s/step은 load-bearing** — 값싼 절단 3종 모두 ~9% TTT를 지불(전부 ~12.3k
+  attractor로 수렴 = leader 품질 저하 시 공통 귀착점). 남은 알고리즘적 후보(미시도·위험 중간):
+  follower nash의 후보 간 warm-start(지배항 직접 공략), APJOINT 한정 adjoint 가격, event-trigger
+  leader cadence. 코드: OPT1/2/3 전부 gated(기본 OFF=비트동일), env OPT1/OPT2/OPT3/OPT12.
