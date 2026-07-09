@@ -366,3 +366,7 @@ depth 0에서** 나옴. "deep V의 공"의 과반은 채점형태+far의 공이�
 **APJOINT = SPLIT-PRICE v2, 기본 depth d3** — 성능 동급 + d0 무붕괴(수량 가드) +
 사용자 스펙 정합("가격은 배분만", 전 solve 경로 일관). level은 METER_PRICE_MODE=level.
 챔피언(ablation 상한) G1DF d3/d4 = 11283/11230, legacy 10729.
+
+### 마지막 셀: hybrid-v2 d4 = 11892 (d3 11893과 0.9 차이 — 동급, d3가 solve 10s 쌈)
+→ 기본 depth d3 확정 유지. v2 곡선: d0 13079(무붕괴, v1) / d3 11893 / d4 11892.
+컨트롤러 완전 종결. 이후: 교차검증(155/128) → 풀매트릭스 → 집필.
