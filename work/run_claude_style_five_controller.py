@@ -505,6 +505,10 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
         controller.signal_price_signals = {
             s.strip() for s in _os.environ["PRICE_SIGNALS"].split(",") if s.strip()
         }
+    if _os.environ.get("METER_PRICE_MODE") == "level" and hasattr(controller, "nash_solver"):
+        # 구 B3 계보(가격이 레벨 조절 + soft anchor) 재현용 — 기본은 split(총량 equality).
+        if hasattr(controller.nash_solver, "metering_price_split"):
+            controller.nash_solver.metering_price_split = False
     previous: Optional[ControlAction] = None
     steps = max(1, int(round(cfg.simulation.T_total / cfg.simulation.control_interval)))
     run_rows: List[Dict[str, Any]] = []

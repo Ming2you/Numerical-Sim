@@ -238,6 +238,40 @@ class TestJointCrossPrice(unittest.TestCase):
             self.assertLessEqual(abs(chosen - ref_v), 10.0 + 1e-6,
                                  msg="VSL trust(±10km/h)가 보폭을 제한해야 한다")
 
+    def test_split_price_preserves_budget_and_tilts_allocation(self):
+        # SPLIT-PRICE: metering 가격이 있어도 Σmeter = ω·N_UF*가 정확히 보존되고,
+        # 가격의 ramp 간 차이가 배분을 기울인다(비싼 ramp의 몫 감소).
+        import types
+        cfg = _build_cfg()
+        f = F1WuFaithfulFollower(cfg)
+        net = cfg.network
+        state = TrafficState.initial(cfg)
+        ctrl = ControlAction.fixed(cfg)
+        dem = _demand(cfg)[0]
+        coupling = f._wu._coupling(state, ctrl, dem)
+        link = net.freeway_links[0]
+        owned = [r for r in net.ramps if net.ramp_to_freeway.get(r) == link]
+        self.assertEqual(len(owned), 2, msg="테스트 전제: 링크당 ramp 2개")
+        leader = types.SimpleNamespace(N_P_star=0.0, N_UF_star=4000.0)
+        budget = float(f._wu._omega_f.get(link, 0.5)) * 4000.0
+
+        def solve_with_prices(prices):
+            f.metering_marginal_price = prices
+            f.metering_marginal_price_ref = {r: budget / 2.0 for r in owned}
+            _, meter, _ = f._solve_freeway_agent_metered(
+                link, state, coupling, dem, ctrl, leader,
+            )
+            return meter
+
+        m_a = solve_with_prices({owned[0]: +5.0, owned[1]: -5.0})  # r0 비쌈 → r0 몫↓
+        m_b = solve_with_prices({owned[0]: -5.0, owned[1]: +5.0})  # 반대
+        for m in (m_a, m_b):
+            self.assertAlmostEqual(sum(m.values()), budget, places=6,
+                                   msg="총량 보존: Σmeter = ω·N_UF* 정확 일치")
+        self.assertLess(m_a[owned[0]], m_b[owned[0]],
+                        msg="가격 차이가 배분을 기울여야 한다(비싼 ramp 몫 감소)")
+        f.metering_marginal_price = None
+
     def test_subset_price_restricts_priced_signals(self):
         # SUBSET-PRICE: signal_price_signals={'D'}면 D만 가격 계산·하달, 나머지는 무가격.
         cfg = _build_cfg()

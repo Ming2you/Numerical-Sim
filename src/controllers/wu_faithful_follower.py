@@ -182,6 +182,14 @@ class WuFaithfulFollower:
         # 밀도로 사전 인증한 ramp만 방류 증가 후보 허용. 조임(방류↓)은 가역이라 자유.
         # None이면 비활성(기존 거동).
         self.metering_release_certified: Optional[Dict[str, bool]] = None
+        # ---------- SPLIT-PRICE(2026-07-09, 사용자 스펙 정정): 총량=수량, 배분=own_TTS+가격 ----------
+        # True(기본): metering 가격이 있어도 **총량은 equality budget으로 강제**하고, 가격은
+        # budget 내 ramp 간 배분 채점(own_TTS + Σ g_ext·(x−ref))에만 쓴다. Σ가 고정이라
+        # 가격의 공통 성분은 후보 간 상수로 소거 — ramp 간 차이만 배분을 기울인다(가격이
+        # 총량과 싸울 여지 원천 차단). 절벽 축(총량)=수량, 매끈 축(배분)=가격의 축단위
+        # Weitzman 정합. False = 구 B3 계보(가격이 레벨 조절 + soft anchor) 재현용 —
+        # d0 붕괴(22698)·레벨 배회의 원인이었던 모드.
+        self.metering_price_split: bool = True
         # VSL 가격(세그먼트 키 "link__segN"). E2(2026-07-09): vsl_override 프리미티브로
         # local_vsl_costs(고정 VSL 벡터 국소 채점)가 생겨 g_ext = g_i − d_local로 정렬됨
         # (기존 raw g_i의 own 성분 이중계상 결함 해소). 기본 OFF.
@@ -2262,9 +2270,19 @@ class WuFaithfulFollower:
         dual_standing = (
             nuf_mode_priced == "dual" and abs(float(self._lambda_UF)) > 1.0e-12
         )
+        # SPLIT-PRICE: split 모드면 가격이 있어도 레벨-조절 분기(priced branch)를 타지
+        # 않는다 — 총량은 아래 equality 분기가 강제하고, 가격은 그 배분 채점에만 합산.
+        price_split = (
+            self.metering_price_split
+            and self.metering_marginal_price is not None
+            and leader is not None
+            and n_uf_star > 0.0
+            and bool(owned_ramps)
+        )
         priced_metering = (
             self.metering_marginal_price is not None
             and bool(owned_ramps)
+            and not price_split
             and (
                 (leader is not None and n_uf_star > 0.0)
                 or dual_standing
@@ -2469,7 +2487,7 @@ class WuFaithfulFollower:
             best_cost = float("inf")
 
             if len(owned_ramps) == 1:
-                # ramp 1개면 배분 자유도가 없다: meter = budget(clamped).
+                # ramp 1개면 배분 자유도가 없다: meter = budget(clamped). 가격은 상수라 무영향.
                 r0 = owned_ramps[0]
                 meter = {r0: float(np.clip(budget, 0.0, caps[r0]))}
                 best_vsl, best_cost, e = _solve_with(meter)
@@ -2491,6 +2509,11 @@ class WuFaithfulFollower:
                     m2c = float(np.clip(budget - m1c, 0.0, cap2))
                     meter = {r1: m1c, r2: m2c}
                     vsl_dict, cost, e = _solve_with(meter)
+                    # SPLIT-PRICE: own_TTS + Σ g_ext·(x−ref)로 배분 랭킹. Σ=budget 고정이라
+                    # 가격 공통성분은 후보 간 상수(자동 소거) — ramp 간 차이만 작동.
+                    # priced_metering=False이므로 anchor/λ 항은 없음(순수 선형 가격만).
+                    if price_split:
+                        cost += _price_metering_cost(meter)
                     evals_total += e
                     if cost < best_cost:
                         best_cost, best_vsl, best_meter = cost, vsl_dict, dict(meter)

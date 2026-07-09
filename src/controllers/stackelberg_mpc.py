@@ -1181,6 +1181,7 @@ class StackelbergMPCController:
         previous: ControlAction,
         stage: str = "coarse",
         incumbent_obj: float = float("inf"),
+        rollout_abort_obj: float = float("inf"),
     ) -> _LeaderCandidateEvaluation:
         raw_action = LeaderAction(float(action.N_P_star), float(action.N_UF_star))
         action, projection_meta = self._project_action_to_follower_feasible_np(
@@ -1206,7 +1207,7 @@ class StackelbergMPCController:
             state,
             nash,
             forecast,
-            incumbent_obj=incumbent_obj,
+            incumbent_obj=rollout_abort_obj,
         )
         objective_terms = self.leader.objective_terms(
             predicted_states,

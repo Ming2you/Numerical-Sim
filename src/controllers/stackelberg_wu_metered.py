@@ -1634,6 +1634,10 @@ class StackelbergWuMeteredController(StackelbergMPCController):
             raise ValueError("Stackelberg leader prefilter removed every candidate.")
         results: List[_LeaderCandidateEvaluation] = []
         stage_incumbent = float(incumbent_obj)
+        # OPT2의 abort 기준은 **같은 스케일**(full 후보 objective = (3+d) rollout+far)만 —
+        # fallback incumbent(_response_tts_objective, 3스텝·far 없음)는 스케일이 작아 섞으면
+        # 과잉 pruning으로 정상 후보를 기각(leader가 fallback으로 후퇴, 실측 +1000 손실).
+        rollout_inc = float("inf")
         for idx in selected_indices:
             result = self._evaluate_full_candidate(
                 idx + index_offset,
@@ -1643,9 +1647,12 @@ class StackelbergWuMeteredController(StackelbergMPCController):
                 previous,
                 stage=stage,
                 incumbent_obj=stage_incumbent,
+                rollout_abort_obj=rollout_inc,
             )
             results.append(result)
             stage_incumbent = min(stage_incumbent, float(result.objective))
+            if float(result.objective) != float("inf"):
+                rollout_inc = min(rollout_inc, float(result.objective))
         diag: Dict[str, float] = {
             "leader_candidate_parallel_backend_serial": 1.0,
             "leader_candidate_parallel_backend_thread": 0.0,
