@@ -202,11 +202,13 @@ class TestJointCrossPrice(unittest.TestCase):
 
     def test_vsl_trust_handed_down_and_bounds_moves(self):
         # PRICE-TR: 컨트롤러가 vsl trust(±10)를 하달하고, follower의 VSL 선택이
-        # ref에서 trust 반경 이내로 제한된다.
+        # ref에서 trust 반경 이내로 제한된다. 기본값은 None(분리실험 +432 판정)이므로
+        # 메커니즘 검증을 위해 명시적으로 10을 설정한다.
         cfg = _build_cfg()
         controller = StackelbergWuMeteredController(cfg)
         controller.signal_price_enabled = False
         controller.vsl_price_enabled = True
+        controller.vsl_price_trust_kmh = 10.0  # 기본 None — 메커니즘 고정용 명시 설정
         state = TrafficState.initial(cfg)
         state.time_sec = float(cfg.simulation.control_interval)
         controller._maybe_refresh_signal_prices(
