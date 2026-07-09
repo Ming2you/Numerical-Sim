@@ -1,0 +1,5 @@
+scenario,controller,baseline,Delta_D_abs,Delta_D_pct,legacy_gap,gap_recovery_pct,throughput_delta,terminal_delta
+sweet_122,PSTACK-G1DF,PFO,27.7,106.13,53.0,52.3,6.2,-6.1
+sweet_155,PSTACK-G1DF,PFO,221.6,7.95,462.0,48.0,496.4,-488.0
+sweet_155_incident,PSTACK-G1DF,PFO,207.1,2.78,290.1,71.4,-20.9,19.5
+sweet_190,PSTACK-G1DF,PFO,2344.2,20.36,2898.6,80.9,2738.2,-2832.7
