@@ -213,3 +213,27 @@ link 배분. 성능 챔피언은 G1DF(11283 d3)이며 ablation 상한으로 병�
   P-Stack/legacy 0%=metering이 band 아래로 눌러놔서.
 - incident jam은 1스텝 내 완성(rho 29→85) → 반응형 VSL 불가. far는 경보 정확(ramp항 폭증)하나
   leader lever gradient 0 → action space 결함. 선제 VSL 검증은 far×VSL price 세션에 이관.
+
+## 최종 ablation 지도 (전 런 완결, d3 sweet_190)
+
+| 구성 | total_ttt | 판정 |
+|---|---:|---|
+| legacy | 10729 | ceiling |
+| **G1DF 최소 (equality+far+마찰 green price)** | **11283** | **챔피언** |
+| G1DF+E1 (마찰ON/OFF) | 11445/11422 | E1은 green 축서 마찰 무관 해로움(far가 문턱을 넘겨버림) |
+| G1DF density link-share | 11443 (+21 vs 11422) | 대칭 평시 중립, ω는 활발(0.05~0.87) — 무대는 비대칭/사고 |
+| G1DF dual clean | **12443 (+1160)** | dual 최종 기각 — λ 정상인데 계단 반응이 40% 수량 진동 유발 |
+| APJOINT baseline (raw g_i) | 11854 | E2 이전 구성(재현 불가) |
+| APJOINT+E2(+trust) | 12475 (+621) | 교정이 해로움 — 상쇄 노이즈(g_i−d_local, 전역≈국소면 SNR 붕괴) 의심, trust 혼입 |
+| APJOINT+E1E2 (마찰ON) | 12189 | E1이 freeway 축선 −286 도움(far가 vm gradient에 실신호) |
+| APJOINT+E1E2+PRICE-TR | 13493 | 마찰 제거가 freeway 축서 +1304 — 마찰=신호검정 확증 |
+
+축별 교훈: E1은 green 해로움/freeway 이로움(레버별 far-신호 SNR 차이), 마찰은 green 무관/
+freeway 결정적, E2 교정은 성능 역행(편향-분산 트레이드오프 — 순수 externality 차는 상쇄
+노이즈). dual은 4세대(3병리 수정+양 base) 완전 기각 — 계단 반응은 base 무관.
+
+## 분리 런 (실행중 bquy80687): APJOINT+E2 차감, trust 제거
++621 = 차감 노이즈 vs VSL trust 분해 → 플래그십(APJOINT) 공식 구성 결정 재료.
+- (E2 no-trust) ≈ 11854면 → 범인은 trust(반경 완화로 해소), 정합 공식 유지 가능
+- (E2 no-trust) ≈ 12475면 → 범인은 차감(상쇄 노이즈) → E1E2 세트(12189)로 가고
+  "externality-pure 가격의 SNR 붕괴"를 논문 발견으로 서술
