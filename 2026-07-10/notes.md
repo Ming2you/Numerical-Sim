@@ -126,6 +126,21 @@ sweet_190, T=7200, APJOINT 디폴트(SPLIT-v2 d3, link-share density), 앵커 TT
 - 코드: WuFaithfulFollower.segment_agents(SEG13=1), dual 배선(NUF_DUAL=1) —
   커밋 bb321be(2단계)·eed15ce(dual), 브랜치 feature/segment-agents-13p.
 
+# PFO 사각형 (새 망, sweet_190) — 조정 가치 = 입자도의 함수 (논문 핵심 그림)
+
+| | PFO(leader 없음) | APJOINT(leader) | leader 가치 |
+|---|---:|---:|---:|
+| 7p(link) | 15683 | 15717 | ≈0 (−34) |
+| 13p(segment) | **29392** | 17610 | **+11782 (−40%)** |
+
+- 7p: link own-TTS가 metering 내부화 → follower만으로 충분(leader 중립).
+- 13p: merge-seg owner의 own-TTS에서 metering 유인 증발(receiving-bound 변위,
+  test_segment_local_plant에 물리 고정) → follower-only 붕괴 → **leader 예산+가격이 40% 구조**.
+- 결합 해석: 대규모망은 미세 분해가 강제되므로 "입자도↑ → 조정 가치↑"가 hierarchical
+  control의 존재 증명. 단 7p leader≈0은 새 망·190 한정(구 망 190에선 P-Stack≫PFO —
+  4×7 매트릭스), "거칠수록 가치 감소"까지만 주장.
+- 진행 중: seg13 v1(incumbent 가격-레벨, SEG13_V1=1) — 7p 플래핑 병리 재현 A/B.
+
 # 13-player 재구축 진행 (feature/segment-agents-13p, worktree 격리)
 
 - 1단계 완료(34db7de): segment_local_plant.py(비트 일치 보장 설계) + R_F merge 2→3 +
