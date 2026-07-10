@@ -243,6 +243,12 @@ def make_controller(controller_id: str, cfg: ExperimentConfig):
             getattr(cfg.mpc, "leader_value_depth", 0)
         ) == 0:
             cfg.mpc.leader_value_depth = 3
+        # OPT12 기본 ON(2026-07-10 확정): local 스텝 refined 재정련 생략 + rollout exact
+        # 조기절단 — sweet_190 ablation TTT 11459 vs 11458(+1, 무손실)에 compute −28%
+        # (81.7→59.2s/step). OPT12=0으로 해제. (OPT3·SPSA는 APJOINT서 유해 판정 — 제외.)
+        if _os_ap.environ.get("OPT12") != "0":
+            cfg.mpc.leader_skip_local_refinement = True
+            cfg.mpc.leader_rollout_early_stop = True
         controller = F1StackelbergWuMeteredController(cfg)
         controller.nash_solver.f1_spillback_weight = 0.0
         controller.signal_price_enabled = True
