@@ -86,7 +86,8 @@ class MetanetEquationTests(unittest.TestCase):
         self.assertEqual(cfg.simulation.K_cu, 36)
         self.assertEqual(cfg.leader.objective_mode, "follower_ttt")
         self.assertEqual(cfg.leader.N_P_star_unit, "veh")
-        self.assertAlmostEqual(cfg.leader.N_P_crit_veh, 509.448830418254)
+        # d11cd16(2026-06-30) N_P_crit recalibration 반영 — 구 기대값 509.4488은 재보정 전.
+        self.assertAlmostEqual(cfg.leader.N_P_crit_veh, 1142.058)
         self.assertLessEqual(cfg.leader.N_P_candidate_lower_factor, cfg.leader.N_P_candidate_upper_factor)
         self.assertEqual(cfg.leader.N_UF_star_unit, "veh_per_hour")
         self.assertGreaterEqual(cfg.evaluation.eps_balance, 0.0)
@@ -100,7 +101,8 @@ class MetanetEquationTests(unittest.TestCase):
         self.assertIn("OR_D_W_storage", cfg.network.urban_link_storage_veh)
         self.assertEqual(cfg.network.freeway_segments_per_link, 4)
         self.assertEqual(cfg.network.ramp_merge_segment_index["R_D_W"], 2)
-        self.assertEqual(cfg.network.ramp_merge_segment_index["R_F_W"], 2)
+        # 13-player 재구축: F 인터체인지 on-ramp는 seg3 merge (2026-07-10 망 변경 승인).
+        self.assertEqual(cfg.network.ramp_merge_segment_index["R_F_W"], 3)
         self.assertEqual(cfg.network.off_ramp_segment_index["OR_D_W"], 1)
         self.assertEqual(cfg.network.off_ramp_segment_index["OR_F_W"], 2)
         self.assertEqual(cfg.network.off_ramp_segment_index["OR_D_E"], 1)

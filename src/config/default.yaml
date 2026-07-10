@@ -43,11 +43,13 @@ network:
     R_F_W: 1500.0
     R_D_E: 1500.0
     R_F_E: 1500.0
+  # 13-player 재구축(2026-07-10 승인): F 인터체인지 on-ramp는 seg3 merge — D(off seg1/on seg2),
+  # F(off seg2/on seg3)로 기하 일관 + F_L3 agent의 metering 유인 확보(plan-13player-rebuild.md).
   ramp_merge_segment_index:
     R_D_W: 2
-    R_F_W: 2
+    R_F_W: 3
     R_D_E: 2
-    R_F_E: 2
+    R_F_E: 3
   ramp_queue_max_veh: 180.0
   signals:
   - A
