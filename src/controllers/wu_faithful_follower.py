@@ -2337,8 +2337,12 @@ class WuFaithfulFollower:
             own_ramp = agent.owned_ramps[0] if agent.owned_ramps else None
             if own_ramp is not None and self.metering_enabled:
                 cap_r = float(net.ramp_capacity_veh_h[own_ramp])
+                # 내림차순(전량 방류 우선) — 7p 분율 순서(1.0, 0.7, …)와 동일 규약.
+                # own-TTS는 보존식 때문에 방류에 근사-무차별인 레짐이 흔해서 tie-break가
+                # 결정적: 오름차순이면 최소 방류로 쏠려 전면 질식(PFO 13p 실측 병리).
                 m_cands: List[Optional[float]] = sorted(
-                    {round(cap_r * f, 6) for f in self.ramp_metering_fractions}
+                    {round(cap_r * f, 6) for f in self.ramp_metering_fractions},
+                    reverse=True,
                 )
             else:
                 m_cands = [None]
