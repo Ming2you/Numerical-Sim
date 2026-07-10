@@ -46,7 +46,26 @@ def mfd_far_cost_to_go(cfg: "ExperimentConfig", state: "TrafficState") -> float:
     ramp_total = sum(max(0.0, float(state.ramp_queue.get(r, 0.0))) for r in net.ramps)
     n_main = max(0.0, float(state.total_freeway_vehicles(net)) - ramp_total)
     g_fw = float(getattr(cfg.mpc, "leader_mfd_far_g_fw", 300.0))
-    far += (n_main * n_main) * tc_h / (2.0 * max(g_fw, 1.0))
+    if getattr(cfg.mpc, "leader_mfd_far_freeflow_offset", False):
+        # 자유류 오프셋(2026-07-11, 8-seg 경부하 과잉억제 수선): 링크 주행시간 내 자연
+        # 배출분은 큐가 아님 — N_eff = max(0, N_l − G·t_trav)만 2차 벌점, 흐르는 재고는
+        # 선형(평균 잔여 주행 t_trav/2). t_trav ∝ 링크 길이라 식이 자기정규화(튜닝 상수 0).
+        # 링크별 제곱합(각 링크는 자기 출구로 배수 — 합산 제곱의 교차항 과대 제거).
+        n_seg_l = int(net.freeway_segments_per_link)
+        t_trav = (n_seg_l * seg_len) / max(v_free, 1.0)  # [h]
+        drainable = g_fw * (t_trav / max(tc_h, 1.0e-9))  # [veh]
+        for link in net.freeway_links:
+            dens = state.freeway_density.get(link, [])
+            lanes = state.freeway_effective_lanes.get(link, [])
+            n_l = sum(
+                max(0.0, float(dens[i])) * seg_len
+                * max(float(lanes[i]) if i < len(lanes) else float(net.freeway_lanes), 1.0e-9)
+                for i in range(len(dens))
+            )
+            n_eff = max(0.0, n_l - drainable)
+            far += (n_eff * n_eff) * tc_h / (2.0 * max(g_fw, 1.0)) + n_l * t_trav / 2.0
+    else:
+        far += (n_main * n_main) * tc_h / (2.0 * max(g_fw, 1.0))
     # ---- freeway reservoir: ramp 큐 merge-병목 대기 + 통과 ----
     for ramp in net.ramps:
         q = max(0.0, float(state.ramp_queue.get(ramp, 0.0)))
