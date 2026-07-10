@@ -486,6 +486,8 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
         cfg.mpc.leader_mfd_far_weight = float(_os.environ["MFD_FAR_W"])
     if _os.environ.get("FAR_D0") == "1":
         cfg.mpc.leader_mfd_far_at_d0 = True  # depth=0에서도 rollout+far 채점(얕은 leader 검정)
+    if _os.environ.get("EARLY_STOP") == "1":
+        cfg.mpc.leader_rollout_early_stop = True  # A2: 러닝베스트 초과 rollout 중도 폐기(선택 불변)
     if _os.environ.get("OPT12") == "1":
         cfg.mpc.leader_skip_local_refinement = True  # OPT1: local 스텝 refined 재정련 생략
         cfg.mpc.leader_rollout_early_stop = True     # OPT2: incumbent 초과 rollout exact 조기절단
@@ -520,6 +522,10 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
         # 구 B3 계보(가격이 레벨 조절 + soft anchor) 재현용 — 기본은 split(총량 equality).
         if hasattr(controller.nash_solver, "metering_price_split"):
             controller.nash_solver.metering_price_split = False
+    if _os.environ.get("LEADER_DEDUPE") == "1" and hasattr(controller, "candidate_dedupe_enabled"):
+        controller.candidate_dedupe_enabled = True  # A1: 같은 N_UF 후보 solve+rollout 재사용
+    if _os.environ.get("PRICE_LITE") == "1" and hasattr(controller, "price_lite"):
+        controller.price_lite = True  # B: baseline+one-sided+스텐실 재활용+얕은 가격 rollout
     previous: Optional[ControlAction] = None
     steps = max(1, int(round(cfg.simulation.T_total / cfg.simulation.control_interval)))
     run_rows: List[Dict[str, Any]] = []

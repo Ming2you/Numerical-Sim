@@ -272,6 +272,43 @@ class TestJointCrossPrice(unittest.TestCase):
                         msg="가격 차이가 배분을 기울여야 한다(비싼 ramp 몫 감소)")
         f.metering_marginal_price = None
 
+    def test_price_lite_hands_down_same_key_sets(self):
+        # B-패키지: price_lite 경로가 legacy와 동일한 가격 키 집합을 유한값으로 하달.
+        cfg = _build_cfg()
+        controller = StackelbergWuMeteredController(cfg)
+        controller.metering_price_enabled = True
+        controller.vsl_price_enabled = True
+        controller.green_offset_cross_price_enabled = True
+        controller.vsl_meter_cross_price_enabled = True
+        controller.price_lite = True
+        state = TrafficState.initial(cfg)
+        state.time_sec = float(cfg.simulation.control_interval)
+        controller._maybe_refresh_signal_prices(
+            state, _demand(cfg), ControlAction.fixed(cfg),
+        )
+        f = controller.nash_solver
+        net = cfg.network
+        self.assertEqual(set(f.signal_marginal_price), set(net.signals))
+        self.assertEqual(set(f.metering_marginal_price), set(net.ramps))
+        expected_vsl = {
+            f"{link}__seg{i}"
+            for link in net.freeway_links
+            for i in range(int(net.freeway_segments_per_link))
+        }
+        self.assertEqual(set(f.vsl_marginal_price), expected_vsl)
+        nonramp = {s for s in net.signals if not f._local_models[s].has_ramps}
+        self.assertEqual(set(f.green_offset_cross_price), nonramp)
+        self.assertEqual(set(f.vsl_meter_cross_price), set(net.ramps))
+        allv = (
+            list(f.signal_marginal_price.values())
+            + list(f.metering_marginal_price.values())
+            + list(f.vsl_marginal_price.values())
+            + list(f.green_offset_cross_price.values())
+            + list(f.vsl_meter_cross_price.values())
+        )
+        for v in allv:
+            self.assertTrue(v == v and abs(v) < 1e12)
+
     def test_split_price_ignored_in_autonomous_branch(self):
         # SPLIT-PRICE v2: split 모드(기본)에선 leader=None(incumbent/PFO probe) 자율
         # 분기의 총량 탐색에 가격이 개입하지 않는다 — 극단 가격을 걸어도 무가격과 동일.

@@ -118,6 +118,20 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         self.green_offset_cross_weight: float = 1.0
         self.vsl_meter_cross_price_enabled: bool = False
         self.vsl_meter_cross_weight: float = 1.0
+        # ---------- A/B-패키지(2026-07-10): 계산비용 절감 ----------
+        # A1 후보 N_UF 중복제거: step 내 follower 반응은 후보의 N_UF에만 의존(λ_P는
+        # warm-start 고정, N_P는 dual로만 작용) → 같은 N_UF 후보는 solve+rollout 재사용,
+        # N_P 의존 diagnostics(λ_next·target 계열)만 패치. warm-start 순서 효과로 미세
+        # 드리프트 가능 — sweet_190 검증런으로 확인. 기본 OFF(env LEADER_DEDUPE=1).
+        self.candidate_dedupe_enabled: bool = False
+        self._nuf_solve_cache: Dict[float, tuple] = {}
+        self._dedupe_hits: int = 0
+        # B 가격-lite: 공용 baseline + one-sided FD + cross 스텐실 재활용 + 얕은 가격
+        # rollout(H+1 — 가격은 배분 신호라 국소·단기; 후보 채점은 기존 깊이+far 유지).
+        # refresh당 전역 rollout ~62(양측·4-corner·H+D) → ~30(H+1) = rollout·초 기준 −68%.
+        # 기본 OFF(env PRICE_LITE=1) — 검증런 후 채택 결정.
+        self.price_lite: bool = False
+        self._price_rollout_count: int = 0
         # ---------- E1(2026-07-09): 가격 FD에 far(MFD tail) 합산 ----------
         # 비대칭 해소(사용자 지시): far는 leader 후보 채점에만 있고 가격 rollout엔 없었다 —
         # "far는 수량 신호(N_UF_star)만 똑똑하게 하고 가격(gradient)엔 안 들어간다". 활성 시
@@ -237,6 +251,9 @@ class StackelbergWuMeteredController(StackelbergMPCController):
                 n_l = max(len(links_ls), 1)
                 follower_ls._wu._omega_f = {l: 1.0 / n_l for l in links_ls}
         self._link_share_ctx = (state, forecast, previous)
+        # A1: N_UF 중복제거 캐시는 step 단위(state·가격·λ가 step 내 고정일 때만 유효).
+        self._nuf_solve_cache = {}
+        self._dedupe_hits = 0
         max_iter = max(1, int(self.price_iter_max))
         if max_iter <= 1:
             # single-shot(기존): price 1회 → follower 응답 1회 → commit.
@@ -336,6 +353,7 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         forecast: List[DemandStep],
         signal: str,
         p1: float,
+        depth_override: Optional[int] = None,
     ) -> float:
         """ego 신호만 green을 p1로 바꾸고 나머지는 previous 유지, horizon 전역 rollout TTT.
 
@@ -345,7 +363,8 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         control = previous.copy()
         control.green_times[f"{signal}_p1"] = float(p1)
         control.green_times[f"{signal}_p2"] = float(total - p1)
-        states, ttt = self._predict(state, control, forecast)
+        self._price_rollout_count += 1
+        states, ttt = self._predict(state, control, forecast, depth_override=depth_override)
         return self._price_ttt(states, ttt)
 
     def _predict_ttt_and_barrier(
@@ -353,6 +372,7 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         state: TrafficState,
         control: ControlAction,
         forecast: List[DemandStep],
+        depth_override: Optional[int] = None,
     ) -> tuple[float, float]:
         """전역 rollout의 (TTT, barrier). barrier는 B4 활성 시에만 계산(아니면 0).
 
@@ -364,7 +384,8 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         계산하므로 추가 rollout 0회(green·metering 유한차분이 두 gradient를 동시에 얻음)."""
         from src.models.urban_queue_model import _effective_available_space
 
-        states, ttt = self._predict(state, control, forecast)
+        self._price_rollout_count += 1
+        states, ttt = self._predict(state, control, forecast, depth_override=depth_override)
         return self._price_ttt(states, ttt), self._barrier_from_states(states)
 
     def _barrier_from_states(self, states: List[TrafficState]) -> float:
@@ -421,6 +442,7 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         forecast: List[DemandStep],
         ramp: str,
         value: float,
+        depth_override: Optional[int] = None,
     ) -> tuple[float, float, float]:
         """해당 ramp만 metering을 value로 바꾸고 previous hold — (TTT, barrier, max_rho).
 
@@ -429,7 +451,8 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         control = previous.copy()
         control.ramp_metering = dict(previous.ramp_metering)
         control.ramp_metering[ramp] = float(value)
-        states, ttt = self._predict(state, control, forecast)
+        self._price_rollout_count += 1
+        states, ttt = self._predict(state, control, forecast, depth_override=depth_override)
         barrier = self._barrier_from_states(states)
         link = self.cfg.network.ramp_to_freeway.get(ramp)
         max_rho = 0.0
@@ -448,13 +471,15 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         seg_key: str,
         value: float,
         vsl_upper: float,
+        depth_override: Optional[int] = None,
     ) -> float:
         """해당 segment만 VSL을 value로 바꾸고(link fallback 키 동기화) horizon TTT."""
         control = previous.copy()
         control.vsl = dict(previous.vsl)
         control.vsl[seg_key] = float(value)
         control.vsl[link] = min(float(control.vsl.get(link, vsl_upper)), float(value))
-        states, ttt = self._predict(state, control, forecast)
+        self._price_rollout_count += 1
+        states, ttt = self._predict(state, control, forecast, depth_override=depth_override)
         return self._price_ttt(states, ttt)
 
     def _global_rollout_ttt_with_offset(
@@ -464,12 +489,14 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         forecast: List[DemandStep],
         signal: str,
         offset: float,
+        depth_override: Optional[int] = None,
     ) -> float:
         """ego 신호만 offset을 바꾸고 나머지는 previous hold, horizon 전역 rollout TTT."""
         control = previous.copy()
         control.offsets = dict(previous.offsets)
         control.offsets[signal] = float(offset)
-        states, ttt = self._predict(state, control, forecast)
+        self._price_rollout_count += 1
+        states, ttt = self._predict(state, control, forecast, depth_override=depth_override)
         return self._price_ttt(states, ttt)
 
     def _global_rollout_ttt_with_green_offset(
@@ -480,6 +507,7 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         signal: str,
         p1: float,
         offset: float,
+        depth_override: Optional[int] = None,
     ) -> float:
         """ego 신호의 green(p1)·offset을 동시에 바꾸고 나머지 hold — horizon 전역 rollout TTT.
 
@@ -491,7 +519,8 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         control.green_times[f"{signal}_p2"] = float(total - p1)
         control.offsets = dict(previous.offsets)
         control.offsets[signal] = float(offset)
-        states, ttt = self._predict(state, control, forecast)
+        self._price_rollout_count += 1
+        states, ttt = self._predict(state, control, forecast, depth_override=depth_override)
         return self._price_ttt(states, ttt)
 
     def _global_rollout_ttt_with_vsl_meter(
@@ -504,6 +533,7 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         meter: float,
         vsl: float,
         vsl_upper: float,
+        depth_override: Optional[int] = None,
     ) -> float:
         """ego ramp의 metering·이 link 전 segment VSL을 동시에 바꾸고 나머지 hold — 전역 TTT.
 
@@ -517,7 +547,8 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         for index in range(int(net.freeway_segments_per_link)):
             control.vsl[f"{link}__seg{index}"] = float(vsl)
         control.vsl[link] = float(vsl)
-        states, ttt = self._predict(state, control, forecast)
+        self._price_rollout_count += 1
+        states, ttt = self._predict(state, control, forecast, depth_override=depth_override)
         return self._price_ttt(states, ttt)
 
     def _spsa_global_price_gradients(
@@ -854,6 +885,22 @@ class StackelbergWuMeteredController(StackelbergMPCController):
             return
 
         meta: Dict[str, float] = {"wu_b2_price_enabled": float(self.signal_price_enabled)}
+        self._price_rollout_count = 0
+
+        # ---- B-패키지: price-lite 경로(공용 baseline + one-sided + 스텐실 재활용 + 얕은 rollout) ----
+        if self.price_lite:
+            self._compute_prices_lite(
+                state, forecast, previous, follower, net, meta,
+                op_green, clamp, total, ramp_caps, op_meter,
+                vsl_values, vsl_lower, vsl_upper, op_vsl, cycle,
+            )
+            self._signal_price_refresh_count += 1
+            meta["wu_b2_price_refreshed"] = 1.0
+            meta["wu_b2_price_refresh_count"] = float(self._signal_price_refresh_count)
+            meta["wu_price_rollout_count"] = float(self._price_rollout_count)
+            meta["wu_price_lite"] = 1.0
+            self._signal_price_meta = meta
+            return
 
         # ---- green 채널(B2) ----
         # ---- SPSA(가격층 O(n)): 4채널 per-lever FD의 전역 rollout을 동시섭동 쌍 k개로 대체 ----
@@ -1319,7 +1366,264 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         self._signal_price_refresh_count += 1
         meta["wu_b2_price_refreshed"] = 1.0
         meta["wu_b2_price_refresh_count"] = float(self._signal_price_refresh_count)
+        meta["wu_price_rollout_count"] = float(self._price_rollout_count)
         self._signal_price_meta = meta
+
+    def _compute_prices_lite(
+        self,
+        state: TrafficState,
+        forecast: List[DemandStep],
+        previous: ControlAction,
+        follower: "WuFaithfulFollower",
+        net,
+        meta: Dict[str, float],
+        op_green: Dict[str, float],
+        clamp,
+        total: float,
+        ramp_caps: Dict[str, float],
+        op_meter: Dict[str, float],
+        vsl_values: List[float],
+        vsl_lower: float,
+        vsl_upper: float,
+        op_vsl: Dict[str, float],
+        cycle: float,
+    ) -> None:
+        """B-패키지 가격 계산 — rollout 예산을 상수 절감(검증: sweet_190 A/B런).
+
+        (B2) one-sided FD: 공용 baseline J0 1회 + lever당 1회 (양측 2회 대비 절반).
+        (B1) cross 스텐실 재활용: h ≈ [J(a⁺,b⁺) − J(a⁺) − J(b⁺) + J0]/(Δa·Δb) —
+             J(a⁺)·J(b⁺)는 per-lever FD가 이미 계산한 점 → 쌍당 신규 1~2회.
+        (B3) 얕은 가격 rollout(H+1): 가격은 배분 신호라 국소·단기(level 고원 실측이
+             방증). 후보 채점은 기존 깊이(H+D)+far 유지.
+        flagship(5신호·4ramp·2링크·4seg) 기준: 62회@H+D → ~30회@H+1 ≈ rollout·초 −68%.
+        한계: B4 barrier·B3CERT 미지원(각각 기본 OFF·split 모드에서 무관 — level 모드
+        재현 시에는 price_lite를 끌 것)."""
+        depth_p = int(self.cfg.mpc.horizon_steps) + 1
+        # ---- 공용 baseline J0 ----
+        self._price_rollout_count += 1
+        base_states, base_raw = self._predict(
+            state, previous, forecast, depth_override=depth_p,
+        )
+        j0 = self._price_ttt(base_states, base_raw)
+
+        # ---- green (one-sided) ----
+        green_pt: Dict[str, tuple] = {}
+        if self.signal_price_enabled and op_green:
+            dsec = float(self.signal_price_delta_sec)
+            pts: Dict[str, tuple] = {}
+            requests: Dict[str, List[float]] = {}
+            for signal, p0 in op_green.items():
+                p_pl = clamp(p0 + dsec)
+                if abs(p_pl - p0) <= 1.0e-9:
+                    p_pl = clamp(p0 - dsec)
+                pts[signal] = (p0, p_pl)
+                requests[signal] = [p0, p_pl]
+            local_costs = follower.local_green_costs(requests, state, previous, forecast[0])
+            prices: Dict[str, float] = {}
+            refs: Dict[str, float] = {}
+            for signal, (p0, p_pl) in pts.items():
+                dp = p_pl - p0
+                if abs(dp) <= 1.0e-9:
+                    g_ext = 0.0
+                    green_pt[signal] = (p0, p0, j0)
+                else:
+                    j_p = self._global_rollout_ttt_with_green(
+                        state, previous, forecast, signal, p_pl, depth_override=depth_p,
+                    )
+                    c0, c_pl = local_costs[signal]
+                    g_ext = (j_p - j0) / dp - (c_pl - c0) / dp
+                    green_pt[signal] = (p0, p_pl, j_p)
+                prices[signal] = float(g_ext)
+                refs[signal] = float(p0)
+                meta[f"wu_b2_price_{signal}"] = float(g_ext)
+                meta[f"wu_b2_price_ref_{signal}"] = float(p0)
+            follower.signal_marginal_price = prices
+            follower.signal_marginal_price_ref = refs
+            follower.signal_marginal_price_weight = float(self.signal_price_weight)
+            follower.signal_marginal_price_trust_sec = (
+                float(self.signal_price_trust_sec)
+                if self.signal_price_trust_sec is not None else None
+            )
+            meta["wu_b2_price_delta_sec"] = dsec
+
+        # ---- metering (one-sided; cert 미지원 → None) ----
+        meter_pt: Dict[str, tuple] = {}
+        if self.metering_price_enabled and op_meter:
+            dm = float(self.metering_price_delta_veh_h)
+            m_requests: Dict[str, List[float]] = {}
+            m_pts: Dict[str, tuple] = {}
+            for ramp, m0 in op_meter.items():
+                cap = ramp_caps[ramp]
+                m_pl = min(cap, m0 + dm)
+                if abs(m_pl - m0) <= 1.0e-9:
+                    m_pl = max(0.0, m0 - dm)
+                m_pts[ramp] = (m0, m_pl)
+                m_requests[ramp] = [m0, m_pl]
+            local_m = follower.local_metering_costs(m_requests, state, previous, forecast[0])
+            m_prices: Dict[str, float] = {}
+            m_refs: Dict[str, float] = {}
+            for ramp, (m0, m_pl) in m_pts.items():
+                dmm = m_pl - m0
+                if abs(dmm) <= 1.0e-9:
+                    g_ext = 0.0
+                    meter_pt[ramp] = (m0, m0, j0)
+                else:
+                    j_m, _bar, _rho = self._global_rollout_metrics_with_metering(
+                        state, previous, forecast, ramp, m_pl, depth_override=depth_p,
+                    )
+                    lc = local_m[ramp]
+                    g_ext = (j_m - j0) / dmm - (lc[1] - lc[0]) / dmm
+                    meter_pt[ramp] = (m0, m_pl, j_m)
+                m_prices[ramp] = float(g_ext)
+                m_refs[ramp] = float(m0)
+            follower.metering_marginal_price = m_prices
+            follower.metering_marginal_price_ref = m_refs
+            follower.metering_marginal_price_trust_frac = (
+                float(self.metering_price_trust_frac)
+                if self.metering_price_trust_frac is not None else None
+            )
+            follower.metering_release_certified = None
+            meta["wu_b3_meter_price_enabled"] = 1.0
+
+        # ---- VSL (one-sided, E2 차감) ----
+        vsl_link_pt: Dict[str, tuple] = {}
+        if self.vsl_price_enabled and vsl_values and op_vsl:
+            dv = float(self.vsl_price_delta_kmh)
+            n_seg_v = int(net.freeway_segments_per_link)
+            v_corners: Dict[str, tuple] = {}
+            v_requests: Dict[str, List[List[float]]] = {}
+            for link in net.freeway_links:
+                base = [
+                    float(op_vsl.get(f"{link}__seg{i}", vsl_upper)) for i in range(n_seg_v)
+                ]
+                reqs: List[List[float]] = [list(base)]
+                for i in range(n_seg_v):
+                    key = f"{link}__seg{i}"
+                    if key not in op_vsl:
+                        continue
+                    x0 = base[i]
+                    v_pl = max(vsl_lower, x0 - dv)
+                    if abs(v_pl - x0) <= 1.0e-9:
+                        v_pl = min(vsl_upper, x0 + dv)
+                    vec = list(base)
+                    vec[i] = v_pl
+                    v_corners[key] = (x0, v_pl, link, len(reqs))
+                    reqs.append(vec)
+                v_requests[link] = reqs
+            local_v = follower.local_vsl_costs(v_requests, state, previous, forecast[0])
+            v_prices: Dict[str, float] = {}
+            v_refs: Dict[str, float] = {}
+            for key, (x0, v_pl, link, ri) in v_corners.items():
+                dvv = v_pl - x0
+                if abs(dvv) <= 1.0e-9:
+                    g_ext = 0.0
+                else:
+                    j_v = self._global_rollout_ttt_with_vsl(
+                        state, previous, forecast, link, key, v_pl, vsl_upper,
+                        depth_override=depth_p,
+                    )
+                    lc = local_v.get(link, [])
+                    d_local = (lc[ri] - lc[0]) / dvv if ri < len(lc) else 0.0
+                    g_ext = (j_v - j0) / dvv - d_local
+                v_prices[key] = float(g_ext)
+                v_refs[key] = float(x0)
+            follower.vsl_marginal_price = v_prices
+            follower.vsl_marginal_price_ref = v_refs
+            follower.vsl_marginal_price_trust_kmh = (
+                float(self.vsl_price_trust_kmh)
+                if self.vsl_price_trust_kmh is not None else None
+            )
+            meta["wu_b3_vsl_price_enabled"] = 1.0
+
+        # ---- cross green×offset (B1 재활용: 쌍당 신규 2회 — J(o⁺), J(p⁺,o⁺)) ----
+        if self.green_offset_cross_price_enabled and green_pt:
+            do = cycle / 8.0
+            nonramp = [s for s in net.signals if not follower._local_models[s].has_ramps]
+            gp_pairs: Dict[str, List[tuple]] = {}
+            corners: Dict[str, tuple] = {}
+            for s in nonramp:
+                p0, p_pl, j_p = green_pt.get(
+                    s, (clamp(previous.green_times.get(f"{s}_p1", total / 2.0)), None, None)
+                )
+                o0 = float(previous.offsets.get(s, 0.0)) % cycle
+                o_pl = (o0 + do) % cycle
+                corners[s] = (p0, p_pl, o0, o_pl, j_p)
+                gp_pairs[s] = [(p0, o0), (p_pl if p_pl is not None else p0, o0),
+                               (p0, o_pl), (p_pl if p_pl is not None else p0, o_pl)]
+            local_go = follower.local_green_offset_costs(gp_pairs, state, previous, forecast[0])
+            cross_prices: Dict[str, float] = {}
+            cross_refs: Dict[str, tuple] = {}
+            for s, (p0, p_pl, o0, o_pl, j_p) in corners.items():
+                dp = (p_pl - p0) if p_pl is not None else 0.0
+                doo = ((o_pl - o0 + cycle / 2.0) % cycle) - cycle / 2.0
+                denom = dp * doo
+                if abs(denom) <= 1.0e-9 or j_p is None:
+                    cross_prices[s] = 0.0
+                    cross_refs[s] = (float(p0), float(o0))
+                    continue
+                j_o = self._global_rollout_ttt_with_offset(
+                    state, previous, forecast, s, o_pl, depth_override=depth_p,
+                )
+                j_po = self._global_rollout_ttt_with_green_offset(
+                    state, previous, forecast, s, p_pl, o_pl, depth_override=depth_p,
+                )
+                h_global = (j_po - j_p - j_o + j0) / denom
+                lc = local_go.get(s, [0.0, 0.0, 0.0, 0.0])
+                h_local = (lc[3] - lc[1] - lc[2] + lc[0]) / denom
+                cross_prices[s] = float(h_global - h_local)
+                cross_refs[s] = (float(p0), float(o0))
+                meta[f"wu_joint_go_cross_{s}"] = cross_prices[s]
+            follower.green_offset_cross_price = cross_prices
+            follower.green_offset_cross_ref = cross_refs
+            follower.green_offset_cross_weight = float(self.green_offset_cross_weight)
+            meta["wu_joint_go_cross_enabled"] = 1.0
+
+        # ---- cross vsl×metering (B1 재활용: 링크당 J(v_s) 1회 + ramp당 J(m⁺,v_s) 1회) ----
+        if self.vsl_meter_cross_price_enabled and vsl_values and meter_pt:
+            dv = float(self.vsl_price_delta_kmh)
+            vm_prices: Dict[str, float] = {}
+            vm_refs: Dict[str, tuple] = {}
+            j_vlink: Dict[str, tuple] = {}
+            for r in net.ramps:
+                link = net.ramp_to_freeway.get(r)
+                if link is None or r not in meter_pt:
+                    continue
+                m0, m_pl, j_m = meter_pt[r]
+                v0 = float(segment_vsl(previous, link, 0, self.cfg))
+                v_s = max(vsl_lower, v0 - dv)
+                if abs(v_s - v0) <= 1.0e-9:
+                    v_s = min(vsl_upper, v0 + dv)
+                dmm = m_pl - m0
+                dvv = v_s - v0
+                denom = dmm * dvv
+                if abs(denom) <= 1.0e-9:
+                    vm_prices[r] = 0.0
+                    vm_refs[r] = (float(m0), float(v0))
+                    continue
+                if link not in j_vlink or abs(j_vlink[link][0] - v_s) > 1.0e-9:
+                    jv = self._global_rollout_ttt_with_vsl_meter(
+                        state, previous, forecast, r, link, m0, v_s, vsl_upper,
+                        depth_override=depth_p,
+                    )
+                    j_vlink[link] = (v_s, jv)
+                j_v = j_vlink[link][1]
+                j_mv = self._global_rollout_ttt_with_vsl_meter(
+                    state, previous, forecast, r, link, m_pl, v_s, vsl_upper,
+                    depth_override=depth_p,
+                )
+                lc = follower.local_vsl_meter_costs(
+                    {r: [(m0, v0), (m_pl, v0), (m0, v_s), (m_pl, v_s)]},
+                    state, previous, forecast[0],
+                )[r]
+                h_global = (j_mv - j_m - j_v + j0) / denom
+                h_local = (lc[3] - lc[1] - lc[2] + lc[0]) / denom
+                vm_prices[r] = float(h_global - h_local)
+                vm_refs[r] = (float(m0), float(v0))
+                meta[f"wu_joint_vm_cross_{r}"] = vm_prices[r]
+            follower.vsl_meter_cross_price = vm_prices
+            follower.vsl_meter_cross_ref = vm_refs
+            follower.vsl_meter_cross_weight = float(self.vsl_meter_cross_weight)
+            meta["wu_joint_vm_cross_enabled"] = 1.0
 
     def _pfo_incumbent_fallback_enabled(self) -> bool:
         return bool(getattr(self.cfg.mpc, "stackelberg_enable_pfo_incumbent", True))
@@ -1753,6 +2057,138 @@ class StackelbergWuMeteredController(StackelbergMPCController):
             "follower_ttt": float(terms["leader_follower_ttt_base"]),
             "spillback_violation": 0.0,
         }
+
+    # ---------- A1(2026-07-10): 후보 N_UF 중복제거 ----------
+
+    def _evaluate_full_candidate(
+        self,
+        index: int,
+        action: LeaderAction,
+        state: TrafficState,
+        forecast: List[DemandStep],
+        previous: ControlAction,
+        stage: str = "coarse",
+        incumbent_obj: float = float("inf"),
+        rollout_abort_obj: float = float("inf"),
+    ) -> _LeaderCandidateEvaluation:
+        """같은 N_UF 후보의 follower solve + rollout 재사용(A1).
+
+        step 내에서 follower 반응은 후보의 N_UF에만 의존한다 — λ_P는 warm-start로
+        고정이고 N_P는 그 λ를 통해서만 작용(dual 규약), metering budget은 ω·N_UF.
+        따라서 (N_P, N_UF) 격자에서 N_UF가 같은 후보들은 nash.control과 rollout이
+        동일하다. 대표 1회만 full 평가하고 나머지는 캐시 재사용, N_P 의존
+        diagnostics(λ_next·target 계열)만 패치한다. objective_terms는 클론 control로
+        정확 재계산(states 재사용, 저렴). base 메서드와 동기 유지 필요(꼬리 복제)."""
+        if not (
+            self.candidate_dedupe_enabled
+            and isinstance(self.nash_solver, WuFaithfulFollower)
+        ):
+            return super()._evaluate_full_candidate(
+                index, action, state, forecast, previous,
+                stage=stage, incumbent_obj=incumbent_obj,
+                rollout_abort_obj=rollout_abort_obj,
+            )
+        raw_action = LeaderAction(float(action.N_P_star), float(action.N_UF_star))
+        action_p, projection_meta = self._project_action_to_follower_feasible_np(
+            action, state, forecast, previous
+        )
+        key = round(float(action_p.N_UF_star), 6)
+        cached = self._nuf_solve_cache.get(key)
+        dedupe_hit = cached is not None
+        if dedupe_hit:
+            self._dedupe_hits += 1
+            nash_rep, predicted_states, follower_ttt, rollout_used = cached
+            nash = self._clone_nash_for_candidate(nash_rep, action_p)
+        else:
+            nash = self.nash_solver.solve(state.copy(), action_p, forecast, previous)
+            predicted_states, follower_ttt, rollout_used = self._leader_evaluation_base(
+                state, nash, forecast, incumbent_obj=rollout_abort_obj,
+            )
+            # abort(inf)된 평가는 캐시 금지 — 같은 N_UF가 뒤에서 더 관대한 문턱으로
+            # 재평가될 수 있다(선택 동일성 보존).
+            if follower_ttt != float("inf"):
+                self._nuf_solve_cache[key] = (
+                    nash, predicted_states, follower_ttt, rollout_used,
+                )
+        evaluated_action, closure_metadata = self._close_nash_response_leader_action(
+            action_p, nash, forecast, intent_action=raw_action,
+        )
+        objective_terms = self.leader.objective_terms(
+            predicted_states, nash.control, previous, follower_ttt,
+            nash.converged, nash.residual_objective, nash.residual_control,
+        )
+        metadata = {
+            "leader_response_proxy_state_count": float(len(predicted_states)),
+            "leader_candidate_raw_N_P_star": float(raw_action.N_P_star),
+            "leader_candidate_raw_N_UF_star": float(raw_action.N_UF_star),
+            **projection_meta,
+            **closure_metadata,
+            "leader_candidate_incumbent_active": float(incumbent_obj < float("inf")),
+            "leader_candidate_incumbent_objective": float(
+                incumbent_obj if incumbent_obj < float("inf") else 0.0
+            ),
+            "leader_candidate_follower_early_terminated_candidates": float(
+                nash.diagnostics.get(
+                    "distributed_grid_early_terminated_candidates",
+                    nash.control.diagnostics.get(
+                        "distributed_grid_early_terminated_candidates", 0.0
+                    ),
+                )
+            ),
+            "leader_candidate_dedupe_hit": float(dedupe_hit),
+        }
+        return _LeaderCandidateEvaluation(
+            index=index,
+            action=evaluated_action,
+            nash=nash,
+            objective=float(objective_terms["leader_total_objective"]),
+            objective_terms=objective_terms,
+            metadata=metadata,
+            rollout_used=rollout_used,
+            stage=stage,
+        )
+
+    def _clone_nash_for_candidate(self, nash_rep, action_p: LeaderAction):
+        """A1 클론: 대표 nash의 control을 복사하고 N_P 의존 diagnostics만 패치.
+
+        행동에 유효한 패치는 wu_faithful_lambda_next(λ_P commit 재료) 하나 —
+        λ_next = clip(λ + gain·(Σnin − projected(N_P))). 나머지 target 계열은
+        로그 정확성용. sigma/sum_nin/λ_P는 후보 무관이라 대표 값 재사용."""
+        import dataclasses as _dc
+        control = nash_rep.control.copy()
+        control.N_P_star = float(action_p.N_P_star)
+        control.N_UF_star = float(action_p.N_UF_star)
+        d = control.diagnostics
+        follower = self.nash_solver
+        n_p = float(action_p.N_P_star)
+        sum_nin = float(d.get("wu_faithful_sum_nin", 0.0))
+        sig_min = float(d.get("wu_faithful_np_feasible_min", 0.0))
+        sig_max = float(d.get("wu_faithful_np_feasible_max", sig_min))
+        lambda_p = float(d.get("wu_faithful_lambda_P", 0.0))
+        projected = min(max(n_p, sig_min), sig_max)
+        if "wu_faithful_lambda_next" in d:
+            d["wu_faithful_lambda_next"] = float(
+                follower._lambda_np_update(lambda_p, sum_nin, projected)
+            )
+        # rate 환산용 horizon_h: 대표 값에서 역산, 불가 시 H·T_c_h.
+        rep_proj = float(d.get("wu_faithful_np_projected_target", 0.0))
+        rep_rate = float(d.get("urban_net_inflow_target_veh_h", 0.0))
+        if abs(rep_rate) > 1.0e-9 and abs(rep_proj) > 1.0e-9:
+            horizon_h = rep_proj / rep_rate
+        else:
+            horizon_h = float(self.cfg.mpc.horizon_steps) * float(
+                self.cfg.simulation.T_c_h
+            )
+        d["wu_faithful_np_target"] = n_p
+        d["wu_faithful_np_original_target"] = n_p
+        d["wu_faithful_np_projected_target"] = projected
+        d["wu_faithful_np_projection_residual"] = n_p - projected
+        d["wu_faithful_np_target_error"] = sum_nin - projected
+        d["urban_net_inflow_target_veh_h"] = projected / max(horizon_h, 1.0e-9)
+        if "wu_faithful_np_original_target_veh" in d:
+            d["wu_faithful_np_original_target_veh"] = n_p
+            d["urban_net_inflow_original_target_veh"] = n_p
+        return _dc.replace(nash_rep, control=control)
 
     def _evaluate_candidate_set(
         self,
