@@ -197,6 +197,24 @@ sweet_190, T=7200, APJOINT 디폴트(SPLIT-v2 d3, link-share density), 앵커 TT
   {NC, PFO+nbr, 13p flag} × {sweet_155, 155_incident, 155_skew} — leader 변별 무대 판정.
   PFO 기준선은 유지(빼면 baseline gaming — Wu 벤치마크 원칙의 거울상), 판정은 매트릭스로.
 
+# 교차 매트릭스 최종 (새 망, {NC, PFO+nbr, 13p flag} × 4무대) — 하루 마감 판정
+
+| 무대 | NC | PFO+nbr | flag | leader TTT | leader N_P초과(평균) |
+|---|---:|---:|---:|---:|---|
+| sweet_155 | 19844 | 7358 | 7318 | +40 | 169.7 vs 188.4 (소폭) |
+| 155_incident | 20035 | **11012** | 11088 | **−76** | 199.1 vs 169.0 (열세) |
+| **155_skew** | 19964 | 7853 | **7416** | **+437** | **108.0 vs 184.7 (−42%)** |
+| sweet_190 | 29611 | 15273 | 14936 | +337 | — |
+
+- incident 무변별로 "스트레스 단조" 중간 가설 철회(±300 교훈). **최종 판정: 계층의
+  잔여 가치는 공간 불균형(skew) 레짐에 집중 — TTT·N_P 보호 동시 우위. 평온/용량상실
+  레짐은 강화 분산과 동급.** 계층의 나머지 논거 = 비용 구조(가격 0× vs rollout (2r+1)×,
+  radius는 파동속도×horizon으로 유계라 n 무관) + 근시안 중앙 붕괴 대비 강건성 + 비결정성 해소.
+- 논문 결과절 뼈대(전부 오늘 실측): ①비결정성 정리 ②절벽 수량우위(dual) ③입자도 사각형
+  ④채널 배타성(3증거) ⑤far 필수성(legacy 붕괴) ⑥레짐 조건부 계층 가치(skew) ⑦O(n) 비용.
+- 잔여 TODO: 매트릭스에 WU-CD-F 열 추가, N_P 준수 그림(궤적), 원고 결과절 집필,
+  플래그십 구성 재현런 2회(±300 방어), notes의 190 xval 표는 outputs/_13p/xval/ 참조.
+
 # 13-player 재구축 진행 (feature/segment-agents-13p, worktree 격리)
 
 - 1단계 완료(34db7de): segment_local_plant.py(비트 일치 보장 설계) + R_F merge 2→3 +
