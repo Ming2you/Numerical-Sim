@@ -543,6 +543,12 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
         if _os.environ.get("SEG13_NBR") and hasattr(_seg_target, "seg13_neighbor_weight"):
             # radius-1 국소 rollout + 이웃 차량수 비용(PFO 강화 기준선; 플래그십은 OFF 유지).
             _seg_target.seg13_neighbor_weight = float(_os.environ["SEG13_NBR"])
+    if _os.environ.get("CAND"):
+        # 헤드룸 탐침: leader 후보 격자 밀도(OPT12 절감분 재투자 실험).
+        cfg.mpc.leader_candidate_count = int(_os.environ["CAND"])
+    if _os.environ.get("FH"):
+        # 헤드룸 탐침: freeway follower 예측 horizon(steps) 연장.
+        cfg.freeway_follower.freeway_prediction_horizon_steps = int(_os.environ["FH"])
     if _os.environ.get("NUF_DUAL") == "1":
         # 8단계 ablation: N_UF 총량을 equality 사영 대신 λ_UF dual(step 간 적분)로 추적.
         cfg.mpc.wu_faithful_nuf_coordination_mode = "dual"
