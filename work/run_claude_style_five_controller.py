@@ -83,6 +83,16 @@ def build_cfg(scenario_name: str, t_total: float) -> tuple[ExperimentConfig, Any
         },
         "simulation": {"T_total": float(t_total)},
     }
+    import os as _os
+    if _os.environ.get("NET8SEG") == "1":
+        # 8-seg 망(2026-07-11 승인): link 4km(8×0.5km, seg 길이 유지 — CFL 안전),
+        # 인터체인지 상대기하 = 승인 기하 ×2 (OR_D 2/R_D 4/OR_F 4/R_F 6). player 5+16=21.
+        # 목적: 외부성 반경(다홉) vs 정보 반경(radius-1) 분리 — nbr 한계 실증 무대.
+        overrides["network"] = {
+            "freeway_segments_per_link": 8,
+            "ramp_merge_segment_index": {"R_D_W": 4, "R_F_W": 6, "R_D_E": 4, "R_F_E": 6},
+            "off_ramp_segment_index": {"OR_D_W": 2, "OR_F_W": 4, "OR_D_E": 2, "OR_F_E": 4},
+        }
     cfg = ExperimentConfig.from_file(str(ROOT / "src" / "config" / "default.yaml"), overrides)
     scenarios = load_scenarios(str(ROOT / "src" / "config" / "scenarios.yaml"))
     scenario = scenarios[scenario_name]
