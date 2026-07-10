@@ -302,6 +302,16 @@ sweet_190, T=7200, APJOINT 디폴트(SPLIT-v2 d3, link-share density), 앵커 TT
   (N_eff = max(0, N − G·T_traverse)) 도입이 정식 수선 후보.
 - ỹ 8-seg 소멸의 기제 확정: corner(전량 개방) 지배 — ỹ 발화(5 iter)해도 argmin 불변.
 
+# 8-seg 경부하 역전의 진짜 원인 (G_FW 기각 후 해부, 2026-07-11 심야)
+
+- **G_FW=600 probe = 8773.2 동일 → far 본선항 가설 기각**(FAR_FF도 회복 가망 낮음 — 게이트 조임).
+- 해부(155-8seg, 갭 +1476): ① **D 교차로 green_p1 82.1s vs nbr 59.8s — urban TTT +1038(갭의 70%)**
+  ← 8-seg 기하에서 D의 ramp-aware rollout 동결 입력(reservoir drain·merge 가중) 왜곡 의심,
+  스텝 단위 solve 진단 필요(다음 세션 스레드). ② 예산 사영이 비율 보존이라 nbr의 기하
+  비대칭 배분(R_D 1500 개방/R_F ~900 조임)을 못 만듦 — 8-seg에서 g_ext 배분 신호 약화 의심.
+  ③ leader N_UF 4510(소폭 과소). FAR_FF(자유류 오프셋)는 물리적으로 옳은 수선이라
+  코드 유지(기본 OFF), 검증 3런 결과는 아래 추가 예정.
+
 # 13-player 재구축 진행 (feature/segment-agents-13p, worktree 격리)
 
 - 1단계 완료(34db7de): segment_local_plant.py(비트 일치 보장 설계) + R_F merge 2→3 +
