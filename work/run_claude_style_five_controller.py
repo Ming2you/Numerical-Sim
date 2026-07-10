@@ -532,6 +532,11 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
         controller.candidate_dedupe_enabled = True  # A1: 같은 N_UF 후보 solve+rollout 재사용
     if _os.environ.get("PRICE_LITE") == "1" and hasattr(controller, "price_lite"):
         controller.price_lite = True  # B: baseline+one-sided+스텐실 재활용+얕은 가격 rollout
+    if _os.environ.get("SEG13") == "1" and hasattr(controller, "nash_solver") and hasattr(
+        controller.nash_solver, "segment_agents"
+    ):
+        # 13-player(2026-07-10 승인): freeway를 segment agent 8개로 분해 + 예산 simplex 사영.
+        controller.nash_solver.segment_agents = True
     previous: Optional[ControlAction] = None
     steps = max(1, int(round(cfg.simulation.T_total / cfg.simulation.control_interval)))
     run_rows: List[Dict[str, Any]] = []

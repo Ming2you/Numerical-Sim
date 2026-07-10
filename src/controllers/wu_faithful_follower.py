@@ -25,6 +25,12 @@ from src.controllers.local_freeway_plant import (
     build_local_freeway_model,
     freeway_substep_local,
 )
+from src.controllers.segment_local_plant import (
+    FrozenLinkTrajectory,
+    SegmentLocalState,
+    build_segment_agent_models,
+    segment_substep_local,
+)
 from src.controllers.local_signal_plant import (
     build_local_model,
     rollout_local_tts,
@@ -233,6 +239,14 @@ class WuFaithfulFollower:
         # VSL trust(±10km/h, vsl_price_trust_kmh)는 보폭 제한이라 마찰과 무관하게 유지.
         self.price_smoothness_disabled: bool = False
         self.vsl_marginal_price_trust_kmh: Optional[float] = None
+        # ---------- 13-player(2026-07-10 승인, plan-13player-rebuild.md) ----------
+        # segment_agents=True면 freeway를 link agent 2개 대신 segment agent 8개로 분해:
+        # F_L0=seg0+origin, F_L1=seg1, F_L2=seg2+R_D, F_L3=seg3+R_F. off-ramp storage는
+        # urban 소유(여기선 동결 y로만 읽음). 예산 Σmeter=ω_F·N_UF*는 owner 2명의
+        # best-response 후 simplex 사영(승인안 (ii)) — env SEG13=1로 활성.
+        self.segment_agents: bool = False
+        self._segment_agent_models: Dict[str, list] = {}
+        self._seg13_diag: Dict[str, float] = {}
         # ---------- J1(2026-07-06): joint offset 패턴 directive ----------
         # F3 판정: offset은 joint 결합 변수라 per-signal 가격(편미분)이 구조적으로 0.
         # J1 = leader가 corridor 패턴(여러 신호 offset 조합)을 통째로 rollout 평가해
@@ -2196,6 +2210,257 @@ class WuFaithfulFollower:
         vsl_dict[link] = float(min(best_vec)) if best_vec else vsl_max
         return vsl_dict, best_obj, evals
 
+    # ---------- 13-player: freeway segment agent 분해 (2026-07-10 승인 매핑) ----------
+
+    def _solve_freeway_segment_agents(
+        self,
+        link: str,
+        state: TrafficState,
+        coupling: Mapping[str, float],
+        demand: DemandStep,
+        snapshot: ControlAction,
+        leader: Optional[object],
+    ) -> tuple[Dict[str, float], Dict[str, float], int]:
+        """link의 segment agent 4개(F_L0~F_L3)가 각자 own VSL(+소유 ramp meter)을 best-response.
+
+        13-player 매핑(plan-13player-rebuild.md): F_L0=seg0+origin queue, F_L1=seg1,
+        F_L2=seg2+R_D, F_L3=seg3+R_F. off-ramp storage는 urban 소유 — 여기서는 동결
+        y(현 상태 hold)로만 읽고(λ_eff·유출 cap) own-TTS에 세지 않는다. 이웃 seg 본선과
+        이웃 ramp 방류도 동결 y(snapshot metering). own-TTS = 자기 seg 차량 + 자기 ramp
+        queue(+blocked) + (seg0) origin queue.
+
+        가격(joint): 전 seg에 g_vsl·(v−ref); leader present 시 소유 ramp agent만
+        g_meter·(m−ref) + h·(m−m_ref)(v−v_ref) 2D 탐색(ramp 없는 agent는 1D).
+        예산 Σmeter = ω_F·N_UF*(equality)는 owner 2명의 best-response 후 simplex 사영
+        (승인안 (ii)) — Jacobi iteration마다 재사영되어 cross-player 합의로 수렴.
+        leader=None(PFO/incumbent probe)이면 예산·meter 가격 없이 자율 best-response
+        (v2 규약: 자율 분기는 가격-레벨 배제).
+
+        v0 단순화(문서화): VSL 후보는 horizon 내 상수(sequence 탐색 없음), 이웃 y는
+        iteration 시작 상태 hold-constant(예측 궤적 교환은 후속 단계)."""
+        net = self.cfg.network
+        sim = self.cfg.simulation
+        ff = self.cfg.freeway_follower
+        cfg = self.cfg
+        if link not in self._segment_agent_models:
+            self._segment_agent_models[link] = build_segment_agent_models(cfg, link)
+        agents = self._segment_agent_models[link]
+        link_model = self._local_freeway_models[link]
+        n_seg = link_model.n_seg
+        horizon = max(1, ff.freeway_prediction_horizon_steps or cfg.mpc.horizon_steps)
+        substeps = horizon * sim.K_cf
+        dt_h = sim.T_f_h
+        vsl_max = max(ff.vsl_set)
+        smooth_w = ff.vsl_smoothness_weight
+
+        # ---- 동결 y(hold-constant): 본선 상태·이웃 방류·storage 점유(urban 소유)·유출 cap ----
+        rhos0 = list(state.freeway_density.get(link, [0.0] * n_seg))
+        speeds0 = list(state.freeway_speed.get(link, [net.v_free] * n_seg))
+        lanes0 = list(state.freeway_effective_lanes.get(link, [])) or [
+            float(net.freeway_lanes) for _ in range(n_seg)
+        ]
+        if len(lanes0) != n_seg:
+            lanes0 = [float(net.freeway_lanes) for _ in range(n_seg)]
+        origin_q0 = max(0.0, float(state.mainline_origin_queue.get(link, 0.0)))
+        occ0: Dict[str, float] = {}
+        storage_avail0: Dict[str, float] = {}
+        for off_ramp in link_model.owned_offramps:
+            cap_o = link_model.offramp_storage_cap.get(off_ramp, 0.0)
+            storage = net.off_ramp_storage_link.get(off_ramp, "")
+            avail = float(state.urban_link_storage.get(storage, cap_o))
+            occ0[off_ramp] = max(0.0, cap_o - avail)
+            storage_avail0[off_ramp] = max(0.0, avail)
+        offramp_cap0 = self._local_offramp_capacity(link, storage_avail0)
+        release0 = {
+            r: max(0.0, float(snapshot.ramp_metering.get(r, net.ramp_capacity_veh_h[r])))
+            for r in link_model.owned_ramps
+        }
+        frozen = FrozenLinkTrajectory(
+            rhos=[rhos0], speeds=[speeds0], prev_lanes=[lanes0],
+            origin_queue=[origin_q0], ramp_release=[release0],
+            occupancy=[occ0], offramp_capacity=[offramp_cap0],
+        )
+        ramp_q0 = {
+            r: max(0.0, float(state.ramp_queue.get(r, 0.0))) for r in link_model.owned_ramps
+        }
+
+        evals = 0
+        vsl_out: Dict[str, float] = {}
+        preferred_meter: Dict[str, float] = {}
+        best_offramp_flow: Dict[str, float] = {}
+        leader_present = (
+            leader is not None and float(getattr(leader, "N_UF_star", 0.0)) > 0.0
+        )
+
+        for agent in agents:
+            seg = agent.seg
+            key = f"{link}__seg{seg}"
+            prev_v = float(segment_vsl(snapshot, link, seg, cfg))
+            v_cands = [
+                float(v) for v in ff.vsl_set
+                if abs(float(v) - prev_v) <= ff.max_vsl_step + 1.0e-9
+            ] or [prev_v]
+            own_ramp = agent.owned_ramps[0] if agent.owned_ramps else None
+            if own_ramp is not None and self.metering_enabled:
+                cap_r = float(net.ramp_capacity_veh_h[own_ramp])
+                m_cands: List[Optional[float]] = sorted(
+                    {round(cap_r * f, 6) for f in self.ramp_metering_fractions}
+                )
+            else:
+                m_cands = [None]
+            best_cost, best_v, best_m = float("inf"), prev_v, None
+            best_flow_local: Dict[str, float] = {}
+            for v_cand in v_cands:
+                for m_cand in m_cands:
+                    cand = ControlAction(
+                        ramp_metering=dict(snapshot.ramp_metering),
+                        vsl=dict(snapshot.vsl),
+                        green_times=dict(snapshot.green_times),
+                        offsets=dict(snapshot.offsets),
+                        inflow_outflow_allocation={},
+                    )
+                    cand.vsl[key] = float(v_cand)
+                    if own_ramp is not None and m_cand is not None:
+                        cand.ramp_metering[own_ramp] = float(m_cand)
+                    own = SegmentLocalState(
+                        rho=float(rhos0[seg]), speed=float(speeds0[seg]),
+                        prev_lane=float(lanes0[seg]),
+                        origin_queue=origin_q0 if agent.owns_origin_queue else 0.0,
+                    )
+                    ramp_q = float(ramp_q0.get(own_ramp, 0.0)) if own_ramp else 0.0
+                    blocked = 0.0
+                    first_flow: Dict[str, float] = {}
+                    cost = 0.0
+                    for t in range(substeps):
+                        own_release: Dict[str, float] = {}
+                        if own_ramp is not None:
+                            # release는 T_f 시작 reservoir만 본다(spec 3.4.3) — 계산 후 적재.
+                            rhos_asm = list(rhos0)
+                            rhos_asm[seg] = float(own.rho)
+                            rel = self._local_ramp_release(
+                                link, rhos_asm, {own_ramp: ramp_q}, cand, demand,
+                            )
+                            r_own = max(0.0, float(rel.get(own_ramp, 0.0)))
+                            ramp_q = max(0.0, ramp_q - r_own * dt_h)
+                            approach = max(
+                                0.0, float(coupling.get(f"u_on_{own_ramp}", 0.0))
+                            )
+                            if self.count_blocked_ramp_inflow:
+                                space = max(0.0, net.ramp_queue_max_veh - ramp_q)
+                                arrival = approach * dt_h
+                                adm1 = min(blocked, space)
+                                adm2 = min(arrival, space - adm1)
+                                ramp_q = min(net.ramp_queue_max_veh, ramp_q + adm1 + adm2)
+                                blocked = blocked - adm1 + (arrival - adm2)
+                            else:
+                                ramp_q = min(
+                                    net.ramp_queue_max_veh, ramp_q + approach * dt_h,
+                                )
+                            own_release[own_ramp] = r_own
+                        own, off_flow, veh = segment_substep_local(
+                            agent, frozen, t, own, own_release, cand, demand,
+                        )
+                        if t == 0:
+                            first_flow = dict(off_flow)
+                        cost += (
+                            float(veh) + ramp_q + blocked
+                            + (own.origin_queue if agent.owns_origin_queue else 0.0)
+                        ) * dt_h
+                    # 마찰(암묵적 신호검정) — 7p와 동일 규약(PRICE-TR 시 0).
+                    if not (self.price_smoothness_disabled and self.vsl_marginal_price):
+                        cost += smooth_w * abs(float(v_cand) - prev_v)
+                    # 가격항: g_vsl(전 seg), 소유 ramp의 g_meter + h cross(leader present).
+                    if self.vsl_marginal_price:
+                        g_vsl = self.vsl_marginal_price.get(key)
+                        if g_vsl is not None:
+                            ref_v = float(self.vsl_marginal_price_ref.get(key, prev_v))
+                            cost += self.vsl_marginal_price_weight * float(g_vsl) * (
+                                float(v_cand) - ref_v
+                            )
+                    if own_ramp is not None and m_cand is not None and leader_present:
+                        if self.metering_marginal_price:
+                            g_m = self.metering_marginal_price.get(own_ramp)
+                            if g_m is not None:
+                                m_ref = float(self.metering_marginal_price_ref.get(
+                                    own_ramp, float(m_cand),
+                                ))
+                                cost += (
+                                    self.metering_marginal_price_weight
+                                    * float(g_m) * (float(m_cand) - m_ref)
+                                )
+                        if self.vsl_meter_cross_price:
+                            h_c = self.vsl_meter_cross_price.get(own_ramp)
+                            if h_c is not None:
+                                m_ref2, v_ref2 = self.vsl_meter_cross_ref.get(
+                                    own_ramp, (0.0, vsl_max),
+                                )
+                                cost += self.vsl_meter_cross_weight * float(h_c) * (
+                                    (float(m_cand) - float(m_ref2))
+                                    * (float(v_cand) - float(v_ref2))
+                                )
+                    evals += 1
+                    if cost < best_cost:
+                        best_cost, best_v, best_m = cost, float(v_cand), m_cand
+                        best_flow_local = dict(first_flow)
+            vsl_out[key] = float(best_v)
+            if own_ramp is not None and best_m is not None:
+                preferred_meter[own_ramp] = float(best_m)
+            for o, fl in best_flow_local.items():
+                best_offramp_flow[o] = float(fl)
+
+        # link 대표 VSL(plant fallback·진단) = min seg — 7p 규약 유지.
+        seg_vals = [vsl_out.get(f"{link}__seg{i}", vsl_max) for i in range(n_seg)]
+        vsl_out[link] = float(min(seg_vals)) if seg_vals else vsl_max
+        # f→u 결합 캐시(선택 후보의 첫 substep off-ramp 유출) — 7p와 동일 규약.
+        for off_ramp in link_model.owned_offramps:
+            self._wu._last_offramp_flow[off_ramp] = float(
+                best_offramp_flow.get(off_ramp, 0.0)
+            )
+        self._wu._last_offramp_flow[link] = float(
+            sum(best_offramp_flow.get(o, 0.0) for o in link_model.owned_offramps)
+        )
+        self._wu._has_last_offramp_flow = True
+
+        # ---- 예산 simplex 사영(승인안 (ii)): Σmeter = ω_F·N_UF* (equality) ----
+        meter_out: Dict[str, float] = dict(preferred_meter)
+        nuf_mode = str(getattr(
+            self.cfg.mpc, "wu_faithful_nuf_coordination_mode", "equality",
+        ))
+        if leader_present and nuf_mode == "equality" and preferred_meter:
+            caps = {r: float(net.ramp_capacity_veh_h[r]) for r in preferred_meter}
+            cap_sum = sum(caps.values())
+            omega_f = float(self._wu._omega_f.get(link, 0.0))
+            n_uf_star = float(getattr(leader, "N_UF_star", 0.0))
+            budget = min(max(omega_f * n_uf_star, 0.0), cap_sum)
+            total_pref = sum(preferred_meter.values())
+            if total_pref <= 1.0e-9:
+                meter_out = {
+                    r: budget * caps[r] / max(cap_sum, 1.0e-9) for r in preferred_meter
+                }
+            else:
+                scale = budget / total_pref
+                meter_out = {
+                    r: min(caps[r], m * scale) for r, m in preferred_meter.items()
+                }
+                deficit = budget - sum(meter_out.values())
+                if deficit > 1.0e-9:
+                    for r in sorted(
+                        meter_out, key=lambda x: caps[x] - meter_out[x], reverse=True,
+                    ):
+                        room = caps[r] - meter_out[r]
+                        add = min(room, deficit)
+                        meter_out[r] += add
+                        deficit -= add
+                        if deficit <= 1.0e-9:
+                            break
+            self._seg13_diag[f"wu_seg13_budget_{link}"] = float(budget)
+            self._seg13_diag[f"wu_seg13_presplit_{link}"] = float(total_pref)
+            self._seg13_diag[f"wu_seg13_postsplit_{link}"] = float(
+                sum(meter_out.values())
+            )
+        self._seg13_diag[f"wu_seg13_evals_{link}"] = float(evals)
+        return vsl_out, meter_out, evals
+
     # ---------- freeway agent: 진짜 ramp metering 탐색 (핵심 신규) ----------
 
     def _solve_freeway_agent_metered(
@@ -2929,6 +3194,7 @@ class WuFaithfulFollower:
     ) -> tuple[ControlAction, int, bool, float, int]:
         net = self.cfg.network
         self._wu._repair_diagnostics = {}
+        self._seg13_diag = {}
         control = ControlAction.uncontrolled(self.cfg)
         control.green_times = dict(previous.green_times)
         control.vsl = dict(previous.vsl)
@@ -3019,14 +3285,25 @@ class WuFaithfulFollower:
             # step 간 적분(수렴 후 λ_next 계산, 아래 post-loop). PFO(leader=None)는 dual_active=False라 무영향.
             # freeway agent(Jacobi 내부): VSL solve만 cheap하게 — VSL은 여기서 inert이고
             # metering 좌표하강은 비싸므로 합의 루프 밖에서 1회만 돈다(아래 post-loop).
+            # 13-player(segment_agents): segment agent 8개가 (VSL, meter)를 루프 안에서
+            # best-response + 예산 사영 — meter 합의가 iteration을 필요로 하므로 in-loop.
+            new_meter: Dict[str, float] = {}
             for link in net.freeway_links:
-                vsl_dict, _, e = self._solve_freeway_agent_local(
-                    link, state, coupling, demand, snapshot,
-                )
+                if self.segment_agents and self.metering_enabled:
+                    vsl_dict, meter_dict, e = self._solve_freeway_segment_agents(
+                        link, state, coupling, demand, snapshot, leader,
+                    )
+                    new_meter.update(meter_dict)
+                else:
+                    vsl_dict, _, e = self._solve_freeway_agent_local(
+                        link, state, coupling, demand, snapshot,
+                    )
                 new_vsl.update(vsl_dict)
                 evals += e
             control.green_times.update(new_green)
             control.vsl.update(new_vsl)
+            if new_meter:
+                control.ramp_metering.update(new_meter)
             # outgoing 결합변수 갱신 후 under-relaxation 합성.
             predicted = self._wu._coupling(state, control, demand)
             relaxed = {
@@ -3156,6 +3433,10 @@ class WuFaithfulFollower:
             inflow_outflow_allocation={},
         )
         for link in net.freeway_links:
+            if self.segment_agents and self.metering_enabled:
+                # 13-player: VSL·metering은 Jacobi 합의 안에서 segment agent들이 이미
+                # commit(예산 사영 포함) — post-loop 좌표하강 생략.
+                continue
             if self.metering_enabled:
                 vsl_dict, meter_dict, e = self._solve_freeway_agent_metered(
                     link, state, coupling, demand, meter_snapshot, leader,
@@ -3274,6 +3555,9 @@ class WuFaithfulFollower:
         control.diagnostics["wu_faithful_offsets_searched_off_zero"] = float(offsets_off_zero)
         control.diagnostics["wu_faithful_offset_evals"] = float(offset_evals)
         control.diagnostics.update(self._wu._repair_diagnostics)
+        if self.segment_agents:
+            control.diagnostics["wu_seg13_active"] = 1.0
+            control.diagnostics.update(self._seg13_diag)
         return control, iteration, converged, float(residual), evals
 
     # ---------- 외부 인터페이스 (DistributedCoordinator.solve와 동일) ----------
