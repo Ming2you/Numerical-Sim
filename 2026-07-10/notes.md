@@ -231,6 +231,22 @@ sweet_190, T=7200, APJOINT 디폴트(SPLIT-v2 d3, link-share density), 앵커 TT
   플래그십은 worker가 base follower를 재구성하는 문제로 serial 강제 — 수선 계획: worker
   payload에 follower 상태 직렬화 + wave 병렬(웨이브 간 incumbent 공유) + dedupe 사전 그룹핑.
 
+# POLISH 붕괴 + optimizer's curse 메커니즘 (심야 2차)
+
+- **P-CENT-POLISH = 20975 ≈ 맨 P-CENT(20889)** — "구성상 ≥플래그십" 보장은 per-step·
+  proxy(9분+far) 기준까지만; 폐루프에서 grid가 매 스텝 proxy-편향 이웃으로 이탈, 누적 붕괴.
+  좋은 중심을 줘도 같은 어트랙터 수렴 = grid argmin이 중심 무관하게 proxy 편향을 따름.
+- **핵심 발견(분해=prior의 메커니즘)**: 같은 9분+far proxy로 d0 플래그십은 14901(정상),
+  polish는 20975(붕괴) — 차이는 탐색 폭. 2-D leader 공간은 거친 proxy에 순위-강건,
+  ~300 per-lever 이웃 argmin은 proxy 오차에 과적합(optimizer's curse). 동일 예산에서
+  중앙은 proxy 거칠게(→curse) 또는 탐색 좁게(→커버리지 상실) 중 택일 강제.
+- 잔여 카드: DEEP-POLISH(채점 18분, ~200s/step 오프라인 상한) — 회수 기대 낮아 보류 권고.
+- **depth 스윕 종합(13p)**: d0+far 14901/31.8s · d1 14750/39.0s · d2 14956/44.5s ·
+  d3 14936/54.2s · d4 15512(요철) · d5 14563/63.9s — d4 제외 고원. **권고: 플래그십 d1**
+  (동률 중 최저비용−28%, d5 우위는 비단조 구간 단일런이라 보류). CAND81 15115 기각.
+  발견: 7p d0 붕괴 vs 13p d0 동률 = **ỹ 교환이 leader 원시야(deep V) 의존 제거**.
+- 진행 중: H 스윕(H1d1/H2d1/H1d0 — 7p에선 H단축 손해였으나 13p는 ỹ가 받침 가설).
+
 # 13-player 재구축 진행 (feature/segment-agents-13p, worktree 격리)
 
 - 1단계 완료(34db7de): segment_local_plant.py(비트 일치 보장 설계) + R_F merge 2→3 +
