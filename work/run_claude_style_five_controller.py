@@ -532,11 +532,12 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
         controller.candidate_dedupe_enabled = True  # A1: 같은 N_UF 후보 solve+rollout 재사용
     if _os.environ.get("PRICE_LITE") == "1" and hasattr(controller, "price_lite"):
         controller.price_lite = True  # B: baseline+one-sided+스텐실 재활용+얕은 가격 rollout
-    if _os.environ.get("SEG13") == "1" and hasattr(controller, "nash_solver") and hasattr(
-        controller.nash_solver, "segment_agents"
-    ):
+    if _os.environ.get("SEG13") == "1":
         # 13-player(2026-07-10 승인): freeway를 segment agent 8개로 분해 + 예산 simplex 사영.
-        controller.nash_solver.segment_agents = True
+        # P-STACK 계열은 .nash_solver, PFO(WU-FAITHFUL-FOLLOWER)는 follower 자체가 controller.
+        _seg_target = getattr(controller, "nash_solver", controller)
+        if hasattr(_seg_target, "segment_agents"):
+            _seg_target.segment_agents = True
     if _os.environ.get("NUF_DUAL") == "1":
         # 8단계 ablation: N_UF 총량을 equality 사영 대신 λ_UF dual(step 간 적분)로 추적.
         cfg.mpc.wu_faithful_nuf_coordination_mode = "dual"
