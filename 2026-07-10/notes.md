@@ -215,6 +215,22 @@ sweet_190, T=7200, APJOINT 디폴트(SPLIT-v2 d3, link-share density), 앵커 TT
 - 잔여 TODO: 매트릭스에 WU-CD-F 열 추가, N_P 준수 그림(궤적), 원고 결과절 집필,
   플래그십 구성 재현런 2회(±300 방어), notes의 190 xval 표는 outputs/_13p/xval/ 참조.
 
+# 천장 탐색 종결 — P-CENT+far도 계층에 패배 (심야 최종)
+
+- far를 모듈 함수 승격(stackelberg_mpc.mfd_far_cost_to_go) 후 CentralizedMPC(proposed)
+  채점 2경로에 이식 + runner P-CENT ID(커밋). **P-CENT+far = 20889**(completed 18813,
+  mean_solve 33.0s) — legacy(23845)보다 −2956(원시야 가치 재확인)이나 플래그십(14936)에
+  −5953 열세. **새 망에서 계층(14936)이 모든 중앙집중 구현을 상회 = 경험적 프런티어.**
+- 논문 주장(신규): 계층 분해는 중앙의 근사가 아니라 동등 예산에서 중앙을 이김 —
+  분해가 탐색 prior(follower 저차원 국소해 + leader 2-D 탐색 vs 중앙의 고차원 격자 낭비).
+  단서: P-CENT는 scipy 부재로 grid fallback·구망 튜닝 — "실용 예산의 중앙 구현들 대비"로 한정.
+- 병렬성 정리(원고 scalability용): PFO도 Jacobi라 agent-병렬(직렬 주장 금지). P-Stack
+  증가분(후보 25-way·가격 30-way)이 전부 독립 축 → 병렬 벽시계 같은 자릿수·n-무관,
+  잔여 격차 = 전역 rollout 시간축 직렬성. P-CENT는 병렬 최용이(무상태 후보)나 총연산
+  O(n²)라 W∝n² 필요 — n=13은 교차점 아래. 병렬 인프라는 base에 기존재(backend flag),
+  플래그십은 worker가 base follower를 재구성하는 문제로 serial 강제 — 수선 계획: worker
+  payload에 follower 상태 직렬화 + wave 병렬(웨이브 간 incumbent 공유) + dedupe 사전 그룹핑.
+
 # 13-player 재구축 진행 (feature/segment-agents-13p, worktree 격리)
 
 - 1단계 완료(34db7de): segment_local_plant.py(비트 일치 보장 설계) + R_F merge 2→3 +
