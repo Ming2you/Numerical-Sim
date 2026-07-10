@@ -139,6 +139,9 @@ sweet_190, T=7200, APJOINT 디폴트(SPLIT-v2 d3, link-share density), 앵커 TT
 - 결합 해석: 대규모망은 미세 분해가 강제되므로 "입자도↑ → 조정 가치↑"가 hierarchical
   control의 존재 증명. 단 7p leader≈0은 새 망·190 한정(구 망 190에선 P-Stack≫PFO —
   4×7 매트릭스), "거칠수록 가치 감소"까지만 주장.
+- **NC(새 망) = 29611** — 13p PFO(29392)는 NC 대비 +0.7%로 사실상 동급(과방류 병리가
+  NC의 전량방류와 같은 breakdown 어트랙터). 개선율: 13p equality +40.5%, 7p 계열 +47%.
+  논문 라인: "segment 분해 + 무조정 = 무제어로 퇴화, 계층 조정이 +40.5% 복원".
 - 진행 중: seg13 v1(incumbent 가격-레벨, SEG13_V1=1) — 7p 플래핑 병리 재현 A/B.
 
 # 13-player 재구축 진행 (feature/segment-agents-13p, worktree 격리)
