@@ -256,6 +256,11 @@ class WuFaithfulFollower:
         # 갱신된다. False(SEG13_TRAJ=0)면 v0의 hold-constant(현 상태 동결) — A/B용.
         self.seg13_traj_exchange: bool = True
         self._seg_traj: Dict[str, dict] = {}
+        # radius-1 국소 rollout(PFO 강화 변형, env SEG13_NBR): 자기 ±1 seg를 함께 전진시키고
+        # 그 차량수를 w_nbr 가중으로 비용에 포함 — own-TTS의 방류 무차별(보존식 변위)을
+        # leader 없이 깨는 정직한 최대 분산 기준선. 플래그십(leader)은 가격이 이 역할을
+        # 하므로 기본 0.0(OFF) — 켜면 가격 기여 귀속이 흐려진다.
+        self.seg13_neighbor_weight: float = 0.0
         # ---------- J1(2026-07-06): joint offset 패턴 directive ----------
         # F3 판정: offset은 joint 결합 변수라 per-signal 가격(편미분)이 구조적으로 0.
         # J1 = leader가 corridor 패턴(여러 신호 offset 조합)을 통째로 rollout 평가해
@@ -2369,6 +2374,16 @@ class WuFaithfulFollower:
                     ramp_q = float(ramp_q0.get(own_ramp, 0.0)) if own_ramp else 0.0
                     blocked = 0.0
                     first_flow: Dict[str, float] = {}
+                    # radius-1 이웃 상태(활성 시): ±1 seg를 함께 전진(2차 이웃은 동결 y).
+                    nbr_states: Dict[int, SegmentLocalState] = {}
+                    if self.seg13_neighbor_weight > 0.0:
+                        for j in (seg - 1, seg + 1):
+                            if 0 <= j < n_seg:
+                                nbr_states[j] = SegmentLocalState(
+                                    rho=float(rhos0[j]), speed=float(speeds0[j]),
+                                    prev_lane=float(lanes0[j]),
+                                    origin_queue=origin_q0 if j == 0 else 0.0,
+                                )
                     cost = 0.0
                     tr_rho: List[float] = []
                     tr_v: List[float] = []
@@ -2405,9 +2420,34 @@ class WuFaithfulFollower:
                                 )
                             own_release[own_ramp] = r_own
                         tr_rel.append(float(own_release.get(own_ramp, 0.0)) if own_ramp else 0.0)
+                        # radius-1: 이웃을 time-t 상태 기준으로 동시(자코비) 전진 —
+                        # 이웃 방류는 동결 스케줄, 이웃 차량수는 w_nbr 가중 비용.
+                        new_nbr: Dict[int, SegmentLocalState] = {}
+                        if nbr_states:
+                            frz_rel = frozen.ramp_release[
+                                min(t, len(frozen.ramp_release) - 1)
+                            ]
+                            cur_all: Dict[int, SegmentLocalState] = dict(nbr_states)
+                            cur_all[seg] = own
+                            for j, st_j in nbr_states.items():
+                                agent_j = agents[j]
+                                rel_j = {
+                                    r: max(0.0, float(frz_rel.get(r, 0.0)))
+                                    for r in agent_j.owned_ramps
+                                }
+                                ov = {k: v for k, v in cur_all.items() if k != j}
+                                nst, _, veh_j = segment_substep_local(
+                                    agent_j, frozen, t, st_j, rel_j, cand, demand,
+                                    extra_overrides=ov,
+                                )
+                                new_nbr[j] = nst
+                                cost += self.seg13_neighbor_weight * float(veh_j) * dt_h
                         own, off_flow, veh = segment_substep_local(
                             agent, frozen, t, own, own_release, cand, demand,
+                            extra_overrides=nbr_states or None,
                         )
+                        if nbr_states:
+                            nbr_states = new_nbr
                         if t == 0:
                             first_flow = dict(off_flow)
                         cost += (

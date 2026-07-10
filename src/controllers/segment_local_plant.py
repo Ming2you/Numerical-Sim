@@ -119,17 +119,26 @@ def segment_substep_local(
     own_ramp_release: Mapping[str, float],
     control: ControlAction,
     demand,
+    extra_overrides: Optional[Mapping[int, SegmentLocalState]] = None,
 ) -> Tuple[SegmentLocalState, Dict[str, float], float]:
     """segment agent 1 substep 전진 — 반환 (다음 자기 상태, 자기 seg off-ramp 유출, 자기 seg 차량수).
 
     이웃 배열은 frozen.at(t)로 채우고 자기 seg 항목만 own/own_ramp_release로 덮어쓴 뒤
     `freeway_substep_local`을 호출, index=agent.seg 결과만 취한다.
+    extra_overrides: radius-국소 rollout용 — frozen 대신 함께 전진 중인 이웃 seg의
+    현재 상태를 주입(PFO 강화 변형; 기본 None이면 순수 동결-이웃).
     """
     rhos, speeds, prev_lanes, origin_q, releases, occupancy, cap = frozen.at(t)
     seg = agent.seg
     rhos[seg] = float(own.rho)
     speeds[seg] = float(own.speed)
     prev_lanes[seg] = float(own.prev_lane)
+    if extra_overrides:
+        for j, st in extra_overrides.items():
+            if 0 <= int(j) < len(rhos) and int(j) != seg:
+                rhos[int(j)] = float(st.rho)
+                speeds[int(j)] = float(st.speed)
+                prev_lanes[int(j)] = float(st.prev_lane)
     if agent.owns_origin_queue:
         origin_q = float(own.origin_queue)
     for ramp in agent.owned_ramps:
