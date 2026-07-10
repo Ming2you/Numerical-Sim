@@ -585,6 +585,9 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
     if _os.environ.get("FH"):
         # 헤드룸 탐침: freeway follower 예측 horizon(steps) 연장.
         cfg.freeway_follower.freeway_prediction_horizon_steps = int(_os.environ["FH"])
+    if _os.environ.get("G_FW"):
+        # far freeway drain 계수 재보정 probe(8-seg: 본선 2차항이 자유류까지 과대 계상 가설).
+        cfg.mpc.leader_mfd_far_g_fw = float(_os.environ["G_FW"])
     if _os.environ.get("NUF_DUAL") == "1":
         # 8단계 ablation: N_UF 총량을 equality 사영 대신 λ_UF dual(step 간 적분)로 추적.
         cfg.mpc.wu_faithful_nuf_coordination_mode = "dual"
