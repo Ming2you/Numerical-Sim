@@ -103,6 +103,12 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         self.offset_price_enabled: bool = False
         self.offset_price_delta_sec: Optional[float] = None  # None=cycle/8(그리드 1칸)
         self.offset_price_refresh_threshold_sec: float = 7.0  # 그리드 반칸
+        # ---------- SPSA(2026-07-10): 가격층 O(n) — per-lever FD를 동시섭동으로 대체 ----------
+        # per-lever 유한차분은 lever수(O(n))×전역 rollout(O(n)) = refresh당 O(n²). SPSA(Spall
+        # 1992)는 전 lever를 동시에 ±δ 섭동한 rollout 쌍 k개로 전 lever gradient를 한꺼번에
+        # 추정(교차항은 독립 부호로 기대 0) → rollout 2k회 고정 = O(n). adjoint의 실용 대체.
+        self.price_spsa_enabled: bool = False
+        self.price_spsa_pairs: int = 4
         # ---------- JOINT(2026-07-09): bilinear cross-term 가격 ----------
         # per-lever 선형가격이 못 담는 lever쌍 교차곡률 h_ext = h_global − h_local(4-corner
         # 스텐실)를 하달. green×offset(non-ramp 신호): follower가 joint 2D 공동탐색해야 cross가
@@ -514,6 +520,81 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         states, ttt = self._predict(state, control, forecast)
         return self._price_ttt(states, ttt)
 
+    def _spsa_global_price_gradients(
+        self,
+        state: TrafficState,
+        previous: ControlAction,
+        forecast: List[DemandStep],
+        levers: List[tuple],
+        meter_cert_probe: Optional[Dict[str, float]] = None,
+    ) -> tuple[Dict[tuple, float], float]:
+        """SPSA(Spall 1992) — 전 lever 동시 ±δ rollout 쌍 k개로 전 lever의 전역 TTT gradient.
+
+        levers: (kind, key, v_minus, v_plus, span). per-lever FD의 O(lever)회 rollout을 2k회
+        고정으로 대체(가격층 O(n)). 교차 lever 항은 독립 Rademacher 부호로 기대 0(노이즈는
+        k=price_spsa_pairs로 제어). refresh count 시드로 결정론적. meter_cert_probe가 있으면
+        전 ramp 동시 +δ rollout의 본선 최대 예측밀도(개별 +δ보다 보수적)를 cert용으로 반환."""
+        import numpy as np
+
+        net = self.cfg.network
+        total_green = float(net.effective_green_total)
+        cycle = float(net.cycle_length)
+        k = max(1, int(self.price_spsa_pairs))
+
+        def build(sign_map: Dict[tuple, float]) -> ControlAction:
+            c = previous.copy()
+            c.green_times = dict(previous.green_times)
+            c.ramp_metering = dict(previous.ramp_metering)
+            c.vsl = dict(previous.vsl)
+            c.offsets = dict(previous.offsets)
+            touched_links: Dict[str, float] = {}
+            for kind, key, v_minus, v_plus, _span in levers:
+                v = v_plus if sign_map[(kind, key)] > 0 else v_minus
+                if kind == "green":
+                    c.green_times[f"{key}_p1"] = float(v)
+                    c.green_times[f"{key}_p2"] = float(total_green - v)
+                elif kind == "meter":
+                    c.ramp_metering[key] = float(v)
+                elif kind == "vsl":
+                    c.vsl[key] = float(v)
+                    link = key.split("__seg")[0]
+                    touched_links[link] = min(touched_links.get(link, float("inf")), float(v))
+                elif kind == "offset":
+                    c.offsets[key] = float(v) % cycle
+            for link, vmin in touched_links.items():
+                c.vsl[link] = min(float(c.vsl.get(link, vmin)), vmin)
+            return c
+
+        g_acc: Dict[tuple, float] = {(kd, ky): 0.0 for kd, ky, _, _, _ in levers}
+        for s_idx in range(k):
+            rng = np.random.default_rng(100003 * int(self._signal_price_refresh_count) + s_idx)
+            signs = {
+                (kd, ky): (1.0 if rng.random() >= 0.5 else -1.0)
+                for kd, ky, _, _, _ in levers
+            }
+            states_hi, t_hi_raw = self._predict(state, build(signs), forecast)
+            states_lo, t_lo_raw = self._predict(
+                state, build({q: -s for q, s in signs.items()}), forecast
+            )
+            t_hi = self._price_ttt(states_hi, t_hi_raw)
+            t_lo = self._price_ttt(states_lo, t_lo_raw)
+            for kd, ky, _vm, _vp, span in levers:
+                if span > 1.0e-9:
+                    g_acc[(kd, ky)] += (t_hi - t_lo) * signs[(kd, ky)] / span
+        g = {q: v / float(k) for q, v in g_acc.items()}
+        rho_joint = 0.0
+        if meter_cert_probe:
+            c = previous.copy()
+            c.ramp_metering = dict(previous.ramp_metering)
+            for ramp, m_hi in meter_cert_probe.items():
+                c.ramp_metering[ramp] = float(m_hi)
+            probe_states, _ = self._predict(state, c, forecast)
+            for s in probe_states:
+                for _link, dens in s.freeway_density.items():
+                    if dens:
+                        rho_joint = max(rho_joint, float(max(dens)))
+        return g, rho_joint
+
     # 상단 arterial A-B-C / 하단 D-(E)-F / 수직 A-D·C-F(E는 비신호 통과) — 진행방향 lag seed용.
     _OFFSET_CORRIDORS = (("A", "B", "C"), ("D", "F"), ("A", "D"), ("C", "F"))
 
@@ -775,6 +856,51 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         meta: Dict[str, float] = {"wu_b2_price_enabled": float(self.signal_price_enabled)}
 
         # ---- green 채널(B2) ----
+        # ---- SPSA(가격층 O(n)): 4채널 per-lever FD의 전역 rollout을 동시섭동 쌍 k개로 대체 ----
+        # d_local(국소 채점)·trust·cross-term은 기존 그대로 — 전역 g_i의 추정 방식만 교체.
+        spsa_g: Optional[Dict[tuple, float]] = None
+        spsa_rho_joint = float("inf")
+        if bool(getattr(self, "price_spsa_enabled", False)):
+            spsa_levers: List[tuple] = []
+            spsa_meter_probe: Dict[str, float] = {}
+            if self.signal_price_enabled:
+                d_g = float(self.signal_price_delta_sec)
+                for signal, p1_0 in op_green.items():
+                    lo_v, hi_v = clamp(p1_0 - d_g), clamp(p1_0 + d_g)
+                    spsa_levers.append(("green", signal, lo_v, hi_v, hi_v - lo_v))
+            if self.metering_price_enabled:
+                d_m0 = float(self.metering_price_delta_veh_h)
+                for ramp, x0 in op_meter.items():
+                    cap = ramp_caps[ramp]
+                    d_r = d_m0 if self.metering_price_trust_frac is None else max(
+                        d_m0, float(self.metering_price_trust_frac) * cap
+                    )
+                    lo_v, hi_v = max(0.0, x0 - d_r), min(cap, x0 + d_r)
+                    spsa_levers.append(("meter", ramp, lo_v, hi_v, hi_v - lo_v))
+                    spsa_meter_probe[ramp] = hi_v
+            if self.vsl_price_enabled:
+                d_v = float(self.vsl_price_delta_kmh)
+                for key, x0 in op_vsl.items():
+                    lo_v, hi_v = max(vsl_lower, x0 - d_v), min(vsl_upper, x0 + d_v)
+                    spsa_levers.append(("vsl", key, lo_v, hi_v, hi_v - lo_v))
+            if self.offset_price_enabled:
+                d_o = (
+                    float(self.offset_price_delta_sec)
+                    if self.offset_price_delta_sec is not None else cycle / 8.0
+                )
+                for signal, off0 in op_offset.items():
+                    spsa_levers.append(
+                        ("offset", signal, (off0 - d_o) % cycle, (off0 + d_o) % cycle, 2.0 * d_o)
+                    )
+            if spsa_levers:
+                spsa_g, spsa_rho_joint = self._spsa_global_price_gradients(
+                    state, previous, forecast, spsa_levers,
+                    spsa_meter_probe if spsa_meter_probe else None,
+                )
+                meta["wu_spsa_enabled"] = 1.0
+                meta["wu_spsa_pairs"] = float(self.price_spsa_pairs)
+                meta["wu_spsa_levers"] = float(len(spsa_levers))
+
         if self.signal_price_enabled:
             delta = float(self.signal_price_delta_sec)
             pts: Dict[str, tuple[float, float, float]] = {}
@@ -792,13 +918,17 @@ class StackelbergWuMeteredController(StackelbergMPCController):
                 if two_delta <= 1.0e-9:
                     g_ext = 0.0
                 else:
-                    ttt_hi, bar_hi = self._global_rollout_metrics_with_green(
-                        state, previous, forecast, signal, p_hi,
-                    )
-                    ttt_lo, bar_lo = self._global_rollout_metrics_with_green(
-                        state, previous, forecast, signal, p_lo,
-                    )
-                    g_i = (ttt_hi - ttt_lo) / two_delta
+                    if spsa_g is not None:
+                        g_i = float(spsa_g.get(("green", signal), 0.0))
+                        bar_hi = bar_lo = 0.0
+                    else:
+                        ttt_hi, bar_hi = self._global_rollout_metrics_with_green(
+                            state, previous, forecast, signal, p_hi,
+                        )
+                        ttt_lo, bar_lo = self._global_rollout_metrics_with_green(
+                            state, previous, forecast, signal, p_lo,
+                        )
+                        g_i = (ttt_hi - ttt_lo) / two_delta
                     cost_lo, cost_hi = local_costs[signal]
                     g_ext = g_i - (cost_hi - cost_lo) / two_delta
                     if self.barrier_price_enabled:
@@ -855,13 +985,19 @@ class StackelbergWuMeteredController(StackelbergMPCController):
                     g_ext = 0.0
                     m_certs[ramp] = False  # 측정 불능이면 방류 증가 미인증(보수적)
                 else:
-                    ttt_hi, bar_hi, rho_hi = self._global_rollout_metrics_with_metering(
-                        state, previous, forecast, ramp, m_hi,
-                    )
-                    ttt_lo, bar_lo, _ = self._global_rollout_metrics_with_metering(
-                        state, previous, forecast, ramp, m_lo,
-                    )
-                    g_i = (ttt_hi - ttt_lo) / span
+                    if spsa_g is not None:
+                        g_i = float(spsa_g.get(("meter", ramp), 0.0))
+                        bar_hi = bar_lo = 0.0
+                        # cert: 전 ramp 동시 +δ rollout의 최대 밀도(개별보다 보수적).
+                        rho_hi = float(spsa_rho_joint)
+                    else:
+                        ttt_hi, bar_hi, rho_hi = self._global_rollout_metrics_with_metering(
+                            state, previous, forecast, ramp, m_hi,
+                        )
+                        ttt_lo, bar_lo, _ = self._global_rollout_metrics_with_metering(
+                            state, previous, forecast, ramp, m_lo,
+                        )
+                        g_i = (ttt_hi - ttt_lo) / span
                     cost_lo, cost_hi = local_m[ramp]
                     g_ext = g_i - (cost_hi - cost_lo) / span
                     if self.barrier_price_enabled:
@@ -905,13 +1041,16 @@ class StackelbergWuMeteredController(StackelbergMPCController):
             for signal, off0 in op_offset.items():
                 o_lo, o_hi = o_requests[signal]
                 span = 2.0 * delta_o
-                ttt_hi = self._global_rollout_ttt_with_offset(
-                    state, previous, forecast, signal, o_hi,
-                )
-                ttt_lo = self._global_rollout_ttt_with_offset(
-                    state, previous, forecast, signal, o_lo,
-                )
-                g_i = (ttt_hi - ttt_lo) / span
+                if spsa_g is not None:
+                    g_i = float(spsa_g.get(("offset", signal), 0.0))
+                else:
+                    ttt_hi = self._global_rollout_ttt_with_offset(
+                        state, previous, forecast, signal, o_hi,
+                    )
+                    ttt_lo = self._global_rollout_ttt_with_offset(
+                        state, previous, forecast, signal, o_lo,
+                    )
+                    g_i = (ttt_hi - ttt_lo) / span
                 cost_lo, cost_hi = local_o[signal]
                 g_ext = g_i - (cost_hi - cost_lo) / span
                 o_prices[signal] = float(g_ext)
@@ -1054,13 +1193,16 @@ class StackelbergWuMeteredController(StackelbergMPCController):
                 if span <= 1.0e-9:
                     g_ext = 0.0
                 else:
-                    ttt_hi = self._global_rollout_ttt_with_vsl(
-                        state, previous, forecast, link, key, v_hi, vsl_upper,
-                    )
-                    ttt_lo = self._global_rollout_ttt_with_vsl(
-                        state, previous, forecast, link, key, v_lo, vsl_upper,
-                    )
-                    g_i = (ttt_hi - ttt_lo) / span
+                    if spsa_g is not None:
+                        g_i = float(spsa_g.get(("vsl", key), 0.0))
+                    else:
+                        ttt_hi = self._global_rollout_ttt_with_vsl(
+                            state, previous, forecast, link, key, v_hi, vsl_upper,
+                        )
+                        ttt_lo = self._global_rollout_ttt_with_vsl(
+                            state, previous, forecast, link, key, v_lo, vsl_upper,
+                        )
+                        g_i = (ttt_hi - ttt_lo) / span
                     lc = local_v.get(link, [])
                     if req_idx + 1 < len(lc):
                         d_local = (lc[req_idx] - lc[req_idx + 1]) / span

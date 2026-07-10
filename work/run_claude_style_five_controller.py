@@ -500,6 +500,10 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
     controller = make_controller(controller_id, cfg)
     if _os.environ.get("PRICE_ITER") and hasattr(controller, "price_iter_max"):
         controller.price_iter_max = int(_os.environ["PRICE_ITER"])  # B: leader↔follower dual-ascent 반복 횟수
+    if _os.environ.get("PRICE_SPSA") == "1" and hasattr(controller, "price_spsa_enabled"):
+        controller.price_spsa_enabled = True  # SPSA: per-lever FD → 동시섭동(가격층 O(n))
+    if _os.environ.get("SPSA_K") and hasattr(controller, "price_spsa_pairs"):
+        controller.price_spsa_pairs = int(_os.environ["SPSA_K"])
     if _os.environ.get("MFD_FAR_PRICE") == "1" and hasattr(controller, "price_far_enabled"):
         controller.price_far_enabled = True  # E1: 가격 FD에도 far 합산(MFD_FAR=1 필요)
     if _os.environ.get("LINK_SHARE") and hasattr(controller, "nuf_link_share_mode"):
