@@ -251,6 +251,11 @@ class WuFaithfulFollower:
         # 배제(가격은 예산 내 배분만 — 7p 플래그십 규약). v1=True면 incumbent도
         # g_meter/h로 레벨 조절(7p에서 레짐 플래핑 병리를 낸 구성) — env SEG13_V1=1.
         self.seg13_meter_price_standing: bool = False
+        # 궤적 교환(Wu §IV-D의 ỹ): Jacobi iteration마다 각 segment agent가 자기 seg의
+        # 예측 입력궤적(ρ,v,λ,release)을 내놓고, 다음 iteration의 동결 y가 α=0.5 블렌딩으로
+        # 갱신된다. False(SEG13_TRAJ=0)면 v0의 hold-constant(현 상태 동결) — A/B용.
+        self.seg13_traj_exchange: bool = True
+        self._seg_traj: Dict[str, dict] = {}
         # ---------- J1(2026-07-06): joint offset 패턴 directive ----------
         # F3 판정: offset은 joint 결합 변수라 per-signal 가격(편미분)이 구조적으로 0.
         # J1 = leader가 corridor 패턴(여러 신호 offset 조합)을 통째로 rollout 평가해
@@ -2279,11 +2284,28 @@ class WuFaithfulFollower:
             r: max(0.0, float(snapshot.ramp_metering.get(r, net.ramp_capacity_veh_h[r])))
             for r in link_model.owned_ramps
         }
-        frozen = FrozenLinkTrajectory(
-            rhos=[rhos0], speeds=[speeds0], prev_lanes=[lanes0],
-            origin_queue=[origin_q0], ramp_release=[release0],
-            occupancy=[occ0], offramp_capacity=[offramp_cap0],
-        )
+        # 궤적 교환(ỹ): 직전 Jacobi iteration의 예측 입력궤적이 있으면 그걸 동결 y로 쓴다.
+        # 없으면(첫 iteration) 현 상태 hold-constant. occupancy(urban 소유)·유출 cap은
+        # 항상 state 동결 — 교환 대상은 본선 (ρ,v,λ)와 owner 방류 스케줄만.
+        traj_prev = self._seg_traj.get(link) if self.seg13_traj_exchange else None
+        if traj_prev is not None and traj_prev.get("rhos"):
+            t_len = len(traj_prev["rhos"])
+            frozen = FrozenLinkTrajectory(
+                rhos=[list(r) for r in traj_prev["rhos"]],
+                speeds=[list(r) for r in traj_prev["speeds"]],
+                prev_lanes=[list(r) for r in traj_prev["lanes"]],
+                origin_queue=[origin_q0 for _ in range(t_len)],
+                ramp_release=[dict(r) for r in traj_prev["release"]],
+                occupancy=[dict(occ0) for _ in range(t_len)],
+                offramp_capacity=[dict(offramp_cap0) for _ in range(t_len)],
+            )
+            self._seg13_diag[f"wu_seg13_traj_used_{link}"] = 1.0
+        else:
+            frozen = FrozenLinkTrajectory(
+                rhos=[rhos0], speeds=[speeds0], prev_lanes=[lanes0],
+                origin_queue=[origin_q0], ramp_release=[release0],
+                occupancy=[occ0], offramp_capacity=[offramp_cap0],
+            )
         ramp_q0 = {
             r: max(0.0, float(state.ramp_queue.get(r, 0.0))) for r in link_model.owned_ramps
         }
@@ -2292,6 +2314,7 @@ class WuFaithfulFollower:
         vsl_out: Dict[str, float] = {}
         preferred_meter: Dict[str, float] = {}
         best_offramp_flow: Dict[str, float] = {}
+        agent_best_traj: Dict[int, tuple] = {}
         leader_present = (
             leader is not None and float(getattr(leader, "N_UF_star", 0.0)) > 0.0
         )
@@ -2321,6 +2344,7 @@ class WuFaithfulFollower:
                 m_cands = [None]
             best_cost, best_v, best_m = float("inf"), prev_v, None
             best_flow_local: Dict[str, float] = {}
+            best_traj: Optional[tuple] = None  # (rho[t], v[t], lane[t], rel[t]) — 입력시점 기록
             for v_cand in v_cands:
                 for m_cand in m_cands:
                     cand = ControlAction(
@@ -2342,7 +2366,15 @@ class WuFaithfulFollower:
                     blocked = 0.0
                     first_flow: Dict[str, float] = {}
                     cost = 0.0
+                    tr_rho: List[float] = []
+                    tr_v: List[float] = []
+                    tr_lane: List[float] = []
+                    tr_rel: List[float] = []
                     for t in range(substeps):
+                        # 궤적 교환용 입력시점 기록(substep t 시작 상태) — frozen.at(t) 의미와 정렬.
+                        tr_rho.append(float(own.rho))
+                        tr_v.append(float(own.speed))
+                        tr_lane.append(float(own.prev_lane))
                         own_release: Dict[str, float] = {}
                         if own_ramp is not None:
                             # release는 T_f 시작 reservoir만 본다(spec 3.4.3) — 계산 후 적재.
@@ -2368,6 +2400,7 @@ class WuFaithfulFollower:
                                     net.ramp_queue_max_veh, ramp_q + approach * dt_h,
                                 )
                             own_release[own_ramp] = r_own
+                        tr_rel.append(float(own_release.get(own_ramp, 0.0)) if own_ramp else 0.0)
                         own, off_flow, veh = segment_substep_local(
                             agent, frozen, t, own, own_release, cand, demand,
                         )
@@ -2417,11 +2450,52 @@ class WuFaithfulFollower:
                     if cost < best_cost:
                         best_cost, best_v, best_m = cost, float(v_cand), m_cand
                         best_flow_local = dict(first_flow)
+                        best_traj = (tr_rho, tr_v, tr_lane, tr_rel)
+            if best_traj is not None:
+                agent_best_traj[seg] = best_traj
             vsl_out[key] = float(best_v)
             if own_ramp is not None and best_m is not None:
                 preferred_meter[own_ramp] = float(best_m)
             for o, fl in best_flow_local.items():
                 best_offramp_flow[o] = float(fl)
+
+        # ---- 궤적 교환 저장: 각 agent의 best 예측 입력궤적을 다음 iteration의 y로 ----
+        # α=0.5 under-relaxation(루프의 coupling 블렌딩과 동일 규약)으로 진동을 누른다.
+        if self.seg13_traj_exchange and len(agent_best_traj) == n_seg:
+            alpha = 0.5
+            new_rhos = [
+                [float(agent_best_traj[j][0][t]) for j in range(n_seg)]
+                for t in range(substeps)
+            ]
+            new_speeds = [
+                [float(agent_best_traj[j][1][t]) for j in range(n_seg)]
+                for t in range(substeps)
+            ]
+            new_lanes = [
+                [float(agent_best_traj[j][2][t]) for j in range(n_seg)]
+                for t in range(substeps)
+            ]
+            new_release: List[Dict[str, float]] = []
+            for t in range(substeps):
+                rel_t = dict(release0)
+                for a in agents:
+                    if a.owned_ramps and a.seg in agent_best_traj:
+                        rel_t[a.owned_ramps[0]] = float(agent_best_traj[a.seg][3][t])
+                new_release.append(rel_t)
+            prev_stored = self._seg_traj.get(link)
+            if prev_stored is not None and len(prev_stored.get("rhos", [])) == substeps:
+                for t in range(substeps):
+                    for j in range(n_seg):
+                        new_rhos[t][j] = (1.0 - alpha) * prev_stored["rhos"][t][j] + alpha * new_rhos[t][j]
+                        new_speeds[t][j] = (1.0 - alpha) * prev_stored["speeds"][t][j] + alpha * new_speeds[t][j]
+                        new_lanes[t][j] = (1.0 - alpha) * prev_stored["lanes"][t][j] + alpha * new_lanes[t][j]
+                    for r in new_release[t]:
+                        old = float(prev_stored["release"][t].get(r, new_release[t][r]))
+                        new_release[t][r] = (1.0 - alpha) * old + alpha * new_release[t][r]
+            self._seg_traj[link] = {
+                "rhos": new_rhos, "speeds": new_speeds,
+                "lanes": new_lanes, "release": new_release,
+            }
 
         # link 대표 VSL(plant fallback·진단) = min seg — 7p 규약 유지.
         seg_vals = [vsl_out.get(f"{link}__seg{i}", vsl_max) for i in range(n_seg)]
@@ -3208,6 +3282,7 @@ class WuFaithfulFollower:
         net = self.cfg.network
         self._wu._repair_diagnostics = {}
         self._seg13_diag = {}
+        self._seg_traj = {}  # 궤적 교환은 solve 단위 — 후보 간 오염 방지.
         control = ControlAction.uncontrolled(self.cfg)
         control.green_times = dict(previous.green_times)
         control.vsl = dict(previous.vsl)

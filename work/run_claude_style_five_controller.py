@@ -538,6 +538,8 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
         _seg_target = getattr(controller, "nash_solver", controller)
         if hasattr(_seg_target, "segment_agents"):
             _seg_target.segment_agents = True
+        if _os.environ.get("SEG13_TRAJ") == "0" and hasattr(_seg_target, "seg13_traj_exchange"):
+            _seg_target.seg13_traj_exchange = False  # v0(hold-constant) 재현 A/B용
     if _os.environ.get("NUF_DUAL") == "1":
         # 8단계 ablation: N_UF 총량을 equality 사영 대신 λ_UF dual(step 간 적분)로 추적.
         cfg.mpc.wu_faithful_nuf_coordination_mode = "dual"
