@@ -110,6 +110,22 @@ sweet_190, T=7200, APJOINT 디폴트(SPLIT-v2 d3, link-share density), 앵커 TT
 - 앵커 이동(11893→11458)은 병렬 세션과 교차 확인된 사실 — 7/9 표준구성 커밋(8c9f3b2/2f08e3b)
   유력, 논문 수치 확정 전 커밋 귀속 1런 권장.
 
+# 13-player 3점 결과 (새 망 R_F merge seg3, sweet_190, OPT12 — 사용자 지시로 조기 실전 투입)
+
+| 구성 | TTT | urban/freeway TTT | completed | 비고 |
+|---|---:|---|---:|---|
+| 7p 앵커(새 망) | 15717 | 13943 / 1774 | 27925 | 새 망은 구망(11458)보다 어려움 — 비교 분모 |
+| 13p equality+joint | 17610 (+12%) | 15870 / 1741 | 26816 | 손실 전부 urban — 교환 배분 질 저하 |
+| 13p dual(λ_UF) | 28242 (+80%) | 17042 / **11200** | 13838 | 본선 잔류 10430 — 절벽 잠금, **최종 기각** |
+
+- dual 붕괴 메커니즘: λ 음수 국면 과방류 보조 → 본선 breakdown → capacity drop 잠금 →
+  λ가 뒤늦게 조여도 비가역. 4세대 기각의 실험적 종결 + Weitzman 절벽 ablation 재료.
+- 13p equality의 +1893은 urban 집중 — v0 단순화 용의 2건: ① 이웃 y hold-constant(owner의
+  merge 밀도 예측 동결 → 배분 질 저하), ② vsl×meter cross ref가 link-binding 기준(own-seg
+  정합 필요). 다음 수술 = 예측 궤적 교환 + cross-ref 정합 → 재측정.
+- 코드: WuFaithfulFollower.segment_agents(SEG13=1), dual 배선(NUF_DUAL=1) —
+  커밋 bb321be(2단계)·eed15ce(dual), 브랜치 feature/segment-agents-13p.
+
 # 13-player 재구축 진행 (feature/segment-agents-13p, worktree 격리)
 
 - 1단계 완료(34db7de): segment_local_plant.py(비트 일치 보장 설계) + R_F merge 2→3 +
