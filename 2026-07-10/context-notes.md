@@ -23,6 +23,27 @@
 - base/A-only/A+B 순차 체인이 도는 동안 src/ 수정 금지(후속 런이 시작 시점 디스크
   코드를 import). 수술은 체인 종료 후 브랜치에서.
 
+## 3점런 재해석 (병렬 세션 69443b9 OPT12 기본화와의 교차)
+- 타임라인: base 시작 ~11:11 → base 종료 12:11:41(=a_only 시작, 구 runner import) →
+  OPT12 기본화 편집 12:43:37 → 커밋 69443b9 12:44:06 → a_plus_b는 새 runner로 시작 예정.
+- **base = 깨끗**(병렬 세션 독립 baseline 11458과 0.2 이내 일치), **a_only = 깨끗**(의도대로
+  A-only), **a_plus_b = OPT12 기본 ON + A + B "풀스택"으로 재해석**(오염이 아니라 미래
+  디폴트 구성의 측정으로 활용; A+B 단독 효과 필요 시 OPT12=0 런 1회 추가).
+- 최종 비교틀: base 11458 / OPT12 11459@59.2(병렬, 솔로) / a_only(A단독) / a_plus_b(풀스택).
+  주의: a_only 구간에 이 세션 테스트 스위트(~19분)가 겹쳐 solve 타이밍 소폭 오염 —
+  TTT는 결정론이라 무영향, 타이밍은 ±10% 밴드로 해석.
+- 병렬 세션 판정 수용: OPT2(early-stop)=내 A2와 동일 기제(±0 exact 입증), OPT3·SPSA 기각.
+  내 체인의 신규 정보 = **A1(dedupe)·B(price-lite)** 효과.
+
+## 미해결 — base 앵커 드리프트 (체인 종료 후 귀속)
+- 3점런 base(코드 6e65991) = **11457.798, mean_solve 76.9s** vs 직전 측정(bjjl23hli, 코드
+  ~948e331 추정) 11891.667/86.6s vs 공식 앵커 11893. −435 TTT + −11% solve.
+- 배제 완료: SPSA(55dce56)는 price_spsa_enabled=False 게이트 확인, A/B(6e65991)는
+  legacy 경로 diff 검사(depth_override=None 중립, refresh_count 증가는 lite 분기 안).
+- 남은 용의: 948e331~55dce56 사이 커밋들(2f08e3b equality 복귀 등) 또는 직전 측정의
+  env/코드 상태 불확실. **3점 비교 자체는 내부 일관(세 런 동일 코드) — A/B 판정 유효.**
+  앵커 귀속은 체인 종료 후 짧은 bisect 런 1~2회로.
+
 ## 기타
 - 55dce56(SPSA 가격층, PRICE_SPSA gated)은 병렬 세션 커밋 — 기본 off라 3점런 무영향.
   leader 측 가격층이라 13-player 이식과도 직교.

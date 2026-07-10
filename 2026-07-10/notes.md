@@ -88,3 +88,34 @@ sweet_190, T=7200, APJOINT 디폴트(SPLIT-v2 d3, link-share density), 앵커 TT
 - 복잡도 정리: legacy O(n²)(joint grid×plant), P-Stack 수량층 O(K·d·n)=O(n), 가격층 유한차분
   O(n²)/refresh(상각)→SPSA/adjoint 시 O(n). early-termination은 legacy엔 원래 있음 — P-Stack은
   비용이 follower nash(후보당 ~5s)에 지배돼 rollout 절단 효과 미미(OPT2 ±0, exact 입증).
+
+# 3점런 최종 판정 (A/B 패키지, sweet_190, 순차 체인 완료 13:xx)
+
+| run | 구성 | TTT | Δ vs base | mean_solve |
+|---|---|---:|---:|---:|
+| base | 디폴트(구 runner) | 11457.798 | — | 76.9s |
+| a_only | A1 dedupe + A2 early-stop | 11415.698 | **−42 (무손실)** | 72.9s |
+| a_plus_b | **OPT12 기본 ON** + A + B price-lite | 13070.923 | **+1613 (기각)** | 44.0s |
+
+- **판정: A1(N_UF dedupe) 검증 — 단독 무손실(−42는 warm-start 순서 드리프트, ±300 밴드 내),
+  절감 ~5%(테스트 스위트 동시실행 오염 감안 시 소폭 상회 추정). B(price-lite) 기각** —
+  OPT12(+1)·A(−42)로는 +1613을 설명 못 하므로 손상은 B(또는 B×OPT1 상호작용) 귀속.
+  얕은(H+1)·one-sided 가격 추정이 price를 오염 — SPSA 기각(+2233)과 동일 패턴,
+  "가격층은 exact FD가 답, 근사는 n=7에서 손해" 결론 재확인. 필요 시 OPT12=0 A+B 런으로
+  상호작용 분리 가능하나 채택 경로가 없어 보류.
+- **A1 디폴트 승격 보류**: OPT1(skip refinement)×A1 결합 미측정 — 무측정 결합 금지 교훈
+  (FIXED_ALL·E1 전례). 필요 시 OPT12+A1 1런으로 확정. 현행 디폴트 = OPT12(병렬 세션 승격).
+- a_plus_b는 runner 교체(69443b9, 12:43)가 시작 전에 디스크 반영돼 OPT12 기본 ON으로 돎 —
+  오염이 아니라 "풀스택" 측정으로 재해석(타임라인 검증은 context-notes 참조).
+- 앵커 이동(11893→11458)은 병렬 세션과 교차 확인된 사실 — 7/9 표준구성 커밋(8c9f3b2/2f08e3b)
+  유력, 논문 수치 확정 전 커밋 귀속 1런 권장.
+
+# 13-player 재구축 진행 (feature/segment-agents-13p, worktree 격리)
+
+- 1단계 완료(34db7de): segment_local_plant.py(비트 일치 보장 설계) + R_F merge 2→3 +
+  기하·stale 테스트 정리, 관련 스위트 138/138. 상세는 plan-13player-rebuild.md·checklist.md.
+- 발견: build_agent_specs(distributed_coordinator.py)가 이미 13-agent 파티션 구현 —
+  새 기하에서 R_D→F_W2/R_F→F_W3 자동 배정 확인(2단계 골격).
+- 물리 발견(테스트로 고정): receiving-bound 레짐에서 자기 램프 방류가 본선 유입을 1:1
+  변위 → 자기 seg 밀도 불변, metering 이득은 상류 agent로 가는 cross-agent externality.
+  예산 equality + g_ext 가격의 존재 이유가 보존식 수준에서 입증됨(논문 재료).
