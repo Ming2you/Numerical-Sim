@@ -172,6 +172,19 @@ sweet_190, T=7200, APJOINT 디폴트(SPLIT-v2 d3, link-share density), 앵커 TT
 - **13p 플래그십 확정 = SEG13 + 궤적 교환 + tie-break 수정, E1 제외 → TTT 14936**
   (7p 15717 대비 −781/−5.0%, NC 대비 +49.6%). 다음 = 교차검증(sweet_155/128) → 풀매트릭스.
 
+# 13p 계산비용 + 강화 PFO (심야 추가)
+
+- **계산비용**: 13p 플래그십 mean 54.2s/max 85.5s(36분) vs 7p 60.7s/85.9s(40분) —
+  **13p가 ~11% 빠름**(segment 국소 solve가 link 빔서치보다 저렴; per-agent 비용
+  망 크기 무관 = follower 층 O(n)·자명 병렬 실증). 실시간 경계(180s) 여유 2배+.
+- **PFO+nbr(radius-1 국소 rollout + 이웃 차량수 비용 w=1, SEG13_NBR=1) = 15273**
+  (solve 5.9s) — 비결정 구간(25.6k~29.4k)에서 7p PFO(15683)·7p APJOINT(15717) 추월.
+  이 시나리오의 정직한 leader 가치 = 15273→14936 = **+337(±300 경계)**.
+  단 (a) PFO+nbr은 비-Wu 기준선(이웃 비용 = 부여된 조정 장치), (b) PFO엔 N_P 개념
+  부재 — 190은 보호구역 무대가 약해 leader 변별 저평가 가능(구 망 190은 P-Stack≫PFO),
+  (c) w=1 휴리스틱의 레짐 강건성 미보장. **판정은 교차검증(155/128/incident)으로.**
+- 스펙트럼(논문 그림): Wu-충실 분산=비결정 → +이웃 공유=대부분 회수 → +계층 조정=최상단.
+
 # 13-player 재구축 진행 (feature/segment-agents-13p, worktree 격리)
 
 - 1단계 완료(34db7de): segment_local_plant.py(비트 일치 보장 설계) + R_F merge 2→3 +
