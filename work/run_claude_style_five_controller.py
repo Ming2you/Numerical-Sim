@@ -537,6 +537,9 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
     ):
         # 13-player(2026-07-10 승인): freeway를 segment agent 8개로 분해 + 예산 simplex 사영.
         controller.nash_solver.segment_agents = True
+    if _os.environ.get("NUF_DUAL") == "1":
+        # 8단계 ablation: N_UF 총량을 equality 사영 대신 λ_UF dual(step 간 적분)로 추적.
+        cfg.mpc.wu_faithful_nuf_coordination_mode = "dual"
     previous: Optional[ControlAction] = None
     steps = max(1, int(round(cfg.simulation.T_total / cfg.simulation.control_interval)))
     run_rows: List[Dict[str, Any]] = []

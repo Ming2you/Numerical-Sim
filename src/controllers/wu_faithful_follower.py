@@ -2291,6 +2291,13 @@ class WuFaithfulFollower:
         leader_present = (
             leader is not None and float(getattr(leader, "N_UF_star", 0.0)) > 0.0
         )
+        nuf_mode = str(getattr(
+            self.cfg.mpc, "wu_faithful_nuf_coordination_mode", "equality",
+        ))
+        # 8단계 ablation(dual): λ_UF·m — DUAL-STANDING 규약(windup 수정): 영속 가격이라
+        # incumbent(leader=None) solve에도 적용해 적분 루프의 액추에이터를 유지한다.
+        lambda_uf = float(self._lambda_UF)
+        dual_price_active = nuf_mode == "dual" and abs(lambda_uf) > 1.0e-12
 
         for agent in agents:
             seg = agent.seg
@@ -2398,6 +2405,8 @@ class WuFaithfulFollower:
                                     (float(m_cand) - float(m_ref2))
                                     * (float(v_cand) - float(v_ref2))
                                 )
+                    if own_ramp is not None and m_cand is not None and dual_price_active:
+                        cost += lambda_uf * float(m_cand)
                     evals += 1
                     if cost < best_cost:
                         best_cost, best_v, best_m = cost, float(v_cand), m_cand
@@ -2422,10 +2431,8 @@ class WuFaithfulFollower:
         self._wu._has_last_offramp_flow = True
 
         # ---- 예산 simplex 사영(승인안 (ii)): Σmeter = ω_F·N_UF* (equality) ----
+        # dual 모드면 사영 없음 — 총량은 λ_UF(step 간 적분)가 추적, 레벨은 자율.
         meter_out: Dict[str, float] = dict(preferred_meter)
-        nuf_mode = str(getattr(
-            self.cfg.mpc, "wu_faithful_nuf_coordination_mode", "equality",
-        ))
         if leader_present and nuf_mode == "equality" and preferred_meter:
             caps = {r: float(net.ramp_capacity_veh_h[r]) for r in preferred_meter}
             cap_sum = sum(caps.values())
