@@ -312,6 +312,18 @@ sweet_190, T=7200, APJOINT 디폴트(SPLIT-v2 d3, link-share density), 앵커 TT
   ③ leader N_UF 4510(소폭 과소). FAR_FF(자유류 오프셋)는 물리적으로 옳은 수선이라
   코드 유지(기본 OFF), 검증 3런 결과는 아래 추가 예정.
 
+# FAR_FF 최종 판정 + 밤샘 배치 마감 (2026-07-11 아침)
+
+- **FAR_FF(자유류 오프셋) = 전 무대 행동-중립 확정**: 4-seg 190 Δ+0.2 / 8-seg 190 +30 /
+  155 비트동일 / skew +105 / incident 비트동일. 안전하나 경부하 역전의 해법 아님 —
+  물리적으로 옳은 수선이라 코드 유지(기본 OFF), 대규모 망 대비 옵션으로 병기.
+- 경부하 역전(155계열 flag가 nbr에 +0.8~1.5k)의 확정 원인 스레드(차기 세션 1순위):
+  ① **D 교차로 green_p1 82s 쏠림**(갭의 70%, 8-seg 동결입력 왜곡 의심 — 스텝 단위 solve 진단)
+  ② 예산 사영의 비율 보존이 기하 비대칭 배분(R_D 개방/R_F 조임)을 못 만듦(g_ext 약화 의심)
+  ③ leader N_UF 소폭 과소(4510 vs nbr 실현 4791).
+- 차기 세션 큐: D-green 진단 → leader 병렬(worker 수선) → far/파라미터 8-seg 재보정 검토
+  → WU-CD-F 열 → 결과절 집필(§3.4.3 완료 상태).
+
 # 13-player 재구축 진행 (feature/segment-agents-13p, worktree 격리)
 
 - 1단계 완료(34db7de): segment_local_plant.py(비트 일치 보장 설계) + R_F merge 2→3 +
