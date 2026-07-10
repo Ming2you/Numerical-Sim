@@ -419,6 +419,24 @@ def make_controller(controller_id: str, cfg: ExperimentConfig):
     if controller_id == "P-CENT":
         # 중앙 천장 측정기(2026-07-10): 전권 joint 최적화 + far tail 채점(신규 이식).
         return CentralizedMPC(cfg, mode="proposed")
+    if controller_id == "P-CENT-POLISH":
+        # 진짜 중앙 상한(2026-07-10): 플래그십 해를 격자 중심(previous)으로 한 중앙 polish.
+        # _structured_grid_search가 center/previous를 후보에 포함하므로 polish 채점(H rollout
+        # +far) 기준으로 플래그십 이하로 내려갈 수 없음 — 개선분 = lever별 headroom 측정.
+        class _PolishController:
+            def __init__(self, cfg_):
+                self.flag = make_controller("P-STACK-WU-FAITHFUL-ALLPRICE-JOINT", cfg_)
+                self.cent = CentralizedMPC(cfg_, mode="proposed")
+
+            def decide(self, state, forecast, previous):
+                base = self.flag.decide(state, forecast, previous)
+                info = self.cent.decide_with_info(state.copy(), forecast, previous_control=base)
+                info.control.diagnostics["polish_improved"] = float(
+                    info.control.diagnostics.get("centralized_grid_early_terminated", 0.0) == 0.0
+                )
+                return info.control
+
+        return _PolishController(cfg)
     raise ValueError(f"Unknown controller: {controller_id}")
 
 
@@ -427,6 +445,8 @@ def decide(controller_id: str, controller, sim: MixedTrafficSimulator, forecast,
         return baseline_control("no_control", cfg, sim.state, forecast[0])
     if controller_id == "P-CENT":
         return controller.decide_with_info(sim.state.copy(), forecast, previous).control
+    if controller_id == "P-CENT-POLISH":
+        return controller.decide(sim.state.copy(), forecast, previous)
     if controller_id in {
         "WU-CD-F",
         "WU-FAITHFUL-FOLLOWER",
