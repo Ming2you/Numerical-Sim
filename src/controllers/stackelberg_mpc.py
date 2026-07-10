@@ -15,6 +15,56 @@ from src.models.demand import DemandStep
 from src.models.state import ControlAction, ExperimentConfig, TrafficState
 
 
+def mfd_far_cost_to_go(cfg: "ExperimentConfig", state: "TrafficState") -> float:
+    """far(MFD tail): near rollout 밖 잔여 accumulation의 배수 cost-to-go(§3.2, uniform urban+freeway).
+
+    **urban reservoir**: N_P를 outflow(N)로 배수 — N_crit 넘으면 outflow↓ → V 급증(gridlock 회피).
+      삼각형 drain TTS ≈ N²/(2G)·T_c_h. G=probe① calib(Geroliminis/Haddad MFD).
+    **freeway reservoir**: 본선 2차(exit 병목 큐잉) + ramp 큐 merge-병목 대기(congestion-aware).
+      ramp: q²/(2·merge_rate)·T_c_h(대기) + q·T_ramp_traverse(합류 후 통과),
+      merge_rate=ramp_cap·receiving(ρ_merge) → 혼잡할수록 배수 느림(hidden-space).
+    leader_mfd_far_enabled 미설정=0(비트동일). cfg·state만 읽는 순수 함수 —
+    P-CENT(중앙 천장 측정기) 등 타 컨트롤러 채점에 재사용(2026-07-10 승격)."""
+    if not getattr(cfg.mpc, "leader_mfd_far_enabled", False):
+        return 0.0
+    from src.models.metanet import _ramp_merge_index, _clip
+    net = cfg.network
+    tc_h = float(cfg.simulation.T_c_h)
+    w = float(getattr(cfg.mpc, "leader_mfd_far_weight", 1.0))
+    # ---- urban reservoir ----
+    # boundary_in 큐도 accumulation에 포함: gating(유입 조임)은 차를 boundary 큐로 옮길 뿐
+    # (여전히 TTT 발생)이라, in-network(N_P)만 세면 gating이 far상 공짜로 보여 leader가 과-gate.
+    n_u = float(state.protected_accumulation_veh(net)) + float(state.boundary_in_queue_vehicles(net))
+    n_crit = float(getattr(cfg.mpc, "leader_mfd_far_ncrit", 1700.0))
+    g_free = float(getattr(cfg.mpc, "leader_mfd_far_g_free", 640.0))
+    g_cong = float(getattr(cfg.mpc, "leader_mfd_far_g_cong", 500.0))
+    g_u = g_free if n_u < n_crit else g_cong
+    far = (n_u * n_u) * tc_h / (2.0 * max(g_u, 1.0))
+    # ---- freeway reservoir: 본선 2차(exit 병목 큐잉, urban과 대칭) ----
+    seg_len = float(net.freeway_segment_length_km)
+    v_free = float(net.v_free)
+    ramp_total = sum(max(0.0, float(state.ramp_queue.get(r, 0.0))) for r in net.ramps)
+    n_main = max(0.0, float(state.total_freeway_vehicles(net)) - ramp_total)
+    g_fw = float(getattr(cfg.mpc, "leader_mfd_far_g_fw", 300.0))
+    far += (n_main * n_main) * tc_h / (2.0 * max(g_fw, 1.0))
+    # ---- freeway reservoir: ramp 큐 merge-병목 대기 + 통과 ----
+    for ramp in net.ramps:
+        q = max(0.0, float(state.ramp_queue.get(ramp, 0.0)))
+        if q <= 0.0:
+            continue
+        link = net.ramp_to_freeway.get(ramp)
+        dens = state.freeway_density.get(link, [])
+        if not dens:
+            continue
+        midx = _ramp_merge_index(cfg, ramp, len(dens))
+        rho_merge = float(dens[midx])
+        recv = _clip((net.rho_max - rho_merge) / max(net.rho_max - net.rho_crit, 1.0e-9), 0.0, 1.0)
+        merge_interval = float(net.ramp_capacity_veh_h[ramp]) * recv * tc_h  # veh/interval
+        t_ramp_traverse = (len(dens) - midx) * seg_len / max(v_free, 1.0)
+        far += (q * q) * tc_h / (2.0 * max(merge_interval, 1.0e-6)) + q * t_ramp_traverse
+    return w * far
+
+
 @dataclass
 class DecisionResult:
     control: ControlAction
@@ -2021,54 +2071,8 @@ class StackelbergMPCController:
         # 자체가 후보별 response 비용을 담고, full system rollout 비용은 의도적으로 배제한다.
 
     def _mfd_far_cost_to_go(self, state: TrafficState) -> float:
-        """far(MFD tail): near rollout 밖 잔여 accumulation의 배수 cost-to-go(§3.2, uniform urban+freeway).
-
-        **urban reservoir**: N_P를 outflow(N)로 배수 — N_crit 넘으면 outflow↓ → V 급증(gridlock 회피).
-          삼각형 drain TTS ≈ N²/(2G)·T_c_h. G=probe① calib(Geroliminis/Haddad MFD).
-        **freeway reservoir(나)**: 본선은 흐름(선형 통과), ramp 큐는 merge-병목 대기(2차, congestion-aware).
-          본선: N_main·T_traverse. ramp: q²/(2·merge_rate)·T_c_h(대기) + q·T_ramp_traverse(합류 후 통과).
-          merge_rate=ramp_cap·receiving(ρ_merge) → 혼잡할수록 배수 느림 → ramp 큐 cost 급증(hidden-space).
-        leader_mfd_far_enabled 미설정=0(비트동일)."""
-        if not getattr(self.cfg.mpc, "leader_mfd_far_enabled", False):
-            return 0.0
-        from src.models.metanet import _ramp_merge_index, _clip
-        net = self.cfg.network
-        tc_h = float(self.cfg.simulation.T_c_h)
-        w = float(getattr(self.cfg.mpc, "leader_mfd_far_weight", 1.0))
-        # ---- urban reservoir ----
-        # boundary_in 큐도 accumulation에 포함: gating(유입 조임)은 차를 boundary 큐로 옮길 뿐
-        # (여전히 TTT 발생)이라, in-network(N_P)만 세면 gating이 far상 공짜로 보여 leader가 과-gate.
-        n_u = float(state.protected_accumulation_veh(net)) + float(state.boundary_in_queue_vehicles(net))
-        n_crit = float(getattr(self.cfg.mpc, "leader_mfd_far_ncrit", 1700.0))
-        g_free = float(getattr(self.cfg.mpc, "leader_mfd_far_g_free", 640.0))
-        g_cong = float(getattr(self.cfg.mpc, "leader_mfd_far_g_cong", 500.0))
-        g_u = g_free if n_u < n_crit else g_cong
-        far = (n_u * n_u) * tc_h / (2.0 * max(g_u, 1.0))
-        # ---- freeway reservoir(나): 본선도 exit 병목 큐잉 → 2차(urban과 대칭) ----
-        # 실측 freeway exit ~300/interval capacity-flat → 혼잡 시 본선도 병목 뒤 큐잉.
-        # 선형(N·T, free-flow)은 urban(2차) 대비 8배 과소평가 → urban 과보호. 2차로 정정.
-        seg_len = float(net.freeway_segment_length_km)
-        v_free = float(net.v_free)
-        ramp_total = sum(max(0.0, float(state.ramp_queue.get(r, 0.0))) for r in net.ramps)
-        n_main = max(0.0, float(state.total_freeway_vehicles(net)) - ramp_total)
-        g_fw = float(getattr(self.cfg.mpc, "leader_mfd_far_g_fw", 300.0))
-        far += (n_main * n_main) * tc_h / (2.0 * max(g_fw, 1.0))
-        # ---- freeway reservoir(나): ramp 큐 merge-병목 대기 + 통과 ----
-        for ramp in net.ramps:
-            q = max(0.0, float(state.ramp_queue.get(ramp, 0.0)))
-            if q <= 0.0:
-                continue
-            link = net.ramp_to_freeway.get(ramp)
-            dens = state.freeway_density.get(link, [])
-            if not dens:
-                continue
-            midx = _ramp_merge_index(self.cfg, ramp, len(dens))
-            rho_merge = float(dens[midx])
-            recv = _clip((net.rho_max - rho_merge) / max(net.rho_max - net.rho_crit, 1.0e-9), 0.0, 1.0)
-            merge_interval = float(net.ramp_capacity_veh_h[ramp]) * recv * tc_h  # veh/interval
-            t_ramp_traverse = (len(dens) - midx) * seg_len / max(v_free, 1.0)
-            far += (q * q) * tc_h / (2.0 * max(merge_interval, 1.0e-6)) + q * t_ramp_traverse
-        return w * far
+        """far(MFD tail) — 모듈 함수 `mfd_far_cost_to_go`로 위임(P-CENT 천장 이식용 승격)."""
+        return mfd_far_cost_to_go(self.cfg, state)
 
     def _predict(
         self,

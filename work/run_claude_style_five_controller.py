@@ -25,6 +25,7 @@ from src.controllers.joint_wu_controllers import (
     JointB2TRController,
     JointF1Controller,
 )
+from src.controllers.centralized_mpc import CentralizedMPC
 from src.controllers.stackelberg_wu_metered import StackelbergWuMeteredController
 from src.controllers.wu_faithful_follower import WuFaithfulFollower
 from src.models.demand import DemandProfile, apply_scenario_network_overrides, load_scenarios
@@ -415,12 +416,17 @@ def make_controller(controller_id: str, cfg: ExperimentConfig):
         return StackelbergWuMeteredController(cfg)
     if controller_id == "CLASSICAL-HIERARCHICAL":
         return ClassicalHierarchicalController(cfg)
+    if controller_id == "P-CENT":
+        # 중앙 천장 측정기(2026-07-10): 전권 joint 최적화 + far tail 채점(신규 이식).
+        return CentralizedMPC(cfg, mode="proposed")
     raise ValueError(f"Unknown controller: {controller_id}")
 
 
 def decide(controller_id: str, controller, sim: MixedTrafficSimulator, forecast, previous, cfg, step: int):
     if controller_id == "NO-CONTROL":
         return baseline_control("no_control", cfg, sim.state, forecast[0])
+    if controller_id == "P-CENT":
+        return controller.decide_with_info(sim.state.copy(), forecast, previous).control
     if controller_id in {
         "WU-CD-F",
         "WU-FAITHFUL-FOLLOWER",
