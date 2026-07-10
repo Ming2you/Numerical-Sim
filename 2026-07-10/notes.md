@@ -165,7 +165,12 @@ sweet_190, T=7200, APJOINT 디폴트(SPLIT-v2 d3, link-share density), 앵커 TT
   갖춰지면 미세 분해가 거친 분해를 이긴다".
 - E1 반전: 7p 중립(+47)→13p −605 — "가격에 실어야 하는 정보량 ∝ 분해 입자도"
   (VSL 가격 반전과 짝).
-- 진행 중: 확정런 seg13_final = traj+E1+tie-break수정 결합(단독런들은 수정 전 코드).
+- 결합 판정 종결: combo(traj+E1+수정)=16464로 traj 단독 대비 +1528 역행 → 분리런
+  (traj+수정, E1 제외)=**14936**(traj 단독 14938과 동일, 수정 중립) → **역행 범인=E1×traj
+  이중계상**(follower가 ỹ로 보는 혼잡을 가격 tail이 재계상 → 과보수). E1 판정 3연속
+  "base 의존" — 논문 재료: "가격 채널의 정보량은 follower 정보 채널과 상보적".
+- **13p 플래그십 확정 = SEG13 + 궤적 교환 + tie-break 수정, E1 제외 → TTT 14936**
+  (7p 15717 대비 −781/−5.0%, NC 대비 +49.6%). 다음 = 교차검증(sweet_155/128) → 풀매트릭스.
 
 # 13-player 재구축 진행 (feature/segment-agents-13p, worktree 격리)
 
