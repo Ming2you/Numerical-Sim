@@ -247,6 +247,10 @@ class WuFaithfulFollower:
         self.segment_agents: bool = False
         self._segment_agent_models: Dict[str, list] = {}
         self._seg13_diag: Dict[str, float] = {}
+        # SPLIT-PRICE v1/v2 재현(13p): v2(기본)=incumbent(leader=None)는 meter 가격-레벨
+        # 배제(가격은 예산 내 배분만 — 7p 플래그십 규약). v1=True면 incumbent도
+        # g_meter/h로 레벨 조절(7p에서 레짐 플래핑 병리를 낸 구성) — env SEG13_V1=1.
+        self.seg13_meter_price_standing: bool = False
         # ---------- J1(2026-07-06): joint offset 패턴 directive ----------
         # F3 판정: offset은 joint 결합 변수라 per-signal 가격(편미분)이 구조적으로 0.
         # J1 = leader가 corridor 패턴(여러 신호 offset 조합)을 통째로 rollout 평가해
@@ -2384,7 +2388,9 @@ class WuFaithfulFollower:
                             cost += self.vsl_marginal_price_weight * float(g_vsl) * (
                                 float(v_cand) - ref_v
                             )
-                    if own_ramp is not None and m_cand is not None and leader_present:
+                    if own_ramp is not None and m_cand is not None and (
+                        leader_present or self.seg13_meter_price_standing
+                    ):
                         if self.metering_marginal_price:
                             g_m = self.metering_marginal_price.get(own_ramp)
                             if g_m is not None:

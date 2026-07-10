@@ -541,6 +541,11 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
     if _os.environ.get("NUF_DUAL") == "1":
         # 8단계 ablation: N_UF 총량을 equality 사영 대신 λ_UF dual(step 간 적분)로 추적.
         cfg.mpc.wu_faithful_nuf_coordination_mode = "dual"
+    if _os.environ.get("SEG13_V1") == "1":
+        # SPLIT-PRICE v1 재현: incumbent도 meter 가격-레벨 조절(7p 플래핑 병리 A/B용).
+        _seg_t = getattr(controller, "nash_solver", controller)
+        if hasattr(_seg_t, "seg13_meter_price_standing"):
+            _seg_t.seg13_meter_price_standing = True
     previous: Optional[ControlAction] = None
     steps = max(1, int(round(cfg.simulation.T_total / cfg.simulation.control_interval)))
     run_rows: List[Dict[str, Any]] = []
