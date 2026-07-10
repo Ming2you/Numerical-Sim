@@ -188,7 +188,12 @@ sweet_190, T=7200, APJOINT 디폴트(SPLIT-v2 d3, link-share density), 앵커 TT
   E1단독 −605(정보가 없으면 가격에 실으면 득) / E1×traj +1528 / price×NBR +556(겹치면 손).
   이론 근거 = C-4 정의(가격 = 전역 − follower 국소모델) — 국소모델 확장 시 가격 차감 기준을
   같이 줄이지 않으면 중복. **플래그십은 radius-0+가격 유지, NBR은 PFO 전용.**
-- 진행 중(심야 배치): legacy 천장(새 망 달성가능 상한 측정) + 교차 매트릭스
+- **legacy 새 망 = 23845 붕괴(urban 15758/freeway 8087)** — 천장이 아니라 바닥권.
+  원인 = far 부재: N_UF 전 스텝 6000(최대) 고정 → 과잉 admission → 본선 breakdown.
+  구 망(merge seg2)은 9분 창 안에 대가가 보였지만 새 망(경계 merge)은 창 밖 실현 —
+  **"근시안 중앙 < 무조정 분산 < 원시야 계층" 3극 구도**(far 기계의 가치 소급 입증,
+  13p 플래그십이 구 챔피언 대비 −37%로 새 망 SOTA). "11k 대비 14.9k" 우려 해소.
+- 진행 중(심야 배치): 교차 매트릭스
   {NC, PFO+nbr, 13p flag} × {sweet_155, 155_incident, 155_skew} — leader 변별 무대 판정.
   PFO 기준선은 유지(빼면 baseline gaming — Wu 벤치마크 원칙의 거울상), 판정은 매트릭스로.
 
