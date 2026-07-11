@@ -3476,9 +3476,23 @@ class WuFaithfulFollower:
             sigma_min, sigma_max = self._np_feasible_range(
                 state, coupling, commit_snapshot, forecast_arrivals, horizon_h,
             )
-            projected_target = min(max(n_p_star, sigma_min), sigma_max)
-            # 방향: Σnin > target(유입 과다) → λ 증가(억제 강화). max(0,·)이 A1(음수 금지)을 강제.
-            lambda_next = self._lambda_np_update(lambda_p, sum_nin, projected_target)
+            # windup 수선 ①(내부 투영): 모서리(feas_min)는 own-TTS와 타협하는 follower
+            # 균형이 도달하지 못하는 점이라 오차가 구조적 양수 → λ 단방향 적분(8-seg
+            # 155에서 cap 폭주, NP_OFF probe로 인과 확정). 내부점으로 클립하면 균형이
+            # target 양쪽에 놓일 수 있어 λ가 자가 복원한다. frac=0이면 구거동(비트동일).
+            interior = float(getattr(self.cfg.mpc, "np_target_interior_frac", 0.0))
+            proj_lo = sigma_min + max(0.0, interior) * max(0.0, sigma_max - sigma_min)
+            projected_target = min(max(n_p_star, proj_lo), sigma_max)
+            # windup 수선 ②(경부하 deadband): 보호구역 accumulation이 임계 대비 충분히
+            # 낮으면 보호가 무의미 — 적분 대신 감쇠로 λ를 회수(잔여 왜곡 제거).
+            deadband = float(getattr(self.cfg.mpc, "np_dual_deadband_frac", 0.0))
+            n_p_crit_veh = float(getattr(self.cfg.leader, "N_P_crit_veh", 0.0) or 0.0)
+            n_p_now = float(state.protected_accumulation_veh(net))
+            if deadband > 0.0 and n_p_crit_veh > 0.0 and n_p_now < deadband * n_p_crit_veh:
+                lambda_next = 0.5 * lambda_p
+            else:
+                # 방향: Σnin > target(유입 과다) → λ 증가(억제 강화). max(0,·)이 A1(음수 금지)을 강제.
+                lambda_next = self._lambda_np_update(lambda_p, sum_nin, projected_target)
         # ---- per-signal OFFSET 국소 탐색(PLATOON-AWARE, "proposed" authority 전용, step당 1회) ----
         # 수렴된 green/결합값을 고정한 뒤, 각 신호가 자기 corridor objective를 최소화하는 offset을
         # 탐색해 control.offsets에 commit한다. offset 채점은 phase-resolved 서비스 + 상류 platoon

@@ -594,6 +594,10 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
     if _os.environ.get("NP_OFF") == "1" and hasattr(controller, "nash_solver"):
         # D-green 진단 probe: N_P dual(λ_P) 차단 — 8-seg 경부하 λ 폭주 인과 확인용.
         controller.nash_solver.np_price_enabled = False
+    if _os.environ.get("NP_FIX") == "0":
+        # λ windup 수선 해제(구거동 재현 A/B): 내부 투영·deadband 모두 끔.
+        cfg.mpc.np_target_interior_frac = 0.0
+        cfg.mpc.np_dual_deadband_frac = 0.0
     if _os.environ.get("NUF_DUAL") == "1":
         # 8단계 ablation: N_UF 총량을 equality 사영 대신 λ_UF dual(step 간 적분)로 추적.
         cfg.mpc.wu_faithful_nuf_coordination_mode = "dual"

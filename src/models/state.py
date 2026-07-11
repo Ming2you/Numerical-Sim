@@ -417,6 +417,12 @@ class MPCConfig:
     wu_np_arrival_mode: str = "horizon"
     wu_np_phase_substep: bool = False
     wu_faithful_np_predictor_mode: str = "legacy"
+    # λ_P windup 수선(2026-07-11, 규칙 2종 — 구조 불변): NP_FIX=0으로 구거동 재현.
+    # ① 내부 투영: target을 feasibility 모서리(feas_min) 대신 내부점으로 클립 —
+    #    모서리는 균형이 아니라 오차가 구조적 양수(+109~301 실측)여서 λ 단방향 적분.
+    np_target_interior_frac: float = 0.25
+    # ② 경부하 deadband: 보호 accumulation < frac·N_P_crit면 적분 대신 감쇠(0.5×).
+    np_dual_deadband_frac: float = 0.9
     wu_faithful_np_coordination_mode: str = "cap"
     # N_UF 조정 모드: "equality"=leader link budget으로 metering 합을 hard 고정,
     # "cap"=budget을 상한으로만 쓰고 자율 metering 좌표하강을 존중(합 ≤ budget 투영),
