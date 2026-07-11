@@ -261,6 +261,11 @@ class WuFaithfulFollower:
         # leader 없이 깨는 정직한 최대 분산 기준선. 플래그십(leader)은 가격이 이 역할을
         # 하므로 기본 0.0(OFF) — 켜면 가격 기여 귀속이 흐려진다.
         self.seg13_neighbor_weight: float = 0.0
+        # 예산 부등식 ablation(2026-07-11, env SEG13_INEQ=1): 등식 Σ=budget 대신 Σ≤budget.
+        # 170_skew 진단 — 등식은 상향으로도 binding이라 leader N_UF=6000이 follower의
+        # 자발적 하향 metering을 덮어써 절벽 근처 dip→과잉 교정(whipsaw)을 유발.
+        # True면 자율 합이 budget 미만일 때 그대로 존중(하향 자유), 초과 시에만 사영.
+        self.seg13_budget_inequality: bool = False
         # ---------- J1(2026-07-06): joint offset 패턴 directive ----------
         # F3 판정: offset은 joint 결합 변수라 per-signal 가격(편미분)이 구조적으로 0.
         # J1 = leader가 corridor 패턴(여러 신호 offset 조합)을 통째로 rollout 평가해
@@ -2564,7 +2569,10 @@ class WuFaithfulFollower:
             n_uf_star = float(getattr(leader, "N_UF_star", 0.0))
             budget = min(max(omega_f * n_uf_star, 0.0), cap_sum)
             total_pref = sum(preferred_meter.values())
-            if total_pref <= 1.0e-9:
+            if self.seg13_budget_inequality and total_pref <= budget + 1.0e-9:
+                # 부등식 모드: 자율 합 ≤ budget이면 강제 상향 없이 그대로 존중.
+                meter_out = dict(preferred_meter)
+            elif total_pref <= 1.0e-9:
                 meter_out = {
                     r: budget * caps[r] / max(cap_sum, 1.0e-9) for r in preferred_meter
                 }

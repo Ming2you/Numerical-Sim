@@ -579,6 +579,9 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
         if _os.environ.get("SEG13_NBR") and hasattr(_seg_target, "seg13_neighbor_weight"):
             # radius-1 국소 rollout + 이웃 차량수 비용(PFO 강화 기준선; 플래그십은 OFF 유지).
             _seg_target.seg13_neighbor_weight = float(_os.environ["SEG13_NBR"])
+        if _os.environ.get("SEG13_INEQ") == "1" and hasattr(_seg_target, "seg13_budget_inequality"):
+            # 예산 부등식 ablation: Σmeter ≤ budget(하향 자율 존중) — 170_skew whipsaw 인과 검증.
+            _seg_target.seg13_budget_inequality = True
     if _os.environ.get("CAND"):
         # 헤드룸 탐침: leader 후보 격자 밀도(OPT12 절감분 재투자 실험).
         cfg.mpc.leader_candidate_count = int(_os.environ["CAND"])
