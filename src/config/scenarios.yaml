@@ -320,6 +320,14 @@
         "in_F_right": 0.977
       },
       "required": false
+    },
+    "sweet_170_skew": {
+      "urban_scale": 1.7,
+      "freeway_scale": 1.7,
+      "ramp_scale": 1.7,
+      "incident_capacity_factor": 1.0,
+      "urban_west_east_ratio": 2.0,
+      "required": false
     }
   }
 }
