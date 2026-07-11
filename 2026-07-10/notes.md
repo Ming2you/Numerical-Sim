@@ -321,8 +321,15 @@ sweet_190, T=7200, APJOINT 디폴트(SPLIT-v2 d3, link-share density), 앵커 TT
   ① **D 교차로 green_p1 82s 쏠림**(갭의 70%, 8-seg 동결입력 왜곡 의심 — 스텝 단위 solve 진단)
   ② 예산 사영의 비율 보존이 기하 비대칭 배분(R_D 개방/R_F 조임)을 못 만듦(g_ext 약화 의심)
   ③ leader N_UF 소폭 과소(4510 vs nbr 실현 4791).
-- 차기 세션 큐: D-green 진단 → leader 병렬(worker 수선) → far/파라미터 8-seg 재보정 검토
-  → WU-CD-F 열 → 결과절 집필(§3.4.3 완료 상태).
+- **[D-green 진단 완결] 주범 = λ_P(N_P dual) 폭주**: 8-seg에서 leader가 N_P* 과타이트
+  선택(평균 1202, 임계 턱밑; 4-seg는 1451) → 경부하에도 상시 초과 → λ_P cap(10) 포화
+  (31/40 스텝; 4-seg 10/40) → λ·nin이 ramp 신호 own-TTS 압도 → **D·F green이 max 근처
+  고정(λ高 89.0s / λ低 66.0s)** → phase-2 기아 = urban +1038. nbr 우위의 정체 =
+  "오작동하는 보호 채널의 부재". far·follower·사영 무죄. NP_OFF probe로 확인 사살 중.
+  수선 후보: ① leader N_P 후보 하한 재검(왜 8-seg에서 타이트 선택?), ② λ 경부하
+  deadband(n_P < θ·crit면 λ 동결), ③ λ cap 재검.
+- 차기 세션 큐: NP_OFF 판정 → λ 수선 → leader 병렬(worker 수선) → WU-CD-F 열
+  → 결과절 집필(§3.4.3 완료 상태).
 
 # 13-player 재구축 진행 (feature/segment-agents-13p, worktree 격리)
 
