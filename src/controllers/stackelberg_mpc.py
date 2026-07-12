@@ -15,6 +15,41 @@ from src.models.demand import DemandStep
 from src.models.state import ControlAction, ExperimentConfig, TrafficState
 
 
+def leader_hinge_cost(cfg: "ExperimentConfig", states: list) -> float:
+    """Leader 채점 전용 hinge(2026-07-12 복원, 사용자 지시 — follower/가격 채널 불변).
+
+    구 F1 follower hinge 2종을 leader의 candidate 채점(rollout 궤적)으로 이관:
+      freeway: Σ_t Σ_seg max(0, ρ − ρ_crit_eff)·L_seg·λ_eff  [임계 초과 차량수]
+      urban:   Σ_t Σ_link max(0, 점유 − frac·cap)            [spillback 여유부족, frac=0.5]
+    선형·차량수×T_c_h = veh·h(TTT 동단위, w=1이 1차 정확값). far와 같은 격리 수준 —
+    후보 랭킹에만 작용하고 가격 probe·follower 목적에는 들어가지 않는다(이중계상 방지).
+    leader_hinge_enabled=False(기본)면 0 — 비트동일."""
+    if not getattr(cfg.mpc, "leader_hinge_enabled", False):
+        return 0.0
+    from src.models.metanet import effective_rho_crit
+    net = cfg.network
+    tc_h = float(cfg.simulation.T_c_h)
+    w = float(getattr(cfg.mpc, "leader_hinge_weight", 1.0))
+    frac = float(getattr(cfg.mpc, "leader_hinge_spill_frac", 0.5))
+    seg_len = float(net.freeway_segment_length_km)
+    rho_crit = float(effective_rho_crit(net, None))
+    total = 0.0
+    for s in states:
+        excess = 0.0
+        for link in net.freeway_links:
+            dens = s.freeway_density.get(link, [])
+            lanes = s.freeway_effective_lanes.get(link, [])
+            for i, rho in enumerate(dens):
+                lam = float(lanes[i]) if i < len(lanes) else 1.0
+                excess += max(0.0, float(rho) - rho_crit) * seg_len * lam
+        for link, cap in net.urban_link_storage_veh.items():
+            avail = float(s.urban_link_storage.get(link, cap))
+            occ = max(0.0, float(cap) - avail)
+            excess += max(0.0, occ - frac * float(cap))
+        total += excess * tc_h
+    return w * total
+
+
 def mfd_far_cost_to_go(cfg: "ExperimentConfig", state: "TrafficState") -> float:
     """far(MFD tail): near rollout 밖 잔여 accumulation의 배수 cost-to-go(§3.2, uniform urban+freeway).
 
@@ -2081,7 +2116,13 @@ class StackelbergMPCController:
         ):
             # far(MFD tail): near rollout 끝(states[-1]) 잔여 accumulation의 배수 cost-to-go를
             # 해석적으로 가산(§3.2). far가 temporal tail을 싸게 담으면 near 깊이 d를 줄일 수 있다.
-            return states, rollout_ttt + self._mfd_far_cost_to_go(states[-1]), True
+            return (
+                states,
+                rollout_ttt
+                + self._mfd_far_cost_to_go(states[-1])
+                + leader_hinge_cost(self.cfg, states),
+                True,
+            )
         if float(nash.control.diagnostics.get("leader_response_closure_use_rollout_objective", 0.0)) >= 0.5:
             return states, rollout_ttt, True
         return states, float(nash.objective_value), True

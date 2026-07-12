@@ -429,6 +429,11 @@ class MPCConfig:
     # ε-best-response gap probe(2026-07-12, 리뷰 2.2/2.8 대응): 수렴 고정점에서 각
     # follower를 최종 결합변수 하에 단독 재최적화해 개선 여지를 측정(진단 전용, 행동 불변).
     eps_gap_probe: bool = False
+    # Leader hinge 복원(2026-07-12, 사용자 지시): 구 F1 hinge 2종(freeway ρ_crit 초과,
+    # urban 0.5cap spill)을 leader candidate 채점에만 가산. False=비트동일.
+    leader_hinge_enabled: bool = False
+    leader_hinge_weight: float = 1.0
+    leader_hinge_spill_frac: float = 0.5
     wu_faithful_np_coordination_mode: str = "cap"
     # N_UF 조정 모드: "equality"=leader link budget으로 metering 합을 hard 고정,
     # "cap"=budget을 상한으로만 쓰고 자율 metering 좌표하강을 존중(합 ≤ budget 투영),
