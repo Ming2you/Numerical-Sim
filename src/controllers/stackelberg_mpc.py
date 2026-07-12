@@ -15,7 +15,7 @@ from src.models.demand import DemandStep
 from src.models.state import ControlAction, ExperimentConfig, TrafficState
 
 
-def leader_hinge_cost(cfg: "ExperimentConfig", states: list) -> float:
+def leader_hinge_cost(cfg: "ExperimentConfig", states: list, forecast=None) -> float:
     """Leader 채점 전용 hinge(2026-07-12 복원, 사용자 지시 — follower/가격 채널 불변).
 
     구 F1 follower hinge 2종을 leader의 candidate 채점(rollout 궤적)으로 이관:
@@ -33,6 +33,17 @@ def leader_hinge_cost(cfg: "ExperimentConfig", states: list) -> float:
     frac = float(getattr(cfg.mpc, "leader_hinge_spill_frac", 0.5))
     seg_len = float(net.freeway_segment_length_km)
     rho_crit = float(effective_rho_crit(net, None))
+    # hinge v2(2026-07-13, 155_incident +943 귀속 수선): 예정된 차로폐쇄(forecast의
+    # lane closure)가 걸린 segment는 과금 면제 — 폐쇄 유발 임계 초과는 어떤 후보도
+    # 회피할 수 없는 외생 혼잡이라, 과금하면 랭킹만 왜곡한다(통제 가능한 초과만 벌점).
+    exempt: set = set()
+    if forecast:
+        from src.models.demand import merge_freeway_lane_loss
+        merged = merge_freeway_lane_loss(list(forecast))
+        for link, seg_losses in merged.items():
+            for seg_idx, loss in seg_losses.items():
+                if float(loss) > 0.0:
+                    exempt.add((str(link), int(seg_idx)))
     total = 0.0
     for s in states:
         excess = 0.0
@@ -40,6 +51,8 @@ def leader_hinge_cost(cfg: "ExperimentConfig", states: list) -> float:
             dens = s.freeway_density.get(link, [])
             lanes = s.freeway_effective_lanes.get(link, [])
             for i, rho in enumerate(dens):
+                if (str(link), i) in exempt:
+                    continue
                 lam = float(lanes[i]) if i < len(lanes) else 1.0
                 excess += max(0.0, float(rho) - rho_crit) * seg_len * lam
         for link, cap in net.urban_link_storage_veh.items():
@@ -2120,7 +2133,7 @@ class StackelbergMPCController:
                 states,
                 rollout_ttt
                 + self._mfd_far_cost_to_go(states[-1])
-                + leader_hinge_cost(self.cfg, states),
+                + leader_hinge_cost(self.cfg, states, forecast),
                 True,
             )
         if float(nash.control.diagnostics.get("leader_response_closure_use_rollout_objective", 0.0)) >= 0.5:
