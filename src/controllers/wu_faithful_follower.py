@@ -261,6 +261,9 @@ class WuFaithfulFollower:
         # leader 없이 깨는 정직한 최대 분산 기준선. 플래그십(leader)은 가격이 이 역할을
         # 하므로 기본 0.0(OFF) — 켜면 가격 기여 귀속이 흐려진다.
         self.seg13_neighbor_weight: float = 0.0
+        # NP-CAND-λ̂(2026-07-12): 직전 step 컨트롤러가 commit한 solve의 Σnin.
+        # np_candidate_lambda=True일 때 후보별 λ̂ 선반영의 오차항으로 쓴다. None=첫 step.
+        self._np_last_sum_nin: Optional[float] = None
         # 예산 부등식 ablation(2026-07-11, env SEG13_INEQ=1): 등식 Σ=budget 대신 Σ≤budget.
         # 170_skew 진단 — 등식은 상향으로도 binding이라 leader N_UF=6000이 follower의
         # 자발적 하향 metering을 덮어써 절벽 근처 dip→과잉 교정(whipsaw)을 유발.
@@ -3381,6 +3384,42 @@ class WuFaithfulFollower:
         dual_active = leader is not None and self.use_dual_np and self.np_price_enabled
         n_p_star = float(getattr(leader, "N_P_star", 0.0)) if leader is not None else 0.0
         lambda_p = float(self._lambda_P) if dual_active else 0.0  # warm-start(직전 step 수렴값).
+        # ---- NP-CAND-λ̂(2026-07-12, 리뷰 4안): 후보별 λ 1회 선반영 ----
+        # 표준(플래그 OFF)에선 λ가 스텝 내 동결이라 follower 반응이 N_P 후보에 불변
+        # (리뷰 지적: R_S(N_P)가 아니라 R_S(λ)). ON이면 직전 committed Σnin과 이 후보의
+        # 투영 target으로 λ를 1회 적분 선반영한 λ̂ 아래서 Jacobi를 완전 재수렴시킨다.
+        # 폐지된 step 내 이분법(A1+A2 주석 참조)과 달리 반복 중 λ 갱신이 없어
+        # off-equilibrium commit이 없고, clip(0,cap)이 음수 보조금을 차단한다.
+        np_cand_lambda_applied = 0.0
+        if (
+            dual_active
+            and bool(getattr(self.cfg.mpc, "np_candidate_lambda", False))
+            and self._np_last_sum_nin is not None
+        ):
+            pre_snapshot = ControlAction(
+                ramp_metering=dict(control.ramp_metering),
+                vsl=dict(control.vsl),
+                green_times=dict(control.green_times),
+                offsets=dict(control.offsets),
+                inflow_outflow_allocation={},
+            )
+            pre_min, pre_max = self._np_feasible_range(
+                state, coupling, pre_snapshot, forecast_arrivals, horizon_h,
+            )
+            interior_pre = float(getattr(self.cfg.mpc, "np_target_interior_frac", 0.0))
+            pre_lo = pre_min + max(0.0, interior_pre) * max(0.0, pre_max - pre_min)
+            pre_target = min(max(n_p_star, pre_lo), pre_max)
+            deadband_pre = float(getattr(self.cfg.mpc, "np_dual_deadband_frac", 0.0))
+            crit_pre = float(getattr(self.cfg.leader, "N_P_crit_veh", 0.0) or 0.0)
+            if deadband_pre > 0.0 and crit_pre > 0.0 and float(
+                state.protected_accumulation_veh(net)
+            ) < deadband_pre * crit_pre:
+                lambda_p = 0.5 * lambda_p
+            else:
+                lambda_p = self._lambda_np_update(
+                    lambda_p, float(self._np_last_sum_nin), pre_target,
+                )
+            np_cand_lambda_applied = 1.0
         sum_nin = 0.0
         evals = 0
         # 듀얼 분해 N_P 추적은 **control step 간 λ 적분 갱신**으로 한다(A1+A2, 2026-07-02 진단).
@@ -3673,6 +3712,9 @@ class WuFaithfulFollower:
         # 유의값, leader=None이면 모두 0(default). plant/run-log가 읽는 rate는 PROJECTED target.
         control.diagnostics["wu_faithful_np_original_target"] = float(n_p_star)
         control.diagnostics["wu_faithful_np_projected_target"] = float(projected_target)
+        control.diagnostics["wu_faithful_np_sum_nin"] = float(sum_nin)
+        control.diagnostics["wu_faithful_np_cand_lambda_applied"] = float(np_cand_lambda_applied)
+        control.diagnostics["wu_faithful_np_cand_lambda"] = float(lambda_p)
         control.diagnostics["wu_faithful_np_feasible_min"] = float(sigma_min)
         control.diagnostics["wu_faithful_np_feasible_max"] = float(sigma_max)
         control.diagnostics["wu_faithful_np_projection_residual"] = float(n_p_star - projected_target)

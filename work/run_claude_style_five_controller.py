@@ -597,6 +597,9 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
     if _os.environ.get("NP_OFF") == "1" and hasattr(controller, "nash_solver"):
         # D-green 진단 probe: N_P dual(λ_P) 차단 — 8-seg 경부하 λ 폭주 인과 확인용.
         controller.nash_solver.np_price_enabled = False
+    if _os.environ.get("NP_CAND_LAMBDA") == "1":
+        # 리뷰 4안: 후보별 λ̂ 1회 선반영 — N_P가 당스텝 follower 반응에 작용(A/B용).
+        cfg.mpc.np_candidate_lambda = True
     if _os.environ.get("NP_FIX") == "0":
         # λ windup 수선 해제(구거동 재현 A/B): 내부 투영·deadband 모두 끔.
         cfg.mpc.np_target_interior_frac = 0.0

@@ -423,6 +423,9 @@ class MPCConfig:
     np_target_interior_frac: float = 0.25
     # ② 경부하 deadband: 보호 accumulation < frac·N_P_crit면 적분 대신 감쇠(0.5×).
     np_dual_deadband_frac: float = 0.9
+    # NP-CAND-λ̂(2026-07-12, 리뷰 4안): 후보 평가마다 λ를 후보 target으로 1회 선반영해
+    # follower 반응이 N_P 후보에 의존하게 한다. False=구거동(스텝 내 λ 동결) 비트동일.
+    np_candidate_lambda: bool = False
     wu_faithful_np_coordination_mode: str = "cap"
     # N_UF 조정 모드: "equality"=leader link budget으로 metering 합을 hard 고정,
     # "cap"=budget을 상한으로만 쓰고 자율 metering 좌표하강을 존중(합 ≤ budget 투영),

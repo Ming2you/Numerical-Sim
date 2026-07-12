@@ -1944,6 +1944,10 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         lam_next = best.nash.control.diagnostics.get("wu_faithful_lambda_next")
         if lam_next is not None:
             self.nash_solver._lambda_P = float(lam_next)
+            # NP-CAND-λ̂: 다음 step의 후보별 λ 선반영에 쓸 committed Σnin 저장.
+            sum_nin_d = best.nash.control.diagnostics.get("wu_faithful_np_sum_nin")
+            if sum_nin_d is not None:
+                self.nash_solver._np_last_sum_nin = float(sum_nin_d)
         metadata["leader_lambda_np_committed"] = float(lam_next is not None)
         # N_UF dual λ_UF: 선택 후보 diagnostics에서 commit(λ_P와 동일 규약)하되,
         # BOOTSTRAP(2026-07-09): incumbent/fallback 선택으로 diagnostics에 λ_next가 없어도
@@ -2093,6 +2097,9 @@ class StackelbergWuMeteredController(StackelbergMPCController):
             action, state, forecast, previous
         )
         key = round(float(action_p.N_UF_star), 6)
+        if bool(getattr(self.cfg.mpc, "np_candidate_lambda", False)):
+            # NP-CAND-λ̂: λ̂가 N_P 의존이라 follower 반응이 후보별로 달라짐 → 키에 N_P 포함.
+            key = (key, round(float(action_p.N_P_star), 6))
         cached = self._nuf_solve_cache.get(key)
         dedupe_hit = cached is not None
         if dedupe_hit:
