@@ -362,6 +362,21 @@ sweet_190, T=7200, APJOINT 디폴트(SPLIT-v2 d3, link-share density), 앵커 TT
   구판 14936이 더 좋으므로 4-seg 공식 대표값 선택은 검토 필요(밴드 내 동률로 처리하고
   재현런으로 확정 권장). 8-seg는 수선판이 전면 우위라 즉시 갱신.
 
+# ★★플래그십 최종 구성 동결 + 8-seg 전면 전환 (2026-07-12 심야)
+
+**최종 구성 = 8-seg 디폴트 망 + NP-CAND-λ̂ ON + leader hinge ON** (모두 커밋됨).
+
+- 8-seg 전면 전환: default.yaml 기하 승격(segments 8, merge 4/6, off 2/4), 러너
+  NET4SEG=1 반전, **테스트 13건 기하-일반화(cfg 유도형)** — segment_local 5·metanet 3·
+  constraints 3·rl 2 수정, 전 모듈 green(잔여 9건은 구 7p 시절 stale, 별건).
+- leader hinge 복원(사용자 지시): F1 2종(freeway ρ_crit·urban 0.5cap)을 candidate
+  채점 전용으로(가격 probe·follower 불변 — far와 동일 격리). A/B 양면 중립
+  (190: 15722/15652 +70, 155_skew: 7514/7509 +5) → 무해 확인 후 기본 ON.
+- NP-CAND-λ̂ 기본 ON(2셀 통과: 155_skew 7490 −19, 190 15535 −117).
+- **최종 구성 재검증 스윕 발주**: 지속 7무대(T=7200) + 펄스 5무대(T=3600) 플래그십
+  일괄 재측정(outputs/_final) — 논문 headline 수치를 "서술된 구성 그대로"로 통일.
+- 잔여: 8-seg SLSQP 앵커(진행 중), 8-seg 오라클 재실행, ε-gap probe 본런.
+
 # ★P-CENT SLSQP 완주 — 강한 중앙 기준선 확보, 계층 우위 유지 (2026-07-12 밤)
 
 scipy 1.18 설치 후 진짜 연속 최적화 중앙(SLSQP multi-start 5, maxiter 40, far 포함,
