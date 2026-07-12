@@ -666,28 +666,32 @@ class ConstraintTests(unittest.TestCase):
     def test_distributed_agent_partition_matches_topology(self):
         cfg = short_config()
         urban_agents, freeway_agents = build_agent_specs(cfg)
+        n = cfg.network.freeway_segments_per_link
+        m_d = cfg.network.ramp_merge_segment_index["R_D_W"]
+        m_f = cfg.network.ramp_merge_segment_index["R_F_W"]
+        o_d = cfg.network.off_ramp_segment_index["OR_D_W"]
         self.assertEqual(len(urban_agents), 5)
-        self.assertEqual(len(freeway_agents), 8)
+        self.assertEqual(len(freeway_agents), 2 * n)
         self.assertEqual({agent.id for agent in urban_agents}, {"U_A", "U_B", "U_C", "U_D", "U_F"})
         self.assertEqual(
             {agent.id for agent in freeway_agents},
-            {"F_W0", "F_W1", "F_W2", "F_W3", "F_E0", "F_E1", "F_E2", "F_E3"},
+            {f"F_{side}{i}" for side in ("W", "E") for i in range(n)},
         )
         d_agent = next(agent for agent in urban_agents if agent.id == "U_D")
         self.assertIn("D_N_to_onW", d_agent.movements)
         self.assertIn("D_offW_to_N", d_agent.movements)
-        # 13-player 매핑(2026-07-10 망 변경 승인): D 인터체인지 on-ramp는 seg2(F_W2),
-        # F 인터체인지 on-ramp는 seg3(F_W3) — ramp 소유 agent가 link당 2개로 분리.
-        fw_d_agent = next(agent for agent in freeway_agents if agent.id == "F_W2")
+        # segment-player 매핑(기하 무관, cfg 유도): merge seg가 해당 on-ramp 소유 —
+        # ramp 소유 agent가 link당 2개로 분리(8-seg 디폴트: F_W4=R_D, F_W6=R_F).
+        fw_d_agent = next(agent for agent in freeway_agents if agent.id == f"F_W{m_d}")
         self.assertEqual(tuple(fw_d_agent.ramps), ("R_D_W",))
-        fw_f_agent = next(agent for agent in freeway_agents if agent.id == "F_W3")
+        fw_f_agent = next(agent for agent in freeway_agents if agent.id == f"F_W{m_f}")
         self.assertEqual(tuple(fw_f_agent.ramps), ("R_F_W",))
         freeway_ids = {agent.id for agent in freeway_agents}
         for agent in urban_agents:
             self.assertTrue(set(agent.neighbors).issubset(freeway_ids))
         self.assertEqual(
             set(d_agent.neighbors),
-            {"F_W1", "F_W2", "F_E1", "F_E2"},
+            {f"F_W{o_d}", f"F_W{m_d}", f"F_E{o_d}", f"F_E{m_d}"},
         )
 
     def test_uncontrolled_E_vehicles_are_counted_in_ttt_coverage(self):
@@ -808,7 +812,10 @@ class ConstraintTests(unittest.TestCase):
         )
         self.assertEqual(result.control.diagnostics["distributed_player_active"], 1.0)
         self.assertEqual(result.control.diagnostics["distributed_urban_agent_count"], 5.0)
-        self.assertEqual(result.control.diagnostics["distributed_freeway_agent_count"], 8.0)
+        self.assertEqual(
+            result.control.diagnostics["distributed_freeway_agent_count"],
+            2.0 * cfg.network.freeway_segments_per_link,
+        )
         self.assertIn("agent_U_A_objective", result.control.diagnostics)
         self.assertIn("agent_F_W2_objective", result.control.diagnostics)
         self.assertIn("distributed_response_objective_tts", result.control.diagnostics)
@@ -912,7 +919,7 @@ class ConstraintTests(unittest.TestCase):
         coordinator = DistributedCoordinator(cfg)
         state = TrafficState.initial(cfg)
         demand = DemandProfile(cfg, ScenarioConfig("test")).at(0.0)
-        agent = next(item for item in coordinator.freeway_agents if item.id == "F_W2")
+        agent = next(item for item in coordinator.freeway_agents if "R_D_W" in item.ramps)
         upper = {ramp: cfg.network.ramp_capacity_veh_h[ramp] for ramp in agent.ramps}
 
         upstream_idx = agent.segment_index - 1

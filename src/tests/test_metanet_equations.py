@@ -99,14 +99,14 @@ class MetanetEquationTests(unittest.TestCase):
         self.assertIn("R_D_W", cfg.network.on_ramp_to_movement)
         self.assertIn("OR_D_W", cfg.network.off_ramps)
         self.assertIn("OR_D_W_storage", cfg.network.urban_link_storage_veh)
-        self.assertEqual(cfg.network.freeway_segments_per_link, 4)
-        self.assertEqual(cfg.network.ramp_merge_segment_index["R_D_W"], 2)
-        # 13-player 재구축: F 인터체인지 on-ramp는 seg3 merge (2026-07-10 망 변경 승인).
-        self.assertEqual(cfg.network.ramp_merge_segment_index["R_F_W"], 3)
-        self.assertEqual(cfg.network.off_ramp_segment_index["OR_D_W"], 1)
-        self.assertEqual(cfg.network.off_ramp_segment_index["OR_F_W"], 2)
-        self.assertEqual(cfg.network.off_ramp_segment_index["OR_D_E"], 1)
-        self.assertEqual(cfg.network.off_ramp_segment_index["OR_F_E"], 2)
+        # 8-seg 디폴트(2026-07-12 승격): 인터체인지 상대기하 = 4-seg 승인 기하 ×2.
+        self.assertEqual(cfg.network.freeway_segments_per_link, 8)
+        self.assertEqual(cfg.network.ramp_merge_segment_index["R_D_W"], 4)
+        self.assertEqual(cfg.network.ramp_merge_segment_index["R_F_W"], 6)
+        self.assertEqual(cfg.network.off_ramp_segment_index["OR_D_W"], 2)
+        self.assertEqual(cfg.network.off_ramp_segment_index["OR_F_W"], 4)
+        self.assertEqual(cfg.network.off_ramp_segment_index["OR_D_E"], 2)
+        self.assertEqual(cfg.network.off_ramp_segment_index["OR_F_E"], 4)
         self.assertTrue(cfg.freeway_offramp_capacity_drop.enabled)
         self.assertGreaterEqual(cfg.freeway_offramp_capacity_drop.lane_reduction, 0.0)
         self.assertLess(cfg.freeway_offramp_capacity_drop.lane_reduction, cfg.network.freeway_lanes)
@@ -272,12 +272,14 @@ class MetanetEquationTests(unittest.TestCase):
 
         lane_profile, diag = effective_lane_profile(state, cfg)
 
-        self.assertAlmostEqual(lane_profile["FW_W"][0], cfg.network.freeway_lanes)
-        self.assertLess(lane_profile["FW_W"][1], cfg.network.freeway_lanes)
-        self.assertAlmostEqual(lane_profile["FW_W"][2], cfg.network.freeway_lanes)
-        self.assertAlmostEqual(lane_profile["FW_W"][3], cfg.network.freeway_lanes)
+        idx = cfg.network.off_ramp_segment_index["OR_D_W"]
+        for i in range(cfg.network.freeway_segments_per_link):
+            if i == idx:
+                self.assertLess(lane_profile["FW_W"][i], cfg.network.freeway_lanes)
+            else:
+                self.assertAlmostEqual(lane_profile["FW_W"][i], cfg.network.freeway_lanes)
         self.assertAlmostEqual(diag["capacity_drop_lane_loss_FW_W_seg0"], 0.0)
-        self.assertGreater(diag["capacity_drop_lane_loss_FW_W_seg1"], 0.0)
+        self.assertGreater(diag[f"capacity_drop_lane_loss_FW_W_seg{idx}"], 0.0)
 
     def test_offramp_flow_uses_segment_specific_storage_capacity(self):
         cfg = ExperimentConfig.from_file(
@@ -291,7 +293,10 @@ class MetanetEquationTests(unittest.TestCase):
             state.freeway_effective_lanes[link] = [
                 cfg.network.freeway_lanes for _ in range(cfg.network.freeway_segments_per_link)
             ]
-        state.freeway_density["FW_W"] = [0.0, 20.0, 20.0, 0.0]
+        dens = [0.0] * cfg.network.freeway_segments_per_link
+        dens[cfg.network.off_ramp_segment_index["OR_D_W"]] = 20.0
+        dens[cfg.network.off_ramp_segment_index["OR_F_W"]] = 20.0
+        state.freeway_density["FW_W"] = dens
         for storage_link in cfg.network.off_ramp_storage_link.values():
             state.urban_link_storage[storage_link] = cfg.network.urban_link_storage_veh[storage_link]
         state.urban_link_storage["OR_D_W_storage"] = 0.0

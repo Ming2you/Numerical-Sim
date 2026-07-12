@@ -599,6 +599,9 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
     if _os.environ.get("LEADER_HINGE") == "1":
         # leader 채점 hinge 복원(F1 2종을 candidate 랭킹 전용으로 이관) — A/B용.
         cfg.mpc.leader_hinge_enabled = True
+    if _os.environ.get("LEADER_HINGE") == "0":
+        # 기본 ON 전환(2026-07-12) 이후의 해제 ablation용.
+        cfg.mpc.leader_hinge_enabled = False
     if _os.environ.get("EPS_GAP") == "1":
         # ε-best-response gap probe(리뷰 2.2/2.8): 고정점 단독 재최적화 진단, 행동 불변.
         cfg.mpc.eps_gap_probe = True
