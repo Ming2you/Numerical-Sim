@@ -84,15 +84,13 @@ def build_cfg(scenario_name: str, t_total: float) -> tuple[ExperimentConfig, Any
         "simulation": {"T_total": float(t_total)},
     }
     import os as _os
-    if _os.environ.get("NET4SEG") != "1":
-        # ★8-seg = 디폴트 망(2026-07-12 사용자 결정: "4-seg 버리고 8-seg 디폴트").
-        # link 4km(8×0.5km), 인터체인지 기하 ×2 (OR_D 2/R_D 4/OR_F 4/R_F 6), player 5+16=21.
-        # 규약: T=7200(ci 180s × 40스텝). 구 NET8SEG=1은 이제 무의미(항상 적용),
-        # 4-seg 재현은 NET4SEG=1로만 가능(legacy 비교 전용).
+    if _os.environ.get("NET4SEG") == "1":
+        # legacy 4-seg 재현 전용(2026-07-12부터 default.yaml 자체가 8-seg).
+        # 구 NET8SEG=1은 무의미(디폴트가 이미 8-seg).
         overrides["network"] = {
-            "freeway_segments_per_link": 8,
-            "ramp_merge_segment_index": {"R_D_W": 4, "R_F_W": 6, "R_D_E": 4, "R_F_E": 6},
-            "off_ramp_segment_index": {"OR_D_W": 2, "OR_F_W": 4, "OR_D_E": 2, "OR_F_E": 4},
+            "freeway_segments_per_link": 4,
+            "ramp_merge_segment_index": {"R_D_W": 2, "R_F_W": 3, "R_D_E": 2, "R_F_E": 3},
+            "off_ramp_segment_index": {"OR_D_W": 1, "OR_F_W": 2, "OR_D_E": 1, "OR_F_E": 2},
         }
     cfg = ExperimentConfig.from_file(str(ROOT / "src" / "config" / "default.yaml"), overrides)
     scenarios = load_scenarios(str(ROOT / "src" / "config" / "scenarios.yaml"))
@@ -607,6 +605,9 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
     if _os.environ.get("NP_CAND_LAMBDA") == "1":
         # 리뷰 4안: 후보별 λ̂ 1회 선반영 — N_P가 당스텝 follower 반응에 작용(A/B용).
         cfg.mpc.np_candidate_lambda = True
+    if _os.environ.get("NP_CAND_LAMBDA") == "0":
+        # 구거동 재현(스텝 내 λ 동결) — 기본 ON 전환(2026-07-12) 이후의 ablation용.
+        cfg.mpc.np_candidate_lambda = False
     if _os.environ.get("NP_FIX") == "0":
         # λ windup 수선 해제(구거동 재현 A/B): 내부 투영·deadband 모두 끔.
         cfg.mpc.np_target_interior_frac = 0.0

@@ -19,7 +19,7 @@ network:
   freeway_links:
   - FW_W
   - FW_E
-  freeway_segments_per_link: 4
+  freeway_segments_per_link: 8
   freeway_segment_length_km: 0.5
   freeway_lanes: 2
   v_free: 100.0
@@ -46,10 +46,10 @@ network:
   # 13-player 재구축(2026-07-10 승인): F 인터체인지 on-ramp는 seg3 merge — D(off seg1/on seg2),
   # F(off seg2/on seg3)로 기하 일관 + F_L3 agent의 metering 유인 확보(plan-13player-rebuild.md).
   ramp_merge_segment_index:
-    R_D_W: 2
-    R_F_W: 3
-    R_D_E: 2
-    R_F_E: 3
+    R_D_W: 4
+    R_F_W: 6
+    R_D_E: 4
+    R_F_E: 6
   ramp_queue_max_veh: 180.0
   signals:
   - A
@@ -138,10 +138,10 @@ network:
     OR_D_E: FW_E
     OR_F_E: FW_E
   off_ramp_segment_index:
-    OR_D_W: 1
-    OR_F_W: 2
-    OR_D_E: 1
-    OR_F_E: 2
+    OR_D_W: 2
+    OR_F_W: 4
+    OR_D_E: 2
+    OR_F_E: 4
   off_ramp_storage_link:
     OR_D_W: OR_D_W_storage
     OR_F_W: OR_F_W_storage

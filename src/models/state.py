@@ -423,9 +423,11 @@ class MPCConfig:
     np_target_interior_frac: float = 0.25
     # ② 경부하 deadband: 보호 accumulation < frac·N_P_crit면 적분 대신 감쇠(0.5×).
     np_dual_deadband_frac: float = 0.9
-    # NP-CAND-λ̂(2026-07-12, 리뷰 4안): 후보 평가마다 λ를 후보 target으로 1회 선반영해
-    # follower 반응이 N_P 후보에 의존하게 한다. False=구거동(스텝 내 λ 동결) 비트동일.
-    np_candidate_lambda: bool = False
+    # NP-CAND-λ̂(2026-07-12, 리뷰 4안 → 원고 (47)~(51) 정식화): 후보 평가마다 λ를 후보
+    # target으로 1회 선반영(predictor) + 차기 스텝 실현 유입으로 교정(corrector).
+    # 기본 ON(2026-07-12 확정 — A/B: 8-seg 155_skew 7490/준거 7509, 190 15535/15652).
+    # NP_CAND_LAMBDA=0으로 구거동(스텝 내 λ 동결) 재현.
+    np_candidate_lambda: bool = True
     # ε-best-response gap probe(2026-07-12, 리뷰 2.2/2.8 대응): 수렴 고정점에서 각
     # follower를 최종 결합변수 하에 단독 재최적화해 개선 여지를 측정(진단 전용, 행동 불변).
     eps_gap_probe: bool = False
