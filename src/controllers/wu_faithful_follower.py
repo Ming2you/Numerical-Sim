@@ -3711,6 +3711,68 @@ class WuFaithfulFollower:
         # N_P 투영 진단: 리더 의도(original)·실현가능범위로 투영한 target·잔차. dual path에서만
         # 유의값, leader=None이면 모두 0(default). plant/run-log가 읽는 rate는 PROJECTED target.
         control.diagnostics["wu_faithful_np_original_target"] = float(n_p_star)
+        # ---- ε-best-response gap probe(2026-07-12, 진단 전용 — 행동 불변) ----
+        # 고정점(최종 결합변수·최종 control)에서 각 urban follower를 단독 재최적화해
+        # gap_i = J_i(committed) − J_i(BR) ≥ 0을 측정. freeway segment agent는 재-BR의
+        # 행동 변화량(L1)만 측정(예산 사영·궤적 캐시 부작용은 save/restore로 차단).
+        # 공유 등식 제약 하 metering의 단독 이탈은 실행가능집합 밖이므로 gap 정의에서 제외.
+        if bool(getattr(self.cfg.mpc, "eps_gap_probe", False)):
+            import copy as _copy
+            probe_snapshot = ControlAction(
+                ramp_metering=dict(control.ramp_metering),
+                vsl=dict(control.vsl),
+                green_times=dict(control.green_times),
+                offsets=dict(control.offsets),
+                inflow_outflow_allocation={},
+            )
+            gaps = []
+            rel_gaps = []
+            for signal in net.signals:
+                arr_probe = self._per_movement_arrivals(signal, state, probe_snapshot, demand)
+                _, j_br, _, _ = self._solve_urban_agent_local(
+                    signal, state, coupling, arr_probe, s_eff_frozen,
+                    reservoir_drain, freeway_congestion, probe_snapshot, leader,
+                    lambda_p, forecast_arrivals, horizon_h, demand,
+                )
+                p1_com = float(control.green_times.get(f"{signal}_p1", 0.0))
+                _, j_com, _, _ = self._solve_urban_agent_local(
+                    signal, state, coupling, arr_probe, s_eff_frozen,
+                    reservoir_drain, freeway_congestion, probe_snapshot, leader,
+                    lambda_p, forecast_arrivals, horizon_h, demand,
+                    candidates_override=[p1_com],
+                )
+                gap = max(0.0, float(j_com) - float(j_br))
+                gaps.append(gap)
+                rel_gaps.append(gap / max(abs(float(j_br)), 1.0e-9))
+            fw_vsl_l1 = 0.0
+            fw_meter_l1 = 0.0
+            if self.segment_agents and self.metering_enabled:
+                saved_traj = _copy.deepcopy(self._seg_traj)
+                saved_off = dict(self._wu._last_offramp_flow)
+                saved_has = bool(getattr(self._wu, "_has_last_offramp_flow", False))
+                saved_diag = dict(self._seg13_diag)
+                for link in net.freeway_links:
+                    vsl_p, meter_p, _ = self._solve_freeway_segment_agents(
+                        link, state, coupling, demand, probe_snapshot, leader,
+                    )
+                    for k, v in vsl_p.items():
+                        fw_vsl_l1 += abs(float(v) - float(control.vsl.get(k, v)))
+                    for k, v in meter_p.items():
+                        fw_meter_l1 += abs(float(v) - float(control.ramp_metering.get(k, v)))
+                self._seg_traj = saved_traj
+                self._wu._last_offramp_flow = saved_off
+                self._wu._has_last_offramp_flow = saved_has
+                self._seg13_diag = saved_diag
+            control.diagnostics["wu_eps_gap_probe"] = 1.0
+            control.diagnostics["wu_eps_gap_urban_max"] = float(max(gaps) if gaps else 0.0)
+            control.diagnostics["wu_eps_gap_urban_mean"] = float(
+                sum(gaps) / len(gaps) if gaps else 0.0
+            )
+            control.diagnostics["wu_eps_gap_urban_rel_max"] = float(
+                max(rel_gaps) if rel_gaps else 0.0
+            )
+            control.diagnostics["wu_eps_fw_vsl_l1"] = float(fw_vsl_l1)
+            control.diagnostics["wu_eps_fw_meter_l1"] = float(fw_meter_l1)
         control.diagnostics["wu_faithful_np_projected_target"] = float(projected_target)
         control.diagnostics["wu_faithful_np_sum_nin"] = float(sum_nin)
         control.diagnostics["wu_faithful_np_cand_lambda_applied"] = float(np_cand_lambda_applied)
