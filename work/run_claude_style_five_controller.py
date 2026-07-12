@@ -84,10 +84,11 @@ def build_cfg(scenario_name: str, t_total: float) -> tuple[ExperimentConfig, Any
         "simulation": {"T_total": float(t_total)},
     }
     import os as _os
-    if _os.environ.get("NET8SEG") == "1":
-        # 8-seg 망(2026-07-11 승인): link 4km(8×0.5km, seg 길이 유지 — CFL 안전),
-        # 인터체인지 상대기하 = 승인 기하 ×2 (OR_D 2/R_D 4/OR_F 4/R_F 6). player 5+16=21.
-        # 목적: 외부성 반경(다홉) vs 정보 반경(radius-1) 분리 — nbr 한계 실증 무대.
+    if _os.environ.get("NET4SEG") != "1":
+        # ★8-seg = 디폴트 망(2026-07-12 사용자 결정: "4-seg 버리고 8-seg 디폴트").
+        # link 4km(8×0.5km), 인터체인지 기하 ×2 (OR_D 2/R_D 4/OR_F 4/R_F 6), player 5+16=21.
+        # 규약: T=7200(ci 180s × 40스텝). 구 NET8SEG=1은 이제 무의미(항상 적용),
+        # 4-seg 재현은 NET4SEG=1로만 가능(legacy 비교 전용).
         overrides["network"] = {
             "freeway_segments_per_link": 8,
             "ramp_merge_segment_index": {"R_D_W": 4, "R_F_W": 6, "R_D_E": 4, "R_F_E": 6},
