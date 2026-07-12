@@ -41,6 +41,15 @@ class ScenarioConfig:
     surge_end_sec: Optional[float] = None
     surge_peak_scale: float = 1.0
     surge_recovery_scale: float = 1.0
+    # 사다리꼴 펄스 프로파일(2026-07-12 승인, 청산형 설계): base 지대 → 램프업 →
+    # 플래토(class scale 도달) → 램프다운 → base 복귀. pulse_start_sec가 None이면
+    # 완전 휴면(기존 시나리오 비트 동일). 펄스 구성 시 내장 sine 피크파는 꺼서
+    # 설계 곡선이 그대로 실현되게 한다(effective scale = base + (class−base)·pulse(t)).
+    pulse_base_scale: Optional[float] = None
+    pulse_start_sec: Optional[float] = None
+    pulse_rampup_sec: float = 300.0
+    pulse_plateau_sec: float = 900.0
+    pulse_rampdown_sec: float = 300.0
     metadata: Dict[str, float] = field(default_factory=dict)
 
     @classmethod
@@ -84,6 +93,14 @@ class ScenarioConfig:
                 known[key] = float(value)
         known["surge_peak_scale"] = float(raw.get("surge_peak_scale", 1.0))
         known["surge_recovery_scale"] = float(raw.get("surge_recovery_scale", 1.0))
+        for key in ("pulse_base_scale", "pulse_start_sec"):
+            value = raw.get(key)
+            if value is not None:
+                known[key] = float(value)
+        for key in ("pulse_rampup_sec", "pulse_plateau_sec", "pulse_rampdown_sec"):
+            value = raw.get(key)
+            if value is not None:
+                known[key] = float(value)
         return cls(name=name, **known)
 
 
@@ -163,6 +180,26 @@ class DemandProfile:
             return peak_scale + fraction * (recovery_scale - peak_scale)
         return recovery_scale
 
+    def _pulse_fraction(self, time_sec: float) -> Optional[float]:
+        # 사다리꼴 펄스 위치 함수 pulse(t)∈[0,1]. base 지대 0, 램프 선형, 플래토 1.
+        # 미구성(pulse_start_sec/base_scale None)이면 None → 기존 경로 비트 동일.
+        start = self.scenario.pulse_start_sec
+        base = self.scenario.pulse_base_scale
+        if start is None or base is None:
+            return None
+        up = max(0.0, self.scenario.pulse_rampup_sec)
+        plateau = max(0.0, self.scenario.pulse_plateau_sec)
+        down = max(0.0, self.scenario.pulse_rampdown_sec)
+        if time_sec <= start:
+            return 0.0
+        if time_sec <= start + up:
+            return (time_sec - start) / max(up, 1.0e-9)
+        if time_sec <= start + up + plateau:
+            return 1.0
+        if time_sec <= start + up + plateau + down:
+            return 1.0 - (time_sec - start - up - plateau) / max(down, 1.0e-9)
+        return 0.0
+
     def _active_lane_loss(self, time_sec: float) -> Dict[str, Dict[int, float]]:
         # 차로 폐쇄는 DemandStep에 넣어 plant와 MPC forecast가 같은 incident 상태를 보게 한다.
         lane_loss: Dict[str, Dict[int, float]] = {}
@@ -187,9 +224,22 @@ class DemandProfile:
         peak = 1.0 + 0.22 * math.sin(math.pi * min(max(x, 0.0), 1.0))
 
         surge = self._surge_scale(time_sec)
-        freeway_base = 1650.0 * self.scenario.freeway_scale * peak * surge
-        ramp_base = 560.0 * self.scenario.ramp_scale * peak * surge
-        urban_base = 500.0 * self.scenario.urban_scale * peak * surge
+        pulse = self._pulse_fraction(time_sec)
+        if pulse is None:
+            urban_scale = self.scenario.urban_scale
+            freeway_scale = self.scenario.freeway_scale
+            ramp_scale = self.scenario.ramp_scale
+        else:
+            # 펄스 모드: class scale은 플래토 피크, base 지대는 pulse_base_scale.
+            # 내장 sine 피크파는 꺼서(peak=1) 설계 사다리꼴이 그대로 실현되게 한다.
+            peak = 1.0
+            base = max(0.0, float(self.scenario.pulse_base_scale))
+            urban_scale = base + (self.scenario.urban_scale - base) * pulse
+            freeway_scale = base + (self.scenario.freeway_scale - base) * pulse
+            ramp_scale = base + (self.scenario.ramp_scale - base) * pulse
+        freeway_base = 1650.0 * freeway_scale * peak * surge
+        ramp_base = 560.0 * ramp_scale * peak * surge
+        urban_base = 500.0 * urban_scale * peak * surge
 
         freeway = {
             link: freeway_base * (1.0 + 0.05 * idx)
