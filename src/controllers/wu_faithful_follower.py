@@ -264,6 +264,14 @@ class WuFaithfulFollower:
         # NP-CAND-λ̂(2026-07-12): 직전 step 컨트롤러가 commit한 solve의 Σnin.
         # np_candidate_lambda=True일 때 후보별 λ̂ 선반영의 오차항으로 쓴다. None=첫 step.
         self._np_last_sum_nin: Optional[float] = None
+        # (51) corrector 상태(원고 정식화 정렬): 직전 step 보호구역 accumulation(실현
+        # 유입 측정용), step 가드 시각, pending=(λ_k, 커밋 후보의 투영 target),
+        # 최근 실현 순유입(horizon 환산 veh). predictor(48)·corrector(51) 모두 실현
+        # 유입을 오차 신호로 쓴다 — 예측 Σnin은 첫 스텝 fallback.
+        self._np_prev_accum: Optional[float] = None
+        self._np_step_time: Optional[float] = None
+        self._np_corrector_pending: Optional[tuple] = None
+        self._np_last_real_q: Optional[float] = None
         # 예산 부등식 ablation(2026-07-11, env SEG13_INEQ=1): 등식 Σ=budget 대신 Σ≤budget.
         # 170_skew 진단 — 등식은 상향으로도 binding이라 leader N_UF=6000이 follower의
         # 자발적 하향 metering을 덮어써 절벽 근처 dip→과잉 교정(whipsaw)을 유발.
@@ -3383,6 +3391,36 @@ class WuFaithfulFollower:
             )
         dual_active = leader is not None and self.use_dual_np and self.np_price_enabled
         n_p_star = float(getattr(leader, "N_P_star", 0.0)) if leader is not None else 0.0
+        np_cand_flag = bool(getattr(self.cfg.mpc, "np_candidate_lambda", False))
+        # ---- (51) corrector(원고 정식화): λ_{k+1} = Π[λ_k + γ_c(Q^real − Ñ_{c*})] ----
+        # 커밋 시점이 아니라 다음 step 시작 시(실현 유입 관측 후) standing λ를 1회 교정.
+        # Q^real은 보호구역 accumulation 차분(구간)을 horizon 배수로 환산해 측정한다
+        # (Σnin·target이 horizon 집계 veh 단위이므로). 후보 solve 간에는 state 시각
+        # 가드로 스텝당 1회만 실행된다.
+        if dual_active and np_cand_flag:
+            now_t = float(getattr(state, "time_sec", 0.0))
+            if self._np_step_time != now_t:
+                self._np_step_time = now_t
+                n_p_now_veh = float(state.protected_accumulation_veh(net))
+                if self._np_prev_accum is not None:
+                    self._np_last_real_q = (
+                        n_p_now_veh - float(self._np_prev_accum)
+                    ) * float(max(1, self.cfg.mpc.horizon_steps))
+                self._np_prev_accum = n_p_now_veh
+                if (
+                    self._np_corrector_pending is not None
+                    and self._np_last_real_q is not None
+                ):
+                    lam_base, tgt_committed = self._np_corrector_pending
+                    deadband_c = float(getattr(self.cfg.mpc, "np_dual_deadband_frac", 0.0))
+                    crit_c = float(getattr(self.cfg.leader, "N_P_crit_veh", 0.0) or 0.0)
+                    if deadband_c > 0.0 and crit_c > 0.0 and n_p_now_veh < deadband_c * crit_c:
+                        self._lambda_P = 0.5 * float(lam_base)
+                    else:
+                        self._lambda_P = self._lambda_np_update(
+                            float(lam_base), float(self._np_last_real_q), float(tgt_committed),
+                        )
+                self._np_corrector_pending = None
         lambda_p = float(self._lambda_P) if dual_active else 0.0  # warm-start(직전 step 수렴값).
         # ---- NP-CAND-λ̂(2026-07-12, 리뷰 4안): 후보별 λ 1회 선반영 ----
         # 표준(플래그 OFF)에선 λ가 스텝 내 동결이라 follower 반응이 N_P 후보에 불변
@@ -3391,11 +3429,13 @@ class WuFaithfulFollower:
         # 폐지된 step 내 이분법(A1+A2 주석 참조)과 달리 반복 중 λ 갱신이 없어
         # off-equilibrium commit이 없고, clip(0,cap)이 음수 보조금을 차단한다.
         np_cand_lambda_applied = 0.0
-        if (
-            dual_active
-            and bool(getattr(self.cfg.mpc, "np_candidate_lambda", False))
-            and self._np_last_sum_nin is not None
-        ):
+        # predictor(48)의 오차 신호 Q^prev: 실현 유입(우선) → 예측 Σnin(첫 스텝 fallback).
+        q_prev = (
+            self._np_last_real_q
+            if self._np_last_real_q is not None
+            else self._np_last_sum_nin
+        )
+        if dual_active and np_cand_flag and q_prev is not None:
             pre_snapshot = ControlAction(
                 ramp_metering=dict(control.ramp_metering),
                 vsl=dict(control.vsl),
@@ -3417,7 +3457,7 @@ class WuFaithfulFollower:
                 lambda_p = 0.5 * lambda_p
             else:
                 lambda_p = self._lambda_np_update(
-                    lambda_p, float(self._np_last_sum_nin), pre_target,
+                    lambda_p, float(q_prev), pre_target,
                 )
             np_cand_lambda_applied = 1.0
         sum_nin = 0.0

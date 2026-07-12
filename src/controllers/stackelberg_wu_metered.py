@@ -1943,8 +1943,18 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         # 하지 않고 유지한다 — 커밋된 제어가 PFO면 λ는 plant에 영향이 없으므로 새 정보가 없다.
         lam_next = best.nash.control.diagnostics.get("wu_faithful_lambda_next")
         if lam_next is not None:
-            self.nash_solver._lambda_P = float(lam_next)
-            # NP-CAND-λ̂: 다음 step의 후보별 λ 선반영에 쓸 committed Σnin 저장.
+            if bool(getattr(self.cfg.mpc, "np_candidate_lambda", False)):
+                # (51) corrector로 이관: 커밋 시점에는 standing λ를 갱신하지 않고
+                # (λ_k, 커밋 후보의 투영 target)을 pending으로 넘겨, 다음 step 시작 시
+                # 실현 유입 Q^real로 1회 교정한다(원고 정식화 정렬 — λ̂ 재적분 아님).
+                tgt_c = best.nash.control.diagnostics.get("wu_faithful_np_projected_target")
+                if tgt_c is not None:
+                    self.nash_solver._np_corrector_pending = (
+                        float(self.nash_solver._lambda_P), float(tgt_c),
+                    )
+            else:
+                self.nash_solver._lambda_P = float(lam_next)
+            # 첫 스텝 predictor fallback용 committed Σnin 저장(실현 유입 관측 전).
             sum_nin_d = best.nash.control.diagnostics.get("wu_faithful_np_sum_nin")
             if sum_nin_d is not None:
                 self.nash_solver._np_last_sum_nin = float(sum_nin_d)
