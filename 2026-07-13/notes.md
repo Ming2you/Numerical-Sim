@@ -27,15 +27,17 @@ NP-CAND-λ̂ 채널이 전 셀에서 λ̂=0으로 휴면. 원인은 **계획 공
 - 활성화 시 190 계열 거동이 바뀔 수 있음(실현 ~1,500 > r̂·1,730 ≈ 1,211 → λ̂ 발동 예상).
   **디폴트 ON 전환은 반드시 5-suite A/B 후 결정.**
 
-## 2. WU-CD-F 컬럼 (bigziw672, 진행 중)
-- 문헌 Wu(green+VSL only, metering 용량 고정) 12셀: sustained 7(T=7200) + suite pulse 5(T=3600).
-- sustained 7셀 완료 시점 확인 — 마지막 sweet_190 sustained: total_ttt=22,901.8
-  (계층 ~15.7k 대비 +46% 수준, 권한 차이의 정직한 갭). pulse 배치 진입.
-- 완료 시: 4컬럼 메인 표(NC / WU-CD-F / P-Stack / P-CENT) 확정, 구 "WU" 컬럼은
-  PFO-link(권한 동등 ablation)로 재라벨.
+## 2. WU-CD-F 컬럼 완료 → 4컬럼 메인 표 확정 (results/main_table_4col.md)
+- 문헌 Wu(green+VSL only, metering 용량 고정) 12셀 완료: sustained 7(T=7200) + suite pulse 5(T=3600).
+  (중간보고 때 22,901.8을 190으로 오기 — 실제는 170_skew. 190 = 28,324.3. 정정.)
+- 비교 유효성: 셀별 free_flow_reference 전 컬럼 일치 확인(190=2507.448 등). NC 원자료는
+  컨트롤러 무관이므로 λ수선 전 xval(155계열)·_8seg/nc(190)·_170(170계열) 값 사용 가능.
+- 핵심: WU-CD-F는 sustained −1.2~−9.4%(155_skew만 −20.8%, green 재배분 레짐), 펄스 169%+
+  사실상 NC 동급 → **권한 격차(metering, −40%p↑)와 조정 격차(P-Stack−PFO-link, sustained 7/7승
+  −23~−1,281)가 표에서 분리**. 구 "WU" 컬럼은 PFO-link(권한 동등 ablation)로 재라벨 확정.
+- P-CENT 8-seg 재측정 반영: 190 = 18,527.4 (계층 −15.5% 우위, 계산 1/8). 구 4-seg 17,929 대체.
 
 ## TODO
-- [ ] WU-CD-F 12셀 완료 → 메인 표 + suite 표 확정, notes/메모리 갱신
 - [ ] 8-seg oracle 재실행(open-loop bound, 구 14,223은 4-seg 값)
 - [ ] ε-gap probe 프로덕션 1셀
 - [ ] 원고 수정시트 일괄 적용(Word 닫힌 후) + notation rename 실행
