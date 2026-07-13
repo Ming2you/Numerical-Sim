@@ -605,6 +605,9 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
     if _os.environ.get("NP_BIAS") == "1":
         # r̂ 편향 보정: λ̂ target을 실현 공간으로 환산 — A/B용(기본 OFF).
         cfg.mpc.np_bias_correction = True
+    if _os.environ.get("NP_CAP"):
+        # 방법 A cap 포화 A/B: λ 상한 override(기본 10.0 — dhigh2 잔차 +476~534 진단).
+        getattr(controller, "nash_solver", controller).lambda_np_cap = float(_os.environ["NP_CAP"])
     if _os.environ.get("NP_DEADBAND_V2") == "1":
         # deadband v2: 위반 신호의 저stock 게이트 우회 — 잠금해제 A/B용(기본 OFF).
         cfg.mpc.np_deadband_violation_override = True
