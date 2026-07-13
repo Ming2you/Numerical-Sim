@@ -602,6 +602,9 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
     if _os.environ.get("LEADER_HINGE") == "0":
         # 기본 ON 전환(2026-07-12) 이후의 해제 ablation용.
         cfg.mpc.leader_hinge_enabled = False
+    if _os.environ.get("NP_BIAS") == "1":
+        # r̂ 편향 보정: λ̂ target을 실현 공간으로 환산 — A/B용(기본 OFF).
+        cfg.mpc.np_bias_correction = True
     if _os.environ.get("EPS_GAP") == "1":
         # ε-best-response gap probe(리뷰 2.2/2.8): 고정점 단독 재최적화 진단, 행동 불변.
         cfg.mpc.eps_gap_probe = True

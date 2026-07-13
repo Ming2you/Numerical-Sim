@@ -272,6 +272,11 @@ class WuFaithfulFollower:
         self._np_step_time: Optional[float] = None
         self._np_corrector_pending: Optional[tuple] = None
         self._np_last_real_q: Optional[float] = None
+        # r̂ 편향 보정(2026-07-13): 계획(예측 Σnin) 대비 실현(ΔN_P×H) 유입의 EWMA 비율.
+        # 국소 모형의 낙관 편향으로 계획-공간 target(Ñ)과 실현-공간 오차 신호가 어긋나
+        # λ̂가 구조적으로 휴면하는 문제의 다리 — 비교를 r̂·Ñ(실현 공간 환산)으로 수행.
+        # np_bias_correction=False(기본)면 r̂=1 고정(비트동일).
+        self._np_bias_ratio: Optional[float] = None
         # 예산 부등식 ablation(2026-07-11, env SEG13_INEQ=1): 등식 Σ=budget 대신 Σ≤budget.
         # 170_skew 진단 — 등식은 상향으로도 binding이라 leader N_UF=6000이 follower의
         # 자발적 하향 metering을 덮어써 절벽 근처 dip→과잉 교정(whipsaw)을 유발.
@@ -3407,18 +3412,39 @@ class WuFaithfulFollower:
                         n_p_now_veh - float(self._np_prev_accum)
                     ) * float(max(1, self.cfg.mpc.horizon_steps))
                 self._np_prev_accum = n_p_now_veh
+                # r̂ 갱신: 직전 commit 균형의 예측 Σnin(_np_last_sum_nin, commit 시 기록)과
+                # 방금 측정한 실현 유입의 쌍으로 EWMA(β=0.3). 음수 실현·0 나눗셈 가드로
+                # [0.05, 2.0] 클립. 플래그 OFF면 사용처에서 r̂=1로 무시된다.
+                if (
+                    self._np_last_real_q is not None
+                    and self._np_last_sum_nin is not None
+                ):
+                    denom = max(abs(float(self._np_last_sum_nin)), 1.0e-6)
+                    ratio = min(max(float(self._np_last_real_q) / denom, 0.05), 2.0)
+                    if self._np_bias_ratio is None:
+                        self._np_bias_ratio = ratio
+                    else:
+                        self._np_bias_ratio = 0.7 * self._np_bias_ratio + 0.3 * ratio
                 if (
                     self._np_corrector_pending is not None
                     and self._np_last_real_q is not None
                 ):
                     lam_base, tgt_committed = self._np_corrector_pending
+                    r_hat_c = (
+                        float(self._np_bias_ratio)
+                        if bool(getattr(self.cfg.mpc, "np_bias_correction", False))
+                        and self._np_bias_ratio is not None
+                        else 1.0
+                    )
                     deadband_c = float(getattr(self.cfg.mpc, "np_dual_deadband_frac", 0.0))
                     crit_c = float(getattr(self.cfg.leader, "N_P_crit_veh", 0.0) or 0.0)
                     if deadband_c > 0.0 and crit_c > 0.0 and n_p_now_veh < deadband_c * crit_c:
                         self._lambda_P = 0.5 * float(lam_base)
                     else:
                         self._lambda_P = self._lambda_np_update(
-                            float(lam_base), float(self._np_last_real_q), float(tgt_committed),
+                            float(lam_base),
+                            float(self._np_last_real_q),
+                            r_hat_c * float(tgt_committed),
                         )
                 self._np_corrector_pending = None
         lambda_p = float(self._lambda_P) if dual_active else 0.0  # warm-start(직전 step 수렴값).
@@ -3451,13 +3477,19 @@ class WuFaithfulFollower:
             pre_target = min(max(n_p_star, pre_lo), pre_max)
             deadband_pre = float(getattr(self.cfg.mpc, "np_dual_deadband_frac", 0.0))
             crit_pre = float(getattr(self.cfg.leader, "N_P_crit_veh", 0.0) or 0.0)
+            r_hat_p = (
+                float(self._np_bias_ratio)
+                if bool(getattr(self.cfg.mpc, "np_bias_correction", False))
+                and self._np_bias_ratio is not None
+                else 1.0
+            )
             if deadband_pre > 0.0 and crit_pre > 0.0 and float(
                 state.protected_accumulation_veh(net)
             ) < deadband_pre * crit_pre:
                 lambda_p = 0.5 * lambda_p
             else:
                 lambda_p = self._lambda_np_update(
-                    lambda_p, float(q_prev), pre_target,
+                    lambda_p, float(q_prev), r_hat_p * pre_target,
                 )
             np_cand_lambda_applied = 1.0
         sum_nin = 0.0
@@ -3817,6 +3849,9 @@ class WuFaithfulFollower:
         control.diagnostics["wu_faithful_np_sum_nin"] = float(sum_nin)
         control.diagnostics["wu_faithful_np_cand_lambda_applied"] = float(np_cand_lambda_applied)
         control.diagnostics["wu_faithful_np_cand_lambda"] = float(lambda_p)
+        control.diagnostics["wu_faithful_np_bias_ratio"] = float(
+            self._np_bias_ratio if self._np_bias_ratio is not None else 1.0
+        )
         control.diagnostics["wu_faithful_np_feasible_min"] = float(sigma_min)
         control.diagnostics["wu_faithful_np_feasible_max"] = float(sigma_max)
         control.diagnostics["wu_faithful_np_projection_residual"] = float(n_p_star - projected_target)

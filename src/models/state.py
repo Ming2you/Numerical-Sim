@@ -428,6 +428,10 @@ class MPCConfig:
     # 기본 ON(2026-07-12 확정 — A/B: 8-seg 155_skew 7490/준거 7509, 190 15535/15652).
     # NP_CAND_LAMBDA=0으로 구거동(스텝 내 λ 동결) 재현.
     np_candidate_lambda: bool = True
+    # r̂ 편향 보정(2026-07-13): λ̂ 오차 비교의 target을 실현 공간으로 환산(r̂·Ñ).
+    # 계획(예측 Σnin) vs 실현(ΔN_P×H)의 낙관 편향이 채널 휴면의 원인 — 보정 시
+    # 실현 유입이 환산 상한에 닿으면 λ̂가 실제로 발동한다. False=비트동일.
+    np_bias_correction: bool = False
     # ε-best-response gap probe(2026-07-12, 리뷰 2.2/2.8 대응): 수렴 고정점에서 각
     # follower를 최종 결합변수 하에 단독 재최적화해 개선 여지를 측정(진단 전용, 행동 불변).
     eps_gap_probe: bool = False
