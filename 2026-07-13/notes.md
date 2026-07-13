@@ -166,3 +166,15 @@ seg2 off(OR_D) / seg3 on(R_D) / seg4 off(OR_F) / seg5 on(R_F) — merge만 4→3
   계획-공간 신호만 쓰므로 재고측정·r̂·deadband 전부 불요, cross-step 지연 제거.
 - 구현 발주: NP_PD_ITER=K 플래그(기본 0=OFF 비트동일), K≤5 조기수렴, γ 25배율,
   최종 λ로 Jacobi 재수렴 후 커밋(off-equilibrium 방지). λ 유실 진단 포함.
+
+## 10. 단위테스트 실패 9건 판정 — 전부 pre-existing (plant 무관)
+- pre-plant 커밋(9865155) 임시 워크트리서 동일 3모듈 재실행 → **동일 9건 실패(이름까지 일치)**.
+- 구성: forecast_awareness 4(off-ramp 예측 계열) + six_controller 3 + post_analysis 2(legacy 하네스).
+- 결론: 다이아몬드 plant 변경은 테스트 무결(기하 민감 139개 통과 + 실패는 전부 선재).
+  실패 9건 수리는 별도 백로그(legacy 하네스 정리 시점에 일괄).
+
+## 11. 방법 A 구현 완료 (8410094) — 상세는 커밋 메시지·§9 참조
+- λ 유실 3원인 확정(초기충전 오독 / PFO 선택 스텝 pending 단절 / 실현공간 트리거).
+- OFF 비트동일 검증(3런 state_timeseries 일치), 스모크: 오발동 소멸·λ cap 발화·Σν 실이동
+  (2,054→1,765)·계산 ~1.1×. 주의: cap 10 포화(잔차 +99~+534) → cap 상향 A/B 후보.
+- 본 A/B(dual 3셀, NP_PD_ITER=4+FB_OFF) 실행 중 → 잠긴 baseline 1,243/2,064/3,305 대조.
