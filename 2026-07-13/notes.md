@@ -178,3 +178,14 @@ seg2 off(OR_D) / seg3 on(R_D) / seg4 off(OR_F) / seg5 on(R_F) — merge만 4→3
 - OFF 비트동일 검증(3런 state_timeseries 일치), 스모크: 오발동 소멸·λ cap 발화·Σν 실이동
   (2,054→1,765)·계산 ~1.1×. 주의: cap 10 포화(잔차 +99~+534) → cap 상향 A/B 후보.
 - 본 A/B(dual 3셀, NP_PD_ITER=4+FB_OFF) 실행 중 → 잠긴 baseline 1,243/2,064/3,305 대조.
+
+## 12. 원복 결정(2026-07-14) + 신규 무대 판정 요약
+- warm-pulse: dmid_w +64.2 패(빈망 이점 소멸) / dhigh_w −22.0 승 / **dhigh2_w +2,288 대패
+  (잔존 u 3,002 vs PFO 161 — FB_OFF 상태 이력잠금형 실패)**.
+- dsust(균일 k): 155 +1,539 / 170 +489 패. dsym_110(비대칭): +296 패 → (a)(b)(c) 가설 기각.
+- 종합 원리: **조정 수익 = urban 한계혼잡비용 − freeway 한계흡수비용 격차. 균형 dual은
+  흡수처 소멸로 거래 자체가 무가치** → 보호 오버헤드만 잔존. FB_OFF 교란으로 손실 과장.
+- 사용자 결정: dual 원복, 새 plant에서 원 프로그램+신규 6종 재분석, 이후 중수요 skew·incident.
+  incident remap 제안: merge=seg5, 본선=seg6.
+- Phase 0: 원 9셀(무-incident) base3 발주(_np_final). Phase 1: guard-ON 귀속 3종 발주
+  (dsym_110·sweet_190·dhigh2_w, _phase1) — production 구성(방법A+guard) 확정용.
