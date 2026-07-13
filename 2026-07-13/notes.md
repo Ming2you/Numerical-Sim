@@ -69,8 +69,30 @@ urban은 자유류 근방(NC u_delay 37~896 vs sustained 190의 15,146). leader�
   postsplit==budget, presplit<budget 스텝도 budget으로 상향 = equality) × 3셀,
   outputs/_usuite/. 프로브 스크립트는 scratchpad(probe_urban_ceiling.py).
 
+## 5. urban suite 결과 — 판정: urban-binding에선 green-only Wu가 전승
+| 셀 | NC | WU-CD-F | PFO-link | P-Stack |
+|---|---|---|---|---|
+| umid(×1.36) | 802.6 | **753.2** | 761.6 | 766.0 |
+| uhigh(×1.69) | 1,196.8 | **1,157.4** | 1,183.3 | 1,173.5 |
+| uhigh2(×2.05) | 1,741.5 | **1,705.5** | 1,755.6(NC↓) | 1,722.6 |
+
+- 전 컨트롤러 개선폭 작음(최선 −2.1~−4.9%) — urban 혼잡의 lever는 green 재배분뿐
+  (경계 유입 외생·turning ratio 고정), freeway-binding의 −32~−45%와 대조.
+- **WU-CD-F 3/3 전승** — green이 유일 lever인 무대에선 문헌 Wu가 최적(포화×skew 게이트 정합).
+  metering 권한(PFO/P-Stack 강점)은 freeway 자유류라 무용.
+- P-Stack>PFO 2/3(uhigh −9.8·uhigh2 −33.0, umid +4.4): uhigh2에서 PFO는 NC보다 악화
+  (own-TTS 국소 휴리스틱 심층포화 역효과)를 leader가 교정. 방향은 가설대로, 크기 0.6~1.9%.
+- **논문 지도 3축 완성**: freeway-binding sustained=계층 필수 / freeway-binding pulse=국소 충분
+  / urban-binding=마진 자체 소멸·green-Wu 최적 → 계층 가치 = 결합 스트레스(양망 동시) 레짐.
+
+### λ̂ 부동 제3원인 (uhigh2 step-쌍 추적)
+- 유일 위반 스텝(step 7: 실현 2,035 > 커밋 target 1,831, +204)에서 **경부하 deadband가
+  신호 폐기** — 게이트가 절대 stock 기준(accum 588 < 0.9×N_P_crit 1,142=1,028)인데
+  펄스는 stock이 flow 지연 추종이라 loading edge에서 항상 미달.
+- 함의: NP_BIAS=1(r̂)만으론 펄스에서 안 열림 — deadband 게이트 재설계(커밋 target 연동
+  또는 예측 stock 기준) 필요. **구조 변경이라 사용자 승인 대기.**
+
 ## TODO
-- [ ] urban suite 12런 완료 → 표 작성(leader 가치의 urban-포화 가설 판정)
 - [ ] P-CENT 11셀 완료 → 메인 표 P-CENT 컬럼·계산비용 행 갱신
 - [ ] 8-seg oracle 재실행(open-loop bound, 구 14,223은 4-seg 값)
 - [ ] ε-gap probe 프로덕션 1셀
