@@ -37,7 +37,16 @@ NP-CAND-λ̂ 채널이 전 셀에서 λ̂=0으로 휴면. 원인은 **계획 공
   −23~−1,281)가 표에서 분리**. 구 "WU" 컬럼은 PFO-link(권한 동등 ablation)로 재라벨 확정.
 - P-CENT 8-seg 재측정 반영: 190 = 18,527.4 (계층 −15.5% 우위, 계산 1/8). 구 4-seg 17,929 대체.
 
+## 3. P-CENT 8-seg 전셀 발주 + 계산비용 집계 (사용자 지시)
+- P-CENT SLSQP 나머지 11셀 3체인 병렬 발주(suite 5 / 155계열 3 / 170계열 3,
+  outputs/_pcent/slsqp_8seg_{suite,155fam,170fam}.log). 단독 실측 475s/스텝 기준
+  sustained 셀당 ~5.3h — 병렬 경합 감안 총 16~30h 예상.
+- 계산비용 사다리(12셀 mean_step_compute_sec): PFO-link 3.6s < WU-CD-F 11.1s <
+  계층 59.2s < P-CENT 475.3s. **계층만 ci 180s 실시간 경계 내(33%), P-CENT는 2.6배 초과.**
+  상세는 results/main_table_4col.md 계산비용 절.
+
 ## TODO
+- [ ] P-CENT 11셀 완료 → 메인 표 P-CENT 컬럼·계산비용 행 갱신
 - [ ] 8-seg oracle 재실행(open-loop bound, 구 14,223은 4-seg 값)
 - [ ] ε-gap probe 프로덕션 1셀
 - [ ] 원고 수정시트 일괄 적용(Word 닫힌 후) + notation rename 실행
