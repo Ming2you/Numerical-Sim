@@ -210,3 +210,12 @@ seg2 off(OR_D) / seg3 on(R_D) / seg4 off(OR_F) / seg5 on(R_F) — merge만 4→3
 - 구분 실험: **sweet_190 동결구성(SEG13만, PD4 없음) 신plant 1런** 발주(_phase1/…_locked).
   이기면 (a)=방법 A는 transient 전용, 져도 같으면 (b)=plant 재캘리브레이션 필요.
 - dsym_120 pd4 마감 +1,172 패(비대칭 사다리 전패 확정).
+
+## 15. 구분 실험 판정(2026-07-14) — 범인 = 방법 A의 sustained 과잉 억제
+- **sweet_190 동결구성(신plant) = 15,591.9 vs PFO 16,187.5 = −595.6 승** (구plant −565 재현).
+  새 plant는 본진 무손상. PD4(17,739.5)와의 격차 2,148 = 방법 A 몫.
+- 기제: 계획-공간 예산 강제 × 모델 낙관(~30%) = 실현 유입이 target보다 ~30% 과잉 억제
+  → urban 잔존 +1,074. 펄스 dual(위반 실재)에선 이득, 본진(위반 부재)에선 순손실 — 정합.
+- **production 구성 확정 = 동결(SEG13만)**. 방법 A는 원고 정식화((47)-(51)→후보 내 PD) +
+  transient A/B 절 전용. 백로그: 계획 target의 r̂ 역보정(×1/r̂)으로 sustained 무해화 시도.
+- Phase 2 발주: 동결 P-Stack × 8셀(sustained 4 + 펄스 4, incident 제외) → _np_final/…_locked.
