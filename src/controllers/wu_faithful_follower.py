@@ -3438,7 +3438,21 @@ class WuFaithfulFollower:
                     )
                     deadband_c = float(getattr(self.cfg.mpc, "np_dual_deadband_frac", 0.0))
                     crit_c = float(getattr(self.cfg.leader, "N_P_crit_veh", 0.0) or 0.0)
-                    if deadband_c > 0.0 and crit_c > 0.0 and n_p_now_veh < deadband_c * crit_c:
+                    low_stock_c = (
+                        deadband_c > 0.0 and crit_c > 0.0
+                        and n_p_now_veh < deadband_c * crit_c
+                    )
+                    # deadband v2(2026-07-13): 위반(실현 유입 > 환산 target)은 stock과 무관하게
+                    # 적분한다. 펄스 loading edge는 stock이 flow를 지연 추종해 절대 게이트가
+                    # 진짜 위반을 삼킨다(dhigh2 step7 +204 폐기 실측). 경부하 windup 수선은
+                    # 위반 없는 저stock 국면에만 적용되므로 보존. 플래그 OFF면 비트동일.
+                    viol_ovr = bool(
+                        getattr(self.cfg.mpc, "np_deadband_violation_override", False)
+                    )
+                    violated_c = (
+                        float(self._np_last_real_q) > r_hat_c * float(tgt_committed)
+                    )
+                    if low_stock_c and not (viol_ovr and violated_c):
                         self._lambda_P = 0.5 * float(lam_base)
                     else:
                         self._lambda_P = self._lambda_np_update(
@@ -3483,9 +3497,15 @@ class WuFaithfulFollower:
                 and self._np_bias_ratio is not None
                 else 1.0
             )
-            if deadband_pre > 0.0 and crit_pre > 0.0 and float(
+            low_stock_pre = deadband_pre > 0.0 and crit_pre > 0.0 and float(
                 state.protected_accumulation_veh(net)
-            ) < deadband_pre * crit_pre:
+            ) < deadband_pre * crit_pre
+            # deadband v2: 위반(q_prev > 환산 pre_target)은 stock 게이트를 우회(위 corrector 참조).
+            viol_ovr_pre = bool(
+                getattr(self.cfg.mpc, "np_deadband_violation_override", False)
+            )
+            violated_pre = float(q_prev) > r_hat_p * pre_target
+            if low_stock_pre and not (viol_ovr_pre and violated_pre):
                 lambda_p = 0.5 * lambda_p
             else:
                 lambda_p = self._lambda_np_update(
@@ -3607,7 +3627,15 @@ class WuFaithfulFollower:
             deadband = float(getattr(self.cfg.mpc, "np_dual_deadband_frac", 0.0))
             n_p_crit_veh = float(getattr(self.cfg.leader, "N_P_crit_veh", 0.0) or 0.0)
             n_p_now = float(state.protected_accumulation_veh(net))
-            if deadband > 0.0 and n_p_crit_veh > 0.0 and n_p_now < deadband * n_p_crit_veh:
+            low_stock_post = (
+                deadband > 0.0 and n_p_crit_veh > 0.0
+                and n_p_now < deadband * n_p_crit_veh
+            )
+            # deadband v2: 위반(Σnin > projected_target)은 stock 게이트를 우회(corrector 참조).
+            viol_ovr_post = bool(
+                getattr(self.cfg.mpc, "np_deadband_violation_override", False)
+            )
+            if low_stock_post and not (viol_ovr_post and sum_nin > projected_target):
                 lambda_next = 0.5 * lambda_p
             else:
                 # 방향: Σnin > target(유입 과다) → λ 증가(억제 강화). max(0,·)이 A1(음수 금지)을 강제.

@@ -432,6 +432,10 @@ class MPCConfig:
     # 계획(예측 Σnin) vs 실현(ΔN_P×H)의 낙관 편향이 채널 휴면의 원인 — 보정 시
     # 실현 유입이 환산 상한에 닿으면 λ̂가 실제로 발동한다. False=비트동일.
     np_bias_correction: bool = False
+    # deadband v2(2026-07-13): 위반 신호(유입 > 환산 target)는 저stock 게이트를 우회해
+    # 적분한다 — 펄스 loading edge에서 stock 지연이 진짜 위반을 삼키는 병리 해소.
+    # 경부하 windup 수선(위반 없는 저stock 감쇠)은 보존. False=비트동일.
+    np_deadband_violation_override: bool = False
     # ε-best-response gap probe(2026-07-12, 리뷰 2.2/2.8 대응): 수렴 고정점에서 각
     # follower를 최종 결합변수 하에 단독 재최적화해 개선 여지를 측정(진단 전용, 행동 불변).
     eps_gap_probe: bool = False

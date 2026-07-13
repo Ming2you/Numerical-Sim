@@ -605,6 +605,12 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
     if _os.environ.get("NP_BIAS") == "1":
         # r̂ 편향 보정: λ̂ target을 실현 공간으로 환산 — A/B용(기본 OFF).
         cfg.mpc.np_bias_correction = True
+    if _os.environ.get("NP_DEADBAND_V2") == "1":
+        # deadband v2: 위반 신호의 저stock 게이트 우회 — 잠금해제 A/B용(기본 OFF).
+        cfg.mpc.np_deadband_violation_override = True
+    if _os.environ.get("FB_OFF") == "1":
+        # fallback guard 해제 — N_P-active leader 기각 억압 제거(잠금해제 A/B용).
+        cfg.mpc.stackelberg_enable_fallback = False
     if _os.environ.get("EPS_GAP") == "1":
         # ε-best-response gap probe(리뷰 2.2/2.8): 고정점 단독 재최적화 진단, 행동 불변.
         cfg.mpc.eps_gap_probe = True
