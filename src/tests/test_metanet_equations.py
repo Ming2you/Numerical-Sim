@@ -99,10 +99,11 @@ class MetanetEquationTests(unittest.TestCase):
         self.assertIn("R_D_W", cfg.network.on_ramp_to_movement)
         self.assertIn("OR_D_W", cfg.network.off_ramps)
         self.assertIn("OR_D_W_storage", cfg.network.urban_link_storage_veh)
-        # 8-seg 디폴트(2026-07-12 승격): 인터체인지 상대기하 = 4-seg 승인 기하 ×2.
+        # 다이아몬드 인터체인지(2026-07-13 승인): D(off 2/on 3), F(off 4/on 5) —
+        # merge+off 동거(구 seg4) 해소, 각 인터체인지 내 exit가 entrance 상류.
         self.assertEqual(cfg.network.freeway_segments_per_link, 8)
-        self.assertEqual(cfg.network.ramp_merge_segment_index["R_D_W"], 4)
-        self.assertEqual(cfg.network.ramp_merge_segment_index["R_F_W"], 6)
+        self.assertEqual(cfg.network.ramp_merge_segment_index["R_D_W"], 3)
+        self.assertEqual(cfg.network.ramp_merge_segment_index["R_F_W"], 5)
         self.assertEqual(cfg.network.off_ramp_segment_index["OR_D_W"], 2)
         self.assertEqual(cfg.network.off_ramp_segment_index["OR_F_W"], 4)
         self.assertEqual(cfg.network.off_ramp_segment_index["OR_D_E"], 2)
