@@ -329,6 +329,42 @@
       "urban_west_east_ratio": 2.0,
       "required": false
     },
+    "pulse_umid": {
+      "urban_scale": 3.264,
+      "freeway_scale": 0.68,
+      "ramp_scale": 0.68,
+      "incident_capacity_factor": 1.0,
+      "pulse_base_scale": 0.5,
+      "pulse_start_sec": 900.0,
+      "pulse_rampup_sec": 300.0,
+      "pulse_plateau_sec": 900.0,
+      "pulse_rampdown_sec": 300.0,
+      "required": false
+    },
+    "pulse_uhigh": {
+      "urban_scale": 4.056,
+      "freeway_scale": 0.845,
+      "ramp_scale": 0.845,
+      "incident_capacity_factor": 1.0,
+      "pulse_base_scale": 0.5,
+      "pulse_start_sec": 900.0,
+      "pulse_rampup_sec": 300.0,
+      "pulse_plateau_sec": 900.0,
+      "pulse_rampdown_sec": 300.0,
+      "required": false
+    },
+    "pulse_uhigh2": {
+      "urban_scale": 4.92,
+      "freeway_scale": 1.025,
+      "ramp_scale": 1.025,
+      "incident_capacity_factor": 1.0,
+      "pulse_base_scale": 0.5,
+      "pulse_start_sec": 900.0,
+      "pulse_rampup_sec": 300.0,
+      "pulse_plateau_sec": 900.0,
+      "pulse_rampdown_sec": 300.0,
+      "required": false
+    },
     "pulse_mid": {
       "urban_scale": 1.85,
       "freeway_scale": 1.85,
