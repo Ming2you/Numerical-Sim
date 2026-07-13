@@ -1944,14 +1944,23 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         lam_next = best.nash.control.diagnostics.get("wu_faithful_lambda_next")
         if lam_next is not None:
             if bool(getattr(self.cfg.mpc, "np_candidate_lambda", False)):
-                # (51) corrector로 이관: 커밋 시점에는 standing λ를 갱신하지 않고
-                # (λ_k, 커밋 후보의 투영 target)을 pending으로 넘겨, 다음 step 시작 시
-                # 실현 유입 Q^real로 1회 교정한다(원고 정식화 정렬 — λ̂ 재적분 아님).
-                tgt_c = best.nash.control.diagnostics.get("wu_faithful_np_projected_target")
-                if tgt_c is not None:
-                    self.nash_solver._np_corrector_pending = (
-                        float(self.nash_solver._lambda_P), float(tgt_c),
-                    )
+                if int(getattr(self.cfg.mpc, "np_primal_dual_iters", 0)) > 0:
+                    # 방법 A: 선택 후보의 K-loop 최종 λ(안장점)를 다음 step warm start로
+                    # 직접 commit. corrector 체인은 사용하지 않는다(pending 해제) —
+                    # λ는 매 step 후보별 계획-공간 반복으로 재유도된다.
+                    lam_pd = best.nash.control.diagnostics.get("wu_faithful_np_cand_lambda")
+                    if lam_pd is not None:
+                        self.nash_solver._lambda_P = float(lam_pd)
+                    self.nash_solver._np_corrector_pending = None
+                else:
+                    # (51) corrector로 이관: 커밋 시점에는 standing λ를 갱신하지 않고
+                    # (λ_k, 커밋 후보의 투영 target)을 pending으로 넘겨, 다음 step 시작 시
+                    # 실현 유입 Q^real로 1회 교정한다(원고 정식화 정렬 — λ̂ 재적분 아님).
+                    tgt_c = best.nash.control.diagnostics.get("wu_faithful_np_projected_target")
+                    if tgt_c is not None:
+                        self.nash_solver._np_corrector_pending = (
+                            float(self.nash_solver._lambda_P), float(tgt_c),
+                        )
             else:
                 self.nash_solver._lambda_P = float(lam_next)
             # 첫 스텝 predictor fallback용 committed Σnin 저장(실현 유입 관측 전).

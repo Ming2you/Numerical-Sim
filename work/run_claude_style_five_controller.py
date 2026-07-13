@@ -608,6 +608,9 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
     if _os.environ.get("NP_DEADBAND_V2") == "1":
         # deadband v2: 위반 신호의 저stock 게이트 우회 — 잠금해제 A/B용(기본 OFF).
         cfg.mpc.np_deadband_violation_override = True
+    if _os.environ.get("NP_PD_ITER"):
+        # 방법 A: candidate 내부 primal-dual 반복 K(0=OFF, 현행 λ̂ 1회 선반영).
+        cfg.mpc.np_primal_dual_iters = int(_os.environ["NP_PD_ITER"])
     if _os.environ.get("FB_OFF") == "1":
         # fallback guard 해제 — N_P-active leader 기각 억압 제거(잠금해제 A/B용).
         cfg.mpc.stackelberg_enable_fallback = False

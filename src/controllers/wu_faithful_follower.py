@@ -3397,12 +3397,20 @@ class WuFaithfulFollower:
         dual_active = leader is not None and self.use_dual_np and self.np_price_enabled
         n_p_star = float(getattr(leader, "N_P_star", 0.0)) if leader is not None else 0.0
         np_cand_flag = bool(getattr(self.cfg.mpc, "np_candidate_lambda", False))
+        # 방법 A(2026-07-13): candidate 내부 primal-dual 반복 K. K>0이면 λ̂ 1회 선반영
+        # 대신 후보별 (λ, green) 안장점 반복으로 대체(np_cand_flag가 마스터 스위치).
+        np_pd_iters = int(getattr(self.cfg.mpc, "np_primal_dual_iters", 0))
+        np_pd_active = dual_active and np_cand_flag and np_pd_iters > 0
         # ---- (51) corrector(원고 정식화): λ_{k+1} = Π[λ_k + γ_c(Q^real − Ñ_{c*})] ----
         # 커밋 시점이 아니라 다음 step 시작 시(실현 유입 관측 후) standing λ를 1회 교정.
         # Q^real은 보호구역 accumulation 차분(구간)을 horizon 배수로 환산해 측정한다
         # (Σnin·target이 horizon 집계 veh 단위이므로). 후보 solve 간에는 state 시각
         # 가드로 스텝당 1회만 실행된다.
-        if dual_active and np_cand_flag:
+        # 방법 A(K>0)에서는 corrector를 통째로 생략한다 — λ는 스텝마다 warm start에서
+        # 후보별로 재유도되고, 실현-공간 교정(Q^real) 채널 자체를 쓰지 않는다.
+        if np_pd_active:
+            self._np_corrector_pending = None
+        if dual_active and np_cand_flag and not np_pd_active:
             now_t = float(getattr(state, "time_sec", 0.0))
             if self._np_step_time != now_t:
                 self._np_step_time = now_t
@@ -3475,7 +3483,8 @@ class WuFaithfulFollower:
             if self._np_last_real_q is not None
             else self._np_last_sum_nin
         )
-        if dual_active and np_cand_flag and q_prev is not None:
+        # 방법 A(K>0)면 1회 선반영을 건너뛴다 — λ는 아래 K-loop에서 계획 공간 반복으로 유도.
+        if dual_active and np_cand_flag and not np_pd_active and q_prev is not None:
             pre_snapshot = ControlAction(
                 ramp_metering=dict(control.ramp_metering),
                 vsl=dict(control.vsl),
@@ -3529,69 +3538,133 @@ class WuFaithfulFollower:
         residual = float("inf")
         converged = False
         iteration = 0
-        for iteration in range(1, s_max + 1):
-            # Jacobi: iteration 시작 control 스냅샷 고정 → 모든 agent 동일 z̃/previous 입력.
-            snapshot = ControlAction(
+
+        def _jacobi_consensus(lam_fixed: float) -> None:
+            # 방법 A 지원 추출(2026-07-13): 기존 합의 루프 본체를 λ 인자만 받는 클로저로
+            # 분리 — K=0(OFF) 경로는 이 클로저를 lambda_p로 1회 호출하므로 연산·순서가
+            # 기존과 동일(비트동일). K>0이면 λ^(κ)마다 재호출해 현 결합값에서 재수렴한다.
+            nonlocal coupling, sum_nin, evals, residual, converged, iteration
+            residual = float("inf")
+            converged = False
+            for iteration in range(1, s_max + 1):
+                # Jacobi: iteration 시작 control 스냅샷 고정 → 모든 agent 동일 z̃/previous 입력.
+                snapshot = ControlAction(
+                    ramp_metering=dict(control.ramp_metering),
+                    vsl=dict(control.vsl),
+                    green_times=dict(control.green_times),
+                    offsets=dict(control.offsets),
+                    inflow_outflow_allocation={},
+                )
+                new_green: Dict[str, float] = {}
+                new_vsl: Dict[str, float] = {}
+                sum_nin = 0.0  # 이 sweep의 Σ_i nin_i(현 λ에서 각 agent가 commit한 net inflow).
+                for signal in net.signals:
+                    arr_movement = self._per_movement_arrivals(signal, state, snapshot, demand)
+                    p1, _, e, nin_i = self._solve_urban_agent_local(
+                        signal, state, coupling, arr_movement, s_eff_frozen,
+                        reservoir_drain, freeway_congestion, snapshot, leader,
+                        lam_fixed, forecast_arrivals, horizon_h, demand,
+                    )
+                    new_green[f"{signal}_p1"] = p1
+                    new_green[f"{signal}_p2"] = net.effective_green_total - p1
+                    sum_nin += nin_i
+                    evals += e
+                # 합의 루프 동안 λ는 호출 인자 값으로 동결한다(스냅샷/결합 settle 우선). λ 갱신은
+                # step 간 적분(수렴 후 λ_next 계산, 아래 post-loop) 또는 방법 A K-loop(κ 간).
+                # PFO(leader=None)는 dual_active=False라 무영향.
+                # freeway agent(Jacobi 내부): VSL solve만 cheap하게 — VSL은 여기서 inert이고
+                # metering 좌표하강은 비싸므로 합의 루프 밖에서 1회만 돈다(아래 post-loop).
+                # 13-player(segment_agents): segment agent 8개가 (VSL, meter)를 루프 안에서
+                # best-response + 예산 사영 — meter 합의가 iteration을 필요로 하므로 in-loop.
+                new_meter: Dict[str, float] = {}
+                for link in net.freeway_links:
+                    if self.segment_agents and self.metering_enabled:
+                        vsl_dict, meter_dict, e = self._solve_freeway_segment_agents(
+                            link, state, coupling, demand, snapshot, leader,
+                        )
+                        new_meter.update(meter_dict)
+                    else:
+                        vsl_dict, _, e = self._solve_freeway_agent_local(
+                            link, state, coupling, demand, snapshot,
+                        )
+                    new_vsl.update(vsl_dict)
+                    evals += e
+                control.green_times.update(new_green)
+                control.vsl.update(new_vsl)
+                if new_meter:
+                    control.ramp_metering.update(new_meter)
+                # outgoing 결합변수 갱신 후 under-relaxation 합성.
+                predicted = self._wu._coupling(state, control, demand)
+                relaxed = {
+                    k: (1.0 - alpha) * coupling.get(k, 0.0) + alpha * predicted[k]
+                    for k in predicted
+                }
+                residual = max(
+                    (
+                        abs(relaxed[k] - coupling.get(k, 0.0)) / max(1.0, abs(coupling.get(k, 0.0)))
+                        for k in relaxed
+                    ),
+                    default=0.0,
+                )
+                coupling = relaxed
+                if residual < self.cfg.mpc.distributed_coupling_tol:
+                    converged = True
+                    break
+
+        # 방법 A 진단: 실사용 κ 횟수·최종 계획-공간 잔차(Σν − Ñ). OFF(K=0)면 0/0.
+        np_pd_iters_used = 0.0
+        np_pd_residual = 0.0
+        if np_pd_active:
+            # ---- 방법 A(2026-07-13): candidate 내부 primal-dual 반복 ----
+            # λ^(κ+1) = Π[λ^(κ) + γ_P(Σν^(κ) − Ñ^(c))]를 K회(조기수렴 허용) 반복하며
+            # 각 κ마다 Jacobi를 재수렴시켜 (λ*, green*) 안장점을 함께 얻는다.
+            # target은 현행 선반영과 동일하게 계획 공간에서 투영하되 r̂ 환산은 제거한다
+            # — 반복이 계획 공간 안에서 닫히므로 실현 보정(Q^real)이 필요 없다.
+            # deadband/위반 override도 K-loop 안에서는 미적용(제약을 직접 강제).
+            pd_snapshot = ControlAction(
                 ramp_metering=dict(control.ramp_metering),
                 vsl=dict(control.vsl),
                 green_times=dict(control.green_times),
                 offsets=dict(control.offsets),
                 inflow_outflow_allocation={},
             )
-            new_green: Dict[str, float] = {}
-            new_vsl: Dict[str, float] = {}
-            sum_nin = 0.0  # 이 sweep의 Σ_i nin_i(현 λ에서 각 agent가 commit한 net inflow).
-            for signal in net.signals:
-                arr_movement = self._per_movement_arrivals(signal, state, snapshot, demand)
-                p1, _, e, nin_i = self._solve_urban_agent_local(
-                    signal, state, coupling, arr_movement, s_eff_frozen,
-                    reservoir_drain, freeway_congestion, snapshot, leader,
-                    lambda_p, forecast_arrivals, horizon_h, demand,
-                )
-                new_green[f"{signal}_p1"] = p1
-                new_green[f"{signal}_p2"] = net.effective_green_total - p1
-                sum_nin += nin_i
-                evals += e
-            # 합의 루프 동안 λ는 warm-start 값으로 동결한다(스냅샷/결합 settle 우선). λ 갱신은
-            # step 간 적분(수렴 후 λ_next 계산, 아래 post-loop). PFO(leader=None)는 dual_active=False라 무영향.
-            # freeway agent(Jacobi 내부): VSL solve만 cheap하게 — VSL은 여기서 inert이고
-            # metering 좌표하강은 비싸므로 합의 루프 밖에서 1회만 돈다(아래 post-loop).
-            # 13-player(segment_agents): segment agent 8개가 (VSL, meter)를 루프 안에서
-            # best-response + 예산 사영 — meter 합의가 iteration을 필요로 하므로 in-loop.
-            new_meter: Dict[str, float] = {}
-            for link in net.freeway_links:
-                if self.segment_agents and self.metering_enabled:
-                    vsl_dict, meter_dict, e = self._solve_freeway_segment_agents(
-                        link, state, coupling, demand, snapshot, leader,
-                    )
-                    new_meter.update(meter_dict)
-                else:
-                    vsl_dict, _, e = self._solve_freeway_agent_local(
-                        link, state, coupling, demand, snapshot,
-                    )
-                new_vsl.update(vsl_dict)
-                evals += e
-            control.green_times.update(new_green)
-            control.vsl.update(new_vsl)
-            if new_meter:
-                control.ramp_metering.update(new_meter)
-            # outgoing 결합변수 갱신 후 under-relaxation 합성.
-            predicted = self._wu._coupling(state, control, demand)
-            relaxed = {
-                k: (1.0 - alpha) * coupling.get(k, 0.0) + alpha * predicted[k]
-                for k in predicted
-            }
-            residual = max(
-                (
-                    abs(relaxed[k] - coupling.get(k, 0.0)) / max(1.0, abs(coupling.get(k, 0.0)))
-                    for k in relaxed
-                ),
-                default=0.0,
+            pd_min, pd_max = self._np_feasible_range(
+                state, coupling, pd_snapshot, forecast_arrivals, horizon_h,
             )
-            coupling = relaxed
-            if residual < self.cfg.mpc.distributed_coupling_tol:
-                converged = True
-                break
+            interior_pd = float(getattr(self.cfg.mpc, "np_target_interior_frac", 0.0))
+            pd_lo = pd_min + max(0.0, interior_pd) * max(0.0, pd_max - pd_min)
+            pd_target = min(max(n_p_star, pd_lo), pd_max)
+            # γ_P 배율: 표준 gain(0.01)은 K≤5 안에 수렴 불가 — 25배≈0.25로 반복 수렴.
+            gain_pd = self.lambda_np_step_gain * float(
+                getattr(self.cfg.mpc, "np_pd_gain_mult", 25.0)
+            )
+            lam_curr = lambda_p  # warm start = standing _lambda_P(직전 step 커밋 λ).
+            lam_last_sweep: Optional[float] = None
+            for _kappa in range(1, np_pd_iters + 1):
+                _jacobi_consensus(lam_curr)
+                lam_last_sweep = lam_curr
+                np_pd_iters_used = float(_kappa)
+                np_pd_residual = float(sum_nin - pd_target)
+                # 조기수렴 ①: 잔차가 target의 2% 이내 — λ 갱신 없이 종료(안장점 도달).
+                if abs(np_pd_residual) <= 0.02 * max(pd_target, 1.0):
+                    break
+                lam_new = min(
+                    max(0.0, lam_curr + gain_pd * np_pd_residual), self.lambda_np_cap
+                )
+                # 조기수렴 ②: λ 고정점(cap/0 clip 포함) — green이 이미 그 λ의 균형.
+                if abs(lam_new - lam_curr) <= 1.0e-6:
+                    lam_curr = lam_new
+                    break
+                lam_curr = lam_new
+            # 최종 λ로 1회 재수렴 — commit되는 green이 최종 λ의 균형이 되게
+            # (off-equilibrium commit 금지). 마지막 sweep이 이미 그 λ였으면 생략.
+            if lam_last_sweep is None or abs(lam_curr - lam_last_sweep) > 1.0e-6:
+                _jacobi_consensus(lam_curr)
+                np_pd_residual = float(sum_nin - pd_target)
+            lambda_p = lam_curr
+            np_cand_lambda_applied = 1.0
+        else:
+            _jacobi_consensus(lambda_p)
         # ---- 듀얼 분해 λ step 간 적분 갱신(A1+A2 — 이분법·commit sweep 폐지, 2026-07-02) ----
         # green은 Jacobi가 수렴시킨 값 그대로 커밋된다(A2: off-equilibrium commit 소멸). λ_next는
         # 마지막 합의 sweep의 Σnin과 투영 target으로 적분 갱신하되, 여기서 self._lambda_P에 쓰지
@@ -3877,6 +3950,9 @@ class WuFaithfulFollower:
         control.diagnostics["wu_faithful_np_sum_nin"] = float(sum_nin)
         control.diagnostics["wu_faithful_np_cand_lambda_applied"] = float(np_cand_lambda_applied)
         control.diagnostics["wu_faithful_np_cand_lambda"] = float(lambda_p)
+        # 방법 A 진단: K-loop 실사용 횟수·최종 계획-공간 잔차(OFF면 0/0).
+        control.diagnostics["wu_faithful_np_pd_iters"] = float(np_pd_iters_used)
+        control.diagnostics["wu_faithful_np_pd_residual"] = float(np_pd_residual)
         control.diagnostics["wu_faithful_np_bias_ratio"] = float(
             self._np_bias_ratio if self._np_bias_ratio is not None else 1.0
         )

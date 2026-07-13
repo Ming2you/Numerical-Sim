@@ -436,6 +436,13 @@ class MPCConfig:
     # 적분한다 — 펄스 loading edge에서 stock 지연이 진짜 위반을 삼키는 병리 해소.
     # 경부하 windup 수선(위반 없는 저stock 감쇠)은 보존. False=비트동일.
     np_deadband_violation_override: bool = False
+    # 방법 A — candidate 내부 primal-dual 반복 횟수 K. 0=OFF(현행 1회 선반영).
+    # K>0이면 후보별로 λ^(κ+1)=Π[λ^(κ)+γ_P(Σν^(κ)−Ñ^(c))]를 K회(조기수렴 허용) 반복하고
+    # 각 κ마다 Jacobi를 재수렴시켜 (λ*, green*) 안장점을 커밋한다.
+    np_primal_dual_iters: int = 0
+    # 방법 A 내부 반복용 γ_P 배율 — 1회당 0.01은 K≤5 안에 수렴 불가, 25배≈0.25로
+    # 5회 내 안장점 도달.
+    np_pd_gain_mult: float = 25.0
     # ε-best-response gap probe(2026-07-12, 리뷰 2.2/2.8 대응): 수렴 고정점에서 각
     # follower를 최종 결합변수 하에 단독 재최적화해 개선 여지를 측정(진단 전용, 행동 불변).
     eps_gap_probe: bool = False
