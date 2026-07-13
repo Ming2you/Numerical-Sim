@@ -199,3 +199,14 @@ seg2 off(OR_D) / seg3 on(R_D) / seg4 off(OR_F) / seg5 on(R_F) — merge만 4→3
 - **dsust 마감**: PD4 −PFO = +1,539/+489/+865 (155/170/190) — 균일 심층과부하 sustained는
   전 강도 PFO 영토(지도 남쪽 등고선 확정).
 - 원자료: outputs/_np_final(원 프로그램 base3), _dsust, _wsuite, _dsym.
+
+## 14. Phase 1 판정(2026-07-14) — 관문 불합격, 구분 실험 발주
+- guard-ON 3종 전부 **guard 무발동**(FB_OFF판과 비트 동일: dsym_110 10,926.5·dhigh2_w 6,966.6)
+  → dual 패배·잠금은 안전망 문제가 아니라 **leader 채점 모델의 낙관 편향**(계획-실현 ~30%
+  편향의 leader판). guard는 예측 기준이라 낙관 모델을 못 거름.
+- **sweet_190 PD4+guard = 17,739.5 vs PFO(신plant) 16,187.5 = +1,552 패** — 구 plant 본진
+  승리(−565)가 역전. 용의자: (a) 방법 A의 sustained 역효과(admission 억제→잔존 tu 17,342
+  vs 16,268) vs (b) 새 plant가 fw-binding leader 가치 자체를 지움.
+- 구분 실험: **sweet_190 동결구성(SEG13만, PD4 없음) 신plant 1런** 발주(_phase1/…_locked).
+  이기면 (a)=방법 A는 transient 전용, 져도 같으면 (b)=plant 재캘리브레이션 필요.
+- dsym_120 pd4 마감 +1,172 패(비대칭 사다리 전패 확정).
