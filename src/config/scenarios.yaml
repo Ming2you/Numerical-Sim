@@ -329,6 +329,30 @@
       "urban_west_east_ratio": 2.0,
       "required": false
     },
+    "dsym_110": {
+      "urban_scale": 2.53,
+      "freeway_scale": 2.04,
+      "ramp_scale": 2.04,
+      "incident_capacity_factor": 1.0,
+      "pulse_base_scale": 0.5,
+      "pulse_start_sec": 3600.0,
+      "pulse_rampup_sec": 300.0,
+      "pulse_plateau_sec": 3600.0,
+      "pulse_rampdown_sec": 300.0,
+      "required": false
+    },
+    "dsym_120": {
+      "urban_scale": 2.76,
+      "freeway_scale": 2.31,
+      "ramp_scale": 2.31,
+      "incident_capacity_factor": 1.0,
+      "pulse_base_scale": 0.5,
+      "pulse_start_sec": 3600.0,
+      "pulse_rampup_sec": 300.0,
+      "pulse_plateau_sec": 3600.0,
+      "pulse_rampdown_sec": 300.0,
+      "required": false
+    },
     "pulse_dmid_w": {
       "urban_scale": 3.128,
       "freeway_scale": 1.85,
