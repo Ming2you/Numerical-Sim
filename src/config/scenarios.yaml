@@ -329,6 +329,78 @@
       "urban_west_east_ratio": 2.0,
       "required": false
     },
+    "pulse_dmid_w": {
+      "urban_scale": 3.128,
+      "freeway_scale": 1.85,
+      "ramp_scale": 1.85,
+      "incident_capacity_factor": 1.0,
+      "pulse_base_scale": 0.5,
+      "pulse_start_sec": 4500.0,
+      "pulse_rampup_sec": 300.0,
+      "pulse_plateau_sec": 900.0,
+      "pulse_rampdown_sec": 300.0,
+      "required": false
+    },
+    "pulse_dhigh_w": {
+      "urban_scale": 3.887,
+      "freeway_scale": 2.3,
+      "ramp_scale": 2.3,
+      "incident_capacity_factor": 1.0,
+      "pulse_base_scale": 0.5,
+      "pulse_start_sec": 4500.0,
+      "pulse_rampup_sec": 300.0,
+      "pulse_plateau_sec": 900.0,
+      "pulse_rampdown_sec": 300.0,
+      "required": false
+    },
+    "pulse_dhigh2_w": {
+      "urban_scale": 4.715,
+      "freeway_scale": 2.8,
+      "ramp_scale": 2.8,
+      "incident_capacity_factor": 1.0,
+      "pulse_base_scale": 0.5,
+      "pulse_start_sec": 4500.0,
+      "pulse_rampup_sec": 300.0,
+      "pulse_plateau_sec": 900.0,
+      "pulse_rampdown_sec": 300.0,
+      "required": false
+    },
+    "dsust_155": {
+      "urban_scale": 3.565,
+      "freeway_scale": 2.108,
+      "ramp_scale": 2.108,
+      "incident_capacity_factor": 1.0,
+      "pulse_base_scale": 0.5,
+      "pulse_start_sec": 3600.0,
+      "pulse_rampup_sec": 300.0,
+      "pulse_plateau_sec": 3600.0,
+      "pulse_rampdown_sec": 300.0,
+      "required": false
+    },
+    "dsust_170": {
+      "urban_scale": 3.91,
+      "freeway_scale": 2.312,
+      "ramp_scale": 2.312,
+      "incident_capacity_factor": 1.0,
+      "pulse_base_scale": 0.5,
+      "pulse_start_sec": 3600.0,
+      "pulse_rampup_sec": 300.0,
+      "pulse_plateau_sec": 3600.0,
+      "pulse_rampdown_sec": 300.0,
+      "required": false
+    },
+    "dsust_190": {
+      "urban_scale": 4.37,
+      "freeway_scale": 2.584,
+      "ramp_scale": 2.584,
+      "incident_capacity_factor": 1.0,
+      "pulse_base_scale": 0.5,
+      "pulse_start_sec": 3600.0,
+      "pulse_rampup_sec": 300.0,
+      "pulse_plateau_sec": 3600.0,
+      "pulse_rampdown_sec": 300.0,
+      "required": false
+    },
     "pulse_dmid": {
       "urban_scale": 3.128,
       "freeway_scale": 1.85,
