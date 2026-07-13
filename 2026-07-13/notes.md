@@ -92,8 +92,35 @@ urban은 자유류 근방(NC u_delay 37~896 vs sustained 190의 15,146). leader�
 - 함의: NP_BIAS=1(r̂)만으론 펄스에서 안 열림 — deadband 게이트 재설계(커밋 target 연동
   또는 예측 stock 기준) 필요. **구조 변경이라 사용자 승인 대기.**
 
+## 6. dual-binding suite 설계·발주 (사용자 교정)
+### 사용자 교정
+"내가 말한 건 urban도 freeway도 혼잡한 상황 — 한쪽만 혼잡하면 local info로 충분하고,
+둘 다 혼잡해야 externality 항을 가진 P-Stack이 좋을 것." §4~5의 urban-only suite는
+설계 의도와 다른 무대였음(결과는 green-lever 단축 자료로 보존).
+
+### 캘리브레이션
+- freeway=ramp를 단독 천장 1.36에 고정하고 urban 스윕: 1.36/1.8/2.2/2.6 →
+  u_delay −49/−46/−11/+63. **결합 urban 천장 U* = 2.3** (0-교차 ≈2.26; 단독 2.4보다
+  낮음 = off-ramp 유입 결합 효과).
+- dual baseline = (2.3, 1.36, 1.36), 셀 = ×{1.36, 1.69, 2.05}.
+  freeway축 1.85/2.3/2.8은 기존 suite와 정확히 동일(비교 대칭성).
+- NC 사전검증(u_delay/f_delay/잔존): dmid 427/758/1,157 · dhigh 1,135/1,027/3,020 ·
+  dhigh2 1,880/1,300/4,667 — **양망 동시 스트레스 + 단일축 대비 초가산**(dhigh u 1,135
+  vs u-suite 510, f 1,027 vs f-suite 976) = externality 무대 형성 확인.
+
+### 셀 정의(scenarios.yaml 추가)
+- pulse_dmid: urban 3.128 / fw·ramp 1.85
+- pulse_dhigh: urban 3.887 / fw·ramp 2.3
+- pulse_dhigh2: urban 4.715 / fw·ramp 2.8
+
+### 발주
+- 4-arm(NC/WU-CD-F/PFO-link/P-Stack SEG13=1) × 3셀 → outputs/_dsuite/.
+- 세션 재시작으로 P-CENT 3체인 사망 확인(각 1스텝 손실) → sustained 2체인(155/170계열)만
+  재발주, suite용 P-CENT는 suite 구성 확정 뒤로 보류.
+
 ## TODO
-- [ ] P-CENT 11셀 완료 → 메인 표 P-CENT 컬럼·계산비용 행 갱신
+- [ ] dual suite 12런 완료 → 표 작성(externality 가설 본판정)
+- [ ] P-CENT sustained 6셀 완료 → 메인 표 P-CENT 컬럼 갱신 (suite분은 구성 확정 후)
 - [ ] 8-seg oracle 재실행(open-loop bound, 구 14,223은 4-seg 값)
 - [ ] ε-gap probe 프로덕션 1셀
 - [ ] 원고 수정시트 일괄 적용(Word 닫힌 후) + notation rename 실행
