@@ -189,3 +189,13 @@ seg2 off(OR_D) / seg3 on(R_D) / seg4 off(OR_F) / seg5 on(R_F) — merge만 4→3
   incident remap 제안: merge=seg5, 본선=seg6.
 - Phase 0: 원 9셀(무-incident) base3 발주(_np_final). Phase 1: guard-ON 귀속 3종 발주
   (dsym_110·sweet_190·dhigh2_w, _phase1) — production 구성(방법A+guard) 확정용.
+
+## 13. Phase 0 base3 완료(새 plant) + dsust 마감 (2026-07-14)
+- **sustained 5셀**: NC·PFO 모두 구 plant와 ±2% 이내 일치 — 단 **155_skew만 PFO 8,660→13,171
+  (+52%)·WU도 악화, 170_skew는 완전 동일(11,902)**. 수요 비단조(155_skew가 170_skew보다 나쁨)
+  = 쌍안정/분기 신호. 같은 seed 재현런은 결정론이라 무정보(설계 실수 자백) — 검증은
+  체인 드레인 후 s123 섭동런으로.
+- **펄스 4셀**: NC/WU/PFO 전부 구 plant 대비 +1~7% 이내 — 기하 변경의 펄스 영향 미미.
+- **dsust 마감**: PD4 −PFO = +1,539/+489/+865 (155/170/190) — 균일 심층과부하 sustained는
+  전 강도 PFO 영토(지도 남쪽 등고선 확정).
+- 원자료: outputs/_np_final(원 프로그램 base3), _dsust, _wsuite, _dsym.
