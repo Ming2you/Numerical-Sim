@@ -118,9 +118,33 @@ urban은 자유류 근방(NC u_delay 37~896 vs sustained 190의 15,146). leader�
 - 세션 재시작으로 P-CENT 3체인 사망 확인(각 1스텝 손실) → sustained 2체인(155/170계열)만
   재발주, suite용 P-CENT는 suite 구성 확정 뒤로 보류.
 
+## 7. plant 변경 — 다이아몬드 인터체인지 재배치 (사용자 승인, 5d2341e)
+### 스펙 (사용자 정확 지정)
+seg2 off(OR_D) / seg3 on(R_D) / seg4 off(OR_F) / seg5 on(R_F) — merge만 4→3, 6→5 이동.
+구 seg4의 merge+off 동거 해소, 각 인터체인지 내 exit가 entrance 상류(무 weaving),
+마지막 merge(5) 뒤 tail 2세그. default.yaml + test_metanet_equations 기하 assert 갱신.
+
+### 재캘리브레이션 — 천장 불변 판명
+- freeway축: 구 suite 하중(1.85/2.3/2.8 flat) NC 교차검증 → f_delay 730/1,058/1,328
+  (구망 688/976/1,273, +4~8%) — **1.36 기준 유지**.
+- urban 결합천장: fw=1.36 고정 스윕 1.8/2.1/2.4/2.7 → −46/−23/+21/+87, 0-교차 ≈2.26
+  → **U*=2.3 유지** (off-ramp 위치 불변이라 당연). pulse_d* 시나리오 수치 그대로 유효.
+- dual 3셀 NC(새 plant): 384/811/985 · 1,102/1,097/2,934 · 1,839/1,370/4,563 —
+  dhigh가 u/f 거의 완전 대칭(1,102/1,097).
+
+### 처리
+- 구망 체인 3개(세션 재시작으로 이미 사망) 확인 폐기, _dsuite 부분출력 →
+  _dsuite_oldnet_partial 보관 이동. **구망 기준 기존 측정치(4컬럼 표 등)는 이제 구-plant
+  역사 자료** — 새 plant 재측정 필요 목록: 메인 sustained 표·WU-CD-F 컬럼·suite·oracle·P-CENT.
+- 주의: incident 시나리오들의 폐색 seg 번호(3, 6, 7)는 구 기하 의미 — 새 기하에선
+  seg3=R_D merge·seg6=본선 tail로 의미가 바뀌므로 incident 셀 재정의 필요.
+- d-suite 4-arm×3셀 새 plant 재발주(outputs/_dsuite/). 전체 단위테스트 백그라운드 실행 중.
+
 ## TODO
-- [ ] dual suite 12런 완료 → 표 작성(externality 가설 본판정)
-- [ ] P-CENT sustained 6셀 완료 → 메인 표 P-CENT 컬럼 갱신 (suite분은 구성 확정 후)
+- [ ] dual suite 12런(새 plant) 완료 → 표 작성(externality 가설 본판정)
+- [ ] 단위테스트 결과 확인
+- [ ] 새 plant 재측정 프로그램 결정(sustained 표·WU-CD-F·P-CENT·oracle — 사용자와 범위 협의)
+- [ ] incident 셀 폐색 위치 재정의(새 기하 기준)
 - [ ] 8-seg oracle 재실행(open-loop bound, 구 14,223은 4-seg 값)
 - [ ] ε-gap probe 프로덕션 1셀
 - [ ] 원고 수정시트 일괄 적용(Word 닫힌 후) + notation rename 실행
