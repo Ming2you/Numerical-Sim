@@ -140,9 +140,16 @@ seg2 off(OR_D) / seg3 on(R_D) / seg4 off(OR_F) / seg5 on(R_F) — merge만 4→3
   seg3=R_D merge·seg6=본선 tail로 의미가 바뀌므로 incident 셀 재정의 필요.
 - d-suite 4-arm×3셀 새 plant 재발주(outputs/_dsuite/). 전체 단위테스트 백그라운드 실행 중.
 
+## 8. dual suite 최종(새 plant) — 펄스 dual에서 1승 2패 (results/dsuite_table.md)
+- dmid PFO +26.8 / **dhigh 계층 −61.1(양축 동시 우위)** / dhigh2 PFO +145.7.
+- 패인 대칭: 중강도 과보호(f −84를 u +111로 지불) vs 극한 청산 실기(term_f +435).
+- λ̂ deadband 휴면 + fallback guard = 조정 채널 절반 잠긴 상태의 성적임을 병기.
+- 미측정 가설: externality 본무대 = dual-binding **sustained**(T=7200) — 사용자 결정 대기.
+- 단위테스트: 기하 민감 4모듈(139개) 전부 통과, 전체 287 중 실패 7+에러 2는 legacy
+  하네스(six_controller 등) 추정 — verbose 재실행으로 목록 확정 중.
+
 ## TODO
-- [ ] dual suite 12런(새 plant) 완료 → 표 작성(externality 가설 본판정)
-- [ ] 단위테스트 결과 확인
+- [ ] 실패 9건 목록 확정(전체 verbose 실행 중) → plant 소행 여부 판정
 - [ ] 새 plant 재측정 프로그램 결정(sustained 표·WU-CD-F·P-CENT·oracle — 사용자와 범위 협의)
 - [ ] incident 셀 폐색 위치 재정의(새 기하 기준)
 - [ ] 8-seg oracle 재실행(open-loop bound, 구 14,223은 4-seg 값)
