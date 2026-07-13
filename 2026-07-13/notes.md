@@ -155,3 +155,14 @@ seg2 off(OR_D) / seg3 on(R_D) / seg4 off(OR_F) / seg5 on(R_F) — merge만 4→3
 - [ ] 8-seg oracle 재실행(open-loop bound, 구 14,223은 4-seg 값)
 - [ ] ε-gap probe 프로덕션 1셀
 - [ ] 원고 수정시트 일괄 적용(Word 닫힌 후) + notation rename 실행
+
+## 9. UNLOCK 스모크 판정 → 방법 A 채택 (bf58364)
+- dhigh2 1800s(SEG13+NP_BIAS+NP_DEADBAND_V2+FB_OFF): λ̂ step1 헛발화(2.59, base 구간) 후
+  진짜 위반(step8 +612, step9 +542)에서 0 유지. r̂는 0.05 클립 바닥으로 오염.
+- 3중 고장 확정: ① Q_real=ΔN_P×H가 평형/청산서 0 붕괴(흐름 vs 재고차분 불일치)
+  ② r̂ 오염+헛발화 ③ step8~9 λ 유실(배선 추적 필요, applied=0 구간 5~7과 연관 의심).
+- 판정: cross-step 적분 사슬(1회 적분+실현 신호+r̂+deadband)은 땜질 불가 →
+  **방법 A(candidate 내부 primal-dual, λ^(κ+1)=Π[λ^(κ)+γ(Σν^(κ)−Ñ)])** 채택(사용자 제안).
+  계획-공간 신호만 쓰므로 재고측정·r̂·deadband 전부 불요, cross-step 지연 제거.
+- 구현 발주: NP_PD_ITER=K 플래그(기본 0=OFF 비트동일), K≤5 조기수렴, γ 25배율,
+  최종 λ로 Jacobi 재수렴 후 커밋(off-equilibrium 방지). λ 유실 진단 포함.
