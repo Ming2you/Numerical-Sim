@@ -19,3 +19,14 @@
   매트릭스 실행 중(_trace155). 완성 후 production 구성 승인 요청 예정.
 - 사용자 방침: **구성 확정 전 표 채우기 중단**(sweet_w 체인 보류). 웜업은 NC로 돌리는
   구조(WARMUP_NC_STEPS 훅)를 구성 확정 후 러너에 추가하고 sweet_w 재발주.
+
+## 층2+3 구현 + 파국 차단 실증 (워크트리 Numerical-Sim-l23, 병합 대기)
+- 구현: β̂ 추정기(BETA_EST)·β̂-guard(GUARD_BETA)·trailing-regret(REGRET_K)·기하 지문 경고·
+  재캘리브레이션 트리거·카나리아(work/component_canary.py, 기본 T=3600). OFF 비트동일(sha256).
+- **파국 셀 실증(dhigh2_w PD4+FBOFF+REGRET_K=3): 6,966.6 → 5,046.6, 잔존 3,002 → 165**
+  (PFO 4,678/161과 동급 청산) — regret 12스텝 발화·강제 incumbent. 하방 +49% → +7.9%.
+- **핵심 발견 2건**: ① 이 코드베이스는 모델≡plant(1스텝 예측 비트일치)라 β̂≈1.0 —
+  "낙관"의 실체는 held-plan 채점의 시간 비일관성(whipsaw)+far 근사이며 frozen coupling은
+  예측 오차가 아니라 선택 오차(ε-gap의 몫). ② 병리는 자기예측으로는 불가시(β̂ max 1.006),
+  **참조정책 regret(실현 vs incumbent 예측)만이 감지** — incumbent 앵커 guard와 실현-return
+  학습(RL) 논거의 정밀한 형태.
