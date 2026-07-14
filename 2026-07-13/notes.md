@@ -219,3 +219,13 @@ seg2 off(OR_D) / seg3 on(R_D) / seg4 off(OR_F) / seg5 on(R_F) — merge만 4→3
 - **production 구성 확정 = 동결(SEG13만)**. 방법 A는 원고 정식화((47)-(51)→후보 내 PD) +
   transient A/B 절 전용. 백로그: 계획 target의 r̂ 역보정(×1/r̂)으로 sustained 무해화 시도.
 - Phase 2 발주: 동결 P-Stack × 8셀(sustained 4 + 펄스 4, incident 제외) → _np_final/…_locked.
+
+## 16. Phase 2 부분 완료(세션 재시작으로 5/8, 잔여 3 재발주) — 155_skew 절벽 보험 확정
+| 셀(신plant, 동결 P-Stack vs PFO) | Δ |
+|---|---|
+| sweet_155 | +464 (구plant −1,281서 반전 — 원인 추적 필요) |
+| **sweet_155_skew** | **−4,961 (−37.7%, 사상 최대)** — PFO 쌍안정 잠금(13,171)을 계층이 완전 회피(8,210) |
+| sweet_170 / 170_skew | −276 / −846 (구와 정합·확대) |
+| sweet_190 | −596 (§15) |
+| pulse_mid | +23 (동급) |
+- 155_skew = "조정=절벽 보험"의 대표 셀 확정. 잔여: 펄스 3셀(재발주), 155 반전 원인, incident remap.
