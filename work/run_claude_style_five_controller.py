@@ -611,6 +611,15 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
     if _os.environ.get("NP_DEADBAND_V2") == "1":
         # deadband v2: 위반 신호의 저stock 게이트 우회 — 잠금해제 A/B용(기본 OFF).
         cfg.mpc.np_deadband_violation_override = True
+    if _os.environ.get("BETA_EST") == "1":
+        # 층2 β̂ 낙관편향 추정기(추정 전용, 행동 불변) — leader_beta_hat 등 진단 export.
+        cfg.mpc.leader_bias_estimator = True
+    if _os.environ.get("GUARD_BETA") == "1":
+        # 층2 β̂ 보정 guard: β̂·leader_pred vs incumbent_pred 비교(BETA_EST=1 필요).
+        cfg.mpc.fallback_guard_beta = True
+    if _os.environ.get("REGRET_K"):
+        # 층2 trailing-regret: 최근 k스텝 실현 > incumbent 예측×1.10 → k스텝 강제 incumbent.
+        cfg.mpc.regret_guard_steps = int(_os.environ["REGRET_K"])
     if _os.environ.get("NP_PD_ITER"):
         # 방법 A: candidate 내부 primal-dual 반복 K(0=OFF, 현행 λ̂ 1회 선반영).
         cfg.mpc.np_primal_dual_iters = int(_os.environ["NP_PD_ITER"])
