@@ -229,3 +229,13 @@ seg2 off(OR_D) / seg3 on(R_D) / seg4 off(OR_F) / seg5 on(R_F) — merge만 4→3
 | sweet_190 | −596 (§15) |
 | pulse_mid | +23 (동급) |
 - 155_skew = "조정=절벽 보험"의 대표 셀 확정. 잔여: 펄스 3셀(재발주), 155 반전 원인, incident remap.
+
+## 17. 155 반전 원인 추적 (2026-07-14)
+- λ windup 기각: 신·구 모두 λ_P=0/40 (tgt_err 신 +653 vs 구 +287로 커졌지만 deadband 정상).
+- 분해: 구 "f +297 내고 u −1,579 회수" → 신 "f +687 내고 u −223 회수" — u→f 거래 수지 붕괴.
+  **on-ramp 잔존 +1,083**이 결정적(blocked-inflow로 urban 역류 tu +713).
+- metering 비교: leader 스타일은 신·구 동일(R_F ~1,000 억제)인데, 신 기하에선 PFO가 R_F를
+  1,450으로 열어도 무사(f_dly 1,105) — **R_F merge가 seg5로 당겨져 tail 2세그 확보, 방류
+  흡수 여유 증가**. leader의 far/hinge는 구 기하 기준이라 R_F 방류 한계비용을 과대평가.
+- 부수: 신 N_UF* min 1,500(구 3,600) — 등식예산 whipsaw 재발 흔적.
+- 귀속 프로브 발주(_trace155): ① LEADER_HINGE=0(보호 몫) ② SEG13_INEQ=1(whipsaw 몫).
