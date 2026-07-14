@@ -415,13 +415,13 @@ class MPCConfig:
     # 기본 전부 OFF = 비트동일.
     # β̂ = EWMA(실현 interval TTT / 커밋 계획의 예측 첫-interval TTT). 추정 전용(행동 불변),
     # 진단 leader_beta_hat/leader_pred_interval_ttt/leader_realized_interval_ttt export.
-    leader_bias_estimator: bool = False
+    leader_bias_estimator: bool = True  # 2026-07-14: β̂ 계기 기본 ON(진단 전용, 결정 무변경 — 논문 그림 재료)
     # guard의 leader측 예측 rollout TTT를 β̂ 배율로 보정(β̂·leader_pred > incumbent_pred면
     # 기각). incumbent측은 무보정 — argmax 선택편향이 없다. leader_bias_estimator 필요.
     fallback_guard_beta: bool = False
     # k>0: 최근 k스텝 실현 interval TTT 합 > 같은 스텝 incumbent 예측 합×1.10이면
     # 다음 k스텝 강제 incumbent 커밋(hysteresis — 강제 중에도 창 계속 갱신). 0=OFF.
-    regret_guard_steps: int = 0
+    regret_guard_steps: int = 3  # 2026-07-14 동결(A4 승인): 실현-regret 안전망 기본 ON — 파국 차단(dhigh2_w +49%→+7.9%)·승리셀 무해/개선(3/3)
     stackelberg_leader_parallel_backend: str = "thread"
     stackelberg_leader_parallel_max_workers: int = 4
     stackelberg_inner_backend_when_outer_process: str = "thread"
