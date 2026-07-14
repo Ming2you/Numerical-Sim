@@ -281,7 +281,7 @@ class WuFaithfulFollower:
         # 170_skew 진단 — 등식은 상향으로도 binding이라 leader N_UF=6000이 follower의
         # 자발적 하향 metering을 덮어써 절벽 근처 dip→과잉 교정(whipsaw)을 유발.
         # True면 자율 합이 budget 미만일 때 그대로 존중(하향 자유), 초과 시에만 사영.
-        self.seg13_budget_inequality: bool = False
+        self.seg13_budget_inequality: bool = True  # 2026-07-14 동결: 부등식 예산이 기본(whipsaw 제거, 155 -909). SEG13_INEQ=0으로 등식 복원 A/B
         # ---------- J1(2026-07-06): joint offset 패턴 directive ----------
         # F3 판정: offset은 joint 결합 변수라 per-signal 가격(편미분)이 구조적으로 0.
         # J1 = leader가 corridor 패턴(여러 신호 offset 조합)을 통째로 rollout 평가해

@@ -463,7 +463,7 @@ class MPCConfig:
     # Leader hinge 복원(2026-07-12, 사용자 지시): 구 F1 hinge 2종(freeway ρ_crit 초과,
     # urban 0.5cap spill)을 leader candidate 채점에만 가산. 기본 ON(A/B 양면 중립:
     # 190 15722/준거 15652, 155_skew 7514/7509 — 무해 확인). LEADER_HINGE=0으로 해제.
-    leader_hinge_enabled: bool = True
+    leader_hinge_enabled: bool = False  # 2026-07-14 동결: 다이아몬드 기하에서 만료(155 -572·155_skew -349·190 중립, 매트릭스 3셀 일관). LEADER_HINGE=1로 복원 A/B
     leader_hinge_weight: float = 1.0
     leader_hinge_spill_frac: float = 0.5
     wu_faithful_np_coordination_mode: str = "cap"
@@ -535,7 +535,7 @@ class FreewayFollowerConfig:
     # "VSL↓→off-ramp 유입↓→storage 회복→λ_eff 회복→본선 차량수↓"의 multi-step 이득을
     # 보려면 한두 step으로는 부족하다(off-ramp 동역학이 여러 step에 걸쳐 회복). 0 이하면
     # mpc.horizon_steps로 fallback. 비용 폭증을 막기 위해 segment 후보 가지치기는 유지.
-    freeway_prediction_horizon_steps: int = 10
+    freeway_prediction_horizon_steps: int = 3  # 2026-07-14 동결: 전 시스템 H=3 통일(FH 스윕으로 10 잉여 확인, 원고 서술 일치. FH env로 A/B 가능)
     horizon_beam_width: int = 2
     horizon_ramp_candidate_limit: int = 3
     horizon_vsl_candidate_limit_per_link: int = 3

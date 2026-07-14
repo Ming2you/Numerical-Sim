@@ -578,6 +578,8 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
         if _os.environ.get("SEG13_NBR") and hasattr(_seg_target, "seg13_neighbor_weight"):
             # radius-1 국소 rollout + 이웃 차량수 비용(PFO 강화 기준선; 플래그십은 OFF 유지).
             _seg_target.seg13_neighbor_weight = float(_os.environ["SEG13_NBR"])
+        if _os.environ.get("SEG13_INEQ") == "0" and hasattr(_seg_target, "seg13_budget_inequality"):
+            _seg_target.seg13_budget_inequality = False  # 등식 복원 A/B(2026-07-14 동결 후)
         if _os.environ.get("SEG13_INEQ") == "1" and hasattr(_seg_target, "seg13_budget_inequality"):
             # 예산 부등식 ablation: Σmeter ≤ budget(하향 자율 존중) — 170_skew whipsaw 인과 검증.
             _seg_target.seg13_budget_inequality = True
@@ -660,7 +662,12 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
         t = step * cfg.simulation.control_interval
         forecast = profile.horizon(t, cfg.mpc.horizon_steps + max(0, cfg.mpc.leader_value_depth))
         t0 = time.perf_counter()
-        control = decide(controller_id, controller, sim, forecast, previous, cfg, step)
+        # WARMUP_NC_STEPS: 웜업 구간은 전 arm 공통 no-control(분석창 진입 상태 동일화 +
+        # 컨트롤러 계산 절약, 표준 관행). 미지정(0)이면 기존 거동.
+        if step < int(_os.environ.get("WARMUP_NC_STEPS", "0")):
+            control = baseline_control("no_control", cfg, sim.state, forecast[0])
+        else:
+            control = decide(controller_id, controller, sim, forecast, previous, cfg, step)
         compute_time = time.perf_counter() - t0
         log = sim.step(control, forecast[0], step)
         previous = control.copy()
