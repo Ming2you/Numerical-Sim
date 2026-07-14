@@ -329,6 +329,68 @@
       "urban_west_east_ratio": 2.0,
       "required": false
     },
+    "sweet_155_w": {
+      "urban_scale": 1.55,
+      "freeway_scale": 1.55,
+      "ramp_scale": 1.55,
+      "incident_capacity_factor": 1.0,
+      "pulse_base_scale": 0.5,
+      "pulse_start_sec": 3600.0,
+      "pulse_rampup_sec": 300.0,
+      "pulse_plateau_sec": 3600.0,
+      "pulse_rampdown_sec": 300.0,
+      "required": false
+    },
+    "sweet_155_skew_w": {
+      "urban_scale": 1.55,
+      "freeway_scale": 1.55,
+      "ramp_scale": 1.55,
+      "incident_capacity_factor": 1.0,
+      "urban_west_east_ratio": 2.0,
+      "pulse_base_scale": 0.5,
+      "pulse_start_sec": 3600.0,
+      "pulse_rampup_sec": 300.0,
+      "pulse_plateau_sec": 3600.0,
+      "pulse_rampdown_sec": 300.0,
+      "required": false
+    },
+    "sweet_170_w": {
+      "urban_scale": 1.7,
+      "freeway_scale": 1.7,
+      "ramp_scale": 1.7,
+      "incident_capacity_factor": 1.0,
+      "pulse_base_scale": 0.5,
+      "pulse_start_sec": 3600.0,
+      "pulse_rampup_sec": 300.0,
+      "pulse_plateau_sec": 3600.0,
+      "pulse_rampdown_sec": 300.0,
+      "required": false
+    },
+    "sweet_170_skew_w": {
+      "urban_scale": 1.7,
+      "freeway_scale": 1.7,
+      "ramp_scale": 1.7,
+      "incident_capacity_factor": 1.0,
+      "urban_west_east_ratio": 2.0,
+      "pulse_base_scale": 0.5,
+      "pulse_start_sec": 3600.0,
+      "pulse_rampup_sec": 300.0,
+      "pulse_plateau_sec": 3600.0,
+      "pulse_rampdown_sec": 300.0,
+      "required": false
+    },
+    "sweet_190_w": {
+      "urban_scale": 1.9,
+      "freeway_scale": 1.9,
+      "ramp_scale": 1.9,
+      "incident_capacity_factor": 1.0,
+      "pulse_base_scale": 0.5,
+      "pulse_start_sec": 3600.0,
+      "pulse_rampup_sec": 300.0,
+      "pulse_plateau_sec": 3600.0,
+      "pulse_rampdown_sec": 300.0,
+      "required": false
+    },
     "dsym_110": {
       "urban_scale": 2.53,
       "freeway_scale": 2.04,
