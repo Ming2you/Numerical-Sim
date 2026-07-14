@@ -57,3 +57,7 @@
   155는 INEQ 단독 최선(7,585). 단일 동결 구성 후보 = combo(전 셀 최선 대비 +131 이내).
 - 승인 상태: A1(FH=3)·A2(INEQ)·A3(hinge-off)·B(병합) 승인 완료, A4(regret 기본 ON)는
   dual regret 7셀 완주 후 판정(사용자 지시). l23-layer23 브랜치 커밋 완료.
+
+## 최종 메인 표 완성 (results/final_table_sweetw.md)
+- 3승2패, 190_w 최대 우위(−270 + 잔존 −284). 권한 격차(WU-CD-F 2~4배)·NC gridlock
+  (방류 3.4k vs 9.5k)이 지배 서사. P-Stack 계산 35s/스텝(FH3 효과). P-CENT 2셀 진행 중.
