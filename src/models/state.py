@@ -408,6 +408,20 @@ class MPCConfig:
     # fallback guard의 leader vs PFO 비교 척도를 penalized objective 대신 realized rollout-TTT로.
     # (penalized obj는 TTT와 어긋나 sweet_128 등에서 TTT 좋은 leader를 잘못 기각했다, 2026-06-25.)
     stackelberg_fallback_guard_use_rollout_ttt: bool = True
+    # ---- 층2(2026-07-14): 낙관편향 β̂ 추정기 + β̂ 보정 guard + trailing-regret 스위치 ----
+    # 배경: leader 내부 rollout은 체계적으로 낙관(~30%: 제약 누락·capacity-drop 절벽 평활·
+    # horizon 절단·동결 결합)이고 argmax 선택이 이를 증폭(optimizer's curse) — 그 결과
+    # 예측 vs 예측 비교인 fallback guard는 실현 +49% 파국에서도 발화하지 못했다.
+    # 기본 전부 OFF = 비트동일.
+    # β̂ = EWMA(실현 interval TTT / 커밋 계획의 예측 첫-interval TTT). 추정 전용(행동 불변),
+    # 진단 leader_beta_hat/leader_pred_interval_ttt/leader_realized_interval_ttt export.
+    leader_bias_estimator: bool = False
+    # guard의 leader측 예측 rollout TTT를 β̂ 배율로 보정(β̂·leader_pred > incumbent_pred면
+    # 기각). incumbent측은 무보정 — argmax 선택편향이 없다. leader_bias_estimator 필요.
+    fallback_guard_beta: bool = False
+    # k>0: 최근 k스텝 실현 interval TTT 합 > 같은 스텝 incumbent 예측 합×1.10이면
+    # 다음 k스텝 강제 incumbent 커밋(hysteresis — 강제 중에도 창 계속 갱신). 0=OFF.
+    regret_guard_steps: int = 0
     stackelberg_leader_parallel_backend: str = "thread"
     stackelberg_leader_parallel_max_workers: int = 4
     stackelberg_inner_backend_when_outer_process: str = "thread"

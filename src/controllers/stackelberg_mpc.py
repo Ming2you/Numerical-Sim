@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import csv
+import sys
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,6 +14,24 @@ from src.controllers.leader import Leader, LeaderAction, leader_metadata
 from src.controllers.nash_solver import NashResult, NashSolver
 from src.models.demand import DemandStep
 from src.models.state import ControlAction, ExperimentConfig, TrafficState
+
+
+# ---------- 층3(2026-07-14): 수작업 캘리브레이션 성분의 기하 지문(경고 전용) ----------
+# 손튜닝 성분들은 특정 plant 기하(ramp merge 인덱스)에서 캘리브레이션된 암묵 전제를
+# 갖는다. 2026-07-13에 merge 인덱스가 {4,6}→{3,5}로 바뀌며 전제가 조용히 만료됐다 —
+# 이 지문은 그 만료를 __init__에서 감지해 stderr 경고 + 진단 카운트로 드러낸다.
+# 수치 경로에는 절대 개입하지 않는다(경고·진단만).
+_CALIB_MERGE_OLD_46 = {"R_D_W": 4, "R_F_W": 6, "R_D_E": 4, "R_F_E": 6}
+CALIBRATION_FINGERPRINTS: Dict[str, Dict[str, Dict[str, int]]] = {
+    # leader hinge 가중(leader_hinge_weight/spill_frac) — 2026-07-12 A/B는 구 merge {4,6}.
+    "leader_hinge": {"ramp_merge": dict(_CALIB_MERGE_OLD_46)},
+    # N_P dual deadband/내부투영(np_dual_deadband_frac/np_target_interior_frac) — 구 plant 튜닝.
+    "np_deadband": {"ramp_merge": dict(_CALIB_MERGE_OLD_46)},
+    # far(MFD tail) g 계수(leader_mfd_far_g_free/g_cong/g_fw/ncrit) — 구 plant probe calib.
+    "leader_mfd_far": {"ramp_merge": dict(_CALIB_MERGE_OLD_46)},
+}
+# 경고는 프로세스당 성분별 1회만(후보 worker 재생성 시 반복 스팸 방지).
+_calib_fingerprint_warned: set = set()
 
 
 def leader_hinge_cost(cfg: "ExperimentConfig", states: list, forecast=None) -> float:
@@ -184,6 +203,55 @@ class StackelbergMPCController:
         self._pfo_fallback_previous_control: Optional[ControlAction] = None
         self._leader_process_pool: Optional[ProcessPoolExecutor] = None
         self._leader_process_pool_workers: int = 0
+        # 층3: 캘리브레이션 지문 대조(경고 전용, 수치 경로 불변).
+        self._calib_fingerprint_mismatch_count: int = self._check_calibration_fingerprints()
+        # 재캘리브레이션 트리거(2026-07-14): 지문 불일치 또는 β̂ 표류 감지 시 진단
+        # leader_recalib_needed=1 + stderr 제안(런당 1회). 수치 경로 불변.
+        self._recalib_needed: bool = self._calib_fingerprint_mismatch_count > 0
+        self._recalib_stderr_emitted: bool = False
+
+    def _check_calibration_fingerprints(self) -> int:
+        """층3: 손튜닝 성분별 캘리브레이션 기하 지문 vs 현재 cfg 기하 대조.
+
+        불일치 성분 수를 반환하고 성분별 한국어 경고를 stderr에 1회 출력한다.
+        경고·카운트만 — 어떤 수치 경로도 바꾸지 않는다."""
+        current = {
+            str(k): int(v)
+            for k, v in dict(
+                getattr(self.cfg.network, "ramp_merge_segment_index", {}) or {}
+            ).items()
+        }
+        mismatches = 0
+        for component, fingerprint in CALIBRATION_FINGERPRINTS.items():
+            expected = {
+                str(k): int(v) for k, v in fingerprint.get("ramp_merge", {}).items()
+            }
+            if not expected or not current:
+                continue
+            if expected == current:
+                continue
+            mismatches += 1
+            if component not in _calib_fingerprint_warned:
+                _calib_fingerprint_warned.add(component)
+                exp_set = sorted(set(expected.values()))
+                cur_set = sorted(set(current.values()))
+                print(
+                    f"[경고] {component} 성분은 merge {{{','.join(str(v) for v in exp_set)}}} "
+                    f"기하에서 캘리브레이션됨 - 현재 {{{','.join(str(v) for v in cur_set)}}}, 재검증 필요",
+                    file=sys.stderr,
+                    flush=True,
+                )
+        return mismatches
+
+    def _maybe_emit_recalib_suggestion(self) -> None:
+        """재캘리브레이션 제안 stderr — 런(컨트롤러 인스턴스)당 최초 1회만."""
+        if self._recalib_needed and not self._recalib_stderr_emitted:
+            self._recalib_stderr_emitted = True
+            print(
+                "[제안] 캘리브레이션 표류 감지 - component_canary.py 실행 권장",
+                file=sys.stderr,
+                flush=True,
+            )
 
     def close(self) -> None:
         if self._leader_process_pool is not None:
@@ -524,7 +592,13 @@ class StackelbergMPCController:
             "leader_response_proxy_state_count": float(best_eval.metadata.get("leader_response_proxy_state_count", 0.0)),
             "leader_candidate_full_evaluated_count": float(len(full_evaluations)),
             "leader_fallback_evaluated_count": float(len(fallback_evaluations)),
+            # 층3: 캘리브레이션 지문 불일치 성분 수 + 재캘리브레이션 트리거(경고·진단 전용).
+            "calib_fingerprint_mismatch_count": float(
+                getattr(self, "_calib_fingerprint_mismatch_count", 0)
+            ),
+            "leader_recalib_needed": float(bool(getattr(self, "_recalib_needed", False))),
         })
+        self._maybe_emit_recalib_suggestion()
         metadata.update(best_eval.metadata)
         metadata.update(best_eval.objective_terms)
         best = DecisionResult(best_eval.nash.control, best_eval.objective, best_eval.nash, metadata)
@@ -1408,6 +1482,19 @@ class StackelbergMPCController:
         use_ttt = bool(getattr(self.cfg.mpc, "stackelberg_fallback_guard_use_rollout_ttt", False))
         leader_ttt = self._evaluation_rollout_ttt(leader_best)
         fallback_ttt = self._evaluation_rollout_ttt(fallback_best)
+        # 층2(2026-07-14): β̂ 보정 — leader측 예측 TTT만 낙관편향 배율 β̂로 보정한다.
+        # leader측은 ~50 후보 argmax 선택이라 낙관이 증폭(optimizer's curse)되지만
+        # incumbent(PFO)는 단일 해라 선택편향이 없어 무보정. β̂=None(추정 전)이면 기존 거동.
+        beta_hat: Optional[float] = None
+        if bool(getattr(self.cfg.mpc, "fallback_guard_beta", False)):
+            beta_value = getattr(self, "_beta_hat", None)
+            if beta_value is not None:
+                beta_hat = float(beta_value)
+        leader_ttt_guard = (
+            leader_ttt
+            if (leader_ttt is None or beta_hat is None)
+            else float(leader_ttt) * beta_hat
+        )
         ttt_available = use_ttt and leader_ttt is not None and fallback_ttt is not None
         if ttt_available:
             # leader가 PFO보다 예측 rollout-TTT 기준 (margin 넘게) 나쁘면 기각, 동률·개선이면 채택.
@@ -1415,7 +1502,7 @@ class StackelbergMPCController:
             # 128의 누적 이득(+13.7%)을 전부 살린다. 대가로 저혼잡(115)에서 PFO 대비 ~0.9% 회귀가
             # 있으나, leader 가치를 주장하지 않는 저부하라 수용한다(2026-06-25 사용자 결정).
             ttt_margin = max(1.0, 1.0e-3 * max(fallback_ttt, 1.0))
-            ttt_worse = leader_ttt > fallback_ttt + ttt_margin
+            ttt_worse = leader_ttt_guard > fallback_ttt + ttt_margin
             # 1차 기각을 TTT로. 잔류/완료 severe는 throughput 안전장치로 유지.
             reject = bool(ttt_worse or terminal_severe or completed_severe)
         else:
@@ -1431,6 +1518,12 @@ class StackelbergMPCController:
             "leader_fallback_guard_metric_ttt": float(ttt_available),
             "leader_fallback_guard_leader_rollout_ttt": float(leader_ttt) if leader_ttt is not None else 0.0,
             "leader_fallback_guard_fallback_rollout_ttt": float(fallback_ttt) if fallback_ttt is not None else 0.0,
+            # 층2: β̂ 보정 적용 여부·값·보정된 leader측 비교값(미적용 시 원값 그대로).
+            "leader_fallback_guard_beta_applied": float(beta_hat is not None),
+            "leader_fallback_guard_beta_hat": float(beta_hat) if beta_hat is not None else 0.0,
+            "leader_fallback_guard_leader_rollout_ttt_beta": (
+                float(leader_ttt_guard) if leader_ttt_guard is not None else 0.0
+            ),
             "leader_fallback_guard_ttt_worse": float(ttt_worse),
             "leader_fallback_guard_terminal_worse": float(terminal_worse),
             "leader_fallback_guard_terminal_severe": float(terminal_severe),

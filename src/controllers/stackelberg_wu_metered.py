@@ -20,6 +20,7 @@ follower를 바꾸려면 `_make_follower_solver`만 오버라이드하면 된다
 """
 from __future__ import annotations
 
+from collections import deque
 from typing import Dict, List, Optional
 
 from src.controllers.stackelberg_mpc import (
@@ -211,9 +212,195 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         self.price_iter_max: int = 1
         self.price_iter_relax: float = 0.5
         self.price_iter_tol: float = 1.0e-2  # 상대 control 변화 수렴 문턱
+        # ---------- 층2(2026-07-14): β̂ 낙관편향 추정기 + trailing-regret 스위치 ----------
+        # leader 내부 rollout은 체계적으로 낙관(제약 누락·capacity-drop 절벽 평활·horizon
+        # 절단·동결 결합)이고 ~50 후보 argmax가 이를 증폭(optimizer's curse) — 예측 vs 예측
+        # 비교인 fallback guard는 실현 +49% 파국에서도 발화하지 못했다.
+        # 측정 기준(설계 선택, 2026-07-14): 이 코드베이스에서 1-step 예측(_predict)은 plant
+        # (run_coupled_interval)와 같은 함수·같은 demand·같은 state라 첫-interval 예측이
+        # 구성상 실현과 일치한다 — 첫-interval 비율은 낙관을 원리적으로 못 잰다. 따라서
+        # 스펙의 허용 대안대로 **horizon TTT + lag buffer**를 쓴다: 예측 = 커밋 계획의
+        # 채점 rollout TTT(distributed_response_rollout_ttt, held-plan H-step — guard가
+        # 비교하는 바로 그 값), 실현 = 이후 H개 interval의 사다리꼴 TTT 합(lag H).
+        # 닫힌루프 재결정·whipsaw·미계상 큐로 실현이 held-plan 예측에서 벗어나는 만큼이
+        # β̂>1로 잡힌다(cfg.mpc.leader_bias_estimator, 기본 OFF=비트동일).
+        self._beta_hat: Optional[float] = None
+        self._beta_ewma_weight: float = 0.2       # EWMA 갱신 가중(스펙 고정)
+        self._beta_ratio_clip: tuple = (0.5, 3.0)  # 단발 이상비율 클립(스펙 고정)
+        # lag buffer: 커밋 시 {pred(H-step TTT), remaining(H), acc(실현 누적)} 등록,
+        # 매 스텝 실현 interval을 전 항목에 가산 — remaining 소진 시 비율 확정·EWMA 갱신.
+        self._beta_pending: deque = deque()
+        self._beta_prev_total_veh: Optional[float] = None  # 직전 스텝 결정 시점 총 차량수 N_prev
+        self._beta_last_realized: Optional[float] = None   # 이번 스텝에서 측정한 직전 interval 실현 TTT
+        # β̂ 표류 재캘리브레이션 트리거: |β̂−1|>0.2 연속 스텝 카운터(5스텝 연속 시 제안).
+        self._beta_drift_streak: int = 0
+        # trailing-regret(cfg.mpc.regret_guard_steps=k>0): (실현 interval, incumbent 예측
+        # interval) 쌍의 최근 k-창. incumbent 예측 interval = incumbent의 채점 horizon TTT/H
+        # (이미 계산된 값 재사용 — 추가 rollout 0회). 창 전체에서 실현 합 > 예측 합×1.10이면
+        # 다음 k스텝 강제 incumbent 커밋(hysteresis: 강제 중에도 창 계속 갱신, k 소진 후 복귀).
+        self._regret_window: deque = deque()
+        self._regret_pending_inc_pred: Optional[float] = None  # 직전 스텝 incumbent 예측 interval TTT
+        self._regret_forced_remaining: int = 0
+        self._regret_force_this_step: bool = False
+        self._regret_last_gap: float = 0.0
 
     def _make_follower_solver(self, cfg: ExperimentConfig):
         return WuFaithfulFollower(cfg)
+
+    # ---------- 층2(2026-07-14): β̂ 추정 + trailing-regret — 스텝 시작/커밋 훅 ----------
+
+    def _beta_regret_on_entry(self, state: TrafficState) -> Dict[str, float]:
+        """스텝 시작(decide 진입) 훅: 직전 interval의 실현 TTT를 측정해 β̂·regret 창을 갱신.
+
+        실현 interval TTT ≈ ((N_prev + N_now)/2)·T_c_h — N = 총 urban+freeway 차량수
+        (사다리꼴 적분 근사, 예측 rollout TTT와 동일 단위 veh·h). β̂은 lag buffer의
+        H-스텝 창이 완성될 때마다 실현합/예측(H-step held-plan TTT) 비율로 EWMA 갱신.
+        두 플래그 모두 OFF면 즉시 반환(계산 0, 비트동일)."""
+        cfg_m = self.cfg.mpc
+        est_on = bool(getattr(cfg_m, "leader_bias_estimator", False))
+        regret_k = int(getattr(cfg_m, "regret_guard_steps", 0))
+        self._regret_force_this_step = False
+        if not est_on and regret_k <= 0:
+            return {}
+        net = self.cfg.network
+        t_c_h = float(self.cfg.simulation.T_c_h)
+        n_now = float(state.total_urban_vehicles(net)) + float(
+            state.total_freeway_vehicles(net)
+        )
+        meta: Dict[str, float] = {}
+        realized: Optional[float] = None
+        if self._beta_prev_total_veh is not None:
+            realized = 0.5 * (self._beta_prev_total_veh + n_now) * t_c_h
+            # β̂ lag buffer: 미결 예측 항목마다 실현 interval을 누적, H개 채워지면 확정.
+            if est_on:
+                while self._beta_pending and self._beta_pending[0]["remaining"] <= 0:
+                    self._beta_pending.popleft()
+                for item in self._beta_pending:
+                    item["acc"] += realized
+                    item["remaining"] -= 1
+                while self._beta_pending and self._beta_pending[0]["remaining"] <= 0:
+                    done = self._beta_pending.popleft()
+                    pred_h = float(done["pred"])
+                    if pred_h > 1.0e-9:
+                        ratio = float(done["acc"]) / pred_h
+                        lo, hi = self._beta_ratio_clip
+                        ratio = min(max(float(ratio), float(lo)), float(hi))
+                        w = float(self._beta_ewma_weight)
+                        self._beta_hat = (
+                            ratio
+                            if self._beta_hat is None
+                            else (1.0 - w) * float(self._beta_hat) + w * ratio
+                        )
+            # regret 창: 같은 interval의 (실현, incumbent 예측 interval) 쌍으로 갱신.
+            if regret_k > 0 and self._regret_pending_inc_pred is not None:
+                self._regret_window.append(
+                    (float(realized), float(self._regret_pending_inc_pred))
+                )
+                while len(self._regret_window) > regret_k:
+                    self._regret_window.popleft()
+        # 재캘리브레이션 트리거 ②: |β̂−1|>0.2가 5스텝 연속이면 표류 판정(진단·경고만).
+        if est_on and self._beta_hat is not None:
+            if abs(float(self._beta_hat) - 1.0) > 0.2:
+                self._beta_drift_streak += 1
+            else:
+                self._beta_drift_streak = 0
+            if self._beta_drift_streak >= 5:
+                self._recalib_needed = True
+        self._regret_pending_inc_pred = None
+        self._beta_last_realized = realized
+        # 이번 스텝 커밋 시점의 N — 다음 스텝 realized 계산 재료.
+        self._beta_prev_total_veh = n_now
+        if regret_k > 0:
+            gap = 0.0
+            if len(self._regret_window) >= regret_k:
+                sum_real = sum(r for r, _ in self._regret_window)
+                sum_inc = sum(p for _, p in self._regret_window)
+                gap = sum_real - 1.10 * sum_inc
+                # 트리거: 창 전체가 10% margin 넘게 나쁘고, 현재 강제 구간이 아니면 k스텝 강제.
+                if self._regret_forced_remaining <= 0 and gap > 0.0:
+                    self._regret_forced_remaining = regret_k
+            self._regret_last_gap = float(gap)
+            if self._regret_forced_remaining > 0:
+                self._regret_force_this_step = True
+                self._regret_forced_remaining -= 1
+        if realized is not None:
+            meta["leader_realized_interval_ttt"] = float(realized)
+        if self._beta_hat is not None:
+            meta["leader_beta_hat"] = float(self._beta_hat)
+        if regret_k > 0:
+            meta["leader_regret_active"] = float(self._regret_force_this_step)
+            meta["leader_regret_gap"] = float(self._regret_last_gap)
+            meta["leader_regret_window_len"] = float(len(self._regret_window))
+        return meta
+
+    def _committed_horizon_pred_ttt(
+        self,
+        state: TrafficState,
+        control: ControlAction,
+        forecast: List[DemandStep],
+        n_steps: int,
+    ) -> float:
+        """커밋된 control의 held-plan H-step 예측 TTT — 채점 진단 재사용, 결측 시 재계산.
+
+        1순위: follower solve가 채점 시 기록한 distributed_response_rollout_ttt
+        (wu_faithful_follower._rollout_horizon_ttt, horizon_steps개 interval — fallback
+        guard가 비교하는 바로 그 값이라 β̂ 보정과 차원이 정확히 맞는다, 추가 rollout 0회).
+        결측(이례)이면 같은 정의로 `_predict`(depth_override=H) 재계산."""
+        diag = getattr(control, "diagnostics", {}) or {}
+        raw = diag.get("distributed_response_rollout_ttt")
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            value = float("nan")
+        if value == value and value not in (float("inf"), -float("inf")):
+            return value
+        _, pred = self._predict(state, control, forecast, depth_override=n_steps)
+        return float(pred)
+
+    def _beta_regret_on_commit(
+        self,
+        state: TrafficState,
+        result: DecisionResult,
+        forecast: List[DemandStep],
+    ) -> Dict[str, float]:
+        """커밋 직후 훅: 커밋 계획(+regret용 incumbent)의 예측 horizon TTT를 등록.
+
+        예측은 채점 rollout 진단의 재사용이라 추가 rollout 0회. β̂용은 lag buffer에
+        {pred, remaining=H}로 등록(entry 훅이 실현 H개를 채워 확정), regret용 incumbent는
+        interval 평균(pred/H)으로 환산해 다음 실현 interval과 쌍을 만든다.
+        두 플래그 모두 OFF면 즉시 반환(계산 0, 비트동일)."""
+        cfg_m = self.cfg.mpc
+        est_on = bool(getattr(cfg_m, "leader_bias_estimator", False))
+        regret_k = int(getattr(cfg_m, "regret_guard_steps", 0))
+        if not est_on and regret_k <= 0:
+            return {}
+        meta: Dict[str, float] = {}
+        if not forecast:
+            return meta
+        n_steps = max(1, int(cfg_m.horizon_steps))
+        pred_h = self._committed_horizon_pred_ttt(
+            state, result.control, forecast, n_steps
+        )
+        meta["leader_pred_horizon_ttt"] = float(pred_h)
+        meta["leader_pred_interval_ttt"] = float(pred_h) / float(n_steps)
+        if est_on:
+            self._beta_pending.append(
+                {"pred": float(pred_h), "remaining": int(n_steps), "acc": 0.0}
+            )
+            # 안전 상한(정상 흐름에선 스텝당 1개 추가·1개 확정으로 길이 ≤ H+1).
+            while len(self._beta_pending) > 4 * n_steps + 4:
+                self._beta_pending.popleft()
+        if regret_k > 0:
+            pfo_eval = getattr(self, "_pfo_incumbent_eval", None)
+            if pfo_eval is not None:
+                inc_h = self._committed_horizon_pred_ttt(
+                    state, pfo_eval.nash.control, forecast, n_steps
+                )
+                self._regret_pending_inc_pred = float(inc_h) / float(n_steps)
+                meta["leader_regret_incumbent_pred_interval_ttt"] = float(
+                    self._regret_pending_inc_pred
+                )
+        return meta
 
     # ---------- B2: per-signal externality 가격 계산/refresh ----------
 
@@ -240,6 +427,9 @@ class StackelbergWuMeteredController(StackelbergMPCController):
             if self.previous_control is not None
             else ControlAction.fixed(self.cfg)
         )
+        # 층2(2026-07-14): β̂/regret 스텝 시작 갱신 — 직전 interval 실현 TTT 측정,
+        # β̂ EWMA·regret 창·강제 incumbent 여부 확정(플래그 OFF면 무동작=비트동일).
+        l2_meta = self._beta_regret_on_entry(state)
         # LINK-SHARE(2026-07-09): mode에 따라 step 시작 시 ω_F 설정.
         #  density → headroom 비례(상태 피드백), search/off → 균등(후보 평가 일관성).
         follower_ls = self.nash_solver
@@ -282,6 +472,12 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         if isinstance(self.nash_solver, WuFaithfulFollower):
             for link, w in self.nash_solver._wu._omega_f.items():
                 result.control.diagnostics[f"leader_nuf_omega_{link}"] = float(w)
+        # 층2: 커밋 계획(+incumbent)의 예측 첫-interval TTT 기록 + 진단 export
+        # (플래그 OFF면 두 훅 모두 {} — 진단 키 추가 없음, 비트동일).
+        l2_meta.update(self._beta_regret_on_commit(state, result, forecast))
+        if l2_meta:
+            result.metadata.update(l2_meta)
+            result.control.diagnostics.update(l2_meta)
         return result
 
     def _link_share_omega(self, state: TrafficState) -> Dict[str, float]:
@@ -1895,6 +2091,22 @@ class StackelbergWuMeteredController(StackelbergMPCController):
                 metadata["leader_fallback_guard_selected"] = 1.0
                 metadata["leader_fallback_guard_selected_pfo"] = 1.0
                 metadata["leader_fallback_guard_rejected_leader"] = 1.0
+        # 층2(2026-07-14) trailing-regret 강제 커밋: 최근 k-창에서 실현 TTT가 incumbent
+        # 예측×1.10을 넘었으면 leader 후보 대신 incumbent를 k스텝 강제 커밋한다
+        # (예측 vs 예측 guard가 못 잡는 실현 기반 안전장치; regret_guard_steps=0=OFF).
+        metadata["leader_regret_forced_commit"] = 0.0
+        if (
+            bool(getattr(self, "_regret_force_this_step", False))
+            and pfo_eval is not None
+            and best.stage != "fallback_pfo"
+        ):
+            best = pfo_eval
+            metadata["leader_regret_forced_commit"] = 1.0
+            metadata["leader_fallback_guard_selected"] = 1.0
+            metadata["leader_fallback_guard_selected_pfo"] = 1.0
+        elif bool(getattr(self, "_regret_force_this_step", False)) and best.stage == "fallback_pfo":
+            # 이미 guard/tie-break가 incumbent를 선택한 경우도 강제 상태를 기록.
+            metadata["leader_regret_forced_commit"] = 1.0
         metadata.update({
             "leader_pfo_incumbent_active": float(pfo_eval is not None),
             "leader_pfo_incumbent_selected": float(best.stage == "fallback_pfo"),
