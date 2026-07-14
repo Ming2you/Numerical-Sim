@@ -267,6 +267,17 @@ def make_controller(controller_id: str, cfg: ExperimentConfig):
         controller.green_offset_cross_price_enabled = True
         controller.vsl_meter_cross_price_enabled = True
         controller.nash_solver.joint_green_offset_enabled = True
+        # metering δ 스캔 승자(2026-07-15): δ=300 + trust_frac=0.20(=반경 300veh/h) 짝.
+        # 170_skew_w wTTT 3244.7(baseline)→3089(회랑 floor 0.65 단독)→3028(δ=300 추가),
+        # 190_w 5419.4→5357(floor)→5045(δ). METER_PRICE_DELTA env가 미지정일 때만 적용
+        # (env가 δ·trust를 직접 주면 그 값 우선). **주의: δ·trust는 짝으로만 유효** —
+        # trust=0.20 단독(δ=60)은 3186으로 오히려 열화, δ=300은 반드시 함께 줘야 한다.
+        # **선결조건: 회랑 예산 floor(seg13_release_floor_frac=0.65)** — floor 없이 이
+        # 반경이면 과소방류 나선(d300_floor0 wTTT 3768). 수량 floor와 짝으로만 안전.
+        import os as _os_mpd
+        if "METER_PRICE_DELTA" not in _os_mpd.environ:
+            controller.metering_price_delta_veh_h = 300.0
+            controller.metering_price_trust_frac = 0.20
         return controller
     # ---- G1DF-NORHO(2026-07-07): g1df에서 rho_crit 안전장치 2종 제거 — 진단 ----
     # 사용자 진단: freeway follower의 F1 ρ_crit hinge(own-TTS penalty)와 leader의 density_headroom
@@ -567,6 +578,30 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
         controller.candidate_dedupe_enabled = True  # A1: 같은 N_UF 후보 solve+rollout 재사용
     if _os.environ.get("PRICE_LITE") == "1" and hasattr(controller, "price_lite"):
         controller.price_lite = True  # B: baseline+one-sided+스텐실 재활용+얕은 가격 rollout
+    if _os.environ.get("METER_PRICE_DELTA") and hasattr(controller, "metering_price_delta_veh_h"):
+        # δ 스캔(2026-07-14): metering 가격 FD probe 폭 override. 기존 d_r =
+        # max(δ, trust_frac·cap)에선 trust(0.25·1500=375)가 작은 δ를 가리므로, B3TR
+        # 원칙(측정한 구간에서만 가격 유효 — 측정폭=trust 반경)을 유지한 채 δ가
+        # 지배하도록 trust_frac도 δ/cap으로 연동(cap 균일 1500). 상향 cert 게이트 불변.
+        _mpd = float(_os.environ["METER_PRICE_DELTA"])
+        controller.metering_price_delta_veh_h = _mpd
+        if getattr(controller, "metering_price_trust_frac", None) is not None:
+            _cap_min = min(cfg.network.ramp_capacity_veh_h.values())
+            controller.metering_price_trust_frac = _mpd / max(_cap_min, 1.0e-9)
+    if _os.environ.get("VSL_PRICE_DELTA") and hasattr(controller, "vsl_price_delta_kmh"):
+        # Task C cross probe(2026-07-14): vsl 가격 FD 폭 override — vsl×meter cross의
+        # δv를 δm과 비례 확대해 2차 혼합곡률 재측정(소δ에서 죽는지 vs 진짜 평탄).
+        controller.vsl_price_delta_kmh = float(_os.environ["VSL_PRICE_DELTA"])
+    if _os.environ.get("GREEN_PRICE_DELTA") and hasattr(controller, "signal_price_delta_sec"):
+        # green 가격 FD 폭 override — green×offset cross의 δp 확대(6→24s 등) 겸용.
+        controller.signal_price_delta_sec = float(_os.environ["GREEN_PRICE_DELTA"])
+    if _os.environ.get("GO_CROSS_OFFSET_DELTA") and hasattr(controller, "green_offset_cross_offset_delta_sec"):
+        controller.green_offset_cross_offset_delta_sec = float(_os.environ["GO_CROSS_OFFSET_DELTA"])
+    if _os.environ.get("RELEASE_FLOOR") is not None:
+        # 회랑 예산 하한 α override: 0=구 부등식(하한 없음), 1=구 등식, 기본 0.65.
+        _rf_target = getattr(controller, "nash_solver", controller)
+        if hasattr(_rf_target, "seg13_release_floor_frac"):
+            _rf_target.seg13_release_floor_frac = float(_os.environ["RELEASE_FLOOR"])
     if _os.environ.get("SEG13") == "1":
         # 13-player(2026-07-10 승인): freeway를 segment agent 8개로 분해 + 예산 simplex 사영.
         # P-STACK 계열은 .nash_solver, PFO(WU-FAITHFUL-FOLLOWER)는 follower 자체가 controller.
@@ -685,7 +720,7 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
         # 가격(wu_b2_/b3_/b4_/f3_)·P1.5(wu_p15_)·joint(wu_j_) 진단은 control_row에 안 실리므로 수집.
         decision.update({
             k: float(v) for k, v in control.diagnostics.items()
-            if k.startswith(("wu_b2_", "wu_b3_", "wu_b4_", "wu_p15_", "wu_f3_", "wu_j_", "wu_eps_", "wu_faithful_np_", "wu_seg13_"))
+            if k.startswith(("wu_b2_", "wu_b3_", "wu_b4_", "wu_p15_", "wu_f3_", "wu_j_", "wu_joint_", "wu_lead_off_", "wu_eps_", "wu_faithful_np_", "wu_seg13_"))
             and isinstance(v, (int, float, bool))
         })
         decision_rows.append(decision)

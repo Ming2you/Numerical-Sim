@@ -282,6 +282,12 @@ class WuFaithfulFollower:
         # 자발적 하향 metering을 덮어써 절벽 근처 dip→과잉 교정(whipsaw)을 유발.
         # True면 자율 합이 budget 미만일 때 그대로 존중(하향 자유), 초과 시에만 사영.
         self.seg13_budget_inequality: bool = True  # 2026-07-14 동결: 부등식 예산이 기본(whipsaw 제거, 155 -909). SEG13_INEQ=0으로 등식 복원 A/B
+        # 회랑 예산(2026-07-14, 사용자 지시): 링크별 α·budget ≤ Σmeter ≤ budget.
+        # 순수 부등식(α=0)은 하한이 없어 大δ 가격이 전 램프를 동시 조일 때 총방류가
+        # 나선형으로 떨어지는 과소방류 나선(구 B3 기각 사유)을 못 막고, 등식(α=1)은
+        # 상향 binding이 whipsaw를 만든다 — α는 그 스펙트럼의 혼합도구(Roberts-Spence:
+        # 가격(배분)과 수량(회랑 경계)의 결합). env RELEASE_FLOOR로 조정.
+        self.seg13_release_floor_frac: float = 0.65
         # ---------- J1(2026-07-06): joint offset 패턴 directive ----------
         # F3 판정: offset은 joint 결합 변수라 per-signal 가격(편미분)이 구조적으로 0.
         # J1 = leader가 corridor 패턴(여러 신호 offset 조합)을 통째로 rollout 평가해
@@ -2585,33 +2591,52 @@ class WuFaithfulFollower:
             n_uf_star = float(getattr(leader, "N_UF_star", 0.0))
             budget = min(max(omega_f * n_uf_star, 0.0), cap_sum)
             total_pref = sum(preferred_meter.values())
-            if self.seg13_budget_inequality and total_pref <= budget + 1.0e-9:
-                # 부등식 모드: 자율 합 ≤ budget이면 강제 상향 없이 그대로 존중.
-                meter_out = dict(preferred_meter)
-            elif total_pref <= 1.0e-9:
-                meter_out = {
-                    r: budget * caps[r] / max(cap_sum, 1.0e-9) for r in preferred_meter
-                }
-            else:
-                scale = budget / total_pref
-                meter_out = {
+
+            def _scale_to(target: float) -> Dict[str, float]:
+                # 목표 합 target으로 비례 사영(용량 클립 + 잔여 재분배) — 기존 등식
+                # 로직을 회랑 상·하한이 공용하도록 함수화(로직 비트 동일).
+                if total_pref <= 1.0e-9:
+                    return {
+                        r: target * caps[r] / max(cap_sum, 1.0e-9)
+                        for r in preferred_meter
+                    }
+                scale = target / total_pref
+                out = {
                     r: min(caps[r], m * scale) for r, m in preferred_meter.items()
                 }
-                deficit = budget - sum(meter_out.values())
+                deficit = target - sum(out.values())
                 if deficit > 1.0e-9:
                     for r in sorted(
-                        meter_out, key=lambda x: caps[x] - meter_out[x], reverse=True,
+                        out, key=lambda x: caps[x] - out[x], reverse=True,
                     ):
-                        room = caps[r] - meter_out[r]
+                        room = caps[r] - out[r]
                         add = min(room, deficit)
-                        meter_out[r] += add
+                        out[r] += add
                         deficit -= add
                         if deficit <= 1.0e-9:
                             break
+                return out
+
+            if self.seg13_budget_inequality and total_pref <= budget + 1.0e-9:
+                # 회랑 예산(2026-07-14): α·budget ≤ Σmeter ≤ budget. 회랑 안이면 자율
+                # 존중(하향 자유), 하한 아래(과소방류 나선 조짐)면 α·budget으로 비례
+                # 상향. α=0이면 구 부등식(하한 없음), α=1이면 구 등식과 동치.
+                floor_b = float(self.seg13_release_floor_frac) * budget
+                if total_pref >= floor_b - 1.0e-9:
+                    meter_out = dict(preferred_meter)
+                else:
+                    meter_out = _scale_to(floor_b)
+            else:
+                meter_out = _scale_to(budget)
             self._seg13_diag[f"wu_seg13_budget_{link}"] = float(budget)
             self._seg13_diag[f"wu_seg13_presplit_{link}"] = float(total_pref)
             self._seg13_diag[f"wu_seg13_postsplit_{link}"] = float(
                 sum(meter_out.values())
+            )
+            # 나선 감시(2026-07-14): 실현 Σmeter/budget 비율 — 지속 하락 + 램프 큐
+            # 상승 동반이면 과소방류 나선 서명. 컨트롤러의 release-트리거 재선형화 재료.
+            self._seg13_diag[f"wu_b3_release_ratio_{link}"] = float(
+                sum(meter_out.values()) / max(budget, 1.0e-9)
             )
         self._seg13_diag[f"wu_seg13_evals_{link}"] = float(evals)
         return vsl_out, meter_out, evals

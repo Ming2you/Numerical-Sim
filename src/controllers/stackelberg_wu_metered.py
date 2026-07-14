@@ -78,6 +78,8 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         # 후보 격자(0.1~0.3·cap)가 δ(60veh/h)보다 커서, 반경과 **측정폭을 격자에 맞춘다**
         # (허용 이동폭만큼 측정: δ_r = trust·cap_r). None=무제한(-B3 재현, 과소방류 나선).
         # 기본 0.25 — metering_price_enabled를 켜면 trust가 함께 걸린다(러너 -B3TR).
+        # 플래그십(ALLPRICE-JOINT)은 make_controller에서 δ=300·trust_frac=0.20 짝으로
+        # override(2026-07-15 δ 스캔 승자 — 아래 make_controller 주석 참조).
         self.metering_price_trust_frac: Optional[float] = 0.25
         # B3CERT(2026-07-05, 사용자 승인 설계): **비대칭 안전 증명서**. trust의 전제(오류
         # 가역성)가 capacity drop에선 깨진다(B3TR v2: 한 칸씩 과방류로 걸어가 breakdown,
@@ -117,6 +119,9 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         # follower가 primal joint을 이미 포착 → cross 가격만 추가. 기본 OFF = 비트동일.
         self.green_offset_cross_price_enabled: bool = False
         self.green_offset_cross_weight: float = 1.0
+        # green×offset cross의 offset FD 폭(2026-07-14 Task C probe): None=cycle/8(기존
+        # 격자 1칸). 2차 혼합편미분은 소δ에서 잘 죽으므로 영역판별 시 cycle/4로 확대.
+        self.green_offset_cross_offset_delta_sec: Optional[float] = None
         self.vsl_meter_cross_price_enabled: bool = False
         self.vsl_meter_cross_weight: float = 1.0
         # ---------- A/B-패키지(2026-07-10): 계산비용 절감 ----------
@@ -1075,12 +1080,26 @@ class StackelbergWuMeteredController(StackelbergMPCController):
                 if _circ(off_now, ref) >= float(self.offset_price_refresh_threshold_sec):
                     refresh = True
                     break
+        release_trigger = False
+        if not refresh and self.metering_price_enabled:
+            # release-트리거 재선형화(2026-07-14): 커밋된 직전 control의 실현
+            # Σmeter/budget(wu_b3_release_ratio_*)이 회랑 하한 α 근방(<α+0.05)까지
+            # 떨어지면(과소방류 나선 조짐) 가격 강제 재선형화 — 지연 불안정 완화.
+            # min(·,0.999)로 등식(α=1) 재현 시 상시 발화 방지(ratio≡1.0).
+            _floor = float(getattr(follower, "seg13_release_floor_frac", 0.0) or 0.0)
+            _thr = min(_floor + 0.05, 0.999)
+            for _k, _v in getattr(previous, "diagnostics", {}).items():
+                if _k.startswith("wu_b3_release_ratio_") and float(_v) < _thr:
+                    refresh = True
+                    release_trigger = True
+                    break
         if not refresh:
             self._signal_price_meta = dict(self._signal_price_meta)
             self._signal_price_meta["wu_b2_price_refreshed"] = 0.0
             return
 
         meta: Dict[str, float] = {"wu_b2_price_enabled": float(self.signal_price_enabled)}
+        meta["wu_b3_release_refresh"] = float(release_trigger)
         self._price_rollout_count = 0
 
         # ---- B-패키지: price-lite 경로(공용 baseline + one-sided + 스텐실 재활용 + 얕은 rollout) ----
@@ -1222,6 +1241,18 @@ class StackelbergWuMeteredController(StackelbergMPCController):
             rho_cert_limit = float(net.rho_crit) * (
                 1.0 - float(self.metering_release_cert_margin)
             )
+            # ---- 3점 곡률 진단(2026-07-14, δ 스캔): TTT(−Δ)/TTT(기준)/TTT(+Δ) ----
+            # 기준점 rollout은 동결 운영점(previous 그대로 — ramp를 자기 op값으로 덮어써도
+            # 동일 control)이라 전 램프 공용 → 1회만 추가 계산(refresh당 +1 rollout).
+            fd3_base_ttt: Optional[float] = None
+            if m_pts and spsa_g is None:
+                _r0 = next(iter(m_pts))
+                _x00 = m_pts[_r0][0]
+                _ttt_b, _, _ = self._global_rollout_metrics_with_metering(
+                    state, previous, forecast, _r0, _x00,
+                )
+                fd3_base_ttt = float(_ttt_b)
+            fd3_cliff_up: Dict[str, bool] = {}
             for ramp, (x0, m_lo, m_hi) in m_pts.items():
                 span = m_hi - m_lo
                 if span <= 1.0e-9:
@@ -1241,6 +1272,26 @@ class StackelbergWuMeteredController(StackelbergMPCController):
                             state, previous, forecast, ramp, m_lo,
                         )
                         g_i = (ttt_hi - ttt_lo) / span
+                        if fd3_base_ttt is not None:
+                            # 곡률 |hi+lo−2·base|: 0이면 선형. 문턱(breakdown) 구조면
+                            # 한쪽 팔만 급등해 곡률이 1차 전폭을 압도한다.
+                            curv = abs(ttt_hi + ttt_lo - 2.0 * fd3_base_ttt)
+                            meta[f"wu_b3_meter_fd3_{ramp}_lo"] = float(ttt_lo)
+                            meta[f"wu_b3_meter_fd3_{ramp}_base"] = float(fd3_base_ttt)
+                            meta[f"wu_b3_meter_fd3_{ramp}_hi"] = float(ttt_hi)
+                            meta[f"wu_b3_meter_fd3_{ramp}_curv"] = float(curv)
+                            # 선형화 불가 깃발: 2차 잔차 > 1차 전폭 |hi−lo| — secant 대표성 상실.
+                            meta[f"wu_b3_meter_fd3_{ramp}_nonlin"] = float(
+                                curv > abs(ttt_hi - ttt_lo) + 1.0e-9
+                            )
+                            # 위쪽 절벽: TTT(+Δ) ≫ base ≈ TTT(−Δ) — 방류 증가 방향만 급락.
+                            fd3_cliff_up[ramp] = bool(
+                                (ttt_hi - fd3_base_ttt)
+                                > 2.0 * abs(fd3_base_ttt - ttt_lo) + 1.0
+                            )
+                            meta[f"wu_b3_meter_fd3_{ramp}_cliffup"] = float(
+                                fd3_cliff_up[ramp]
+                            )
                     cost_lo, cost_hi = local_m[ramp]
                     g_ext = g_i - (cost_hi - cost_lo) / span
                     if self.barrier_price_enabled:
@@ -1255,6 +1306,17 @@ class StackelbergWuMeteredController(StackelbergMPCController):
                 meta[f"wu_b3_meter_price_{ramp}"] = float(g_ext)
                 meta[f"wu_b3_meter_price_ref_{ramp}"] = float(x0)
                 meta[f"wu_b3cert_{ramp}"] = float(m_certs[ramp])
+            # 링크별 '양 램프 동시 위쪽 절벽' 깃발(2026-07-14) — 大δ 과대 신호:
+            # 두 가격이 다 양수(전 램프 조임) → 과소방류 나선 위험의 사전 서명.
+            if fd3_base_ttt is not None:
+                for _link in net.freeway_links:
+                    _ramps_l = [
+                        r for r in m_pts if net.ramp_to_freeway.get(r) == _link
+                    ]
+                    if _ramps_l:
+                        meta[f"wu_b3_cliff_both_{_link}"] = float(
+                            all(fd3_cliff_up.get(r, False) for r in _ramps_l)
+                        )
             follower.metering_marginal_price = m_prices
             follower.metering_marginal_price_ref = m_refs
             follower.metering_release_certified = (
@@ -1454,6 +1516,10 @@ class StackelbergWuMeteredController(StackelbergMPCController):
                     g_ext = g_i - d_local
                 v_prices[key] = float(g_ext)
                 v_refs[key] = float(x0)
+                # 가시성(2026-07-14): per-seg VSL 가격을 meta로 export(기존엔 enabled
+                # 플래그만 나가 5채널 감사에서 vsl이 '안 보임'이었다 — 진단 전용).
+                meta[f"wu_b3_vsl_price_{key}"] = float(g_ext)
+                meta[f"wu_b3_vsl_price_ref_{key}"] = float(x0)
             follower.vsl_marginal_price = v_prices
             follower.vsl_marginal_price_ref = v_refs
             # PRICE-TR: VSL trust region 하달(±kmh — 가격이 측정된 이웃 밖 후보 제외).
@@ -1468,7 +1534,13 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         if self.green_offset_cross_price_enabled:
             meta["wu_joint_go_cross_enabled"] = 1.0
             dp = float(self.signal_price_delta_sec)
-            do = cycle / 8.0
+            do = (
+                float(self.green_offset_cross_offset_delta_sec)
+                if self.green_offset_cross_offset_delta_sec is not None
+                else cycle / 8.0
+            )
+            meta["wu_joint_go_cross_dp"] = float(dp)
+            meta["wu_joint_go_cross_do"] = float(do)
             nonramp = [s for s in net.signals if not follower._local_models[s].has_ramps]
             # 신호별 4-corner (p1, offset) 쌍 구성.
             gp_pairs: Dict[str, List[tuple]] = {}
