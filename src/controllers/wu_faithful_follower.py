@@ -288,6 +288,11 @@ class WuFaithfulFollower:
         # 상향 binding이 whipsaw를 만든다 — α는 그 스펙트럼의 혼합도구(Roberts-Spence:
         # 가격(배분)과 수량(회랑 경계)의 결합). env RELEASE_FLOOR로 조정.
         self.seg13_release_floor_frac: float = 0.65
+        # 부하 적응형 회랑 하한(2026-07-15): 본선 자유류면 α→0(경부하 자율), 임계 근방
+        # α→α_max(나선 방어). RELEASE_FLOOR_FIXED=1로 고정 0.65 복원(A/B).
+        self.seg13_release_floor_adaptive: bool = True
+        self.seg13_floor_cong_lo: float = 0.7   # 본선ρ/ρ_crit 이하면 하한 0
+        self.seg13_floor_cong_hi: float = 1.0   # 임계 도달 시 하한 α_max
         # ---------- J1(2026-07-06): joint offset 패턴 directive ----------
         # F3 판정: offset은 joint 결합 변수라 per-signal 가격(편미분)이 구조적으로 0.
         # J1 = leader가 corridor 패턴(여러 신호 offset 조합)을 통째로 rollout 평가해
@@ -2621,7 +2626,24 @@ class WuFaithfulFollower:
                 # 회랑 예산(2026-07-14): α·budget ≤ Σmeter ≤ budget. 회랑 안이면 자율
                 # 존중(하향 자유), 하한 아래(과소방류 나선 조짐)면 α·budget으로 비례
                 # 상향. α=0이면 구 부등식(하한 없음), α=1이면 구 등식과 동치.
-                floor_b = float(self.seg13_release_floor_frac) * budget
+                # 부하 적응형 α(2026-07-15): 나선은 혼잡(breakdown 근방)에서만 발생하므로
+                # 하한도 그때만 필요. 본선이 자유류면 α→0(follower 자율 존중, 경부하 과잉
+                # 조임 해소), 임계 근방이면 α→α_max(나선 방어). 본선 최대밀도/ρ_crit로 게이팅.
+                alpha_max = float(self.seg13_release_floor_frac)
+                if self.seg13_release_floor_adaptive:
+                    rho_crit = float(net.rho_crit)
+                    seg_rho = state.freeway_density.get(link, [])
+                    cong = (max(seg_rho) / rho_crit) if (seg_rho and rho_crit > 0) else 0.0
+                    c_lo = float(self.seg13_floor_cong_lo)
+                    c_hi = float(self.seg13_floor_cong_hi)
+                    span = max(c_hi - c_lo, 1.0e-9)
+                    frac = min(max((cong - c_lo) / span, 0.0), 1.0)
+                    alpha_eff = alpha_max * frac
+                    self._seg13_diag[f"wu_seg13_floor_cong_{link}"] = float(cong)
+                    self._seg13_diag[f"wu_seg13_floor_alpha_{link}"] = float(alpha_eff)
+                else:
+                    alpha_eff = alpha_max
+                floor_b = alpha_eff * budget
                 if total_pref >= floor_b - 1.0e-9:
                     meter_out = dict(preferred_meter)
                 else:

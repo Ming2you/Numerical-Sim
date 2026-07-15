@@ -645,6 +645,10 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
     if _os.environ.get("NP_CAP"):
         # 방법 A cap 포화 A/B: λ 상한 override(기본 10.0 — dhigh2 잔차 +476~534 진단).
         getattr(controller, "nash_solver", controller).lambda_np_cap = float(_os.environ["NP_CAP"])
+    if _os.environ.get("RELEASE_FLOOR_FIXED") == "1":
+        _seg_t = getattr(controller, "nash_solver", controller)
+        if hasattr(_seg_t, "seg13_release_floor_adaptive"):
+            _seg_t.seg13_release_floor_adaptive = False  # 고정 α=0.65 복원(A/B)
     if _os.environ.get("NP_DEADBAND_V2") == "1":
         # deadband v2: 위반 신호의 저stock 게이트 우회 — 잠금해제 A/B용(기본 OFF).
         cfg.mpc.np_deadband_violation_override = True
