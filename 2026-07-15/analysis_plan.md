@@ -59,31 +59,24 @@
 - 산출: decision_diagnostics 가격 시계열 + 대δ 프로브 + (필요시) cross-OFF ablation.
 
 ## §4. 네트워크 임계성 (어느 교차로/세그먼트가 critical한가)
-**전체 21-agent 정확 Shapley는 2^21로 계산 불가 → 3층 처방.**
 
-### 4a. Leave-one-out 임계성 (1차, O(n))
+### 4a. Leave-one-out 임계성 (O(n))
 - agent i를 no-control/fixed로 고정하고 ΔwTTT 측정 = "i를 빼면 얼마나 나빠지나".
 - 21 agent × 4시나리오 = 84런. Stage3 ablation 인프라(FIXED_ALL/player pin) 재사용.
 - 산출: 교차로·세그먼트별 임계성 히트맵(시나리오별로 어디가 결정적인지).
 
-### 4b. 그룹 Shapley (정확 분해, 해석 가능)
-- 21개를 의미 단위 ~6그룹으로: {urban-W신호, urban-E신호, freeway-W세그, freeway-E세그,
-  merge소유자(R_D/R_F), off-ramp소유자}.
-- 2^6 = 64 연립 = **정확 Shapley 계산 가능**. 각 그룹의 조정 이득 기여분 φ_g.
-- 산출: 서브시스템별 Shapley 기여 막대 + 시나리오 의존성.
-
-### 4c. Coupling flux Φ (결합 방향, 이미 계산됨)
+### 4b. Coupling flux Φ (결합 방향, 이미 계산됨)
 - agent 간 외부성 유량 Phi_{i→j}(예: Phi_F_to_U) — 어느 방향 결합이 지배적인가.
 - 산출: 방향성 결합 그래프(u→f 주채널 정량).
 
 ### 통합 서사
-"개별 임계성(4a) + 원리적 분해(4b) + 결합 방향(4c)" 3층으로 네트워크 구조의
-임계 노드/링크를 정량화. 예상 결론: merge 소유 세그먼트 + 부하측 urban 신호가 critical,
-u→f 방향 결합이 조정 가치의 운반체.
+"개별 임계성(4a) + 결합 방향(4b)"로 네트워크 구조의 임계 노드/링크를 정량화.
+예상 결론: merge 소유 세그먼트 + 부하측 urban 신호가 critical, u→f 방향 결합이
+조정 가치의 운반체.
 
 ---
 
 ## 실행 순서 (동결 후)
 1. §1·§2: 4셀 4컨트롤러 재집계(대부분 기존 런 재사용) — 반나절.
 2. §3: 채널 감사표 완성 + cross 판정 반영 — cross 실험 종료 후 즉시.
-3. §4: 임계성 매트릭스(4a 84런 + 4b 64런) 발주 — 하룻밤. 4c는 기존 진단서 추출.
+3. §4: 임계성 매트릭스(4a leave-one-out 84런) 발주 — 하룻밤. 4b는 기존 진단서 추출.
