@@ -603,12 +603,21 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
         # 기본 미지정=현행(비트동일). CROSS_OFF와 동시 지정 금지(OFF가 우선).
         controller.cross_cliff_gate_enabled = True
     if _os.environ.get("CROSS_OFF") == "1":
-        # cross 가격 2종 제거(2026-07-15 합의): green×offset·vsl×meter 혼합 2차항은 전 무대에서
-        # 실측 0.0006~0.0025로 평탄 — primal joint 탐색이 이미 흡수. 원고에선 "고려 안 함"으로
-        # 서술하므로 코드도 끌 수 있어야 한다. 기본 미지정=현행 유지(비트동일).
+        # cross 가격 2종 동시 제거(2026-07-15). 8셀 실측: 비절벽 셀은 OFF가 −164~−420 이득,
+        # 절벽 셀은 ON이 +27~+380 이득(분리 축은 부하 아닌 capacity-drop 문턱).
+        # 종합 cross OFF=7승1패 / ON=5승3패. 기본 미지정=현행 유지(비트동일).
         for _attr in ("green_offset_cross_price_enabled", "vsl_meter_cross_price_enabled"):
             if hasattr(controller, _attr):
                 setattr(controller, _attr, False)
+    # ---- 채널 분리 A/B(2026-07-16): 두 cross를 따로 껐다 켠다 ----
+    # 가설: 비절벽의 해악은 g×o(어디서나 활성: 전형무게 0.386/0.428),
+    #       절벽의 이득은 v×m(절벽서만 각성: 0.008 → 0.091, 11배).
+    # 맞으면 게이트·문턱 없이 "g×o OFF + v×m ON" 단일 고정으로 8승0패 가능.
+    # 지금까지 CROSS_OFF가 둘을 동시에 껐으므로 이 칸은 미측정.
+    if _os.environ.get("GO_CROSS_OFF") == "1" and hasattr(controller, "green_offset_cross_price_enabled"):
+        controller.green_offset_cross_price_enabled = False   # v×m만 남김
+    if _os.environ.get("VM_CROSS_OFF") == "1" and hasattr(controller, "vsl_meter_cross_price_enabled"):
+        controller.vsl_meter_cross_price_enabled = False      # g×o만 남김
     if _os.environ.get("VSL_PRICE_DELTA") and hasattr(controller, "vsl_price_delta_kmh"):
         # Task C cross probe(2026-07-14): vsl 가격 FD 폭 override — vsl×meter cross의
         # δv를 δm과 비례 확대해 2차 혼합곡률 재측정(소δ에서 죽는지 vs 진짜 평탄).
