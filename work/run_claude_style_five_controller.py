@@ -597,6 +597,18 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
         # 갇히는 문제를, 경계에 닿을 때마다 새 운영점에서 가격을 재측정하며 K회 걷어 해소.
         # OFFSET_PRICE=1과 함께 써야 발화(offset_price_enabled 게이트). 기본 0=OFF(비트동일).
         controller.offset_price_inner_iters = int(_os.environ["OFFSET_INNER_ITER"])
+    if _os.environ.get("CROSS_GATE") == "1" and hasattr(controller, "cross_cliff_gate_enabled"):
+        # 절벽 게이팅(2026-07-15): cross 2종을 wu_b3_cliff_both_* 발화 스텝에만 활성화.
+        # cross ON 고정=5승3패 / OFF 고정=7승1패 → 레짐별로 갈아끼우면 8승0패(오라클) 기대.
+        # 기본 미지정=현행(비트동일). CROSS_OFF와 동시 지정 금지(OFF가 우선).
+        controller.cross_cliff_gate_enabled = True
+    if _os.environ.get("CROSS_OFF") == "1":
+        # cross 가격 2종 제거(2026-07-15 합의): green×offset·vsl×meter 혼합 2차항은 전 무대에서
+        # 실측 0.0006~0.0025로 평탄 — primal joint 탐색이 이미 흡수. 원고에선 "고려 안 함"으로
+        # 서술하므로 코드도 끌 수 있어야 한다. 기본 미지정=현행 유지(비트동일).
+        for _attr in ("green_offset_cross_price_enabled", "vsl_meter_cross_price_enabled"):
+            if hasattr(controller, _attr):
+                setattr(controller, _attr, False)
     if _os.environ.get("VSL_PRICE_DELTA") and hasattr(controller, "vsl_price_delta_kmh"):
         # Task C cross probe(2026-07-14): vsl 가격 FD 폭 override — vsl×meter cross의
         # δv를 δm과 비례 확대해 2차 혼합곡률 재측정(소δ에서 죽는지 vs 진짜 평탄).

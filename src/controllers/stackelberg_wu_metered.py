@@ -129,6 +129,12 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         self.green_offset_cross_offset_delta_sec: Optional[float] = None
         self.vsl_meter_cross_price_enabled: bool = False
         self.vsl_meter_cross_weight: float = 1.0
+        # CROSS-GATE(2026-07-15): cross 2종을 capacity-drop 문턱 근방에서만 활성화.
+        # 근거(8셀 실측): 절벽 무 → cross OFF 이득 −164~−420 / 절벽 유 → cross ON 이득 +27~+380.
+        # 분리 축은 부하가 아님 — 170_w vs 170_incident_w는 NC부하 13,028로 같은데 부호가 반대.
+        # 신호는 기존 wu_b3_cliff_both_*(metering FD가 이미 계산) 재사용 — 신규 문턱 없음.
+        # 기본 False = 게이트 없이 현행 동작(비트동일).
+        self.cross_cliff_gate_enabled: bool = False
         # ---------- A/B-패키지(2026-07-10): 계산비용 절감 ----------
         # A1 후보 N_UF 중복제거: step 내 follower 반응은 후보의 N_UF에만 의존(λ_P는
         # warm-start 고정, N_P는 dual로만 작용) → 같은 N_UF 후보는 solve+rollout 재사용,
@@ -1644,10 +1650,27 @@ class StackelbergWuMeteredController(StackelbergMPCController):
                 if self.vsl_price_trust_kmh is not None else None
             )
 
+        # ---- CROSS-GATE(2026-07-15): cross는 capacity-drop 문턱 근방에서만 이득 ----
+        # 8셀 실측: 절벽 무 → cross OFF가 −164~−420 이득 / 절벽 유 → cross ON이 +27~+380 이득.
+        # 분리 축은 부하가 아니라 절벽(170_w vs 170_incident_w: 부하 13,028 동일, 부호 반대).
+        # 게이트 신호 = 위에서 이미 계산된 wu_b3_cliff_both_*(신규 문턱·파라미터 없음).
+        # 기본 OFF(미지정) = 게이트 없이 현행 동작 → 비트동일.
+        cross_gate_on = True
+        if self.cross_cliff_gate_enabled:
+            _cliff_flags = [
+                v for k, v in meta.items() if k.startswith("wu_b3_cliff_both_")
+            ]
+            # 어느 방향이든 양 램프 동시 위쪽 절벽이면 문턱 근방으로 보고 cross 허용.
+            cross_gate_on = any(float(v) > 0.5 for v in _cliff_flags)
+            meta["wu_joint_cross_gate_on"] = float(cross_gate_on)
+            if not cross_gate_on:
+                follower.green_offset_cross_price = None
+                follower.vsl_meter_cross_price = None
+
         # ---- JOINT green×offset cross(2026-07-09): h_ext = h_global − h_local, 4-corner ----
         # non-ramp 신호만(ramp는 storage 동역학 복잡 → follower joint 제외). δp=green delta,
         # δo=cycle/8(offset 격자 1칸). h는 mixed 2차 편미분(부호 유지 — cross 곡률).
-        if self.green_offset_cross_price_enabled:
+        if self.green_offset_cross_price_enabled and cross_gate_on:
             meta["wu_joint_go_cross_enabled"] = 1.0
             dp = float(self.signal_price_delta_sec)
             do = (
@@ -1704,7 +1727,7 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         # ---- JOINT vsl×metering cross(2026-07-09): h_ext = h_global − h_local, ramp별 4-corner ----
         # δm=metering delta, δv=vsl delta. link-binding VSL(v0=이 link 최소 seg vsl)와 ramp
         # metering(m0)의 mixed 2차. h_local은 vsl_override 고정 own-TTS 4-corner로 계산.
-        if self.vsl_meter_cross_price_enabled and vsl_values:
+        if self.vsl_meter_cross_price_enabled and cross_gate_on and vsl_values:
             meta["wu_joint_vm_cross_enabled"] = 1.0
             dm = float(self.metering_price_delta_veh_h)
             dv = float(self.vsl_price_delta_kmh)
