@@ -592,6 +592,11 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
         # 단일 offset 가격 진단 프로브(2026-07-15): 순수 offset 그래디언트 스파이크 관측용
         # (green×offset cross와 분리). 기본 OFF — env 지정 시에만.
         controller.offset_price_enabled = True
+    if _os.environ.get("OFFSET_INNER_ITER") and hasattr(controller, "offset_price_inner_iters"):
+        # 스텝 내 재선형화(SQP식 trust-region 걷기, 2026-07-15): offset 가격이 trust 한 칸에
+        # 갇히는 문제를, 경계에 닿을 때마다 새 운영점에서 가격을 재측정하며 K회 걷어 해소.
+        # OFFSET_PRICE=1과 함께 써야 발화(offset_price_enabled 게이트). 기본 0=OFF(비트동일).
+        controller.offset_price_inner_iters = int(_os.environ["OFFSET_INNER_ITER"])
     if _os.environ.get("VSL_PRICE_DELTA") and hasattr(controller, "vsl_price_delta_kmh"):
         # Task C cross probe(2026-07-14): vsl 가격 FD 폭 override — vsl×meter cross의
         # δv를 δm과 비례 확대해 2차 혼합곡률 재측정(소δ에서 죽는지 vs 진짜 평탄).

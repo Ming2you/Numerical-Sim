@@ -106,6 +106,11 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         self.offset_price_enabled: bool = False
         self.offset_price_delta_sec: Optional[float] = None  # None=cycle/8(그리드 1칸)
         self.offset_price_refresh_threshold_sec: float = 7.0  # 그리드 반칸
+        # 스텝 내 재선형화(SQP식 trust-region 걷기, 2026-07-15): 선형 offset 가격은
+        # trust(±δ=cycle/8) 한 칸에 갇혀 뾰족한 platoon 골짜기를 못 가로지른다. K>0이면
+        # 앵커가 trust 경계에 닿을 때마다 그 새 운영점에서 가격을 재측정(재선형화)하며
+        # K회까지 15s씩 걸어 direct-search 운영점으로 수렴을 시도한다. 0=OFF(비트동일).
+        self.offset_price_inner_iters: int = 0
         # ---------- SPSA(2026-07-10): 가격층 O(n) — per-lever FD를 동시섭동으로 대체 ----------
         # per-lever 유한차분은 lever수(O(n))×전역 rollout(O(n)) = refresh당 O(n²). SPSA(Spall
         # 1992)는 전 lever를 동시에 ±δ 섭동한 rollout 쌍 k개로 전 lever gradient를 한꺼번에
@@ -699,6 +704,80 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         self._price_rollout_count += 1
         states, ttt = self._predict(state, control, forecast, depth_override=depth_override)
         return self._price_ttt(states, ttt)
+
+    def _offset_price_relinearize_walk(
+        self,
+        state: TrafficState,
+        previous: ControlAction,
+        forecast: List[DemandStep],
+        signal: str,
+        anchor0: float,
+        delta_o: float,
+        inner_k: int,
+        grid_offsets: List[float],
+        lc_map: Dict[float, float],
+        o_weight: float,
+        cycle: float,
+    ) -> tuple[float, int, float]:
+        """offset 가격의 스텝 내 재선형화 걷기 — (최종 앵커, 재선형화 횟수, g_ext) 반환.
+
+        SQP식 trust-region walk. 앵커 a에서 externality 가격 g_ext = d(전역TTT)/d(off) −
+        d(국소 phased)/d(off)를 측정하고, follower가 trust(±δ) 내 grid 후보 중 국소비용+
+        선형가격을 최소화하는 offset*을 고른다(_solve_offset_local과 동일한 채점). offset*이
+        trust 경계(|Δ|≈δ)에 닿으면 운영점을 그리로 옮겨 가격을 재측정(재선형화)하고, 내부
+        최적(경계 미도달)이거나 K회 소진 시 종료한다. 국소비용(lc_map)은 offset 불변 platoon
+        기반이라 신호당 1회 채점해 전달받고, 비싼 전역 rollout만 앵커 이웃을 캐시로 늘린다
+        (총 전역 rollout ≤ 재선형화 횟수+2). 원형 offset 규약 보존(±δ 항상 유효)."""
+        span = 2.0 * delta_o
+        ttt_cache: Dict[float, float] = {}
+
+        def _key(off: float) -> float:
+            return round(float(off) % cycle, 6)
+
+        def _gttt(off: float) -> float:
+            k = _key(off)
+            if k not in ttt_cache:
+                ttt_cache[k] = self._global_rollout_ttt_with_offset(
+                    state, previous, forecast, signal, k,
+                )
+            return ttt_cache[k]
+
+        def _circ(o: float, ref: float) -> float:
+            # 원형 최단 변위 ∈ (−cycle/2, cycle/2].
+            return ((o - ref + cycle / 2.0) % cycle) - cycle / 2.0
+
+        def _g_ext(a: float) -> float:
+            a_hi = (a + delta_o) % cycle
+            a_lo = (a - delta_o) % cycle
+            g_i = (_gttt(a_hi) - _gttt(a_lo)) / span
+            d_local = (lc_map.get(_key(a_hi), 0.0) - lc_map.get(_key(a_lo), 0.0)) / span
+            return g_i - d_local
+
+        def _resp(a: float, g: float) -> float:
+            # trust(±δ) 내 grid 후보 중 국소비용+선형가격 최소(= follower best-response).
+            best_o, best_obj = a, float("inf")
+            for o in grid_offsets:
+                d = _circ(o, a)
+                if abs(d) > delta_o + 1.0e-9:
+                    continue
+                obj = lc_map.get(_key(o), 0.0) + o_weight * g * d
+                if obj < best_obj - 1.0e-9:
+                    best_obj, best_o = obj, float(o)
+            return best_o
+
+        anchor = float(anchor0) % cycle
+        iters = 0
+        g_ext = _g_ext(anchor)
+        while True:
+            o_star = _resp(anchor, g_ext)
+            if abs(_circ(o_star, anchor)) < delta_o - 1.0e-9:
+                break  # 내부 최적(trust 경계 미도달) — 수렴.
+            if iters >= inner_k:
+                break  # 재선형화 예산 소진 — 마지막 앵커에서 종료.
+            anchor = float(o_star) % cycle  # trust 경계로 운영점 이동 → 재선형화.
+            iters += 1
+            g_ext = _g_ext(anchor)
+        return anchor, iters, g_ext
 
     def _global_rollout_ttt_with_green_offset(
         self,
@@ -1336,32 +1415,69 @@ class StackelbergWuMeteredController(StackelbergMPCController):
                 float(self.offset_price_delta_sec)
                 if self.offset_price_delta_sec is not None else cycle / 8.0
             )
-            o_requests = {
-                signal: [(off - delta_o) % cycle, (off + delta_o) % cycle]
-                for signal, off in op_offset.items()
-            }
-            local_o = follower.local_offset_costs(o_requests, state, previous, forecast[0])
+            # 재선형화 걷기는 δ가 grid 한 칸(cycle/8)일 때만 유효(앵커 이웃 a±δ가 grid 후보와
+            # 정렬돼 국소비용을 신호당 1회 채점으로 공유). δ가 어긋나면 단일 선형화로 폴백.
+            inner_k = max(0, int(getattr(self, "offset_price_inner_iters", 0)))
+            grid_aligned = abs(delta_o - cycle / 8.0) <= 1.0e-6
+            do_walk = inner_k > 0 and spsa_g is None and grid_aligned
             o_prices: Dict[str, float] = {}
             o_refs: Dict[str, float] = {}
-            for signal, off0 in op_offset.items():
-                o_lo, o_hi = o_requests[signal]
-                span = 2.0 * delta_o
-                if spsa_g is not None:
-                    g_i = float(spsa_g.get(("offset", signal), 0.0))
-                else:
-                    ttt_hi = self._global_rollout_ttt_with_offset(
-                        state, previous, forecast, signal, o_hi,
+            if do_walk:
+                # 국소 phased 비용은 offset 불변 platoon profile 기반 → 8개 grid 후보를
+                # 신호당 한 번에 채점하고(재선형화마다 재계산 불필요) 앵커가 밟는 이웃만
+                # 전역 rollout을 캐시로 늘린다.
+                o_weight = float(getattr(follower, "offset_marginal_price_weight", 1.0))
+                grid_offsets = [
+                    (frac * cycle) % cycle for frac in follower.offset_fractions
+                ]
+                grid_keys = [round(o, 6) for o in grid_offsets]
+                local_all = follower.local_offset_costs(
+                    {signal: grid_offsets for signal in op_offset},
+                    state, previous, forecast[0],
+                )
+                for signal, off0 in op_offset.items():
+                    lc_map = {
+                        grid_keys[i]: float(local_all[signal][i])
+                        for i in range(len(grid_offsets))
+                    }
+                    anchor, iters, g_ext = self._offset_price_relinearize_walk(
+                        state, previous, forecast, signal, float(off0) % cycle,
+                        delta_o, inner_k, grid_offsets, lc_map, o_weight, cycle,
                     )
-                    ttt_lo = self._global_rollout_ttt_with_offset(
-                        state, previous, forecast, signal, o_lo,
-                    )
-                    g_i = (ttt_hi - ttt_lo) / span
-                cost_lo, cost_hi = local_o[signal]
-                g_ext = g_i - (cost_hi - cost_lo) / span
-                o_prices[signal] = float(g_ext)
-                o_refs[signal] = float(off0)
-                meta[f"wu_f3_offset_price_{signal}"] = float(g_ext)
-                meta[f"wu_f3_offset_ref_{signal}"] = float(off0)
+                    o_prices[signal] = float(g_ext)
+                    o_refs[signal] = float(anchor)
+                    meta[f"wu_f3_offset_price_{signal}"] = float(g_ext)
+                    meta[f"wu_f3_offset_ref_{signal}"] = float(anchor)
+                    meta[f"wu_f3_offset_inner_iters_{signal}"] = float(iters)
+                    meta[f"wu_f3_offset_walk_from_{signal}"] = float(off0) % cycle
+            else:
+                # 단일 선형화(K=0 ∨ SPSA ∨ δ 비정렬) — 기존 비트동일 경로.
+                o_requests = {
+                    signal: [(off - delta_o) % cycle, (off + delta_o) % cycle]
+                    for signal, off in op_offset.items()
+                }
+                local_o = follower.local_offset_costs(
+                    o_requests, state, previous, forecast[0]
+                )
+                for signal, off0 in op_offset.items():
+                    o_lo, o_hi = o_requests[signal]
+                    span = 2.0 * delta_o
+                    if spsa_g is not None:
+                        g_i = float(spsa_g.get(("offset", signal), 0.0))
+                    else:
+                        ttt_hi = self._global_rollout_ttt_with_offset(
+                            state, previous, forecast, signal, o_hi,
+                        )
+                        ttt_lo = self._global_rollout_ttt_with_offset(
+                            state, previous, forecast, signal, o_lo,
+                        )
+                        g_i = (ttt_hi - ttt_lo) / span
+                    cost_lo, cost_hi = local_o[signal]
+                    g_ext = g_i - (cost_hi - cost_lo) / span
+                    o_prices[signal] = float(g_ext)
+                    o_refs[signal] = float(off0)
+                    meta[f"wu_f3_offset_price_{signal}"] = float(g_ext)
+                    meta[f"wu_f3_offset_ref_{signal}"] = float(off0)
             follower.offset_marginal_price = o_prices
             follower.offset_marginal_price_ref = o_refs
             follower.offset_marginal_price_trust_sec = delta_o
