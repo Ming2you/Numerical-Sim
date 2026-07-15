@@ -532,6 +532,13 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
         cfg.mpc.horizon_steps = int(_os.environ["HORIZON"])  # V 깊이 sweep: leader eval+price+follower 동시 연장
     if _os.environ.get("LEADER_V_DEPTH"):
         cfg.mpc.leader_value_depth = int(_os.environ["LEADER_V_DEPTH"])  # leader full-rollout V 깊이(follower myopic 유지)
+    if _os.environ.get("GLOBAL_REFRESH_SEC"):
+        # 리더 전역 탐색 주기(2026-07-16 프로브). 기본 1800s = 10스텝마다만 candidates() 전역
+        # 탐색이고 나머지 스텝은 refined_candidates()로 직전 해 주변만 본다(stackelberg_mpc L488).
+        # 사고(구조 변화)는 incumbent를 무효화하는데 트리거가 시계뿐이라, 4500s 사고 발생 후
+        # 다음 전역 탐색(step 30)까지 15분간 무효한 해 주변만 뒤진다 — 그 구멍의 상한 측정용.
+        # =180이면 매 스텝 전역(상한). 미지정=기본 1800(비트동일).
+        cfg.mpc.leader_global_refresh_sec = float(_os.environ["GLOBAL_REFRESH_SEC"])
     if _os.environ.get("MFD_FAR") == "1":
         cfg.mpc.leader_mfd_far_enabled = True  # far(MFD tail) cost-to-go 가산 → near 깊이 절감 검증
     if _os.environ.get("MFD_FAR_W"):
