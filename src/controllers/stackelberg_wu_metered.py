@@ -1664,8 +1664,14 @@ class StackelbergWuMeteredController(StackelbergMPCController):
             cross_gate_on = any(float(v) > 0.5 for v in _cliff_flags)
             meta["wu_joint_cross_gate_on"] = float(cross_gate_on)
             if not cross_gate_on:
-                follower.green_offset_cross_price = None
-                follower.vsl_meter_cross_price = None
+                # ★None이 아니라 {}: None으로 지우면 L1129 refresh 판정의
+                # `enabled and price is None`이 매 스텝 참이 되어 **전 채널(green·metering·VSL)
+                # 가격 갱신 주기**까지 바뀐다. 1차 게이트 런이 이걸로 오염됨 — 0스텝 발화인
+                # 155_incident가 cross OFF와 값이 갈렸다(1,471.6 vs 1,462.7).
+                # {}면 refresh 판정은 그대로이고, follower는 `signal in {}`(L1531) /
+                # truthy 검사(L2230·L2513)에서 자연히 cross를 건너뛴다.
+                follower.green_offset_cross_price = {}
+                follower.vsl_meter_cross_price = {}
 
         # ---- JOINT green×offset cross(2026-07-09): h_ext = h_global − h_local, 4-corner ----
         # non-ramp 신호만(ramp는 storage 동역학 복잡 → follower joint 제외). δp=green delta,
