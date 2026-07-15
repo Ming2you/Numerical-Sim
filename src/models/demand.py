@@ -35,6 +35,12 @@ class ScenarioConfig:
     # 같도록 renormalize해 skew 효과를 demand 크기와 분리한다. None이면 기존 gradient 유지.
     urban_boundary_weight_override: Optional[Dict[str, float]] = None
     urban_west_east_ratio: Optional[float] = None
+    # 시변 skew 반전(2026-07-15): 지정 시 urban_west_east_ratio가 초기값, _late가 후기값이고
+    # _reversal_sec 중심 ±_reversal_win/2 구간에서 선형 crossfade. offset/green×offset 가격
+    # 활성화 무대(고정 skew면 offset 한 번 정해지고 불변 → 가격 0).
+    urban_we_ratio_late: Optional[float] = None
+    urban_we_reversal_sec: Optional[float] = None
+    urban_we_reversal_win: float = 600.0
     freeway_lane_closures: list[Dict[str, float | str]] = field(default_factory=list)
     surge_start_sec: Optional[float] = None
     surge_peak_sec: Optional[float] = None
@@ -77,6 +83,9 @@ class ScenarioConfig:
         west_east_ratio = raw.get("urban_west_east_ratio")
         if west_east_ratio is not None:
             known["urban_west_east_ratio"] = float(west_east_ratio)
+        for _k in ("urban_we_ratio_late", "urban_we_reversal_sec", "urban_we_reversal_win"):
+            if raw.get(_k) is not None:
+                known[_k] = float(raw[_k])
         lane_closures = raw.get("freeway_lane_closures")
         if isinstance(lane_closures, list):
             known["freeway_lane_closures"] = [
@@ -200,6 +209,22 @@ class DemandProfile:
             return 1.0 - (time_sec - start - up - plateau) / max(down, 1.0e-9)
         return 0.0
 
+    def _effective_we_ratio(self, time_sec: float) -> Optional[float]:
+        """시변 skew: _reversal_sec 중심 crossfade로 초기→후기 비율 보간. 미지정이면 고정값."""
+        r0 = self.scenario.urban_west_east_ratio
+        r1 = self.scenario.urban_we_ratio_late
+        rev = self.scenario.urban_we_reversal_sec
+        if r1 is None or rev is None or r0 is None:
+            return r0
+        win = max(float(self.scenario.urban_we_reversal_win), 1.0e-9)
+        lo, hi = rev - win / 2.0, rev + win / 2.0
+        if time_sec <= lo:
+            return r0
+        if time_sec >= hi:
+            return r1
+        f = (time_sec - lo) / win
+        return r0 + (r1 - r0) * f
+
     def _active_lane_loss(self, time_sec: float) -> Dict[str, Dict[int, float]]:
         # 차로 폐쇄는 DemandStep에 넣어 plant와 MPC forecast가 같은 incident 상태를 보게 한다.
         lane_loss: Dict[str, Dict[int, float]] = {}
@@ -258,7 +283,7 @@ class DemandProfile:
             w_total = sum(weighted.values())
             renorm = (base_total / w_total) if w_total > 1.0e-9 else 1.0
             in_base = {link: weighted[link] * renorm for link in weighted}
-        west_east_ratio = self.scenario.urban_west_east_ratio
+        west_east_ratio = self._effective_we_ratio(time_sec)
         if west_east_ratio is not None:
             # 서/동 측면 진입의 합만 재배분하고 북측 진입과 전체 urban demand 합은 보존한다.
             if west_east_ratio <= 0.0:

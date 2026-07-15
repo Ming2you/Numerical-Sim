@@ -366,6 +366,50 @@
       "pulse_rampdown_sec": 300.0,
       "required": false
     },
+    "vmtest_rampclose": {
+      "urban_scale": 1.7,
+      "freeway_scale": 1.7,
+      "ramp_scale": 2.2,
+      "incident_capacity_factor": 1.0,
+      "freeway_lane_closures": [
+        {
+          "link": "FW_E",
+          "segment": 4,
+          "lane_loss": 1.0,
+          "start_sec": 4500.0,
+          "end_sec": 6300.0
+        },
+        {
+          "link": "FW_W",
+          "segment": 4,
+          "lane_loss": 1.0,
+          "start_sec": 4500.0,
+          "end_sec": 6300.0
+        }
+      ],
+      "pulse_base_scale": 0.5,
+      "pulse_start_sec": 3600.0,
+      "pulse_rampup_sec": 300.0,
+      "pulse_plateau_sec": 3600.0,
+      "pulse_rampdown_sec": 300.0,
+      "required": false
+    },
+    "gotest_skewrev": {
+      "urban_scale": 1.7,
+      "freeway_scale": 1.7,
+      "ramp_scale": 1.7,
+      "incident_capacity_factor": 1.0,
+      "urban_west_east_ratio": 2.0,
+      "urban_we_ratio_late": 0.5,
+      "urban_we_reversal_sec": 5400.0,
+      "urban_we_reversal_win": 600.0,
+      "pulse_base_scale": 0.5,
+      "pulse_start_sec": 3600.0,
+      "pulse_rampup_sec": 300.0,
+      "pulse_plateau_sec": 3600.0,
+      "pulse_rampdown_sec": 300.0,
+      "required": false
+    },
     "sweet_155_incident_w": {
       "urban_scale": 1.55,
       "freeway_scale": 1.55,
