@@ -588,6 +588,10 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
         if getattr(controller, "metering_price_trust_frac", None) is not None:
             _cap_min = min(cfg.network.ramp_capacity_veh_h.values())
             controller.metering_price_trust_frac = _mpd / max(_cap_min, 1.0e-9)
+    if _os.environ.get("OFFSET_PRICE") == "1" and hasattr(controller, "offset_price_enabled"):
+        # 단일 offset 가격 진단 프로브(2026-07-15): 순수 offset 그래디언트 스파이크 관측용
+        # (green×offset cross와 분리). 기본 OFF — env 지정 시에만.
+        controller.offset_price_enabled = True
     if _os.environ.get("VSL_PRICE_DELTA") and hasattr(controller, "vsl_price_delta_kmh"):
         # Task C cross probe(2026-07-14): vsl 가격 FD 폭 override — vsl×meter cross의
         # δv를 δm과 비례 확대해 2차 혼합곡률 재측정(소δ에서 죽는지 vs 진짜 평탄).
