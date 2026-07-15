@@ -94,10 +94,14 @@ def mfd_far_cost_to_go(cfg: "ExperimentConfig", state: "TrafficState") -> float:
     P-CENT(중앙 천장 측정기) 등 타 컨트롤러 채점에 재사용(2026-07-10 승격)."""
     if not getattr(cfg.mpc, "leader_mfd_far_enabled", False):
         return 0.0
-    from src.models.metanet import _ramp_merge_index, _clip
+    from src.models.metanet import (
+        _ramp_merge_index, _clip, desired_speed_kmh, segment_flow_veh_h,
+    )
     net = cfg.network
     tc_h = float(cfg.simulation.T_c_h)
     w = float(getattr(cfg.mpc, "leader_mfd_far_weight", 1.0))
+    # far 항의 t_trav·배수율을 state(ρ·유효차선)에서 유도할지 — 기본 False=기존 상수식(비트동일).
+    state_aware = bool(getattr(cfg.mpc, "leader_mfd_far_state_aware", False))
     # ---- urban reservoir ----
     # boundary_in 큐도 accumulation에 포함: gating(유입 조임)은 차를 boundary 큐로 옮길 뿐
     # (여전히 TTT 발생)이라, in-network(N_P)만 세면 gating이 far상 공짜로 보여 leader가 과-gate.
@@ -124,13 +128,36 @@ def mfd_far_cost_to_go(cfg: "ExperimentConfig", state: "TrafficState") -> float:
         for link in net.freeway_links:
             dens = state.freeway_density.get(link, [])
             lanes = state.freeway_effective_lanes.get(link, [])
+
+            def _lane_at(i: int) -> float:
+                return max(float(lanes[i]) if i < len(lanes) else float(net.freeway_lanes), 1.0e-9)
+
             n_l = sum(
-                max(0.0, float(dens[i])) * seg_len
-                * max(float(lanes[i]) if i < len(lanes) else float(net.freeway_lanes), 1.0e-9)
+                max(0.0, float(dens[i])) * seg_len * _lane_at(i)
                 for i in range(len(dens))
             )
-            n_eff = max(0.0, n_l - drainable)
-            far += (n_eff * n_eff) * tc_h / (2.0 * max(g_fw, 1.0)) + n_l * t_trav / 2.0
+            t_trav_l, g_fw_l = t_trav, g_fw
+            if state_aware and dens:
+                # STATE-AWARE far(2026-07-16): 기존 식은 t_trav를 v_free로, 배수율 g_fw를
+                # 상수 300으로 박아둬 **차선 폐색·과포화를 전혀 못 본다**(사고 시 리더가
+                # freeway 유입 비용을 구조적으로 과소평가). ρ와 유효차선이 state에 있고
+                # METANET 기본도가 있으므로 둘 다 유도한다 — 새 튜닝 상수 없음.
+                #   t_trav = Σ_i ℓ / V(ρ_i)        (자유류 대신 실제 밀도 속도)
+                #   g_fw   = min_i cap(lanes_i)    (병목 세그먼트 용량; 폐색이면 자동 하락)
+                t_trav_l = 0.0
+                caps = []
+                for i in range(len(dens)):
+                    v_i = desired_speed_kmh(max(0.0, float(dens[i])), v_free, net.rho_crit)
+                    t_trav_l += seg_len / max(v_i, 1.0)
+                    caps.append(segment_flow_veh_h(
+                        net.rho_crit,
+                        desired_speed_kmh(net.rho_crit, v_free, net.rho_crit),
+                        _lane_at(i),
+                    ))
+                g_fw_l = min(caps) if caps else g_fw
+            drainable_l = g_fw_l * (t_trav_l / max(tc_h, 1.0e-9))
+            n_eff = max(0.0, n_l - drainable_l)
+            far += (n_eff * n_eff) * tc_h / (2.0 * max(g_fw_l, 1.0)) + n_l * t_trav_l / 2.0
     else:
         far += (n_main * n_main) * tc_h / (2.0 * max(g_fw, 1.0))
     # ---- freeway reservoir: ramp 큐 merge-병목 대기 + 통과 ----
@@ -146,7 +173,14 @@ def mfd_far_cost_to_go(cfg: "ExperimentConfig", state: "TrafficState") -> float:
         rho_merge = float(dens[midx])
         recv = _clip((net.rho_max - rho_merge) / max(net.rho_max - net.rho_crit, 1.0e-9), 0.0, 1.0)
         merge_interval = float(net.ramp_capacity_veh_h[ramp]) * recv * tc_h  # veh/interval
-        t_ramp_traverse = (len(dens) - midx) * seg_len / max(v_free, 1.0)
+        if state_aware:
+            # 합류 후 하류 통과도 자유류가 아니라 실제 밀도 속도로(위와 동일 취지).
+            t_ramp_traverse = sum(
+                seg_len / max(desired_speed_kmh(max(0.0, float(dens[i])), v_free, net.rho_crit), 1.0)
+                for i in range(midx, len(dens))
+            )
+        else:
+            t_ramp_traverse = (len(dens) - midx) * seg_len / max(v_free, 1.0)
         far += (q * q) * tc_h / (2.0 * max(merge_interval, 1.0e-6)) + q * t_ramp_traverse
     return w * far
 

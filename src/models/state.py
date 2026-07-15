@@ -347,6 +347,8 @@ class MPCConfig:
     # leader 후보 채점(V=near+far)과 가격 rollout(price_far) 양쪽이 참조. urban(N²/2G,
     # boundary 큐 포함) + freeway(본선 N²/2G_fw + ramp 큐 bilinear). weight=1이 물리 정확값.
     leader_mfd_far_enabled: bool = True
+    # far 항의 주행시간·배수율을 state(rho·유효차선)에서 유도(2026-07-16). 기본 False=상수식.
+    leader_mfd_far_state_aware: bool = False
     leader_mfd_far_weight: float = 1.0
     # FAR-D0(2026-07-09): depth=0에서도 rollout TTT + far로 후보 채점(역사적 d0는
     # follower 응답 proxy 랭킹 — 채점 형태 고정한 "얕은 leader" 검정용). 기본 False.

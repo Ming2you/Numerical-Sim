@@ -541,6 +541,10 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
         cfg.mpc.leader_global_refresh_sec = float(_os.environ["GLOBAL_REFRESH_SEC"])
     if _os.environ.get("MFD_FAR") == "1":
         cfg.mpc.leader_mfd_far_enabled = True  # far(MFD tail) cost-to-go 가산 → near 깊이 절감 검증
+    if _os.environ.get("FAR_STATE_AWARE") == "1":
+        # far 항이 v_free·상수 g_fw로 박혀 차선폐색·과포화를 못 보는 문제 수정(2026-07-16).
+        # t_trav=Σℓ/V(ρ_i), g_fw=min_i cap(lanes_i) — METANET 기본도에서 유도, 새 상수 없음.
+        cfg.mpc.leader_mfd_far_state_aware = True
     if _os.environ.get("MFD_FAR_W"):
         cfg.mpc.leader_mfd_far_weight = float(_os.environ["MFD_FAR_W"])
     if _os.environ.get("FAR_D0") == "1":
