@@ -563,6 +563,10 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
     if _os.environ.get("NUF_RADIUS_STRICT") == "1":
         # 리더 국소 반경을 실제로 구속(앵커도 반경으로 clip). 기본 OFF=비트동일.
         cfg.mpc.leader_local_radius_strict = True
+    if _os.environ.get("METER_BOX"):
+        # METER-BOX(2026-07-17): SEG13 metering 후보를 m_prev±R 박스 5점으로 + 예산
+        # 사영도 같은 박스. 값=R[veh/h]. 권장 300(=가격 FD 측정폭, 외삽 소멸).
+        cfg.mpc.seg13_meter_box_veh_h = float(_os.environ["METER_BOX"])
     if _os.environ.get("NUF_RADIUS"):
         # 반경 상수 override. trust 산수 복원치 = 4램프 × 0.20 × 1500 = 1200.
         cfg.mpc.leader_local_nuf_radius_veh_h = float(_os.environ["NUF_RADIUS"])

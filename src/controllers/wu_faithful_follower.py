@@ -2266,6 +2266,7 @@ class WuFaithfulFollower:
         demand: DemandStep,
         snapshot: ControlAction,
         leader: Optional[object],
+        previous: Optional[ControlAction] = None,
     ) -> tuple[Dict[str, float], Dict[str, float], int]:
         """link의 segment agent 4개(F_L0~F_L3)가 각자 own VSL(+소유 ramp meter)을 best-response.
 
@@ -2362,6 +2363,9 @@ class WuFaithfulFollower:
         # incumbent(leader=None) solve에도 적용해 적분 루프의 액추에이터를 유지한다.
         lambda_uf = float(self._lambda_UF)
         dual_price_active = nuf_mode == "dual" and abs(lambda_uf) > 1.0e-12
+        # METER-BOX 판별 카운터(박스 끝 선택 vs 내부 정착).
+        _meter_box_total = 0
+        _meter_box_edge = 0
 
         for agent in agents:
             seg = agent.seg
@@ -2374,13 +2378,35 @@ class WuFaithfulFollower:
             own_ramp = agent.owned_ramps[0] if agent.owned_ramps else None
             if own_ramp is not None and self.metering_enabled:
                 cap_r = float(net.ramp_capacity_veh_h[own_ramp])
-                # 내림차순(전량 방류 우선) — 7p 분율 순서(1.0, 0.7, …)와 동일 규약.
-                # own-TTS는 보존식 때문에 방류에 근사-무차별인 레짐이 흔해서 tie-break가
-                # 결정적: 오름차순이면 최소 방류로 쏠려 전면 질식(PFO 13p 실측 병리).
-                m_cands: List[Optional[float]] = sorted(
-                    {round(cap_r * f, 6) for f in self.ramp_metering_fractions},
-                    reverse=True,
-                )
+                # METER-BOX(2026-07-17, 사용자 설계): 고정 격자 {cap·f} 대신 직전 step
+                # commit(m_prev) 중심 ±R 박스 안에 등간격 5점을 찍는다.
+                #   근거 1(실측): 선형 가격 × 이산 격자 → 내부 rung 선택 0/160, 끝점 60~62%,
+                #     '부호→끝점' 적중 80~85%. 끝점이 진짜 최적이면 머물러야 하는데 왕복한다
+                #     = 진짜 최적은 내부이고 선형 외삽(±300 측정을 1125까지 연장)이 지나친다.
+                #   근거 2: R=300이면 박스=가격 FD 측정폭(d_r=0.20×1500) — 가격이 측정된
+                #     구간 안에서만 쓰여 외삽이 소멸("허용 이동폭만큼 측정" 규약 충족).
+                #   흡수 없음: 격자 필터(워크플로 설계)와 달리 점을 새로 찍으므로 m_prev
+                #     자신이 항상 후보 → cap 동결 불가. 5점 유지로 평가수 동일(계산 중립).
+                # 기준점은 previous(직전 step commit)다 — snapshot.ramp_metering은 Jacobi
+                # iteration 1에서 uncontrolled=cap(state.py:1090)이라 기준이 될 수 없다.
+                _box_r = getattr(self.cfg.mpc, "seg13_meter_box_veh_h", None)
+                if _box_r is not None and previous is not None:
+                    _R = float(_box_r)
+                    m_prev_r = min(max(float(
+                        previous.ramp_metering.get(own_ramp, cap_r)), 0.0), cap_r)
+                    m_cands = sorted(
+                        {round(min(max(m_prev_r + off, 0.0), cap_r), 6)
+                         for off in (-_R, -_R / 2.0, 0.0, _R / 2.0, _R)},
+                        reverse=True,
+                    )
+                else:
+                    # 내림차순(전량 방류 우선) — 7p 분율 순서(1.0, 0.7, …)와 동일 규약.
+                    # own-TTS는 보존식 때문에 방류에 근사-무차별인 레짐이 흔해서 tie-break가
+                    # 결정적: 오름차순이면 최소 방류로 쏠려 전면 질식(PFO 13p 실측 병리).
+                    m_cands = sorted(
+                        {round(cap_r * f, 6) for f in self.ramp_metering_fractions},
+                        reverse=True,
+                    )
             else:
                 m_cands = [None]
             best_cost, best_v, best_m = float("inf"), prev_v, None
@@ -2532,6 +2558,16 @@ class WuFaithfulFollower:
             vsl_out[key] = float(best_v)
             if own_ramp is not None and best_m is not None:
                 preferred_meter[own_ramp] = float(best_m)
+                # METER-BOX 판별 진단: 박스 끝(±R)을 골랐나, 내부에 정착했나.
+                # 끝점 비율이 계속 높으면 '진짜 최적이 박스 밖' — 사용자 가설 반증 쪽.
+                if _box_r is not None and previous is not None:
+                    _mp0 = min(max(float(
+                        previous.ramp_metering.get(own_ramp, cap_r)), 0.0), cap_r)
+                    _blo = max(0.0, _mp0 - float(_box_r))
+                    _bhi = min(cap_r, _mp0 + float(_box_r))
+                    _meter_box_total += 1
+                    if abs(float(best_m) - _blo) < 0.5 or abs(float(best_m) - _bhi) < 0.5:
+                        _meter_box_edge += 1
             for o, fl in best_flow_local.items():
                 best_offramp_flow[o] = float(fl)
 
@@ -2601,28 +2637,61 @@ class WuFaithfulFollower:
             budget = min(max(omega_f * n_uf_star, 0.0), cap_sum)
             total_pref = sum(preferred_meter.values())
 
+            # METER-BOX Site B: 사영도 같은 박스 안에서. 안 묶으면 여기가 새는 구멍이다 —
+            # 실측 격자밖 값 38~40%(160개 중)가 전부 이 사영의 산물이고, per-ramp 1199도
+            # 여기서 나왔다(격자 최대 span=1125). None이면 lo=0/hi=caps → 기존과 비트동일.
+            _box_r_b = getattr(self.cfg.mpc, "seg13_meter_box_veh_h", None)
+            if _box_r_b is not None and previous is not None:
+                _Rb = float(_box_r_b)
+                _rl_lo, _rl_hi = {}, {}
+                for r in preferred_meter:
+                    _mp = min(max(float(previous.ramp_metering.get(r, caps[r])), 0.0), caps[r])
+                    _rl_lo[r] = max(0.0, _mp - _Rb)
+                    _rl_hi[r] = min(caps[r], _mp + _Rb)
+            else:
+                _rl_lo = {r: 0.0 for r in preferred_meter}
+                _rl_hi = dict(caps)
+
             def _scale_to(target: float) -> Dict[str, float]:
                 # 목표 합 target으로 비례 사영(용량 클립 + 잔여 재분배) — 기존 등식
                 # 로직을 회랑 상·하한이 공용하도록 함수화(로직 비트 동일).
+                # METER-BOX: 박스가 target을 못 담으면 **예산이 양보한다**(박스=하드).
+                target = min(max(target, sum(_rl_lo.values())), sum(_rl_hi.values()))
                 if total_pref <= 1.0e-9:
                     return {
-                        r: target * caps[r] / max(cap_sum, 1.0e-9)
+                        r: min(max(target * caps[r] / max(cap_sum, 1.0e-9),
+                                   _rl_lo[r]), _rl_hi[r])
                         for r in preferred_meter
                     }
                 scale = target / total_pref
                 out = {
-                    r: min(caps[r], m * scale) for r, m in preferred_meter.items()
+                    r: min(_rl_hi[r], max(_rl_lo[r], m * scale))
+                    for r, m in preferred_meter.items()
                 }
                 deficit = target - sum(out.values())
                 if deficit > 1.0e-9:
                     for r in sorted(
-                        out, key=lambda x: caps[x] - out[x], reverse=True,
+                        out, key=lambda x: _rl_hi[x] - out[x], reverse=True,
                     ):
-                        room = caps[r] - out[r]
+                        room = _rl_hi[r] - out[r]
                         add = min(room, deficit)
                         out[r] += add
                         deficit -= add
                         if deficit <= 1.0e-9:
+                            break
+                # METER-BOX 신규: rl_lo>0이면 하한 클립이 target을 **초과**시킬 수 있다
+                # (기존 lo=0에선 불가능했던 방향). 대칭 surplus 루프로 하한 여유가 큰
+                # 램프부터 깎는다. 박스 OFF(lo=0)면 발화 불가 → 비트동일.
+                surplus = sum(out.values()) - target
+                if surplus > 1.0e-9:
+                    for r in sorted(
+                        out, key=lambda x: out[x] - _rl_lo[x], reverse=True,
+                    ):
+                        room = out[r] - _rl_lo[r]
+                        cut = min(room, surplus)
+                        out[r] -= cut
+                        surplus -= cut
+                        if surplus <= 1.0e-9:
                             break
                 return out
 
@@ -2665,6 +2734,14 @@ class WuFaithfulFollower:
                 sum(meter_out.values()) / max(budget, 1.0e-9)
             )
         self._seg13_diag[f"wu_seg13_evals_{link}"] = float(evals)
+        # METER-BOX 진단 — 플래그 ON일 때만 기록(OFF 런의 CSV 헤더 불변 유지).
+        # box_r 존재 = 플래그가 SEG13 경로에 실제로 도달했다는 영수증(BUDGET_OFF 재발 방지).
+        if getattr(self.cfg.mpc, "seg13_meter_box_veh_h", None) is not None:
+            self._seg13_diag[f"wu_seg13_meter_box_r_{link}"] = float(
+                self.cfg.mpc.seg13_meter_box_veh_h
+            )
+            self._seg13_diag[f"wu_seg13_meter_box_edge_{link}"] = float(_meter_box_edge)
+            self._seg13_diag[f"wu_seg13_meter_box_total_{link}"] = float(_meter_box_total)
         return vsl_out, meter_out, evals
 
     # ---------- freeway agent: 진짜 ramp metering 탐색 (핵심 신규) ----------
@@ -3407,6 +3484,15 @@ class WuFaithfulFollower:
         forecast: Optional[List[DemandStep]] = None,
     ) -> tuple[ControlAction, int, bool, float, int]:
         net = self.cfg.network
+        # METER-BOX 가드: SEG13 경로 전용 플래그가 비-SEG13 구성에 꽂히면 침묵 무효
+        # (BUDGET_OFF 2026-07-16, 20런 무효)가 재발한다 — 런을 살리지 말고 즉사시킨다.
+        if getattr(self.cfg.mpc, "seg13_meter_box_veh_h", None) is not None and not (
+            self.segment_agents and self.metering_enabled
+        ):
+            raise RuntimeError(
+                "METER_BOX는 SEG13(segment_agents+metering) 전용인데 해당 경로가 꺼져 "
+                "있다 — 비-SEG13은 metering_marginal_price_trust_frac이 이미 묶는다."
+            )
         self._wu._repair_diagnostics = {}
         self._seg13_diag = {}
         self._seg_traj = {}  # 궤적 교환은 solve 단위 — 후보 간 오염 방지.
@@ -3639,7 +3725,7 @@ class WuFaithfulFollower:
                 for link in net.freeway_links:
                     if self.segment_agents and self.metering_enabled:
                         vsl_dict, meter_dict, e = self._solve_freeway_segment_agents(
-                            link, state, coupling, demand, snapshot, leader,
+                            link, state, coupling, demand, snapshot, leader, previous,
                         )
                         new_meter.update(meter_dict)
                     else:
@@ -3997,7 +4083,7 @@ class WuFaithfulFollower:
                 saved_diag = dict(self._seg13_diag)
                 for link in net.freeway_links:
                     vsl_p, meter_p, _ = self._solve_freeway_segment_agents(
-                        link, state, coupling, demand, probe_snapshot, leader,
+                        link, state, coupling, demand, probe_snapshot, leader, previous,
                     )
                     for k, v in vsl_p.items():
                         fw_vsl_l1 += abs(float(v) - float(control.vsl.get(k, v)))

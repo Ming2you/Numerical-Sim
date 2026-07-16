@@ -370,6 +370,13 @@ class MPCConfig:
     # N_UF hard budget 제거 — leader는 가격만 넘기고 follower는 PFO autonomous metering
     # (2026-07-16 A/B). '+4.78%가 예산 몫인가 가격 몫인가' 분해용. 기본 False=비트동일.
     leader_budget_off: bool = False
+    # METER-BOX(2026-07-17, 사용자 설계): SEG13 metering 후보를 고정 격자 {cap·f} 대신
+    # 직전 commit m_prev ± R 박스 안 등간격 5점으로. 실측 근거: 선형 가격 × 이산 격자
+    # → 내부 rung 선택 0/160(끝점 60~62%, 부호→끝점 적중 80~85%), 풀스팬 |Δ|=1125 점프.
+    # R=300이면 박스=가격 FD 측정폭(0.20×1500) → 외삽 소멸. 예산 사영(_scale_to)도
+    # 같은 박스로 clamp(박스=하드, 예산이 양보). None=기존 격자 = 비트동일(기본).
+    # SEG13 경로 전용 — 비-SEG13은 이미 metering_marginal_price_trust_frac이 묶는다.
+    seg13_meter_box_veh_h: Optional[float] = None
     leader_continuous_max_evals: int = 25
     leader_continuous_seed_count: int = 7
     leader_continuous_prefilter_samples: int = 31
