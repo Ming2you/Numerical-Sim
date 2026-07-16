@@ -251,7 +251,13 @@ def run_coupled_interval(
     # 으로 쓰기 위한 유일한 입력 — plant·rollout이 이 함수를 공유하므로 rollout 종단 상태도
     # 자기 예측 유출률을 들고 나온다. 관측 유출은 **공간 불균질을 이미 반영**한다(막힌 링크는
     # 못 빠지므로 skew면 자연히 낮음) → 별도 이질성 모델 불필요.
-    state.last_urban_sink_veh = float(ur_diag.get("boundary_out_sink_veh", 0.0))
+    # ★urban 총유출 = 경계 sink + **on-ramp 방류**. urban에서 나가는 길은 이 둘뿐인데
+    # 경계만 세면 총유출의 53~57%만 잡혀 G(n)을 ~45% 과소평가한다(리뷰 2026-07-16).
+    # 둘 다 aggregate_urban_diagnostics가 **합산**(평균 아님)하므로 구간당 대수로 일관.
+    state.last_urban_sink_veh = float(
+        ur_diag.get("boundary_out_sink_veh", 0.0)
+        + ur_diag.get("onramp_green_releases_veh", 0.0)
+    )
     diagnostics.update(fw_diag)
     diagnostics.update(ur_diag)
     return CoupledStepResult(

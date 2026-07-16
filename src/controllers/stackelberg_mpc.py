@@ -96,6 +96,7 @@ def mfd_far_cost_to_go(cfg: "ExperimentConfig", state: "TrafficState") -> float:
         return 0.0
     from src.models.metanet import (
         _ramp_merge_index, _clip, desired_speed_kmh, segment_flow_veh_h,
+        _configured_segment_index,
     )
     net = cfg.network
     tc_h = float(cfg.simulation.T_c_h)
@@ -125,8 +126,12 @@ def mfd_far_cost_to_go(cfg: "ExperimentConfig", state: "TrafficState") -> float:
         # ★단위: far = n²·tc_h/(2·g) 의 차원분석상 **g는 veh(구간당 대수)**다(veh/h 아님).
         #   기존 g_free=640도 "구간당 640대"(=12,800 veh/h 상당). sink가 이미 구간당 대수이므로
         #   **그대로** 쓴다 — /tc_h 하면 20배 과대가 된다.
-        sink = float(getattr(state, "last_urban_sink_veh", 0.0))
-        if sink > 0.0:
+        # ★센티넬: -1 = "아직 한 구간도 안 전진"(초기 상태) → 캘리브 상수 폴백.
+        #   0 = **진짜 gridlock**(아무것도 안 빠짐) → g_u=0 → 아래 max(g_u,1.0)이 바닥이 되어
+        #   far 폭증. 예전엔 `if sink > 0`이라 gridlock이 낙관적 상수 640으로 폴백해
+        #   **완전 gridlock이 준-gridlock보다 싸게 채점되는 부호 반전**이 있었다.
+        sink = float(getattr(state, "last_urban_sink_veh", -1.0))
+        if sink >= 0.0:
             g_u = sink
     far = (n_u * n_u) * tc_h / (2.0 * max(g_u, 1.0))
     # ---- freeway reservoir: 본선 2차(exit 병목 큐잉, urban과 대칭) ----
@@ -176,6 +181,66 @@ def mfd_far_cost_to_go(cfg: "ExperimentConfig", state: "TrafficState") -> float:
             drainable_l = g_fw_l * (t_trav_l / max(tc_h, 1.0e-9))
             n_eff = max(0.0, n_l - drainable_l)
             far += (n_eff * n_eff) * tc_h / (2.0 * max(g_fw_l, 1.0)) + n_l * t_trav_l / 2.0
+    elif bool(getattr(cfg.mpc, "leader_mfd_far_mainline_pipeline", False)):
+        # MAINLINE-PIPELINE(2026-07-16): 본선을 저수지 n²/(2g)로 보는 것은 **범주 착오**다 —
+        # 저수지(MFD)는 urban의 추상이고, freeway는 길이·속도를 아는 **파이프라인**(METANET)이다.
+        # 망 안 차량은 잔여 주행시간을 직접 적분하고, **진입 대기 큐는 저수지로** 둔다
+        # (병목 앞 점 큐이므로 — ramp 큐와 동일 구조).
+        #   t_j   = ℓ / v_j                        세그먼트 j 통과시간
+        #   T_j   = t_j + (1 − β_j)·T_{j+1}        j에 **진입**한 차량의 기대 잔여 exit 시간
+        #   T_j^eff = t_j/2 + (1 − β_j)·T_{j+1}    j 안에 **이미 있는** 차량(평균 절반 남음)
+        #   far  = Σ_j n_j·T_j^eff  +  Σ_l [ o_l²·T_c/(2μ_l^entry) + o_l·T_0 ]
+        # 캘리브 상수 0개(g_fw=300 폐기). ρ·유효차선·β·ℓ·실속도 전부 state/net에서 유도.
+        v_min = float(getattr(net, "v_min", 5.0))
+        for link in net.freeway_links:
+            dens = state.freeway_density.get(link, [])
+            if not dens:
+                continue
+            lanes = state.freeway_effective_lanes.get(link, [])
+            spd = state.freeway_speed.get(link, [])
+            n_seg = len(dens)
+            # t_j: **실제 속도장** 우선(리더의 VSL 레버·anticipation 반영) — 없거나 0이면 FD 폴백.
+            t_seg = []
+            for j in range(n_seg):
+                v_j = float(spd[j]) if (j < len(spd) and float(spd[j]) > 0.0) else desired_speed_kmh(
+                    max(0.0, float(dens[j])), v_free, net.rho_crit
+                )
+                t_seg.append(seg_len / max(v_j, v_min))
+            # β: plant(metanet `off_ratio_by_segment`)와 **동일 규칙** — 세그먼트별 **합산** 후
+            # clip(0,1), 인덱스는 plant와 같은 헬퍼로 해석(범위 밖은 마지막 세그먼트로 클립).
+            beta = [0.0] * n_seg
+            for orp in net.off_ramps:
+                if net.off_ramp_from_freeway.get(orp) != link:
+                    continue
+                idx = _configured_segment_index(
+                    getattr(net, "off_ramp_segment_index", {}), orp, n_seg - 1, n_seg
+                )
+                beta[idx] += float(net.off_ramp_split_ratio.get(orp, 0.0))
+            beta = [_clip(b, 0.0, 1.0) for b in beta]
+            # T_j: 세그먼트 j에 진입한 차량의 기대 잔여(하류로 갈수록 감소, T_I=0).
+            t_rem = [0.0] * n_seg
+            for j in range(n_seg - 1, -1, -1):
+                t_rem[j] = t_seg[j] + (1.0 - beta[j]) * (t_rem[j + 1] if j + 1 < n_seg else 0.0)
+            # (1) 망 안 차량 — 이미 j 안에 있으므로 t_j는 평균 절반만 남았다.
+            for j in range(n_seg):
+                lane_j = max(float(lanes[j]) if j < len(lanes) else float(net.freeway_lanes), 1.0e-9)
+                n_j = max(0.0, float(dens[j])) * seg_len * lane_j
+                t_eff = 0.5 * t_seg[j] + (1.0 - beta[j]) * (t_rem[j + 1] if j + 1 < n_seg else 0.0)
+                far += n_j * t_eff
+            # (2) 본선 진입 origin 큐 — CTM receiving 제약으로 seg0에 못 들어간 수요.
+            # plant가 이 큐의 TTT를 이미 적분하므로(metanet.py:557) far도 **반드시** 세야 한다:
+            # 안 세면 리더에게 '진입을 막으면 차가 사라진다'로 보인다(urban boundary_in과 동일 함정).
+            # 구조는 ramp 큐와 같다 → 같은 형태: 대기(저수지) + 진입 후 본선 주행(T_0 전체).
+            # μ^entry = q_cap·R(ρ_0)·T_c 는 ramp의 μ^merge = C_r·R(ρ_m)·T_c 와 정확히 대칭.
+            # ρ_0→ρ_max면 R→0 → μ→0 → far 발산 = gridlock에서 맞는 거동(포화 해소).
+            o_l = max(0.0, float(state.mainline_origin_queue.get(link, 0.0)))
+            if o_l > 0.0:
+                recv0 = _clip(
+                    (net.rho_max - max(0.0, float(dens[0]))) / max(net.rho_max - net.rho_crit, 1.0e-9),
+                    0.0, 1.0,
+                )
+                mu_entry = float(net.freeway_capacity_veh_h) * recv0 * tc_h  # veh/interval
+                far += (o_l * o_l) * tc_h / (2.0 * max(mu_entry, 1.0e-6)) + o_l * t_rem[0]
     else:
         far += (n_main * n_main) * tc_h / (2.0 * max(g_fw, 1.0))
     # ---- freeway reservoir: ramp 큐 merge-병목 대기 + 통과 ----

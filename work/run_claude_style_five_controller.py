@@ -546,10 +546,15 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
         # t_trav=Σℓ/V(ρ_i), g_fw=min_i cap(lanes_i) — METANET 기본도에서 유도, 새 상수 없음.
         cfg.mpc.leader_mfd_far_state_aware = True
     if _os.environ.get("OBSERVED_GU") == "1":
-        # far의 urban G(n)을 관측 유출(state.last_urban_sink_veh / T_c_h)로 대체 —
+        # far의 urban G(n)을 관측 유출(state.last_urban_sink_veh, **구간당 대수 — 나누지 않음**)로 —
         # 상수 3개(g_free=640/g_cong=500/n_crit=1700, 전부 구 plant 캘리브)와 2단
         # 계단이 함께 사라진다. 관측 유출은 공간 불균질을 이미 반영(막힌 링크는 못 빠짐).
         cfg.mpc.leader_mfd_far_observed_gu = True
+    if _os.environ.get("MAINLINE_PIPELINE") == "1":
+        # 본선 far를 저수지(n²/2g, g_fw=300 상수)에서 **파이프라인 잔여주행시간**으로.
+        # 저수지는 urban(MFD)의 추상 — freeway는 길이·속도를 아는 파이프라인이다.
+        # far = Σ_j n_j·T_j, T_j = ℓ/V(ρ_j) + (1−β_j)·T_{j+1}. 캘리브 상수 0개.
+        cfg.mpc.leader_mfd_far_mainline_pipeline = True
     if _os.environ.get("MFD_FAR_W"):
         cfg.mpc.leader_mfd_far_weight = float(_os.environ["MFD_FAR_W"])
     if _os.environ.get("FAR_D0") == "1":

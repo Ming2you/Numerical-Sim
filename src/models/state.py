@@ -351,7 +351,14 @@ class MPCConfig:
     leader_mfd_far_state_aware: bool = False
     # far의 urban 배수율 G(n)을 상수 계단(g_free/g_cong/n_crit) 대신 **관측 유출**로
     # (2026-07-16, OBSERVED-Gu). 기본 False=상수식(비트동일).
+    # far 자유류 오프셋 분기. **미선언이면 getattr 기본 False로 죽은 코드가 되므로 명시 선언**
+    # (2026-07-16 리뷰: 이 필드 부재로 state_aware 본선 수정이 한 번도 실행 안 됐다).
+    # 주의: mainline_pipeline보다 **먼저** 평가되는 if 분기라, 둘 다 켜면 이쪽이 이긴다.
+    leader_mfd_far_freeflow_offset: bool = False
     leader_mfd_far_observed_gu: bool = False
+    # 본선 far를 저수지 n²/(2g) 대신 **파이프라인 잔여주행시간** Σn_j·T_j 로
+    # (2026-07-16). T_j = ℓ/V(ρ_j) + (1−β_j)·T_{j+1}. 기본 False=저수지식.
+    leader_mfd_far_mainline_pipeline: bool = False
     leader_mfd_far_weight: float = 1.0
     # FAR-D0(2026-07-09): depth=0에서도 rollout TTT + far로 후보 채점(역사적 d0는
     # follower 응답 proxy 랭킹 — 채점 형태 고정한 "얕은 leader" 검정용). 기본 False.
@@ -803,7 +810,7 @@ class TrafficState:
     # run_coupled_interval이 매 구간 기록 — plant·rollout 공용 경로라 rollout 종단 상태도
     # 자기 예측 유출을 들고 온다. far의 배수율 G(n)을 상수 캘리브 대신 관측으로 쓰기 위한 입력.
     # 0.0 = 아직 한 구간도 안 전진(초기 상태) → far는 캘리브 상수로 폴백.
-    last_urban_sink_veh: float = 0.0
+    last_urban_sink_veh: float = -1.0
 
     @classmethod
     def initial(cls, cfg: ExperimentConfig) -> "TrafficState":
