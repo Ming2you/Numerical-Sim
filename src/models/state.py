@@ -349,6 +349,9 @@ class MPCConfig:
     leader_mfd_far_enabled: bool = True
     # far 항의 주행시간·배수율을 state(rho·유효차선)에서 유도(2026-07-16). 기본 False=상수식.
     leader_mfd_far_state_aware: bool = False
+    # far의 urban 배수율 G(n)을 상수 계단(g_free/g_cong/n_crit) 대신 **관측 유출**로
+    # (2026-07-16, OBSERVED-Gu). 기본 False=상수식(비트동일).
+    leader_mfd_far_observed_gu: bool = False
     leader_mfd_far_weight: float = 1.0
     # FAR-D0(2026-07-09): depth=0에서도 rollout TTT + far로 후보 채점(역사적 d0는
     # follower 응답 proxy 랭킹 — 채점 형태 고정한 "얕은 leader" 검정용). 기본 False.
@@ -796,6 +799,11 @@ class TrafficState:
     urban_arrival_buffer: Dict[str, Dict[int, float]] = field(default_factory=dict)
     urban_storage_release_buffer: Dict[str, Dict[int, float]] = field(default_factory=dict)
     time_sec: float = 0.0
+    # 직전 제어구간에 urban 경계를 **실제로** 빠져나간 대수(2026-07-16, OBSERVED-Gu).
+    # run_coupled_interval이 매 구간 기록 — plant·rollout 공용 경로라 rollout 종단 상태도
+    # 자기 예측 유출을 들고 온다. far의 배수율 G(n)을 상수 캘리브 대신 관측으로 쓰기 위한 입력.
+    # 0.0 = 아직 한 구간도 안 전진(초기 상태) → far는 캘리브 상수로 폴백.
+    last_urban_sink_veh: float = 0.0
 
     @classmethod
     def initial(cls, cfg: ExperimentConfig) -> "TrafficState":

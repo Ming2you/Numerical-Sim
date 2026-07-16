@@ -246,6 +246,12 @@ def run_coupled_interval(
         queue_cap_veh=cfg.network.ramp_queue_max_veh * max(len(cfg.network.ramps), 1),
     )
     ur_diag = aggregate_urban_diagnostics(urban_rows, cfg, control, interval_h=sim.T_c_h)
+    # OBSERVED-Gu(2026-07-16): 이 제어구간에 urban 경계를 **실제로** 빠져나간 대수를 state에
+    # 기록. far(MFD tail)의 배수율 G(n)을 상수 캘리브(g_free/g_cong 2단 계단) 대신 **관측값**
+    # 으로 쓰기 위한 유일한 입력 — plant·rollout이 이 함수를 공유하므로 rollout 종단 상태도
+    # 자기 예측 유출률을 들고 나온다. 관측 유출은 **공간 불균질을 이미 반영**한다(막힌 링크는
+    # 못 빠지므로 skew면 자연히 낮음) → 별도 이질성 모델 불필요.
+    state.last_urban_sink_veh = float(ur_diag.get("boundary_out_sink_veh", 0.0))
     diagnostics.update(fw_diag)
     diagnostics.update(ur_diag)
     return CoupledStepResult(

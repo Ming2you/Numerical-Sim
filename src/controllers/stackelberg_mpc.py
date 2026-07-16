@@ -110,6 +110,24 @@ def mfd_far_cost_to_go(cfg: "ExperimentConfig", state: "TrafficState") -> float:
     g_free = float(getattr(cfg.mpc, "leader_mfd_far_g_free", 640.0))
     g_cong = float(getattr(cfg.mpc, "leader_mfd_far_g_cong", 500.0))
     g_u = g_free if n_u < n_crit else g_cong
+    # OBSERVED-Gu(2026-07-16): MFD의 G(n)="이 상태에서 실제로 빠져나가는 양"인데, 지금은
+    # 2단 계단(640/500, 문턱 1700)으로 **모델링**한다 — 셋 다 구 plant 캘리브(_CALIB_MERGE_OLD_46).
+    # 게다가 n_u가 총합이라 **공간 분포를 못 본다**: skew는 총량 동일·배분만 변경이므로 far가
+    # 한 톨도 안 변한다(실측: skew 셀 state-aware Δ=0.0). 그러나 MFD의 well-posedness는 균질을
+    # 전제하고, 불균질하면 같은 accumulation에서도 유출이 낮다(Mazloumian·Geroliminis·Helbing
+    # 2010: 용량은 평균이 아니라 밀도의 **공간 분산**이 결정).
+    # ⇒ 모델링 대신 **관측**한다. run_coupled_interval이 매 구간 기록한 실제 경계 이탈량을
+    #    쓰면 (a) 상수 3개와 계단이 사라지고, (b) 관측 유출이 **불균질을 이미 반영**한다
+    #    (막힌 링크는 못 빠짐). plant·rollout 공용 경로라 rollout 종단도 자기 예측 유출을 가짐.
+    #    max(·,1.0)은 기존 코드에도 있던 수치 가드(0 나눗셈)지 튜닝 노브가 아니다.
+    #    아직 한 구간도 안 전진한 초기 상태(sink=0)는 캘리브 상수로 폴백.
+    if bool(getattr(cfg.mpc, "leader_mfd_far_observed_gu", False)):
+        # ★단위: far = n²·tc_h/(2·g) 의 차원분석상 **g는 veh(구간당 대수)**다(veh/h 아님).
+        #   기존 g_free=640도 "구간당 640대"(=12,800 veh/h 상당). sink가 이미 구간당 대수이므로
+        #   **그대로** 쓴다 — /tc_h 하면 20배 과대가 된다.
+        sink = float(getattr(state, "last_urban_sink_veh", 0.0))
+        if sink > 0.0:
+            g_u = sink
     far = (n_u * n_u) * tc_h / (2.0 * max(g_u, 1.0))
     # ---- freeway reservoir: 본선 2차(exit 병목 큐잉, urban과 대칭) ----
     seg_len = float(net.freeway_segment_length_km)

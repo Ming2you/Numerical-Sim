@@ -545,6 +545,11 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
         # far 항이 v_free·상수 g_fw로 박혀 차선폐색·과포화를 못 보는 문제 수정(2026-07-16).
         # t_trav=Σℓ/V(ρ_i), g_fw=min_i cap(lanes_i) — METANET 기본도에서 유도, 새 상수 없음.
         cfg.mpc.leader_mfd_far_state_aware = True
+    if _os.environ.get("OBSERVED_GU") == "1":
+        # far의 urban G(n)을 관측 유출(state.last_urban_sink_veh / T_c_h)로 대체 —
+        # 상수 3개(g_free=640/g_cong=500/n_crit=1700, 전부 구 plant 캘리브)와 2단
+        # 계단이 함께 사라진다. 관측 유출은 공간 불균질을 이미 반영(막힌 링크는 못 빠짐).
+        cfg.mpc.leader_mfd_far_observed_gu = True
     if _os.environ.get("MFD_FAR_W"):
         cfg.mpc.leader_mfd_far_weight = float(_os.environ["MFD_FAR_W"])
     if _os.environ.get("FAR_D0") == "1":
