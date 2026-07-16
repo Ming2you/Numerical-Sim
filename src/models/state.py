@@ -348,7 +348,7 @@ class MPCConfig:
     # boundary 큐 포함) + freeway(본선 N²/2G_fw + ramp 큐 bilinear). weight=1이 물리 정확값.
     leader_mfd_far_enabled: bool = True
     # far 항의 주행시간·배수율을 state(rho·유효차선)에서 유도(2026-07-16). 기본 False=상수식.
-    leader_mfd_far_state_aware: bool = False
+    leader_mfd_far_state_aware: bool = True
     leader_mfd_far_weight: float = 1.0
     # FAR-D0(2026-07-09): depth=0에서도 rollout TTT + far로 후보 채점(역사적 d0는
     # follower 응답 proxy 랭킹 — 채점 형태 고정한 "얕은 leader" 검정용). 기본 False.
@@ -359,6 +359,11 @@ class MPCConfig:
     leader_global_refresh_sec: float = 1800.0
     leader_local_np_radius_veh: float = 40.0
     leader_local_nuf_radius_veh_h: float = 1500.0
+    # refined_candidates의 반경을 **실제로 구속**시킬지(2026-07-16 A/B). False면 앵커가
+    # bounds로만 clip되어 반경을 우회 → '국소 재탐색'이 전역이 된다(실측 [1200,6000]).
+    # 주의: 반경 1500은 6/20 도입값인데, trust_frac이 7/15에 0.25→0.20으로 바뀌며
+    # 팔로워 합계 이동폭이 4×0.25×1500=1500 → 4×0.20×1500=1200이 되어 짝이 깨졌다.
+    leader_local_radius_strict: bool = False
     leader_continuous_max_evals: int = 25
     leader_continuous_seed_count: int = 7
     leader_continuous_prefilter_samples: int = 31

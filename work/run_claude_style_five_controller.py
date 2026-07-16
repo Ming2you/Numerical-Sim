@@ -264,8 +264,14 @@ def make_controller(controller_id: str, cfg: ExperimentConfig):
         controller.signal_price_enabled = True
         controller.metering_price_enabled = True
         controller.vsl_price_enabled = True
-        controller.green_offset_cross_price_enabled = True
-        controller.vsl_meter_cross_price_enabled = True
+        # ★동결 변경(2026-07-16): cross 2종 기본 OFF. 10셀 실측 —
+        #   ②상수terminal+crossON(구 동결): 평균 +3.70% / 최악 −5.61% / 7승3패
+        #   ③state-aware terminal+crossOFF(신): 평균 +4.78% / 최악 −4.34% / 8승2패
+        # cross는 **눈먼 terminal의 대역**이었다(170_incident: 상수terminal에선 crossON이
+        # +5.62%로 구제, state-aware에선 crossON이 −17.27% 파국 — 이중 보호로 과잉 조임).
+        # terminal이 절벽을 보게 되자 cross는 중복이자 잡음. CROSS_ON=1로 구거동 복원.
+        controller.green_offset_cross_price_enabled = False
+        controller.vsl_meter_cross_price_enabled = False
         controller.nash_solver.joint_green_offset_enabled = True
         # metering δ 스캔 승자(2026-07-15): δ=300 + trust_frac=0.20(=반경 300veh/h) 짝.
         # 170_skew_w wTTT 3244.7(baseline)→3089(회랑 floor 0.65 단독)→3028(δ=300 추가),
@@ -541,10 +547,18 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
         cfg.mpc.leader_global_refresh_sec = float(_os.environ["GLOBAL_REFRESH_SEC"])
     if _os.environ.get("MFD_FAR") == "1":
         cfg.mpc.leader_mfd_far_enabled = True  # far(MFD tail) cost-to-go 가산 → near 깊이 절감 검증
-    if _os.environ.get("FAR_STATE_AWARE") == "1":
-        # far 항이 v_free·상수 g_fw로 박혀 차선폐색·과포화를 못 보는 문제 수정(2026-07-16).
-        # t_trav=Σℓ/V(ρ_i), g_fw=min_i cap(lanes_i) — METANET 기본도에서 유도, 새 상수 없음.
-        cfg.mpc.leader_mfd_far_state_aware = True
+    if _os.environ.get("FAR_STATE_AWARE") is not None:
+        # ★동결 기본 ON(2026-07-16). far가 v_free·상수 g_fw=300으로 박혀 차선폐색·과포화를
+        # 못 보던 결함 수정 — t_trav=Σℓ/V(ρ_i), g_fw=min_i cap(lanes_i)(METANET 기본도 유도,
+        # 새 상수 0). 170_incident −10.45%→+1.21%, 최악 −10.45%→−4.34%.
+        # FAR_STATE_AWARE=0으로 구 상수식 복원(재현용).
+        cfg.mpc.leader_mfd_far_state_aware = _os.environ["FAR_STATE_AWARE"] == "1"
+    if _os.environ.get("NUF_RADIUS_STRICT") == "1":
+        # 리더 국소 반경을 실제로 구속(앵커도 반경으로 clip). 기본 OFF=비트동일.
+        cfg.mpc.leader_local_radius_strict = True
+    if _os.environ.get("NUF_RADIUS"):
+        # 반경 상수 override. trust 산수 복원치 = 4램프 × 0.20 × 1500 = 1200.
+        cfg.mpc.leader_local_nuf_radius_veh_h = float(_os.environ["NUF_RADIUS"])
     if _os.environ.get("MFD_FAR_W"):
         cfg.mpc.leader_mfd_far_weight = float(_os.environ["MFD_FAR_W"])
     if _os.environ.get("FAR_D0") == "1":
@@ -608,6 +622,11 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
         # 갇히는 문제를, 경계에 닿을 때마다 새 운영점에서 가격을 재측정하며 K회 걷어 해소.
         # OFFSET_PRICE=1과 함께 써야 발화(offset_price_enabled 게이트). 기본 0=OFF(비트동일).
         controller.offset_price_inner_iters = int(_os.environ["OFFSET_INNER_ITER"])
+    if _os.environ.get("CROSS_ON") == "1":
+        # 구 동결(②) 재현용 — cross 2종 복원. 2026-07-16부터 기본 OFF.
+        for _attr in ("green_offset_cross_price_enabled", "vsl_meter_cross_price_enabled"):
+            if hasattr(controller, _attr):
+                setattr(controller, _attr, True)
     if _os.environ.get("CROSS_GATE") == "1" and hasattr(controller, "cross_cliff_gate_enabled"):
         # 절벽 게이팅(2026-07-15): cross 2종을 wu_b3_cliff_both_* 발화 스텝에만 활성화.
         # cross ON 고정=5승3패 / OFF 고정=7승1패 → 레짐별로 갈아끼우면 8승0패(오라클) 기대.

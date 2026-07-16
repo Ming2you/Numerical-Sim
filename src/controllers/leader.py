@@ -218,6 +218,21 @@ class Leader:
         if previous is not None:
             np_values.add(float(np.clip(previous.N_P_star, bounds.np_lower, bounds.np_upper)))
             nuf_values.add(float(np.clip(self._previous_nuf_target(previous), bounds.nuf_lower, bounds.nuf_upper)))
+        # NUF-RADIUS-STRICT(2026-07-16 A/B): 위에서 반경으로 격자를 만든 **직후** 앵커들
+        # (center / heuristic_nuf / _nuf_anchor_values / _previous_nuf_target)이 bounds로만
+        # clip되고 **반경엔 안 걸려**, 결과적으로 후보 집합이 전체 bounds가 된다 —
+        # 실측(sweet_170_incident_w, center=6000, 반경=1500): 후보 N_UF 범위 [1200, 6000].
+        # 즉 "국소 재탐색"이 사실상 전역이고 N_UF*가 스텝간 ±1769로 진동한다.
+        # strict=True면 앵커도 [low, high]로 clip해 반경이 실제로 구속하게 한다.
+        # 기본 False = 기존 거동(비트동일).
+        if bool(getattr(self.cfg.mpc, "leader_local_radius_strict", False)):
+            # 반경 밖 후보를 **clip이 아니라 drop**한다 — 격자 간격을 보존하기 위해서다.
+            #   clip: 앵커가 경계에 뭉쳐 중복 제거로 후보수 급감(25→6) → '후보수 효과'가 섞임
+            #   보충: 좁은 범위를 25개로 다시 채우면 strict만 해상도가 좋아짐 → '해상도 효과'
+            #   drop: linspace 간격(=baseline과 동일) 유지, 멀리 있는 앵커만 제외
+            #         → **'리더가 멀리 못 간다'만 순수 분리**(사용자 지적 2026-07-16)
+            np_values = set(v for v in np_values if np_low - 1e-9 <= v <= np_high + 1e-9)
+            nuf_values = set(v for v in nuf_values if nuf_low - 1e-9 <= v <= nuf_high + 1e-9)
         grid = [
             LeaderAction(float(np_), float(nuf))
             for np_ in sorted(np_values)
