@@ -13,8 +13,14 @@
 #   (2) _pricesonly ≡ _budgetoff bit-identical 10/10. λ_P를 꺼도 바뀔 게 없다.
 #   ⇒ N_P dual은 플래그십에서 inert. 남은 질문은 N_UF 예산뿐이므로 10런이면 족하다.
 #
-# 질문: ③의 +4.78%(vs PFO)가 **예산 몫인가 가격 몫인가**.
-#   BUDGET_OFF = N_UF hard budget 제거, λ_UF·가격 전부 유지.
+# 질문(2026-07-17 정정): ③의 +4.78%(vs PFO)에 **N_UF hard budget 채널이 필요한가**.
+#   BUDGET_OFF = N_UF hard budget 제거, marginal price(green/meter/vsl) 유지.
+#   ※ 원래 "예산 몫 vs 가격 몫"이라 썼고 "λ_UF는 가격이라 유지"라고 적었으나 **공허**했다:
+#     λ_UF는 ③에서 항상 0이다(leader_lambda_uf_committed 비영 0/40). nuf_dual_active가 보는
+#     wu_faithful_nuf_coordination_mode 기본값이 "equality"라 dual 모드가 아니고 λ_UF는 갱신조차
+#     안 된다(L3898·L2732). λ_P도 0(비영 0/40). ⇒ ③에 살아있는 dual 가격은 하나도 없고,
+#     실제 조정 수단은 hard budget + marginal price(58컬럼 전부 비영) 둘뿐이다.
+#     따라서 이 arm은 "가격만 남기고 hard budget을 뺀다"가 맞는 서술이다.
 set -u
 cd "C:/Users/alsrj/Desktop/Numerical-Sim-offiter" || exit 1
 PY="C:/Users/alsrj/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/python.exe"
