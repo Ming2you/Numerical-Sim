@@ -238,6 +238,16 @@ class Leader:
             for np_ in sorted(np_values)
             for nuf in sorted(nuf_values)
         ]
+        # BUDGET-FAIR(2026-07-16 A/B): grid는 **np-major** 순서인데 아래 `for action in grid`가
+        # budget까지 **앞에서부터** 채운다 → |np|×|nuf| > budget이면 N_P 축이 굶는다.
+        # 실측(sweet_170_incident_w, 웜업20 후, budget=49): 고유 N_P 4개 / 고유 N_UF 19개,
+        # N_P별 후보수 {-1513: 19, -999: 19, -485: 10, center 542: 1} — **하한 앵커 2개가
+        # 38/49를 독식하고 center엔 1개만**, N_P 상한부(2597)는 한 번도 후보에 안 들어온다.
+        # fair=True면 flatten된 grid를 등간격 stride로 표본해 두 축을 고르게 덮는다
+        # (앵커·값 집합은 그대로 — '순서 때문에 굶는' 것만 교정). 기본 False=비트동일.
+        if bool(getattr(self.cfg.mpc, "leader_budget_fair", False)) and len(grid) > budget:
+            idx = sorted(set(int(round(v)) for v in np.linspace(0, len(grid) - 1, budget)))
+            grid = [grid[i] for i in idx]
         selected: List[LeaderAction] = []
         seen: set[LeaderAction] = set()
 

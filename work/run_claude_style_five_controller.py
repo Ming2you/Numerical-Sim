@@ -553,6 +553,9 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
         # 새 상수 0). 170_incident −10.45%→+1.21%, 최악 −10.45%→−4.34%.
         # FAR_STATE_AWARE=0으로 구 상수식 복원(재현용).
         cfg.mpc.leader_mfd_far_state_aware = _os.environ["FAR_STATE_AWARE"] == "1"
+    if _os.environ.get("BUDGET_FAIR") == "1":
+        # 후보 budget을 축별로 균등 표본(np-major 절단으로 N_P 축이 굶는 문제). 기본 OFF.
+        cfg.mpc.leader_budget_fair = True
     if _os.environ.get("NUF_RADIUS_STRICT") == "1":
         # 리더 국소 반경을 실제로 구속(앵커도 반경으로 clip). 기본 OFF=비트동일.
         cfg.mpc.leader_local_radius_strict = True

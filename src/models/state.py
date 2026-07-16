@@ -364,6 +364,9 @@ class MPCConfig:
     # 주의: 반경 1500은 6/20 도입값인데, trust_frac이 7/15에 0.25→0.20으로 바뀌며
     # 팔로워 합계 이동폭이 4×0.25×1500=1500 → 4×0.20×1500=1200이 되어 짝이 깨졌다.
     leader_local_radius_strict: bool = False
+    # 후보 격자를 np-major로 앞에서 자르면 N_P 축이 굶는다(실측: 고유 N_P 4/N_UF 19,
+    # 하한 앵커 2개가 38/49 독식, center 1개). True면 stride 표본으로 두 축 균등 표본.
+    leader_budget_fair: bool = False
     leader_continuous_max_evals: int = 25
     leader_continuous_seed_count: int = 7
     leader_continuous_prefilter_samples: int = 31
