@@ -2588,8 +2588,12 @@ class WuFaithfulFollower:
 
         # ---- 예산 simplex 사영(승인안 (ii)): Σmeter = ω_F·N_UF* (equality) ----
         # dual 모드면 사영 없음 — 총량은 λ_UF(step 간 적분)가 추적, 레벨은 자율.
+        # BUDGET_OFF(2026-07-17 수정): 이 SEG13 경로엔 게이트가 **없었다**. 비-SEG13 경로
+        # (L2886)만 막혀 있어서 SEG13=1인 플래그십에선 BUDGET_OFF가 무효였고, 2026-07-16
+        # wave2 20런이 통째로 ③ 재실행이 됐다(30/30 bit-identical). 여기서도 막는다.
         meter_out: Dict[str, float] = dict(preferred_meter)
-        if leader_present and nuf_mode == "equality" and preferred_meter:
+        _budget_off_seg13 = bool(getattr(self.cfg.mpc, "leader_budget_off", False))
+        if leader_present and not _budget_off_seg13 and nuf_mode == "equality" and preferred_meter:
             caps = {r: float(net.ramp_capacity_veh_h[r]) for r in preferred_meter}
             cap_sum = sum(caps.values())
             omega_f = float(self._wu._omega_f.get(link, 0.0))
@@ -3669,6 +3673,11 @@ class WuFaithfulFollower:
         # 방법 A 진단: 실사용 κ 횟수·최종 계획-공간 잔차(Σν − Ñ). OFF(K=0)면 0/0.
         np_pd_iters_used = 0.0
         np_pd_residual = 0.0
+        # PD 종료사유 진단(2026-07-17): -1=루프 미실행, 0=K소진(미수렴), 1=잔차수렴, 2=λ고정점.
+        # exit=2 & 최종 λ=cap이면 '수렴'이 아니라 '경계에 박힘' — 이 둘이 run_log에서 구분 불가였다.
+        np_pd_exit = -1.0
+        np_pd_lam_entry = 0.0
+        np_pd_lam_path = ""
         if np_pd_active:
             # ---- 방법 A(2026-07-13): candidate 내부 primal-dual 반복 ----
             # λ^(κ+1) = Π[λ^(κ) + γ_P(Σν^(κ) − Ñ^(c))]를 K회(조기수렴 허용) 반복하며
@@ -3694,6 +3703,9 @@ class WuFaithfulFollower:
                 getattr(self.cfg.mpc, "np_pd_gain_mult", 25.0)
             )
             lam_curr = lambda_p  # warm start = standing _lambda_P(직전 step 커밋 λ).
+            np_pd_lam_entry = float(lam_curr)
+            _lam_path = [float(lam_curr)]
+            np_pd_exit = 0.0  # 0=K소진(미수렴). break에서 1/2로 덮어씀.
             lam_last_sweep: Optional[float] = None
             for _kappa in range(1, np_pd_iters + 1):
                 _jacobi_consensus(lam_curr)
@@ -3702,6 +3714,7 @@ class WuFaithfulFollower:
                 np_pd_residual = float(sum_nin - pd_target)
                 # 조기수렴 ①: 잔차가 target의 2% 이내 — λ 갱신 없이 종료(안장점 도달).
                 if abs(np_pd_residual) <= 0.02 * max(pd_target, 1.0):
+                    np_pd_exit = 1.0
                     break
                 lam_new = min(
                     max(0.0, lam_curr + gain_pd * np_pd_residual), self.lambda_np_cap
@@ -3709,8 +3722,11 @@ class WuFaithfulFollower:
                 # 조기수렴 ②: λ 고정점(cap/0 clip 포함) — green이 이미 그 λ의 균형.
                 if abs(lam_new - lam_curr) <= 1.0e-6:
                     lam_curr = lam_new
+                    np_pd_exit = 2.0
                     break
                 lam_curr = lam_new
+                _lam_path.append(float(lam_curr))
+            np_pd_lam_path = "|".join("%.4f" % v for v in _lam_path)
             # 최종 λ로 1회 재수렴 — commit되는 green이 최종 λ의 균형이 되게
             # (off-equilibrium commit 금지). 마지막 sweep이 이미 그 λ였으면 생략.
             if lam_last_sweep is None or abs(lam_curr - lam_last_sweep) > 1.0e-6:
@@ -4008,6 +4024,10 @@ class WuFaithfulFollower:
         # 방법 A 진단: K-loop 실사용 횟수·최종 계획-공간 잔차(OFF면 0/0).
         control.diagnostics["wu_faithful_np_pd_iters"] = float(np_pd_iters_used)
         control.diagnostics["wu_faithful_np_pd_residual"] = float(np_pd_residual)
+        # 종료사유·λ 경로(2026-07-17): exit=2 & λ=cap → '수렴'이 아니라 경계 고착.
+        control.diagnostics["wu_faithful_np_pd_exit"] = float(np_pd_exit)
+        control.diagnostics["wu_faithful_np_pd_lam_entry"] = float(np_pd_lam_entry)
+        control.diagnostics["wu_faithful_np_pd_lam_path"] = np_pd_lam_path
         control.diagnostics["wu_faithful_np_bias_ratio"] = float(
             self._np_bias_ratio if self._np_bias_ratio is not None else 1.0
         )

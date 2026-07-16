@@ -731,6 +731,10 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
     if _os.environ.get("NP_PD_ITER"):
         # 방법 A: candidate 내부 primal-dual 반복 K(0=OFF, 현행 λ̂ 1회 선반영).
         cfg.mpc.np_primal_dual_iters = int(_os.environ["NP_PD_ITER"])
+    if _os.environ.get("NP_PD_GAIN"):
+        # PD 스텝게인 배수. 기본 25는 gain 0.25 → 실측 잔차 324~580에 곱하면 81~145로
+        # cap(10)을 12배 초과 → λ가 {0, cap} bang-bang(400스텝 중간값 0개, 2026-07-16 실측).
+        cfg.mpc.np_pd_gain_mult = float(_os.environ["NP_PD_GAIN"])
     if _os.environ.get("FB_OFF") == "1":
         # fallback guard 해제 — N_P-active leader 기각 억압 제거(잠금해제 A/B용).
         cfg.mpc.stackelberg_enable_fallback = False
