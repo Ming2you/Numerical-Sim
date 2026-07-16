@@ -55,7 +55,32 @@ metadata["leader_lambda_np_committed"] = float(lam_next is not None)
 λ_P를 꺼도 아무것도 안 바뀐다 — λ_P≡0 측정과 **정합**.
 
 **⇒ N_P dual은 플래그십에서 inert.** "V ⊥ N_P"(7/16), "N_P 축 붕괴 4/49"와 앞뒤가 맞는다.
-논문 §5(한계)에 들어가야 한다.
+
+### 2b. ★λ_UF도 죽어 있다 — 사용자 지적("dual도 죽인거 맞아?")
+
+NP_OFF는 `nash_solver.np_price_enabled=False`만 세우므로 **λ_UF는 안 건드린다**. 그런데 재보니
+**λ_UF도 항상 0**이었다.
+
+| ③, 190_w, 웜업 후 40스텝 | 고유값 | 비영 |
+|---|---|---|
+| `wu_faithful_lambda_P` | `[0.0]` | **0/40** |
+| `leader_lambda_uf_committed` | `[0.0]` | **0/40** |
+| `wu_b2_price_*`(green) | — | **40/40** |
+| `wu_b3_meter_price_*` | — | **40/40** |
+| `wu_b3_vsl_price_*` | — | 24~40/40 |
+| `wu_seg13_budget_*`(hard budget) | — | 17/40 |
+
+이유: `nuf_dual_active`가 `wu_faithful_nuf_coordination_mode`를 보는데 **기본값이 `"equality"`**
+(L3898·L2732) → dual 모드가 아니라 λ_UF는 **갱신조차 안 된다**. `dual_standing`도 항상 False.
+
+**⇒ ③에 살아있는 dual 가격은 하나도 없다.** 실제 조정 수단은 **N_UF hard budget +
+marginal price(green/meter/VSL, 58컬럼 전부 비영)** 둘뿐이다. Stackelberg dual 기계장치는 통째로 논다.
+
+**⇒ `_budgetoff_fix`의 이름이 틀렸다.** 큐 주석에 "λ_UF·가격 전부 유지"라고 썼는데 **λ_UF는
+유지할 게 없다**(공허). 실험 자체는 유효하지만 정확한 질문은 "예산 몫 vs 가격 몫"이 아니라
+**"hard budget 채널이 필요한가"**다.
+
+논문 §5(한계)에 **dual 2종 모두** 들어가야 한다.
 
 ## 3. 게인 산수 — 정정판
 
