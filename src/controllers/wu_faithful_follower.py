@@ -2875,7 +2875,15 @@ class WuFaithfulFollower:
         # (c) 이전 soft penalty hack을 없앤다.
         # DUAL-STANDING: dual 모드는 leader 부재(incumbent probe)에도 λ≠0이면 진입 —
         # incumbent가 λ에 반응해야 적분 루프가 닫힌다(windup 수정, 위 priced 주석 참조).
-        if owned_ramps and (
+        # BUDGET-OFF(2026-07-16 A/B, 사용자 제안): "예산 없이 가격만" arm.
+        # 이 분기가 leader의 N_UF를 **hard 제약**으로 강제한다(follower는 배분만 탐색).
+        # budget_off=True면 이 분기를 건너뛰고 **PFO autonomous 좌표하강**(위 분기)을 탄다 —
+        # de-facto metering이 own-TTS 최소화에서 창발하고, leader는 **가격만** 넘긴다.
+        # 남는 채널: green/metering/vsl/offset marginal price + λ_UF(가격이므로 유지).
+        # 빠지는 것: N_UF hard budget(ω_F·N_UF_star). 기본 False=비트동일.
+        # 목적: +4.78%(③ vs PFO)가 **예산 몫인지 가격 몫인지** 분해 — 사다리에 없던 rung.
+        _budget_off = bool(getattr(self.cfg.mpc, "leader_budget_off", False))
+        if owned_ramps and not _budget_off and (
             (leader is not None and n_uf_star > 0.0) or dual_standing
         ):
             omega_f = float(self._wu._omega_f.get(link, 0.0))

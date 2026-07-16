@@ -367,6 +367,9 @@ class MPCConfig:
     # 후보 격자를 np-major로 앞에서 자르면 N_P 축이 굶는다(실측: 고유 N_P 4/N_UF 19,
     # 하한 앵커 2개가 38/49 독식, center 1개). True면 stride 표본으로 두 축 균등 표본.
     leader_budget_fair: bool = False
+    # N_UF hard budget 제거 — leader는 가격만 넘기고 follower는 PFO autonomous metering
+    # (2026-07-16 A/B). '+4.78%가 예산 몫인가 가격 몫인가' 분해용. 기본 False=비트동일.
+    leader_budget_off: bool = False
     leader_continuous_max_evals: int = 25
     leader_continuous_seed_count: int = 7
     leader_continuous_prefilter_samples: int = 31

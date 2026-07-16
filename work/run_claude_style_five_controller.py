@@ -553,6 +553,10 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
         # 새 상수 0). 170_incident −10.45%→+1.21%, 최악 −10.45%→−4.34%.
         # FAR_STATE_AWARE=0으로 구 상수식 복원(재현용).
         cfg.mpc.leader_mfd_far_state_aware = _os.environ["FAR_STATE_AWARE"] == "1"
+    if _os.environ.get("BUDGET_OFF") == "1":
+        # "가격만" arm: N_UF hard budget 제거, follower는 PFO autonomous metering.
+        # 리더는 여전히 가격(green/metering/vsl/offset)을 계산·전달한다.
+        cfg.mpc.leader_budget_off = True
     if _os.environ.get("BUDGET_FAIR") == "1":
         # 후보 budget을 축별로 균등 표본(np-major 절단으로 N_P 축이 굶는 문제). 기본 OFF.
         cfg.mpc.leader_budget_fair = True
