@@ -389,6 +389,10 @@ class MPCConfig:
     # 후보 intent(N_UF*) 방향으로 스텝당 램프별 ±R 전진 — 박스의 다중스텝 도달을 채점에
     # 반영("박스 끝 너머가 안 보임" 200_w −29.78% 수선 겸 가설 검증). 기본 False=비트동일.
     leader_rollout_box_walk: bool = False
+    # BOX-WALK-VG(사용자 지적 "vsl도 green도 점진 탐색"): VSL·green도 rollout에 다중스텝
+    # 이동 모델링. 후보가 목표를 안 주므로 끝 지속(edge persistence) — 이번 solve가 이동
+    # 한계 끝까지 밀었으면 rollout에서 같은 방향·속도로 전진(전역 한계 정지). 기본 False.
+    leader_rollout_box_walk_vg: bool = False
     leader_continuous_max_evals: int = 25
     leader_continuous_seed_count: int = 7
     leader_continuous_prefilter_samples: int = 31

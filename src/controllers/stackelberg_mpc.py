@@ -1433,6 +1433,7 @@ class StackelbergMPCController:
             nash,
             forecast,
             incumbent_obj=rollout_abort_obj,
+            previous=previous,
         )
         objective_terms = self.leader.objective_terms(
             predicted_states,
@@ -2226,6 +2227,7 @@ class StackelbergMPCController:
         nash: NashResult,
         forecast: list[DemandStep],
         incumbent_obj: float = float("inf"),
+        previous: Optional[ControlAction] = None,
     ) -> tuple[list[TrafficState], float, bool]:
         """Leader 기본 평가는 follower response objective를 그대로 사용한다.
 
@@ -2242,7 +2244,8 @@ class StackelbergMPCController:
             and incumbent_obj != float("inf")
         ):
             abort_above = float(incumbent_obj)
-        states, rollout_ttt = self._predict(state, nash.control, forecast, abort_above=abort_above)
+        states, rollout_ttt = self._predict(
+            state, nash.control, forecast, abort_above=abort_above, previous=previous)
         if self.cfg.leader.objective_mode == "state_accumulation":
             return states, rollout_ttt, True
         # leader_value_depth>0면 leader의 full (3+d) rollout TTT를 base로(=TTT_3+V). follower는
@@ -2281,6 +2284,7 @@ class StackelbergMPCController:
         forecast: list[DemandStep],
         abort_above: Optional[float] = None,
         depth_override: Optional[int] = None,
+        previous: Optional[ControlAction] = None,
     ) -> tuple[list[TrafficState], float]:
         from src.simulation.coupling import run_coupled_interval
 
@@ -2309,18 +2313,84 @@ class StackelbergMPCController:
             and float(getattr(control, "N_UF_star", 0.0)) > 0.0
         )
         if _do_walk:
-            import copy as _copy
             _r_dn = float(_walk_r)
             _bu_w = getattr(self.cfg.mpc, "seg13_meter_box_up_veh_h", None)
             _r_up = float(_bu_w) if _bu_w is not None else _r_dn
             _net = self.cfg.network
             _caps = {r: float(_net.ramp_capacity_veh_h[r]) for r in control.ramp_metering}
             _target_total = float(control.N_UF_star)
-            # 얕은 사본 + ramp dict 교체 — 원본(commit 후보 control)은 불변.
+        # BOX-WALK-VG(2026-07-17, 사용자 지적 "vsl도 green도 점진 탐색해야"): VSL·green도
+        # rollout에 다중스텝 이동을 모델링. metering과 달리 후보가 목표를 안 주므로
+        # **끝 지속(edge persistence)**: 이번 solve가 이동 한계 끝(VSL ±R_v, green ±trust)
+        # 까지 밀었으면 "더 가고 싶었다"로 보고 rollout에서 같은 방향·같은 속도로 전진
+        # (전역 한계에서 정지). 내부 정착(끝 미달)이면 수렴으로 보고 고정 유지.
+        _vg_moves: list = []
+        _gtot = 0.0
+        if bool(getattr(self.cfg.mpc, "leader_rollout_box_walk_vg", False)) and previous is not None:
+            _rv = getattr(self.cfg.mpc, "seg13_vsl_box_kmh", None)
+            if _rv is not None:
+                _rv = float(_rv)
+                _vmin = float(min(self.cfg.freeway_follower.vsl_set))
+                _vmax = float(max(self.cfg.freeway_follower.vsl_set))
+                for _key, _v in control.vsl.items():
+                    if "__seg" not in _key:
+                        continue
+                    _pv = previous.vsl.get(_key)
+                    if _pv is None:
+                        continue
+                    _d0 = float(_v) - float(_pv)
+                    if _d0 >= _rv - 1.0e-6:
+                        _vg_moves.append(("vsl", _key, _rv, _vmin, _vmax))
+                    elif _d0 <= -(_rv - 1.0e-6):
+                        _vg_moves.append(("vsl", _key, -_rv, _vmin, _vmax))
+            _gt = getattr(getattr(self, "nash_solver", None),
+                          "signal_marginal_price_trust_sec", None)
+            if _gt:
+                _gt = float(_gt)
+                _gtot = float(self.cfg.network.effective_green_total)
+                _gmin = float(getattr(self.cfg.network, "green_min", 20.0))
+                for _key, _g in control.green_times.items():
+                    if not _key.endswith("_p1"):
+                        continue
+                    _pg = previous.green_times.get(_key)
+                    if _pg is None:
+                        continue
+                    _d0 = float(_g) - float(_pg)
+                    if _d0 >= _gt - 1.0e-6:
+                        _vg_moves.append(("green", _key, _gt, _gmin, _gtot - _gmin))
+                    elif _d0 <= -(_gt - 1.0e-6):
+                        _vg_moves.append(("green", _key, -_gt, _gmin, _gtot - _gmin))
+        if _do_walk or _vg_moves:
+            import copy as _copy
+            # 얕은 사본 + 변형할 dict만 교체 — 원본(commit 후보 control)은 불변.
+            # 주의: ramp만 교체하고 vsl/green을 원본 dict째 만지면 커밋 후보가 오염된다.
             _ctrl_w = _copy.copy(control)
-            _ctrl_w.ramp_metering = dict(control.ramp_metering)
+            if _do_walk:
+                _ctrl_w.ramp_metering = dict(control.ramp_metering)
+            if _vg_moves:
+                _ctrl_w.vsl = dict(control.vsl)
+                _ctrl_w.green_times = dict(control.green_times)
             control = _ctrl_w
         for _k, demand in enumerate(forecast[:depth]):
+            if _vg_moves and _k >= 1:
+                for _kind, _key, _rate, _lo, _hi in _vg_moves:
+                    if _kind == "vsl":
+                        control.vsl[_key] = min(max(
+                            float(control.vsl[_key]) + _rate, _lo), _hi)
+                    else:
+                        _np1 = min(max(
+                            float(control.green_times[_key]) + _rate, _lo), _hi)
+                        control.green_times[_key] = _np1
+                        _k2 = _key[:-3] + "_p2"
+                        if _k2 in control.green_times:
+                            # p1+p2 합 보존(사이클 예산 112 불변).
+                            control.green_times[_k2] = _gtot - _np1
+                # link 대표 VSL = min(seg) 재계산(plant fallback 정합).
+                for _lnk in self.cfg.network.freeway_links:
+                    _sv = [float(v) for k, v in control.vsl.items()
+                           if k.startswith(_lnk + "__seg")]
+                    if _sv:
+                        control.vsl[_lnk] = min(_sv)
             if _do_walk and _k >= 1:
                 _m = control.ramp_metering
                 _gap = _target_total - sum(_m.values())

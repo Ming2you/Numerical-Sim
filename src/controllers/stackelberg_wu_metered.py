@@ -2096,6 +2096,7 @@ class StackelbergWuMeteredController(StackelbergMPCController):
             state,
             pfo_nash,
             forecast,
+            previous=pfo_previous,
         )
         objective_terms = self.leader.objective_terms(
             predicted_states,
@@ -2557,7 +2558,7 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         else:
             nash = self.nash_solver.solve(state.copy(), action_p, forecast, previous)
             predicted_states, follower_ttt, rollout_used = self._leader_evaluation_base(
-                state, nash, forecast, incumbent_obj=rollout_abort_obj,
+                state, nash, forecast, incumbent_obj=rollout_abort_obj, previous=previous,
             )
             # abort(inf)된 평가는 캐시 금지 — 같은 N_UF가 뒤에서 더 관대한 문턱으로
             # 재평가될 수 있다(선택 동일성 보존).
