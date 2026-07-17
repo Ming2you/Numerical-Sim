@@ -2392,11 +2392,16 @@ class WuFaithfulFollower:
                 _box_r = getattr(self.cfg.mpc, "seg13_meter_box_veh_h", None)
                 if _box_r is not None and previous is not None:
                     _R = float(_box_r)
+                    # 비대칭 박스(2026-07-17, 사용자 설계 2차): 내림은 R(큐 생성 방향이라
+                    # 보수적), 올림은 R_up(회복/방류 방향). 파국 2셀(170_w/200_w)이 전부
+                    # '낮은 곳에 갇혀 못 올라옴'이어서 올림만 넓힌다. 미설정=R(대칭, 기존).
+                    _bu = getattr(self.cfg.mpc, "seg13_meter_box_up_veh_h", None)
+                    _R_up = float(_bu) if _bu is not None else _R
                     m_prev_r = min(max(float(
                         previous.ramp_metering.get(own_ramp, cap_r)), 0.0), cap_r)
                     m_cands = sorted(
                         {round(min(max(m_prev_r + off, 0.0), cap_r), 6)
-                         for off in (-_R, -_R / 2.0, 0.0, _R / 2.0, _R)},
+                         for off in (-_R, -_R / 2.0, 0.0, _R_up / 2.0, _R_up)},
                         reverse=True,
                     )
                 else:
@@ -2561,10 +2566,12 @@ class WuFaithfulFollower:
                 # METER-BOX 판별 진단: 박스 끝(±R)을 골랐나, 내부에 정착했나.
                 # 끝점 비율이 계속 높으면 '진짜 최적이 박스 밖' — 사용자 가설 반증 쪽.
                 if _box_r is not None and previous is not None:
+                    _bu0 = getattr(self.cfg.mpc, "seg13_meter_box_up_veh_h", None)
+                    _rup0 = float(_bu0) if _bu0 is not None else float(_box_r)
                     _mp0 = min(max(float(
                         previous.ramp_metering.get(own_ramp, cap_r)), 0.0), cap_r)
                     _blo = max(0.0, _mp0 - float(_box_r))
-                    _bhi = min(cap_r, _mp0 + float(_box_r))
+                    _bhi = min(cap_r, _mp0 + _rup0)
                     _meter_box_total += 1
                     if abs(float(best_m) - _blo) < 0.5 or abs(float(best_m) - _bhi) < 0.5:
                         _meter_box_edge += 1
@@ -2643,11 +2650,13 @@ class WuFaithfulFollower:
             _box_r_b = getattr(self.cfg.mpc, "seg13_meter_box_veh_h", None)
             if _box_r_b is not None and previous is not None:
                 _Rb = float(_box_r_b)
+                _bu_b = getattr(self.cfg.mpc, "seg13_meter_box_up_veh_h", None)
+                _Rb_up = float(_bu_b) if _bu_b is not None else _Rb
                 _rl_lo, _rl_hi = {}, {}
                 for r in preferred_meter:
                     _mp = min(max(float(previous.ramp_metering.get(r, caps[r])), 0.0), caps[r])
                     _rl_lo[r] = max(0.0, _mp - _Rb)
-                    _rl_hi[r] = min(caps[r], _mp + _Rb)
+                    _rl_hi[r] = min(caps[r], _mp + _Rb_up)
             else:
                 _rl_lo = {r: 0.0 for r in preferred_meter}
                 _rl_hi = dict(caps)
@@ -2742,6 +2751,10 @@ class WuFaithfulFollower:
             )
             self._seg13_diag[f"wu_seg13_meter_box_edge_{link}"] = float(_meter_box_edge)
             self._seg13_diag[f"wu_seg13_meter_box_total_{link}"] = float(_meter_box_total)
+            _bu_d = getattr(self.cfg.mpc, "seg13_meter_box_up_veh_h", None)
+            if _bu_d is not None:
+                # 비대칭 영수증 — 이 컬럼 존재 = up 플래그가 SEG13 경로에 도달.
+                self._seg13_diag[f"wu_seg13_meter_box_rup_{link}"] = float(_bu_d)
         return vsl_out, meter_out, evals
 
     # ---------- freeway agent: 진짜 ramp metering 탐색 (핵심 신규) ----------

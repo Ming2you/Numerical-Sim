@@ -377,6 +377,10 @@ class MPCConfig:
     # 같은 박스로 clamp(박스=하드, 예산이 양보). None=기존 격자 = 비트동일(기본).
     # SEG13 경로 전용 — 비-SEG13은 이미 metering_marginal_price_trust_frac이 묶는다.
     seg13_meter_box_veh_h: Optional[float] = None
+    # 비대칭 박스 올림폭(2026-07-17 2차): 대칭 박스 파국 2셀(170_w −140.9%/200_w −36.3%)이
+    # 전부 '낮은 곳에 갇혀 못 올라옴'(리더 intent 후반 3651/4054 vs PD4 5895/5780)이라
+    # 올림(방류·회복 방향)만 넓힌다. None=seg13_meter_box_veh_h와 동일(대칭, 기존 거동).
+    seg13_meter_box_up_veh_h: Optional[float] = None
     leader_continuous_max_evals: int = 25
     leader_continuous_seed_count: int = 7
     leader_continuous_prefilter_samples: int = 31
