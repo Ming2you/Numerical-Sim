@@ -713,6 +713,12 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
     if _os.environ.get("FAR_FF") == "1":
         # far 자유류 오프셋(자기정규화 수선) — 검증 전 기본 OFF.
         cfg.mpc.leader_mfd_far_freeflow_offset = True
+    if _os.environ.get("METER_PRICE_W") and hasattr(controller, "nash_solver"):
+        # metering marginal price 가중(기본 1.0). 실측: price 항이 own-TTS를 지배해
+        # 내부 rung 선택 0/160(부호→끝점 80~85%) — w<1이면 own-TTS 곡률이 살아나
+        # 내부 최적 가능. w→0 = 분해 손실 복귀(PFO metering)이므로 스윕으로 균형점 탐색.
+        controller.nash_solver.metering_marginal_price_weight = float(
+            _os.environ["METER_PRICE_W"])
     if _os.environ.get("NP_OFF") == "1" and hasattr(controller, "nash_solver"):
         # D-green 진단 probe: N_P dual(λ_P) 차단 — 8-seg 경부하 λ 폭주 인과 확인용.
         controller.nash_solver.np_price_enabled = False
