@@ -1,4 +1,7 @@
-# 전체 파이프라인 드라이버 — sanity gate 후 8종 그림 + 표1 골격을 순차 생성
+# 전체 파이프라인 드라이버 — sanity gate 후 그림(1차 8종 + 2차 ramp큐/밀도/MFD) + 표1 골격을 순차 생성
+import f_mfd
+import f_rampq
+import f_rho
 import fig_intent
 import fig_lambda
 import fig_meter_ramps
@@ -11,7 +14,8 @@ import make_table1
 import pubstyle as ps
 
 MODULES = [fig_meter_ramps, fig_meter_total, fig_intent, fig_tttgap,
-           fig_ttt_traj, fig_vsl_seg, fig_lambda, fig_rung_hist, make_table1]
+           fig_ttt_traj, fig_vsl_seg, fig_lambda, fig_rung_hist,
+           f_rampq, f_rho, f_mfd, make_table1]
 
 
 def main():
