@@ -79,3 +79,6 @@ Urban and Freeway Networks," IEEE TCST 30(1), pp. 57–70을 로컬 PDF에서 �
 수의 본문 상충 — p. 65는 "two freeway agents", p. 66은 "six freeway agents"로
 서술이 엇갈린다(재현에는 영향 없음 — 본 구현의 agent 분할은 자체 망 기준). ③ 시나리오
 1–3의 수요 프로파일 수치(정성 서술만 확인됨).
+
+
+**SLSQP 변형 실측(2026-07-18)**: scipy 설치 후 단독 런에서 첫 결정 스텝 425.8 s(제어주기 180 s의 2.4배, grid의 ~10배) — **실시간 위반으로 제외**. P-CENT-grid가 '동일 budget의 실시간 가능한 중앙집중 참조'로 정당함이 사후 확인됨. (역사적으로는 scipy 부재로 조용히 grid 폴백됐던 것 — 진단 마커 slsqp_available=0.0이 증거.)
