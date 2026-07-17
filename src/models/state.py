@@ -385,6 +385,10 @@ class MPCConfig:
     # commit(previous)으로 + 반폭 R[km/h]. 기존은 sweep마다 재앵커돼 스텝당 실측 50
     # (명목 max_vsl_step 20의 2.5배, ③ 10셀 위반 112/7020). None=기존(비트동일).
     seg13_vsl_box_kmh: Optional[float] = None
+    # BOX-WALK(2026-07-17 3차): 리더 rollout(_predict)에서 2번째 interval부터 metering을
+    # 후보 intent(N_UF*) 방향으로 스텝당 램프별 ±R 전진 — 박스의 다중스텝 도달을 채점에
+    # 반영("박스 끝 너머가 안 보임" 200_w −29.78% 수선 겸 가설 검증). 기본 False=비트동일.
+    leader_rollout_box_walk: bool = False
     leader_continuous_max_evals: int = 25
     leader_continuous_seed_count: int = 7
     leader_continuous_prefilter_samples: int = 31

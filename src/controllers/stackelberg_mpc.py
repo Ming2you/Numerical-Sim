@@ -2292,7 +2292,58 @@ class StackelbergMPCController:
         depth = self.cfg.mpc.horizon_steps + max(0, int(getattr(self.cfg.mpc, "leader_value_depth", 0)))
         if depth_override is not None:
             depth = max(1, int(depth_override))
-        for demand in forecast[:depth]:
+        # BOX-WALK(2026-07-17, 사용자 설계 3차): 기존 rollout은 solve된 control을 horizon에
+        # 고정 — METER-BOX 하에선 m_prev가 낮을 때 박스 밖 모든 후보(N_UF* 3300이든
+        # 6000이든)의 1스텝 실현값이 동일해 V가 구분 불가("박스 끝 너머가 안 보임").
+        # 실측(200_w): ③ 리더는 회복기에 6000 전량방류, box 리더는 intent 3190~3374 고정
+        # → 방류 3000 고착 → ramp 큐 2.4배 → −29.78%. walk ON이면 rollout의 2번째
+        # interval부터 metering을 후보 intent(N_UF*) 방향으로 스텝당 램프별 ±R씩 전진시켜
+        # 다중스텝 도달을 채점에 반영한다. 후보별로 목표가 달라 V가 다시 구분된다.
+        # 가드: incumbent/PFO probe(leader=None)는 N_UF_star=0(follower L4244)이라 walk하면
+        # 0으로 끌려가 오염 → N_UF_star>0일 때만. 기본 False=비트동일.
+        _walk_r = getattr(self.cfg.mpc, "seg13_meter_box_veh_h", None)
+        _do_walk = (
+            bool(getattr(self.cfg.mpc, "leader_rollout_box_walk", False))
+            and _walk_r is not None
+            and bool(control.ramp_metering)
+            and float(getattr(control, "N_UF_star", 0.0)) > 0.0
+        )
+        if _do_walk:
+            import copy as _copy
+            _r_dn = float(_walk_r)
+            _bu_w = getattr(self.cfg.mpc, "seg13_meter_box_up_veh_h", None)
+            _r_up = float(_bu_w) if _bu_w is not None else _r_dn
+            _net = self.cfg.network
+            _caps = {r: float(_net.ramp_capacity_veh_h[r]) for r in control.ramp_metering}
+            _target_total = float(control.N_UF_star)
+            # 얕은 사본 + ramp dict 교체 — 원본(commit 후보 control)은 불변.
+            _ctrl_w = _copy.copy(control)
+            _ctrl_w.ramp_metering = dict(control.ramp_metering)
+            control = _ctrl_w
+        for _k, demand in enumerate(forecast[:depth]):
+            if _do_walk and _k >= 1:
+                _m = control.ramp_metering
+                _gap = _target_total - sum(_m.values())
+                if _gap > 1.0e-9:
+                    # 여유 큰 램프부터 스텝당 ≤ R_up씩 올림(_scale_to deficit 루프와 동형).
+                    for _r in sorted(_m, key=lambda x: _caps[x] - _m[x], reverse=True):
+                        _step = min(_r_up, _caps[_r] - _m[_r], _gap)
+                        if _step <= 0.0:
+                            continue
+                        _m[_r] += _step
+                        _gap -= _step
+                        if _gap <= 1.0e-9:
+                            break
+                elif _gap < -1.0e-9:
+                    _need = -_gap
+                    for _r in sorted(_m, key=lambda x: _m[x], reverse=True):
+                        _step = min(_r_dn, _m[_r], _need)
+                        if _step <= 0.0:
+                            continue
+                        _m[_r] -= _step
+                        _need -= _step
+                        if _need <= 1.0e-9:
+                            break
             result = run_coupled_interval(s, control, demand, self.cfg)
             s.time_sec += self.cfg.simulation.control_interval
             total_ttt += result.freeway_ttt + result.urban_ttt
