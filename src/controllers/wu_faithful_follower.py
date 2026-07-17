@@ -672,6 +672,7 @@ class WuFaithfulFollower:
         horizon_h: float = 1.0,
         demand: Optional[DemandStep] = None,
         candidates_override: Optional[Sequence[float]] = None,
+        committed_prev: Optional[ControlAction] = None,
     ) -> tuple[float, float, int, float]:
         """green p1 후보 탐색 — 반환 (p1*, 자기 TTS objective, evaluations, nin_i*).
 
@@ -797,6 +798,16 @@ class WuFaithfulFollower:
                 ]
                 if trusted:
                     candidates = trusted
+            # BASELINE-BOX green(2026-07-17): PFO는 가격 부재 → 위 trust 미발동 →
+            # green 무제한(실측 per-step 최대 57s). walk-MVG와 동일 한계 ±6s.
+            # ★앵커는 committed_prev(직전 step commit)다 — 이 함수의 previous 인자는
+            # 메인 루프가 snapshot(Jacobi 반복값)을 넘겨서(L3791) sweep마다 재앵커되면
+            # 스텝당 12s 누수(실측). VSL 구멍과 동일 패턴.
+            if (bool(getattr(self.cfg.mpc, "baseline_move_box", False))
+                    and committed_prev is not None):
+                _bg = float(committed_prev.green_times.get(f"{signal}_p1", prev_p1))
+                _bk = [p1 for p1 in candidates if abs(p1 - _bg) <= 6.0 + 1.0e-9]
+                candidates = _bk or [min(candidates, key=lambda p1: abs(p1 - _bg))]
 
         # Leader N_P 추적. 두 모드:
         #  (A) use_dual_np=True(기본, 듀얼 분해): 후보 비용에 + λ_P·nin_i(green)을 더한다.
@@ -1455,6 +1466,7 @@ class WuFaithfulFollower:
         forecast_arrivals: Optional[Mapping[str, float]],
         horizon_h: float,
         demand: DemandStep,
+        previous: Optional[ControlAction] = None,
     ):
         """non-ramp 신호의 green_p1과 offset을 2D 격자로 함께 채점해 joint 최적점 반환.
 
@@ -1542,6 +1554,11 @@ class WuFaithfulFollower:
             trusted = [p for p in green_cands if abs(p - green_ref) <= float(green_trust) + 1.0e-9]
             if trusted:
                 green_cands = trusted
+        # BASELINE-BOX green(joint 경로): local 경로와 동일 — PFO 무제한 green에 ±6s.
+        if bool(getattr(self.cfg.mpc, "baseline_move_box", False)) and previous is not None:
+            _bgj = float(previous.green_times.get(f"{signal}_p1", prev_p1))
+            _bkj = [p for p in green_cands if abs(p - _bgj) <= 6.0 + 1.0e-9]
+            green_cands = _bkj or [min(green_cands, key=lambda p: abs(p - _bgj))]
         offset_cands = []
         for frac in self.offset_fractions:
             offset = (frac * cycle) % cycle
@@ -2784,6 +2801,7 @@ class WuFaithfulFollower:
         demand: DemandStep,
         snapshot: ControlAction,
         leader: Optional[object] = None,
+        previous: Optional[ControlAction] = None,
     ) -> tuple[Dict[str, float], Dict[str, float], int]:
         """freeway agent의 VSL + ramp_metering 결합 탐색 — 반환 (vsl_dict, metering_dict, evals).
 
@@ -2806,6 +2824,32 @@ class WuFaithfulFollower:
         net = self.cfg.network
         owned_ramps = [r for r in net.ramps if net.ramp_to_freeway.get(r) == link]
         caps = {r: float(net.ramp_capacity_veh_h[r]) for r in owned_ramps}
+        # BASELINE-BOX(2026-07-17, 사용자 지시): PFO 경로 metering 이동 한계 — walk-MVG의
+        # METER-BOX와 동일 규약(prev commit 앵커 ±300). 실측: 무제한 PFO는 per-step 최대
+        # 1125(격자 전폭) 점프 → 공정비교(§2.4 authority group 내 bounds 통일) 위반.
+        _bb_on = (
+            bool(getattr(self.cfg.mpc, "baseline_move_box", False))
+            and previous is not None
+        )
+        _bb: Dict[str, tuple] = {}
+        _bb_cands: Dict[str, list] = {}
+        if _bb_on:
+            for _r in owned_ramps:
+                _p = min(max(float(previous.ramp_metering.get(_r, caps[_r])), 0.0), caps[_r])
+                _bb[_r] = (max(0.0, _p - 300.0), min(caps[_r], _p + 300.0))
+                # 격자 흡수 방지(실측: ±300 필터만 걸면 1500에서 격자 간극 450에 막혀
+                # 동결) — walk-MVG METER-BOX와 동일하게 격자 대신 박스 점 5개로 교체.
+                _bb_cands[_r] = sorted(
+                    {round(min(max(_p + _off, 0.0), caps[_r]), 6)
+                     for _off in (-300.0, -150.0, 0.0, 150.0, 300.0)},
+                    reverse=True,
+                )
+
+        def _bb_ok(_r: str, _v: float) -> bool:
+            if not _bb_on:
+                return True
+            _lo, _hi = _bb[_r]
+            return _lo - 1.0e-9 <= float(_v) <= _hi + 1.0e-9
         evals_total = 0
 
         def _solve_with(meter: Mapping[str, float]) -> tuple[Dict[str, float], float, int]:
@@ -2913,6 +2957,9 @@ class WuFaithfulFollower:
                 r: float(np.clip(snapshot.ramp_metering.get(r, caps[r]), 0.0, caps[r]))
                 for r in owned_ramps
             }
+            if _bb_on:
+                # snapshot(반복 내부값)이 박스 밖일 수 있어 초기점도 박스로 clip.
+                best_meter = {r: min(max(best_meter[r], _bb[r][0]), _bb[r][1]) for r in owned_ramps}
             best_vsl, best_cost, e0 = _solve_with(best_meter)
             best_cost += _price_metering_cost(best_meter)
             evals_total += e0
@@ -2922,6 +2969,10 @@ class WuFaithfulFollower:
                 values.update(
                     float(frac) * caps[ramp] for frac in self.ramp_metering_fractions
                 )
+                if _bb_on:
+                    # BASELINE-BOX: 박스 밖 후보 제거 + 박스 점 추가(격자 흡수 방지).
+                    values = ({v for v in values if _bb_ok(ramp, v)}
+                              | set(_bb_cands[ramp]) | {local_best})
                 # B3CERT(비대칭 안전 증명서): 미인증 ramp는 방류 증가(> ref) 후보 제외.
                 # 조임 방향은 가역이라 항상 허용 — trust 이동성 보장보다 우선한다.
                 cert_ok = True
@@ -3022,13 +3073,16 @@ class WuFaithfulFollower:
                     r: float(np.clip(snapshot.ramp_metering.get(r, caps[r]), 0.0, caps[r]))
                     for r in owned_ramps
                 }
+                if _bb_on:
+                    best_meter = {r: min(max(best_meter[r], _bb[r][0]), _bb[r][1]) for r in owned_ramps}
                 best_vsl, best_cost, e0 = _solve_with(best_meter)
                 best_cost += _price_uf(best_meter)
                 evals_total += e0
                 for ramp in owned_ramps:
                     local_best = best_meter[ramp]
-                    for frac in self.ramp_metering_fractions:
-                        cand_val = frac * caps[ramp]
+                    _cand_vals = (_bb_cands[ramp] if _bb_on else
+                                  [f * caps[ramp] for f in self.ramp_metering_fractions])
+                    for cand_val in _cand_vals:
                         if abs(cand_val - best_meter[ramp]) <= 1.0e-9:
                             continue
                         trial = dict(best_meter)
@@ -3060,15 +3114,19 @@ class WuFaithfulFollower:
                 best_vsl, best_cost, e0 = _solve_with(best_meter)
                 evals_total += e0
                 for ramp in owned_ramps:
-                    for frac in self.ramp_metering_fractions:
+                    _cand_vals2 = (_bb_cands[ramp] if _bb_on else
+                                   [f * caps[ramp] for f in self.ramp_metering_fractions])
+                    for _cv in _cand_vals2:
                         trial = dict(best_meter)
-                        trial[ramp] = frac * caps[ramp]
+                        trial[ramp] = _cv
                         trial = _project_to_cap(trial)
                         if all(
                             abs(trial[r] - best_meter[r]) <= 1.0e-9
                             for r in owned_ramps
                         ):
                             continue
+                        if _bb_on and any(not _bb_ok(r, trial[r]) for r in owned_ramps):
+                            continue  # BASELINE-BOX: 사영 후에도 박스 준수 필요.
                         vsl_dict, cost, e = _solve_with(trial)
                         evals_total += e
                         if cost < best_cost:
@@ -3120,6 +3178,8 @@ class WuFaithfulFollower:
         best_meter = {
             r: float(snapshot.ramp_metering.get(r, caps[r])) for r in owned_ramps
         }
+        if _bb_on:
+            best_meter = {r: min(max(best_meter[r], _bb[r][0]), _bb[r][1]) for r in owned_ramps}
         # 초기 best 비용·VSL(현재 metering에서).
         best_vsl, best_cost, e0 = _solve_with(best_meter)
         best_cost += _price_metering_cost(best_meter)
@@ -3128,10 +3188,12 @@ class WuFaithfulFollower:
         # ramp별 좌표하강: 각 ramp의 5개 분율을 훑어 own-TTS 최저 분율로 갱신.
         for ramp in owned_ramps:
             local_best_meter = best_meter[ramp]
-            for frac in self.ramp_metering_fractions:
-                cand_val = frac * caps[ramp]
+            _cand_vals3 = (_bb_cands[ramp] if _bb_on else
+                           [f * caps[ramp] for f in self.ramp_metering_fractions])
+            for cand_val in _cand_vals3:
                 if abs(cand_val - best_meter[ramp]) <= 1.0e-9:
                     continue  # 이미 평가된 현재값.
+
                 # B3CERT: 미인증 ramp의 방류 증가 후보는 스킵(비대칭, trust보다 우선).
                 if (
                     self.metering_marginal_price is not None
@@ -3743,6 +3805,7 @@ class WuFaithfulFollower:
                         signal, state, coupling, arr_movement, s_eff_frozen,
                         reservoir_drain, freeway_congestion, snapshot, leader,
                         lam_fixed, forecast_arrivals, horizon_h, demand,
+                        committed_prev=previous,
                     )
                     new_green[f"{signal}_p1"] = p1
                     new_green[f"{signal}_p2"] = net.effective_green_total - p1
@@ -3950,6 +4013,7 @@ class WuFaithfulFollower:
                         joint = self._solve_urban_agent_joint(
                             signal, state, coupling, arr_movement, s_eff_frozen,
                             control, leader, lambda_p, forecast_arrivals, horizon_h, demand,
+                            previous,
                         )
                         if joint is not None:
                             jp1, joff, _, je, _ = joint
@@ -3996,7 +4060,7 @@ class WuFaithfulFollower:
                 continue
             if self.metering_enabled:
                 vsl_dict, meter_dict, e = self._solve_freeway_agent_metered(
-                    link, state, coupling, demand, meter_snapshot, leader,
+                    link, state, coupling, demand, meter_snapshot, leader, previous,
                 )
                 control.ramp_metering.update(meter_dict)
             else:

@@ -579,6 +579,9 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
     if _os.environ.get("BOX_WALK_VG") == "1":
         # VSL·green도 rollout에 끝 지속(edge persistence) walk. BOX_WALK와 병용 권장.
         cfg.mpc.leader_rollout_box_walk_vg = True
+    if _os.environ.get("BASELINE_BOX") == "1":
+        # PFO(비-SEG13) 이동 한계를 walk-MVG와 동일치로(meter 300/green 6s) — 공정비교용.
+        cfg.mpc.baseline_move_box = True
     if _os.environ.get("NUF_RADIUS"):
         # 반경 상수 override. trust 산수 복원치 = 4램프 × 0.20 × 1500 = 1200.
         cfg.mpc.leader_local_nuf_radius_veh_h = float(_os.environ["NUF_RADIUS"])

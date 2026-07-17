@@ -393,6 +393,11 @@ class MPCConfig:
     # 이동 모델링. 후보가 목표를 안 주므로 끝 지속(edge persistence) — 이번 solve가 이동
     # 한계 끝까지 밀었으면 rollout에서 같은 방향·속도로 전진(전역 한계 정지). 기본 False.
     leader_rollout_box_walk_vg: bool = False
+    # BASELINE-BOX(2026-07-17 밤, 사용자 지시 "PFO도 이동 반경"): 비-SEG13(PFO) 경로에
+    # walk-MVG와 동일한 per-step 이동 한계 — metering |Δ|≤300(prev 앵커), green ±6s.
+    # 실측: 무제한 PFO는 metering 최대 1125/green 최대 57s(공정비교 §2.4 위반).
+    # VSL은 PFO 실측 이동 0이라 미적용. 기본 False=비트동일.
+    baseline_move_box: bool = False
     leader_continuous_max_evals: int = 25
     leader_continuous_seed_count: int = 7
     leader_continuous_prefilter_samples: int = 31
