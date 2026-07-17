@@ -1,0 +1,34 @@
+8seg_pulse_dhigh2_w_base3        NO-CONTROL   wTTT=  12426.3 wComp=   12067 wATT= 61.79
+8seg_pulse_dhigh2_w_base3        WU-CD-F      wTTT=  11790.7 wComp=   12455 wATT= 56.80
+8seg_pulse_dhigh2_w_base3        WU-FAITHFUL- wTTT=   4407.1 wComp=   21055 wATT= 12.56
+8seg_pulse_dhigh2_w_pd4          P-STACK-WU-F wTTT=   6695.0 wComp=   17462 wATT= 23.00
+8seg_pulse_dhigh_w_base3         NO-CONTROL   wTTT=   9120.2 wComp=   12139 wATT= 45.08
+8seg_pulse_dhigh_w_base3         WU-CD-F      wTTT=   8527.1 wComp=   12578 wATT= 40.68
+8seg_pulse_dhigh_w_base3         WU-FAITHFUL- wTTT=   2632.2 wComp=   18861 wATT=  8.37
+8seg_pulse_dhigh_w_pd4           P-STACK-WU-F wTTT=   2609.9 wComp=   18853 wATT=  8.31
+8seg_pulse_dmid_w_base3          NO-CONTROL   wTTT=   5538.8 wComp=   12663 wATT= 26.24
+8seg_pulse_dmid_w_base3          WU-CD-F      wTTT=   5296.0 wComp=   12918 wATT= 24.60
+8seg_pulse_dmid_w_base3          WU-FAITHFUL- wTTT=   1493.3 wComp=   16855 wATT=  5.32
+8seg_pulse_dmid_w_pd4            P-STACK-WU-F wTTT=   1557.1 wComp=   16850 wATT=  5.54
+8seg_dsust_155_base3             NO-CONTROL   wTTT=  27600.8 wComp=   14051 wATT=117.86
+8seg_dsust_155_base3             WU-CD-F      wTTT=  27391.0 wComp=   14076 wATT=116.76
+8seg_dsust_155_base3             WU-FAITHFUL- wTTT=  16854.8 wComp=   26093 wATT= 38.76
+8seg_dsust_155_pd4               P-STACK-WU-F wTTT=  18393.0 wComp=   23014 wATT= 47.95
+8seg_dsust_170_base3             NO-CONTROL   wTTT=  31851.8 wComp=   14019 wATT=136.32
+8seg_dsust_170_base3             WU-CD-F      wTTT=  31504.8 wComp=   14119 wATT=133.88
+8seg_dsust_170_base3             WU-FAITHFUL- wTTT=  21326.3 wComp=   25709 wATT= 49.77
+8seg_dsust_170_pd4               P-STACK-WU-F wTTT=  21815.0 wComp=   25740 wATT= 50.85
+8seg_dsust_190_base3             NO-CONTROL   wTTT=  37342.7 wComp=   14172 wATT=158.09
+8seg_dsust_190_base3             WU-CD-F      wTTT=  36878.0 wComp=   14307 wATT=154.65
+8seg_dsust_190_base3             WU-FAITHFUL- wTTT=  26418.0 wComp=   25875 wATT= 61.26
+8seg_dsust_190_pd4               P-STACK-WU-F wTTT=  27281.9 wComp=   23917 wATT= 68.44
+8seg_dsym_110_base3              NO-CONTROL   wTTT=  21217.6 wComp=   13196 wATT= 96.47
+8seg_dsym_110_base3              WU-CD-F      wTTT=  20955.3 wComp=   13239 wATT= 94.97
+8seg_dsym_110_base3              WU-FAITHFUL- wTTT=  10359.1 wComp=   24818 wATT= 25.04
+8seg_dsym_110_pd4                P-STACK-WU-F wTTT=  10654.6 wComp=   24631 wATT= 25.95
+8seg_dsym_120_base3              NO-CONTROL   wTTT=  25432.4 wComp=   12924 wATT=118.07
+8seg_dsym_120_base3              WU-CD-F      wTTT=  25182.5 wComp=   13006 wATT=116.18
+8seg_dsym_120_base3              WU-FAITHFUL- wTTT=  14588.8 wComp=   24948 wATT= 35.09
+8seg_dsym_120_pd4                P-STACK-WU-F wTTT=  15759.8 wComp=   21874 wATT= 43.23
+8seg_dsym_110_pd4_fbon           P-STACK-WU-F wTTT=  10654.6 wComp=   24631 wATT= 25.95
+8seg_dhigh2w_pd4_fbon            P-STACK-WU-F wTTT=   6695.0 wComp=   17462 wATT= 23.00

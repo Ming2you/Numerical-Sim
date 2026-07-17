@@ -25,6 +25,7 @@ from src.controllers.joint_wu_controllers import (
     JointB2TRController,
     JointF1Controller,
 )
+from src.controllers.centralized_mpc import CentralizedMPC
 from src.controllers.stackelberg_wu_metered import StackelbergWuMeteredController
 from src.controllers.wu_faithful_follower import WuFaithfulFollower
 from src.models.demand import DemandProfile, apply_scenario_network_overrides, load_scenarios
@@ -82,6 +83,15 @@ def build_cfg(scenario_name: str, t_total: float) -> tuple[ExperimentConfig, Any
         },
         "simulation": {"T_total": float(t_total)},
     }
+    import os as _os
+    if _os.environ.get("NET4SEG") == "1":
+        # legacy 4-seg 재현 전용(2026-07-12부터 default.yaml 자체가 8-seg).
+        # 구 NET8SEG=1은 무의미(디폴트가 이미 8-seg).
+        overrides["network"] = {
+            "freeway_segments_per_link": 4,
+            "ramp_merge_segment_index": {"R_D_W": 2, "R_F_W": 3, "R_D_E": 2, "R_F_E": 3},
+            "off_ramp_segment_index": {"OR_D_W": 1, "OR_F_W": 2, "OR_D_E": 1, "OR_F_E": 2},
+        }
     cfg = ExperimentConfig.from_file(str(ROOT / "src" / "config" / "default.yaml"), overrides)
     scenarios = load_scenarios(str(ROOT / "src" / "config" / "scenarios.yaml"))
     scenario = scenarios[scenario_name]
@@ -257,6 +267,17 @@ def make_controller(controller_id: str, cfg: ExperimentConfig):
         controller.green_offset_cross_price_enabled = True
         controller.vsl_meter_cross_price_enabled = True
         controller.nash_solver.joint_green_offset_enabled = True
+        # metering δ 스캔 승자(2026-07-15): δ=300 + trust_frac=0.20(=반경 300veh/h) 짝.
+        # 170_skew_w wTTT 3244.7(baseline)→3089(회랑 floor 0.65 단독)→3028(δ=300 추가),
+        # 190_w 5419.4→5357(floor)→5045(δ). METER_PRICE_DELTA env가 미지정일 때만 적용
+        # (env가 δ·trust를 직접 주면 그 값 우선). **주의: δ·trust는 짝으로만 유효** —
+        # trust=0.20 단독(δ=60)은 3186으로 오히려 열화, δ=300은 반드시 함께 줘야 한다.
+        # **선결조건: 회랑 예산 floor(seg13_release_floor_frac=0.65)** — floor 없이 이
+        # 반경이면 과소방류 나선(d300_floor0 wTTT 3768). 수량 floor와 짝으로만 안전.
+        import os as _os_mpd
+        if "METER_PRICE_DELTA" not in _os_mpd.environ:
+            controller.metering_price_delta_veh_h = 300.0
+            controller.metering_price_trust_frac = 0.20
         return controller
     # ---- G1DF-NORHO(2026-07-07): g1df에서 rho_crit 안전장치 2종 제거 — 진단 ----
     # 사용자 진단: freeway follower의 F1 ρ_crit hinge(own-TTS penalty)와 leader의 density_headroom
@@ -415,12 +436,37 @@ def make_controller(controller_id: str, cfg: ExperimentConfig):
         return StackelbergWuMeteredController(cfg)
     if controller_id == "CLASSICAL-HIERARCHICAL":
         return ClassicalHierarchicalController(cfg)
+    if controller_id == "P-CENT":
+        # 중앙 천장 측정기(2026-07-10): 전권 joint 최적화 + far tail 채점(신규 이식).
+        return CentralizedMPC(cfg, mode="proposed")
+    if controller_id == "P-CENT-POLISH":
+        # 진짜 중앙 상한(2026-07-10): 플래그십 해를 격자 중심(previous)으로 한 중앙 polish.
+        # _structured_grid_search가 center/previous를 후보에 포함하므로 polish 채점(H rollout
+        # +far) 기준으로 플래그십 이하로 내려갈 수 없음 — 개선분 = lever별 headroom 측정.
+        class _PolishController:
+            def __init__(self, cfg_):
+                self.flag = make_controller("P-STACK-WU-FAITHFUL-ALLPRICE-JOINT", cfg_)
+                self.cent = CentralizedMPC(cfg_, mode="proposed")
+
+            def decide(self, state, forecast, previous):
+                base = self.flag.decide(state, forecast, previous)
+                info = self.cent.decide_with_info(state.copy(), forecast, previous_control=base)
+                info.control.diagnostics["polish_improved"] = float(
+                    info.control.diagnostics.get("centralized_grid_early_terminated", 0.0) == 0.0
+                )
+                return info.control
+
+        return _PolishController(cfg)
     raise ValueError(f"Unknown controller: {controller_id}")
 
 
 def decide(controller_id: str, controller, sim: MixedTrafficSimulator, forecast, previous, cfg, step: int):
     if controller_id == "NO-CONTROL":
         return baseline_control("no_control", cfg, sim.state, forecast[0])
+    if controller_id == "P-CENT":
+        return controller.decide_with_info(sim.state.copy(), forecast, previous).control
+    if controller_id == "P-CENT-POLISH":
+        return controller.decide(sim.state.copy(), forecast, previous)
     if controller_id in {
         "WU-CD-F",
         "WU-FAITHFUL-FOLLOWER",
@@ -532,6 +578,120 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
         controller.candidate_dedupe_enabled = True  # A1: 같은 N_UF 후보 solve+rollout 재사용
     if _os.environ.get("PRICE_LITE") == "1" and hasattr(controller, "price_lite"):
         controller.price_lite = True  # B: baseline+one-sided+스텐실 재활용+얕은 가격 rollout
+    if _os.environ.get("METER_PRICE_DELTA") and hasattr(controller, "metering_price_delta_veh_h"):
+        # δ 스캔(2026-07-14): metering 가격 FD probe 폭 override. 기존 d_r =
+        # max(δ, trust_frac·cap)에선 trust(0.25·1500=375)가 작은 δ를 가리므로, B3TR
+        # 원칙(측정한 구간에서만 가격 유효 — 측정폭=trust 반경)을 유지한 채 δ가
+        # 지배하도록 trust_frac도 δ/cap으로 연동(cap 균일 1500). 상향 cert 게이트 불변.
+        _mpd = float(_os.environ["METER_PRICE_DELTA"])
+        controller.metering_price_delta_veh_h = _mpd
+        if getattr(controller, "metering_price_trust_frac", None) is not None:
+            _cap_min = min(cfg.network.ramp_capacity_veh_h.values())
+            controller.metering_price_trust_frac = _mpd / max(_cap_min, 1.0e-9)
+    if _os.environ.get("OFFSET_PRICE") == "1" and hasattr(controller, "offset_price_enabled"):
+        # 단일 offset 가격 진단 프로브(2026-07-15): 순수 offset 그래디언트 스파이크 관측용
+        # (green×offset cross와 분리). 기본 OFF — env 지정 시에만.
+        controller.offset_price_enabled = True
+    if _os.environ.get("VSL_PRICE_DELTA") and hasattr(controller, "vsl_price_delta_kmh"):
+        # Task C cross probe(2026-07-14): vsl 가격 FD 폭 override — vsl×meter cross의
+        # δv를 δm과 비례 확대해 2차 혼합곡률 재측정(소δ에서 죽는지 vs 진짜 평탄).
+        controller.vsl_price_delta_kmh = float(_os.environ["VSL_PRICE_DELTA"])
+    if _os.environ.get("GREEN_PRICE_DELTA") and hasattr(controller, "signal_price_delta_sec"):
+        # green 가격 FD 폭 override — green×offset cross의 δp 확대(6→24s 등) 겸용.
+        controller.signal_price_delta_sec = float(_os.environ["GREEN_PRICE_DELTA"])
+    if _os.environ.get("GO_CROSS_OFFSET_DELTA") and hasattr(controller, "green_offset_cross_offset_delta_sec"):
+        controller.green_offset_cross_offset_delta_sec = float(_os.environ["GO_CROSS_OFFSET_DELTA"])
+    if _os.environ.get("RELEASE_FLOOR") is not None:
+        # 회랑 예산 하한 α override: 0=구 부등식(하한 없음), 1=구 등식, 기본 0.65.
+        _rf_target = getattr(controller, "nash_solver", controller)
+        if hasattr(_rf_target, "seg13_release_floor_frac"):
+            _rf_target.seg13_release_floor_frac = float(_os.environ["RELEASE_FLOOR"])
+    if _os.environ.get("SEG13") == "1":
+        # 13-player(2026-07-10 승인): freeway를 segment agent 8개로 분해 + 예산 simplex 사영.
+        # P-STACK 계열은 .nash_solver, PFO(WU-FAITHFUL-FOLLOWER)는 follower 자체가 controller.
+        _seg_target = getattr(controller, "nash_solver", controller)
+        if hasattr(_seg_target, "segment_agents"):
+            _seg_target.segment_agents = True
+        if _os.environ.get("SEG13_TRAJ") == "0" and hasattr(_seg_target, "seg13_traj_exchange"):
+            _seg_target.seg13_traj_exchange = False  # v0(hold-constant) 재현 A/B용
+        if _os.environ.get("SEG13_NBR") and hasattr(_seg_target, "seg13_neighbor_weight"):
+            # radius-1 국소 rollout + 이웃 차량수 비용(PFO 강화 기준선; 플래그십은 OFF 유지).
+            _seg_target.seg13_neighbor_weight = float(_os.environ["SEG13_NBR"])
+        if _os.environ.get("SEG13_INEQ") == "0" and hasattr(_seg_target, "seg13_budget_inequality"):
+            _seg_target.seg13_budget_inequality = False  # 등식 복원 A/B(2026-07-14 동결 후)
+        if _os.environ.get("SEG13_INEQ") == "1" and hasattr(_seg_target, "seg13_budget_inequality"):
+            # 예산 부등식 ablation: Σmeter ≤ budget(하향 자율 존중) — 170_skew whipsaw 인과 검증.
+            _seg_target.seg13_budget_inequality = True
+    if _os.environ.get("CAND"):
+        # 헤드룸 탐침: leader 후보 격자 밀도(OPT12 절감분 재투자 실험).
+        cfg.mpc.leader_candidate_count = int(_os.environ["CAND"])
+    if _os.environ.get("FH"):
+        # 헤드룸 탐침: freeway follower 예측 horizon(steps) 연장.
+        cfg.freeway_follower.freeway_prediction_horizon_steps = int(_os.environ["FH"])
+    if _os.environ.get("G_FW"):
+        # far freeway drain 계수 재보정 probe(8-seg: 본선 2차항이 자유류까지 과대 계상 가설).
+        cfg.mpc.leader_mfd_far_g_fw = float(_os.environ["G_FW"])
+    if _os.environ.get("FAR_FF") == "1":
+        # far 자유류 오프셋(자기정규화 수선) — 검증 전 기본 OFF.
+        cfg.mpc.leader_mfd_far_freeflow_offset = True
+    if _os.environ.get("NP_OFF") == "1" and hasattr(controller, "nash_solver"):
+        # D-green 진단 probe: N_P dual(λ_P) 차단 — 8-seg 경부하 λ 폭주 인과 확인용.
+        controller.nash_solver.np_price_enabled = False
+    if _os.environ.get("LEADER_HINGE") == "1":
+        # leader 채점 hinge 복원(F1 2종을 candidate 랭킹 전용으로 이관) — A/B용.
+        cfg.mpc.leader_hinge_enabled = True
+    if _os.environ.get("LEADER_HINGE") == "0":
+        # 기본 ON 전환(2026-07-12) 이후의 해제 ablation용.
+        cfg.mpc.leader_hinge_enabled = False
+    if _os.environ.get("NP_BIAS") == "1":
+        # r̂ 편향 보정: λ̂ target을 실현 공간으로 환산 — A/B용(기본 OFF).
+        cfg.mpc.np_bias_correction = True
+    if _os.environ.get("NP_CAP"):
+        # 방법 A cap 포화 A/B: λ 상한 override(기본 10.0 — dhigh2 잔차 +476~534 진단).
+        getattr(controller, "nash_solver", controller).lambda_np_cap = float(_os.environ["NP_CAP"])
+    if _os.environ.get("RELEASE_FLOOR_FIXED") == "1":
+        _seg_t = getattr(controller, "nash_solver", controller)
+        if hasattr(_seg_t, "seg13_release_floor_adaptive"):
+            _seg_t.seg13_release_floor_adaptive = False  # 고정 α=0.65 복원(A/B)
+    if _os.environ.get("NP_DEADBAND_V2") == "1":
+        # deadband v2: 위반 신호의 저stock 게이트 우회 — 잠금해제 A/B용(기본 OFF).
+        cfg.mpc.np_deadband_violation_override = True
+    if _os.environ.get("BETA_EST") == "1":
+        # 층2 β̂ 낙관편향 추정기(추정 전용, 행동 불변) — leader_beta_hat 등 진단 export.
+        cfg.mpc.leader_bias_estimator = True
+    if _os.environ.get("GUARD_BETA") == "1":
+        # 층2 β̂ 보정 guard: β̂·leader_pred vs incumbent_pred 비교(BETA_EST=1 필요).
+        cfg.mpc.fallback_guard_beta = True
+    if _os.environ.get("REGRET_K"):
+        # 층2 trailing-regret: 최근 k스텝 실현 > incumbent 예측×1.10 → k스텝 강제 incumbent.
+        cfg.mpc.regret_guard_steps = int(_os.environ["REGRET_K"])
+    if _os.environ.get("NP_PD_ITER"):
+        # 방법 A: candidate 내부 primal-dual 반복 K(0=OFF, 현행 λ̂ 1회 선반영).
+        cfg.mpc.np_primal_dual_iters = int(_os.environ["NP_PD_ITER"])
+    if _os.environ.get("FB_OFF") == "1":
+        # fallback guard 해제 — N_P-active leader 기각 억압 제거(잠금해제 A/B용).
+        cfg.mpc.stackelberg_enable_fallback = False
+    if _os.environ.get("EPS_GAP") == "1":
+        # ε-best-response gap probe(리뷰 2.2/2.8): 고정점 단독 재최적화 진단, 행동 불변.
+        cfg.mpc.eps_gap_probe = True
+    if _os.environ.get("NP_CAND_LAMBDA") == "1":
+        # 리뷰 4안: 후보별 λ̂ 1회 선반영 — N_P가 당스텝 follower 반응에 작용(A/B용).
+        cfg.mpc.np_candidate_lambda = True
+    if _os.environ.get("NP_CAND_LAMBDA") == "0":
+        # 구거동 재현(스텝 내 λ 동결) — 기본 ON 전환(2026-07-12) 이후의 ablation용.
+        cfg.mpc.np_candidate_lambda = False
+    if _os.environ.get("NP_FIX") == "0":
+        # λ windup 수선 해제(구거동 재현 A/B): 내부 투영·deadband 모두 끔.
+        cfg.mpc.np_target_interior_frac = 0.0
+        cfg.mpc.np_dual_deadband_frac = 0.0
+    if _os.environ.get("NUF_DUAL") == "1":
+        # 8단계 ablation: N_UF 총량을 equality 사영 대신 λ_UF dual(step 간 적분)로 추적.
+        cfg.mpc.wu_faithful_nuf_coordination_mode = "dual"
+    if _os.environ.get("SEG13_V1") == "1":
+        # SPLIT-PRICE v1 재현: incumbent도 meter 가격-레벨 조절(7p 플래핑 병리 A/B용).
+        _seg_t = getattr(controller, "nash_solver", controller)
+        if hasattr(_seg_t, "seg13_meter_price_standing"):
+            _seg_t.seg13_meter_price_standing = True
     previous: Optional[ControlAction] = None
     steps = max(1, int(round(cfg.simulation.T_total / cfg.simulation.control_interval)))
     run_rows: List[Dict[str, Any]] = []
@@ -545,7 +705,12 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
         t = step * cfg.simulation.control_interval
         forecast = profile.horizon(t, cfg.mpc.horizon_steps + max(0, cfg.mpc.leader_value_depth))
         t0 = time.perf_counter()
-        control = decide(controller_id, controller, sim, forecast, previous, cfg, step)
+        # WARMUP_NC_STEPS: 웜업 구간은 전 arm 공통 no-control(분석창 진입 상태 동일화 +
+        # 컨트롤러 계산 절약, 표준 관행). 미지정(0)이면 기존 거동.
+        if step < int(_os.environ.get("WARMUP_NC_STEPS", "0")):
+            control = baseline_control("no_control", cfg, sim.state, forecast[0])
+        else:
+            control = decide(controller_id, controller, sim, forecast, previous, cfg, step)
         compute_time = time.perf_counter() - t0
         log = sim.step(control, forecast[0], step)
         previous = control.copy()
@@ -563,7 +728,7 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
         # 가격(wu_b2_/b3_/b4_/f3_)·P1.5(wu_p15_)·joint(wu_j_) 진단은 control_row에 안 실리므로 수집.
         decision.update({
             k: float(v) for k, v in control.diagnostics.items()
-            if k.startswith(("wu_b2_", "wu_b3_", "wu_b4_", "wu_p15_", "wu_f3_", "wu_j_"))
+            if k.startswith(("wu_b2_", "wu_b3_", "wu_b4_", "wu_p15_", "wu_f3_", "wu_j_", "wu_joint_", "wu_lead_off_", "wu_eps_", "wu_faithful_np_", "wu_seg13_"))
             and isinstance(v, (int, float, bool))
         })
         decision_rows.append(decision)

@@ -1,0 +1,31 @@
+﻿cell,controller,wTTT_veh_h,pct_vs_PFO_ref,comp_mean_sec,comp_max_sec,completed_veh
+sweet_155_w,NC,런 대기,런 대기,런 대기,런 대기,런 대기
+sweet_155_w,WU-CD-F,런 대기,런 대기,런 대기,런 대기,런 대기
+sweet_155_w,PFO,런 대기,런 대기,런 대기,런 대기,런 대기
+sweet_155_w,P-CENT,런 대기,런 대기,런 대기,런 대기,런 대기
+sweet_155_w,walk-MVG,1685.35,5.1,66.11,116.47,10222.5
+sweet_170_w,NC,런 대기,런 대기,런 대기,런 대기,런 대기
+sweet_170_w,WU-CD-F,런 대기,런 대기,런 대기,런 대기,런 대기
+sweet_170_w,PFO,런 대기,런 대기,런 대기,런 대기,런 대기
+sweet_170_w,P-CENT,런 대기,런 대기,런 대기,런 대기,런 대기
+sweet_170_w,walk-MVG,2684.33,11.14,68.93,98.75,10999.0
+sweet_170_skew15_w,NC,런 대기,런 대기,런 대기,런 대기,런 대기
+sweet_170_skew15_w,WU-CD-F,런 대기,런 대기,런 대기,런 대기,런 대기
+sweet_170_skew15_w,PFO,런 대기,런 대기,런 대기,런 대기,런 대기
+sweet_170_skew15_w,P-CENT,런 대기,런 대기,런 대기,런 대기,런 대기
+sweet_170_skew15_w,walk-MVG,2666.97,9.81,69.42,111.24,11015.4
+sweet_170_incident_w,NC,런 대기,런 대기,런 대기,런 대기,런 대기
+sweet_170_incident_w,WU-CD-F,런 대기,런 대기,런 대기,런 대기,런 대기
+sweet_170_incident_w,PFO,런 대기,런 대기,런 대기,런 대기,런 대기
+sweet_170_incident_w,P-CENT,런 대기,런 대기,런 대기,런 대기,런 대기
+sweet_170_incident_w,walk-MVG,2295.23,3.03,65.31,111.67,10999.1
+sweet_190_w,NC,런 대기,런 대기,런 대기,런 대기,런 대기
+sweet_190_w,WU-CD-F,런 대기,런 대기,런 대기,런 대기,런 대기
+sweet_190_w,PFO,런 대기,런 대기,런 대기,런 대기,런 대기
+sweet_190_w,P-CENT,런 대기,런 대기,런 대기,런 대기,런 대기
+sweet_190_w,walk-MVG,5155.59,9.38,74.01,117.98,11705.3
+sweet_200_w,NC,런 대기,런 대기,런 대기,런 대기,런 대기
+sweet_200_w,WU-CD-F,런 대기,런 대기,런 대기,런 대기,런 대기
+sweet_200_w,PFO,런 대기,런 대기,런 대기,런 대기,런 대기
+sweet_200_w,P-CENT,런 대기,런 대기,런 대기,런 대기,런 대기
+sweet_200_w,walk-MVG,8684.25,-20.68,70.69,132.44,9778.8

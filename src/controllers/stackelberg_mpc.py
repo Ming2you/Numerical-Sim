@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import csv
+import sys
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,6 +14,141 @@ from src.controllers.leader import Leader, LeaderAction, leader_metadata
 from src.controllers.nash_solver import NashResult, NashSolver
 from src.models.demand import DemandStep
 from src.models.state import ControlAction, ExperimentConfig, TrafficState
+
+
+# ---------- 층3(2026-07-14): 수작업 캘리브레이션 성분의 기하 지문(경고 전용) ----------
+# 손튜닝 성분들은 특정 plant 기하(ramp merge 인덱스)에서 캘리브레이션된 암묵 전제를
+# 갖는다. 2026-07-13에 merge 인덱스가 {4,6}→{3,5}로 바뀌며 전제가 조용히 만료됐다 —
+# 이 지문은 그 만료를 __init__에서 감지해 stderr 경고 + 진단 카운트로 드러낸다.
+# 수치 경로에는 절대 개입하지 않는다(경고·진단만).
+_CALIB_MERGE_OLD_46 = {"R_D_W": 4, "R_F_W": 6, "R_D_E": 4, "R_F_E": 6}
+CALIBRATION_FINGERPRINTS: Dict[str, Dict[str, Dict[str, int]]] = {
+    # leader hinge 가중(leader_hinge_weight/spill_frac) — 2026-07-12 A/B는 구 merge {4,6}.
+    "leader_hinge": {"ramp_merge": dict(_CALIB_MERGE_OLD_46)},
+    # N_P dual deadband/내부투영(np_dual_deadband_frac/np_target_interior_frac) — 구 plant 튜닝.
+    "np_deadband": {"ramp_merge": dict(_CALIB_MERGE_OLD_46)},
+    # far(MFD tail) g 계수(leader_mfd_far_g_free/g_cong/g_fw/ncrit) — 구 plant probe calib.
+    "leader_mfd_far": {"ramp_merge": dict(_CALIB_MERGE_OLD_46)},
+}
+# 경고는 프로세스당 성분별 1회만(후보 worker 재생성 시 반복 스팸 방지).
+_calib_fingerprint_warned: set = set()
+
+
+def leader_hinge_cost(cfg: "ExperimentConfig", states: list, forecast=None) -> float:
+    """Leader 채점 전용 hinge(2026-07-12 복원, 사용자 지시 — follower/가격 채널 불변).
+
+    구 F1 follower hinge 2종을 leader의 candidate 채점(rollout 궤적)으로 이관:
+      freeway: Σ_t Σ_seg max(0, ρ − ρ_crit_eff)·L_seg·λ_eff  [임계 초과 차량수]
+      urban:   Σ_t Σ_link max(0, 점유 − frac·cap)            [spillback 여유부족, frac=0.5]
+    선형·차량수×T_c_h = veh·h(TTT 동단위, w=1이 1차 정확값). far와 같은 격리 수준 —
+    후보 랭킹에만 작용하고 가격 probe·follower 목적에는 들어가지 않는다(이중계상 방지).
+    leader_hinge_enabled=False(기본)면 0 — 비트동일."""
+    if not getattr(cfg.mpc, "leader_hinge_enabled", False):
+        return 0.0
+    from src.models.metanet import effective_rho_crit
+    net = cfg.network
+    tc_h = float(cfg.simulation.T_c_h)
+    w = float(getattr(cfg.mpc, "leader_hinge_weight", 1.0))
+    frac = float(getattr(cfg.mpc, "leader_hinge_spill_frac", 0.5))
+    seg_len = float(net.freeway_segment_length_km)
+    rho_crit = float(effective_rho_crit(net, None))
+    # hinge v2(2026-07-13, 155_incident +943 귀속 수선): 예정된 차로폐쇄(forecast의
+    # lane closure)가 걸린 segment는 과금 면제 — 폐쇄 유발 임계 초과는 어떤 후보도
+    # 회피할 수 없는 외생 혼잡이라, 과금하면 랭킹만 왜곡한다(통제 가능한 초과만 벌점).
+    exempt: set = set()
+    if forecast:
+        from src.models.demand import merge_freeway_lane_loss
+        merged = merge_freeway_lane_loss(list(forecast))
+        for link, seg_losses in merged.items():
+            for seg_idx, loss in seg_losses.items():
+                if float(loss) > 0.0:
+                    exempt.add((str(link), int(seg_idx)))
+    total = 0.0
+    for s in states:
+        excess = 0.0
+        for link in net.freeway_links:
+            dens = s.freeway_density.get(link, [])
+            lanes = s.freeway_effective_lanes.get(link, [])
+            for i, rho in enumerate(dens):
+                if (str(link), i) in exempt:
+                    continue
+                lam = float(lanes[i]) if i < len(lanes) else 1.0
+                excess += max(0.0, float(rho) - rho_crit) * seg_len * lam
+        for link, cap in net.urban_link_storage_veh.items():
+            avail = float(s.urban_link_storage.get(link, cap))
+            occ = max(0.0, float(cap) - avail)
+            excess += max(0.0, occ - frac * float(cap))
+        total += excess * tc_h
+    return w * total
+
+
+def mfd_far_cost_to_go(cfg: "ExperimentConfig", state: "TrafficState") -> float:
+    """far(MFD tail): near rollout 밖 잔여 accumulation의 배수 cost-to-go(§3.2, uniform urban+freeway).
+
+    **urban reservoir**: N_P를 outflow(N)로 배수 — N_crit 넘으면 outflow↓ → V 급증(gridlock 회피).
+      삼각형 drain TTS ≈ N²/(2G)·T_c_h. G=probe① calib(Geroliminis/Haddad MFD).
+    **freeway reservoir**: 본선 2차(exit 병목 큐잉) + ramp 큐 merge-병목 대기(congestion-aware).
+      ramp: q²/(2·merge_rate)·T_c_h(대기) + q·T_ramp_traverse(합류 후 통과),
+      merge_rate=ramp_cap·receiving(ρ_merge) → 혼잡할수록 배수 느림(hidden-space).
+    leader_mfd_far_enabled 미설정=0(비트동일). cfg·state만 읽는 순수 함수 —
+    P-CENT(중앙 천장 측정기) 등 타 컨트롤러 채점에 재사용(2026-07-10 승격)."""
+    if not getattr(cfg.mpc, "leader_mfd_far_enabled", False):
+        return 0.0
+    from src.models.metanet import _ramp_merge_index, _clip
+    net = cfg.network
+    tc_h = float(cfg.simulation.T_c_h)
+    w = float(getattr(cfg.mpc, "leader_mfd_far_weight", 1.0))
+    # ---- urban reservoir ----
+    # boundary_in 큐도 accumulation에 포함: gating(유입 조임)은 차를 boundary 큐로 옮길 뿐
+    # (여전히 TTT 발생)이라, in-network(N_P)만 세면 gating이 far상 공짜로 보여 leader가 과-gate.
+    n_u = float(state.protected_accumulation_veh(net)) + float(state.boundary_in_queue_vehicles(net))
+    n_crit = float(getattr(cfg.mpc, "leader_mfd_far_ncrit", 1700.0))
+    g_free = float(getattr(cfg.mpc, "leader_mfd_far_g_free", 640.0))
+    g_cong = float(getattr(cfg.mpc, "leader_mfd_far_g_cong", 500.0))
+    g_u = g_free if n_u < n_crit else g_cong
+    far = (n_u * n_u) * tc_h / (2.0 * max(g_u, 1.0))
+    # ---- freeway reservoir: 본선 2차(exit 병목 큐잉, urban과 대칭) ----
+    seg_len = float(net.freeway_segment_length_km)
+    v_free = float(net.v_free)
+    ramp_total = sum(max(0.0, float(state.ramp_queue.get(r, 0.0))) for r in net.ramps)
+    n_main = max(0.0, float(state.total_freeway_vehicles(net)) - ramp_total)
+    g_fw = float(getattr(cfg.mpc, "leader_mfd_far_g_fw", 300.0))
+    if getattr(cfg.mpc, "leader_mfd_far_freeflow_offset", False):
+        # 자유류 오프셋(2026-07-11, 8-seg 경부하 과잉억제 수선): 링크 주행시간 내 자연
+        # 배출분은 큐가 아님 — N_eff = max(0, N_l − G·t_trav)만 2차 벌점, 흐르는 재고는
+        # 선형(평균 잔여 주행 t_trav/2). t_trav ∝ 링크 길이라 식이 자기정규화(튜닝 상수 0).
+        # 링크별 제곱합(각 링크는 자기 출구로 배수 — 합산 제곱의 교차항 과대 제거).
+        n_seg_l = int(net.freeway_segments_per_link)
+        t_trav = (n_seg_l * seg_len) / max(v_free, 1.0)  # [h]
+        drainable = g_fw * (t_trav / max(tc_h, 1.0e-9))  # [veh]
+        for link in net.freeway_links:
+            dens = state.freeway_density.get(link, [])
+            lanes = state.freeway_effective_lanes.get(link, [])
+            n_l = sum(
+                max(0.0, float(dens[i])) * seg_len
+                * max(float(lanes[i]) if i < len(lanes) else float(net.freeway_lanes), 1.0e-9)
+                for i in range(len(dens))
+            )
+            n_eff = max(0.0, n_l - drainable)
+            far += (n_eff * n_eff) * tc_h / (2.0 * max(g_fw, 1.0)) + n_l * t_trav / 2.0
+    else:
+        far += (n_main * n_main) * tc_h / (2.0 * max(g_fw, 1.0))
+    # ---- freeway reservoir: ramp 큐 merge-병목 대기 + 통과 ----
+    for ramp in net.ramps:
+        q = max(0.0, float(state.ramp_queue.get(ramp, 0.0)))
+        if q <= 0.0:
+            continue
+        link = net.ramp_to_freeway.get(ramp)
+        dens = state.freeway_density.get(link, [])
+        if not dens:
+            continue
+        midx = _ramp_merge_index(cfg, ramp, len(dens))
+        rho_merge = float(dens[midx])
+        recv = _clip((net.rho_max - rho_merge) / max(net.rho_max - net.rho_crit, 1.0e-9), 0.0, 1.0)
+        merge_interval = float(net.ramp_capacity_veh_h[ramp]) * recv * tc_h  # veh/interval
+        t_ramp_traverse = (len(dens) - midx) * seg_len / max(v_free, 1.0)
+        far += (q * q) * tc_h / (2.0 * max(merge_interval, 1.0e-6)) + q * t_ramp_traverse
+    return w * far
 
 
 @dataclass
@@ -67,6 +203,55 @@ class StackelbergMPCController:
         self._pfo_fallback_previous_control: Optional[ControlAction] = None
         self._leader_process_pool: Optional[ProcessPoolExecutor] = None
         self._leader_process_pool_workers: int = 0
+        # 층3: 캘리브레이션 지문 대조(경고 전용, 수치 경로 불변).
+        self._calib_fingerprint_mismatch_count: int = self._check_calibration_fingerprints()
+        # 재캘리브레이션 트리거(2026-07-14): 지문 불일치 또는 β̂ 표류 감지 시 진단
+        # leader_recalib_needed=1 + stderr 제안(런당 1회). 수치 경로 불변.
+        self._recalib_needed: bool = self._calib_fingerprint_mismatch_count > 0
+        self._recalib_stderr_emitted: bool = False
+
+    def _check_calibration_fingerprints(self) -> int:
+        """층3: 손튜닝 성분별 캘리브레이션 기하 지문 vs 현재 cfg 기하 대조.
+
+        불일치 성분 수를 반환하고 성분별 한국어 경고를 stderr에 1회 출력한다.
+        경고·카운트만 — 어떤 수치 경로도 바꾸지 않는다."""
+        current = {
+            str(k): int(v)
+            for k, v in dict(
+                getattr(self.cfg.network, "ramp_merge_segment_index", {}) or {}
+            ).items()
+        }
+        mismatches = 0
+        for component, fingerprint in CALIBRATION_FINGERPRINTS.items():
+            expected = {
+                str(k): int(v) for k, v in fingerprint.get("ramp_merge", {}).items()
+            }
+            if not expected or not current:
+                continue
+            if expected == current:
+                continue
+            mismatches += 1
+            if component not in _calib_fingerprint_warned:
+                _calib_fingerprint_warned.add(component)
+                exp_set = sorted(set(expected.values()))
+                cur_set = sorted(set(current.values()))
+                print(
+                    f"[경고] {component} 성분은 merge {{{','.join(str(v) for v in exp_set)}}} "
+                    f"기하에서 캘리브레이션됨 - 현재 {{{','.join(str(v) for v in cur_set)}}}, 재검증 필요",
+                    file=sys.stderr,
+                    flush=True,
+                )
+        return mismatches
+
+    def _maybe_emit_recalib_suggestion(self) -> None:
+        """재캘리브레이션 제안 stderr — 런(컨트롤러 인스턴스)당 최초 1회만."""
+        if self._recalib_needed and not self._recalib_stderr_emitted:
+            self._recalib_stderr_emitted = True
+            print(
+                "[제안] 캘리브레이션 표류 감지 - component_canary.py 실행 권장",
+                file=sys.stderr,
+                flush=True,
+            )
 
     def close(self) -> None:
         if self._leader_process_pool is not None:
@@ -407,7 +592,13 @@ class StackelbergMPCController:
             "leader_response_proxy_state_count": float(best_eval.metadata.get("leader_response_proxy_state_count", 0.0)),
             "leader_candidate_full_evaluated_count": float(len(full_evaluations)),
             "leader_fallback_evaluated_count": float(len(fallback_evaluations)),
+            # 층3: 캘리브레이션 지문 불일치 성분 수 + 재캘리브레이션 트리거(경고·진단 전용).
+            "calib_fingerprint_mismatch_count": float(
+                getattr(self, "_calib_fingerprint_mismatch_count", 0)
+            ),
+            "leader_recalib_needed": float(bool(getattr(self, "_recalib_needed", False))),
         })
+        self._maybe_emit_recalib_suggestion()
         metadata.update(best_eval.metadata)
         metadata.update(best_eval.objective_terms)
         best = DecisionResult(best_eval.nash.control, best_eval.objective, best_eval.nash, metadata)
@@ -1291,6 +1482,19 @@ class StackelbergMPCController:
         use_ttt = bool(getattr(self.cfg.mpc, "stackelberg_fallback_guard_use_rollout_ttt", False))
         leader_ttt = self._evaluation_rollout_ttt(leader_best)
         fallback_ttt = self._evaluation_rollout_ttt(fallback_best)
+        # 층2(2026-07-14): β̂ 보정 — leader측 예측 TTT만 낙관편향 배율 β̂로 보정한다.
+        # leader측은 ~50 후보 argmax 선택이라 낙관이 증폭(optimizer's curse)되지만
+        # incumbent(PFO)는 단일 해라 선택편향이 없어 무보정. β̂=None(추정 전)이면 기존 거동.
+        beta_hat: Optional[float] = None
+        if bool(getattr(self.cfg.mpc, "fallback_guard_beta", False)):
+            beta_value = getattr(self, "_beta_hat", None)
+            if beta_value is not None:
+                beta_hat = float(beta_value)
+        leader_ttt_guard = (
+            leader_ttt
+            if (leader_ttt is None or beta_hat is None)
+            else float(leader_ttt) * beta_hat
+        )
         ttt_available = use_ttt and leader_ttt is not None and fallback_ttt is not None
         if ttt_available:
             # leader가 PFO보다 예측 rollout-TTT 기준 (margin 넘게) 나쁘면 기각, 동률·개선이면 채택.
@@ -1298,7 +1502,7 @@ class StackelbergMPCController:
             # 128의 누적 이득(+13.7%)을 전부 살린다. 대가로 저혼잡(115)에서 PFO 대비 ~0.9% 회귀가
             # 있으나, leader 가치를 주장하지 않는 저부하라 수용한다(2026-06-25 사용자 결정).
             ttt_margin = max(1.0, 1.0e-3 * max(fallback_ttt, 1.0))
-            ttt_worse = leader_ttt > fallback_ttt + ttt_margin
+            ttt_worse = leader_ttt_guard > fallback_ttt + ttt_margin
             # 1차 기각을 TTT로. 잔류/완료 severe는 throughput 안전장치로 유지.
             reject = bool(ttt_worse or terminal_severe or completed_severe)
         else:
@@ -1314,6 +1518,12 @@ class StackelbergMPCController:
             "leader_fallback_guard_metric_ttt": float(ttt_available),
             "leader_fallback_guard_leader_rollout_ttt": float(leader_ttt) if leader_ttt is not None else 0.0,
             "leader_fallback_guard_fallback_rollout_ttt": float(fallback_ttt) if fallback_ttt is not None else 0.0,
+            # 층2: β̂ 보정 적용 여부·값·보정된 leader측 비교값(미적용 시 원값 그대로).
+            "leader_fallback_guard_beta_applied": float(beta_hat is not None),
+            "leader_fallback_guard_beta_hat": float(beta_hat) if beta_hat is not None else 0.0,
+            "leader_fallback_guard_leader_rollout_ttt_beta": (
+                float(leader_ttt_guard) if leader_ttt_guard is not None else 0.0
+            ),
             "leader_fallback_guard_ttt_worse": float(ttt_worse),
             "leader_fallback_guard_terminal_worse": float(terminal_worse),
             "leader_fallback_guard_terminal_severe": float(terminal_severe),
@@ -2012,7 +2222,13 @@ class StackelbergMPCController:
         ):
             # far(MFD tail): near rollout 끝(states[-1]) 잔여 accumulation의 배수 cost-to-go를
             # 해석적으로 가산(§3.2). far가 temporal tail을 싸게 담으면 near 깊이 d를 줄일 수 있다.
-            return states, rollout_ttt + self._mfd_far_cost_to_go(states[-1]), True
+            return (
+                states,
+                rollout_ttt
+                + self._mfd_far_cost_to_go(states[-1])
+                + leader_hinge_cost(self.cfg, states, forecast),
+                True,
+            )
         if float(nash.control.diagnostics.get("leader_response_closure_use_rollout_objective", 0.0)) >= 0.5:
             return states, rollout_ttt, True
         return states, float(nash.objective_value), True
@@ -2021,54 +2237,8 @@ class StackelbergMPCController:
         # 자체가 후보별 response 비용을 담고, full system rollout 비용은 의도적으로 배제한다.
 
     def _mfd_far_cost_to_go(self, state: TrafficState) -> float:
-        """far(MFD tail): near rollout 밖 잔여 accumulation의 배수 cost-to-go(§3.2, uniform urban+freeway).
-
-        **urban reservoir**: N_P를 outflow(N)로 배수 — N_crit 넘으면 outflow↓ → V 급증(gridlock 회피).
-          삼각형 drain TTS ≈ N²/(2G)·T_c_h. G=probe① calib(Geroliminis/Haddad MFD).
-        **freeway reservoir(나)**: 본선은 흐름(선형 통과), ramp 큐는 merge-병목 대기(2차, congestion-aware).
-          본선: N_main·T_traverse. ramp: q²/(2·merge_rate)·T_c_h(대기) + q·T_ramp_traverse(합류 후 통과).
-          merge_rate=ramp_cap·receiving(ρ_merge) → 혼잡할수록 배수 느림 → ramp 큐 cost 급증(hidden-space).
-        leader_mfd_far_enabled 미설정=0(비트동일)."""
-        if not getattr(self.cfg.mpc, "leader_mfd_far_enabled", False):
-            return 0.0
-        from src.models.metanet import _ramp_merge_index, _clip
-        net = self.cfg.network
-        tc_h = float(self.cfg.simulation.T_c_h)
-        w = float(getattr(self.cfg.mpc, "leader_mfd_far_weight", 1.0))
-        # ---- urban reservoir ----
-        # boundary_in 큐도 accumulation에 포함: gating(유입 조임)은 차를 boundary 큐로 옮길 뿐
-        # (여전히 TTT 발생)이라, in-network(N_P)만 세면 gating이 far상 공짜로 보여 leader가 과-gate.
-        n_u = float(state.protected_accumulation_veh(net)) + float(state.boundary_in_queue_vehicles(net))
-        n_crit = float(getattr(self.cfg.mpc, "leader_mfd_far_ncrit", 1700.0))
-        g_free = float(getattr(self.cfg.mpc, "leader_mfd_far_g_free", 640.0))
-        g_cong = float(getattr(self.cfg.mpc, "leader_mfd_far_g_cong", 500.0))
-        g_u = g_free if n_u < n_crit else g_cong
-        far = (n_u * n_u) * tc_h / (2.0 * max(g_u, 1.0))
-        # ---- freeway reservoir(나): 본선도 exit 병목 큐잉 → 2차(urban과 대칭) ----
-        # 실측 freeway exit ~300/interval capacity-flat → 혼잡 시 본선도 병목 뒤 큐잉.
-        # 선형(N·T, free-flow)은 urban(2차) 대비 8배 과소평가 → urban 과보호. 2차로 정정.
-        seg_len = float(net.freeway_segment_length_km)
-        v_free = float(net.v_free)
-        ramp_total = sum(max(0.0, float(state.ramp_queue.get(r, 0.0))) for r in net.ramps)
-        n_main = max(0.0, float(state.total_freeway_vehicles(net)) - ramp_total)
-        g_fw = float(getattr(self.cfg.mpc, "leader_mfd_far_g_fw", 300.0))
-        far += (n_main * n_main) * tc_h / (2.0 * max(g_fw, 1.0))
-        # ---- freeway reservoir(나): ramp 큐 merge-병목 대기 + 통과 ----
-        for ramp in net.ramps:
-            q = max(0.0, float(state.ramp_queue.get(ramp, 0.0)))
-            if q <= 0.0:
-                continue
-            link = net.ramp_to_freeway.get(ramp)
-            dens = state.freeway_density.get(link, [])
-            if not dens:
-                continue
-            midx = _ramp_merge_index(self.cfg, ramp, len(dens))
-            rho_merge = float(dens[midx])
-            recv = _clip((net.rho_max - rho_merge) / max(net.rho_max - net.rho_crit, 1.0e-9), 0.0, 1.0)
-            merge_interval = float(net.ramp_capacity_veh_h[ramp]) * recv * tc_h  # veh/interval
-            t_ramp_traverse = (len(dens) - midx) * seg_len / max(v_free, 1.0)
-            far += (q * q) * tc_h / (2.0 * max(merge_interval, 1.0e-6)) + q * t_ramp_traverse
-        return w * far
+        """far(MFD tail) — 모듈 함수 `mfd_far_cost_to_go`로 위임(P-CENT 천장 이식용 승격)."""
+        return mfd_far_cost_to_go(self.cfg, state)
 
     def _predict(
         self,

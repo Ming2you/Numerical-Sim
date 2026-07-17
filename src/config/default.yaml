@@ -19,7 +19,7 @@ network:
   freeway_links:
   - FW_W
   - FW_E
-  freeway_segments_per_link: 4
+  freeway_segments_per_link: 8
   freeway_segment_length_km: 0.5
   freeway_lanes: 2
   v_free: 100.0
@@ -43,11 +43,14 @@ network:
     R_F_W: 1500.0
     R_D_E: 1500.0
     R_F_E: 1500.0
+  # 다이아몬드 인터체인지 재배치(2026-07-13 사용자 승인): merge+off 동거(구 seg4) 해소 —
+  # D(off seg2/on seg3), F(off seg4/on seg5). 각 인터체인지 내 exit가 entrance 상류(무 weaving),
+  # 마지막 merge(5) 뒤 tail 2세그 확보. off_ramp_segment_index(2/4)는 불변.
   ramp_merge_segment_index:
-    R_D_W: 2
-    R_F_W: 2
-    R_D_E: 2
-    R_F_E: 2
+    R_D_W: 3
+    R_F_W: 5
+    R_D_E: 3
+    R_F_E: 5
   ramp_queue_max_veh: 180.0
   signals:
   - A
@@ -136,10 +139,10 @@ network:
     OR_D_E: FW_E
     OR_F_E: FW_E
   off_ramp_segment_index:
-    OR_D_W: 1
-    OR_F_W: 2
-    OR_D_E: 1
-    OR_F_E: 2
+    OR_D_W: 2
+    OR_F_W: 4
+    OR_D_E: 2
+    OR_F_E: 4
   off_ramp_storage_link:
     OR_D_W: OR_D_W_storage
     OR_F_W: OR_F_W_storage

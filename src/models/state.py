@@ -408,6 +408,20 @@ class MPCConfig:
     # fallback guard의 leader vs PFO 비교 척도를 penalized objective 대신 realized rollout-TTT로.
     # (penalized obj는 TTT와 어긋나 sweet_128 등에서 TTT 좋은 leader를 잘못 기각했다, 2026-06-25.)
     stackelberg_fallback_guard_use_rollout_ttt: bool = True
+    # ---- 층2(2026-07-14): 낙관편향 β̂ 추정기 + β̂ 보정 guard + trailing-regret 스위치 ----
+    # 배경: leader 내부 rollout은 체계적으로 낙관(~30%: 제약 누락·capacity-drop 절벽 평활·
+    # horizon 절단·동결 결합)이고 argmax 선택이 이를 증폭(optimizer's curse) — 그 결과
+    # 예측 vs 예측 비교인 fallback guard는 실현 +49% 파국에서도 발화하지 못했다.
+    # 기본 전부 OFF = 비트동일.
+    # β̂ = EWMA(실현 interval TTT / 커밋 계획의 예측 첫-interval TTT). 추정 전용(행동 불변),
+    # 진단 leader_beta_hat/leader_pred_interval_ttt/leader_realized_interval_ttt export.
+    leader_bias_estimator: bool = True  # 2026-07-14: β̂ 계기 기본 ON(진단 전용, 결정 무변경 — 논문 그림 재료)
+    # guard의 leader측 예측 rollout TTT를 β̂ 배율로 보정(β̂·leader_pred > incumbent_pred면
+    # 기각). incumbent측은 무보정 — argmax 선택편향이 없다. leader_bias_estimator 필요.
+    fallback_guard_beta: bool = False
+    # k>0: 최근 k스텝 실현 interval TTT 합 > 같은 스텝 incumbent 예측 합×1.10이면
+    # 다음 k스텝 강제 incumbent 커밋(hysteresis — 강제 중에도 창 계속 갱신). 0=OFF.
+    regret_guard_steps: int = 3  # 2026-07-14 동결(A4 승인): 실현-regret 안전망 기본 ON — 파국 차단(dhigh2_w +49%→+7.9%)·승리셀 무해/개선(3/3)
     stackelberg_leader_parallel_backend: str = "thread"
     stackelberg_leader_parallel_max_workers: int = 4
     stackelberg_inner_backend_when_outer_process: str = "thread"
@@ -417,6 +431,41 @@ class MPCConfig:
     wu_np_arrival_mode: str = "horizon"
     wu_np_phase_substep: bool = False
     wu_faithful_np_predictor_mode: str = "legacy"
+    # λ_P windup 수선(2026-07-11, 규칙 2종 — 구조 불변): NP_FIX=0으로 구거동 재현.
+    # ① 내부 투영: target을 feasibility 모서리(feas_min) 대신 내부점으로 클립 —
+    #    모서리는 균형이 아니라 오차가 구조적 양수(+109~301 실측)여서 λ 단방향 적분.
+    np_target_interior_frac: float = 0.25
+    # ② 경부하 deadband: 보호 accumulation < frac·N_P_crit면 적분 대신 감쇠(0.5×).
+    np_dual_deadband_frac: float = 0.9
+    # NP-CAND-λ̂(2026-07-12, 리뷰 4안 → 원고 (47)~(51) 정식화): 후보 평가마다 λ를 후보
+    # target으로 1회 선반영(predictor) + 차기 스텝 실현 유입으로 교정(corrector).
+    # 기본 ON(2026-07-12 확정 — A/B: 8-seg 155_skew 7490/준거 7509, 190 15535/15652).
+    # NP_CAND_LAMBDA=0으로 구거동(스텝 내 λ 동결) 재현.
+    np_candidate_lambda: bool = True
+    # r̂ 편향 보정(2026-07-13): λ̂ 오차 비교의 target을 실현 공간으로 환산(r̂·Ñ).
+    # 계획(예측 Σnin) vs 실현(ΔN_P×H)의 낙관 편향이 채널 휴면의 원인 — 보정 시
+    # 실현 유입이 환산 상한에 닿으면 λ̂가 실제로 발동한다. False=비트동일.
+    np_bias_correction: bool = False
+    # deadband v2(2026-07-13): 위반 신호(유입 > 환산 target)는 저stock 게이트를 우회해
+    # 적분한다 — 펄스 loading edge에서 stock 지연이 진짜 위반을 삼키는 병리 해소.
+    # 경부하 windup 수선(위반 없는 저stock 감쇠)은 보존. False=비트동일.
+    np_deadband_violation_override: bool = False
+    # 방법 A — candidate 내부 primal-dual 반복 횟수 K. 0=OFF(현행 1회 선반영).
+    # K>0이면 후보별로 λ^(κ+1)=Π[λ^(κ)+γ_P(Σν^(κ)−Ñ^(c))]를 K회(조기수렴 허용) 반복하고
+    # 각 κ마다 Jacobi를 재수렴시켜 (λ*, green*) 안장점을 커밋한다.
+    np_primal_dual_iters: int = 0
+    # 방법 A 내부 반복용 γ_P 배율 — 1회당 0.01은 K≤5 안에 수렴 불가, 25배≈0.25로
+    # 5회 내 안장점 도달.
+    np_pd_gain_mult: float = 25.0
+    # ε-best-response gap probe(2026-07-12, 리뷰 2.2/2.8 대응): 수렴 고정점에서 각
+    # follower를 최종 결합변수 하에 단독 재최적화해 개선 여지를 측정(진단 전용, 행동 불변).
+    eps_gap_probe: bool = False
+    # Leader hinge 복원(2026-07-12, 사용자 지시): 구 F1 hinge 2종(freeway ρ_crit 초과,
+    # urban 0.5cap spill)을 leader candidate 채점에만 가산. 기본 ON(A/B 양면 중립:
+    # 190 15722/준거 15652, 155_skew 7514/7509 — 무해 확인). LEADER_HINGE=0으로 해제.
+    leader_hinge_enabled: bool = False  # 2026-07-14 동결: 다이아몬드 기하에서 만료(155 -572·155_skew -349·190 중립, 매트릭스 3셀 일관). LEADER_HINGE=1로 복원 A/B
+    leader_hinge_weight: float = 1.0
+    leader_hinge_spill_frac: float = 0.5
     wu_faithful_np_coordination_mode: str = "cap"
     # N_UF 조정 모드: "equality"=leader link budget으로 metering 합을 hard 고정,
     # "cap"=budget을 상한으로만 쓰고 자율 metering 좌표하강을 존중(합 ≤ budget 투영),
@@ -486,7 +535,7 @@ class FreewayFollowerConfig:
     # "VSL↓→off-ramp 유입↓→storage 회복→λ_eff 회복→본선 차량수↓"의 multi-step 이득을
     # 보려면 한두 step으로는 부족하다(off-ramp 동역학이 여러 step에 걸쳐 회복). 0 이하면
     # mpc.horizon_steps로 fallback. 비용 폭증을 막기 위해 segment 후보 가지치기는 유지.
-    freeway_prediction_horizon_steps: int = 10
+    freeway_prediction_horizon_steps: int = 3  # 2026-07-14 동결: 전 시스템 H=3 통일(FH 스윕으로 10 잉여 확인, 원고 서술 일치. FH env로 A/B 가능)
     horizon_beam_width: int = 2
     horizon_ramp_candidate_limit: int = 3
     horizon_vsl_candidate_limit_per_link: int = 3

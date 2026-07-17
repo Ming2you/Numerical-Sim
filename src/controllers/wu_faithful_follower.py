@@ -25,6 +25,12 @@ from src.controllers.local_freeway_plant import (
     build_local_freeway_model,
     freeway_substep_local,
 )
+from src.controllers.segment_local_plant import (
+    FrozenLinkTrajectory,
+    SegmentLocalState,
+    build_segment_agent_models,
+    segment_substep_local,
+)
 from src.controllers.local_signal_plant import (
     build_local_model,
     rollout_local_tts,
@@ -233,6 +239,60 @@ class WuFaithfulFollower:
         # VSL trust(±10km/h, vsl_price_trust_kmh)는 보폭 제한이라 마찰과 무관하게 유지.
         self.price_smoothness_disabled: bool = False
         self.vsl_marginal_price_trust_kmh: Optional[float] = None
+        # ---------- 13-player(2026-07-10 승인, plan-13player-rebuild.md) ----------
+        # segment_agents=True면 freeway를 link agent 2개 대신 segment agent 8개로 분해:
+        # F_L0=seg0+origin, F_L1=seg1, F_L2=seg2+R_D, F_L3=seg3+R_F. off-ramp storage는
+        # urban 소유(여기선 동결 y로만 읽음). 예산 Σmeter=ω_F·N_UF*는 owner 2명의
+        # best-response 후 simplex 사영(승인안 (ii)) — env SEG13=1로 활성.
+        self.segment_agents: bool = False
+        self._segment_agent_models: Dict[str, list] = {}
+        self._seg13_diag: Dict[str, float] = {}
+        # SPLIT-PRICE v1/v2 재현(13p): v2(기본)=incumbent(leader=None)는 meter 가격-레벨
+        # 배제(가격은 예산 내 배분만 — 7p 플래그십 규약). v1=True면 incumbent도
+        # g_meter/h로 레벨 조절(7p에서 레짐 플래핑 병리를 낸 구성) — env SEG13_V1=1.
+        self.seg13_meter_price_standing: bool = False
+        # 궤적 교환(Wu §IV-D의 ỹ): Jacobi iteration마다 각 segment agent가 자기 seg의
+        # 예측 입력궤적(ρ,v,λ,release)을 내놓고, 다음 iteration의 동결 y가 α=0.5 블렌딩으로
+        # 갱신된다. False(SEG13_TRAJ=0)면 v0의 hold-constant(현 상태 동결) — A/B용.
+        self.seg13_traj_exchange: bool = True
+        self._seg_traj: Dict[str, dict] = {}
+        # radius-1 국소 rollout(PFO 강화 변형, env SEG13_NBR): 자기 ±1 seg를 함께 전진시키고
+        # 그 차량수를 w_nbr 가중으로 비용에 포함 — own-TTS의 방류 무차별(보존식 변위)을
+        # leader 없이 깨는 정직한 최대 분산 기준선. 플래그십(leader)은 가격이 이 역할을
+        # 하므로 기본 0.0(OFF) — 켜면 가격 기여 귀속이 흐려진다.
+        self.seg13_neighbor_weight: float = 0.0
+        # NP-CAND-λ̂(2026-07-12): 직전 step 컨트롤러가 commit한 solve의 Σnin.
+        # np_candidate_lambda=True일 때 후보별 λ̂ 선반영의 오차항으로 쓴다. None=첫 step.
+        self._np_last_sum_nin: Optional[float] = None
+        # (51) corrector 상태(원고 정식화 정렬): 직전 step 보호구역 accumulation(실현
+        # 유입 측정용), step 가드 시각, pending=(λ_k, 커밋 후보의 투영 target),
+        # 최근 실현 순유입(horizon 환산 veh). predictor(48)·corrector(51) 모두 실현
+        # 유입을 오차 신호로 쓴다 — 예측 Σnin은 첫 스텝 fallback.
+        self._np_prev_accum: Optional[float] = None
+        self._np_step_time: Optional[float] = None
+        self._np_corrector_pending: Optional[tuple] = None
+        self._np_last_real_q: Optional[float] = None
+        # r̂ 편향 보정(2026-07-13): 계획(예측 Σnin) 대비 실현(ΔN_P×H) 유입의 EWMA 비율.
+        # 국소 모형의 낙관 편향으로 계획-공간 target(Ñ)과 실현-공간 오차 신호가 어긋나
+        # λ̂가 구조적으로 휴면하는 문제의 다리 — 비교를 r̂·Ñ(실현 공간 환산)으로 수행.
+        # np_bias_correction=False(기본)면 r̂=1 고정(비트동일).
+        self._np_bias_ratio: Optional[float] = None
+        # 예산 부등식 ablation(2026-07-11, env SEG13_INEQ=1): 등식 Σ=budget 대신 Σ≤budget.
+        # 170_skew 진단 — 등식은 상향으로도 binding이라 leader N_UF=6000이 follower의
+        # 자발적 하향 metering을 덮어써 절벽 근처 dip→과잉 교정(whipsaw)을 유발.
+        # True면 자율 합이 budget 미만일 때 그대로 존중(하향 자유), 초과 시에만 사영.
+        self.seg13_budget_inequality: bool = True  # 2026-07-14 동결: 부등식 예산이 기본(whipsaw 제거, 155 -909). SEG13_INEQ=0으로 등식 복원 A/B
+        # 회랑 예산(2026-07-14, 사용자 지시): 링크별 α·budget ≤ Σmeter ≤ budget.
+        # 순수 부등식(α=0)은 하한이 없어 大δ 가격이 전 램프를 동시 조일 때 총방류가
+        # 나선형으로 떨어지는 과소방류 나선(구 B3 기각 사유)을 못 막고, 등식(α=1)은
+        # 상향 binding이 whipsaw를 만든다 — α는 그 스펙트럼의 혼합도구(Roberts-Spence:
+        # 가격(배분)과 수량(회랑 경계)의 결합). env RELEASE_FLOOR로 조정.
+        self.seg13_release_floor_frac: float = 0.65
+        # 부하 적응형 회랑 하한(2026-07-15): 본선 자유류면 α→0(경부하 자율), 임계 근방
+        # α→α_max(나선 방어). RELEASE_FLOOR_FIXED=1로 고정 0.65 복원(A/B).
+        self.seg13_release_floor_adaptive: bool = True
+        self.seg13_floor_cong_lo: float = 0.7   # 본선ρ/ρ_crit 이하면 하한 0
+        self.seg13_floor_cong_hi: float = 1.0   # 임계 도달 시 하한 α_max
         # ---------- J1(2026-07-06): joint offset 패턴 directive ----------
         # F3 판정: offset은 joint 결합 변수라 per-signal 가격(편미분)이 구조적으로 0.
         # J1 = leader가 corridor 패턴(여러 신호 offset 조합)을 통째로 rollout 평가해
@@ -2196,6 +2256,413 @@ class WuFaithfulFollower:
         vsl_dict[link] = float(min(best_vec)) if best_vec else vsl_max
         return vsl_dict, best_obj, evals
 
+    # ---------- 13-player: freeway segment agent 분해 (2026-07-10 승인 매핑) ----------
+
+    def _solve_freeway_segment_agents(
+        self,
+        link: str,
+        state: TrafficState,
+        coupling: Mapping[str, float],
+        demand: DemandStep,
+        snapshot: ControlAction,
+        leader: Optional[object],
+    ) -> tuple[Dict[str, float], Dict[str, float], int]:
+        """link의 segment agent 4개(F_L0~F_L3)가 각자 own VSL(+소유 ramp meter)을 best-response.
+
+        13-player 매핑(plan-13player-rebuild.md): F_L0=seg0+origin queue, F_L1=seg1,
+        F_L2=seg2+R_D, F_L3=seg3+R_F. off-ramp storage는 urban 소유 — 여기서는 동결
+        y(현 상태 hold)로만 읽고(λ_eff·유출 cap) own-TTS에 세지 않는다. 이웃 seg 본선과
+        이웃 ramp 방류도 동결 y(snapshot metering). own-TTS = 자기 seg 차량 + 자기 ramp
+        queue(+blocked) + (seg0) origin queue.
+
+        가격(joint): 전 seg에 g_vsl·(v−ref); leader present 시 소유 ramp agent만
+        g_meter·(m−ref) + h·(m−m_ref)(v−v_ref) 2D 탐색(ramp 없는 agent는 1D).
+        예산 Σmeter = ω_F·N_UF*(equality)는 owner 2명의 best-response 후 simplex 사영
+        (승인안 (ii)) — Jacobi iteration마다 재사영되어 cross-player 합의로 수렴.
+        leader=None(PFO/incumbent probe)이면 예산·meter 가격 없이 자율 best-response
+        (v2 규약: 자율 분기는 가격-레벨 배제).
+
+        v0 단순화(문서화): VSL 후보는 horizon 내 상수(sequence 탐색 없음), 이웃 y는
+        iteration 시작 상태 hold-constant(예측 궤적 교환은 후속 단계)."""
+        net = self.cfg.network
+        sim = self.cfg.simulation
+        ff = self.cfg.freeway_follower
+        cfg = self.cfg
+        if link not in self._segment_agent_models:
+            self._segment_agent_models[link] = build_segment_agent_models(cfg, link)
+        agents = self._segment_agent_models[link]
+        link_model = self._local_freeway_models[link]
+        n_seg = link_model.n_seg
+        horizon = max(1, ff.freeway_prediction_horizon_steps or cfg.mpc.horizon_steps)
+        substeps = horizon * sim.K_cf
+        dt_h = sim.T_f_h
+        vsl_max = max(ff.vsl_set)
+        smooth_w = ff.vsl_smoothness_weight
+
+        # ---- 동결 y(hold-constant): 본선 상태·이웃 방류·storage 점유(urban 소유)·유출 cap ----
+        rhos0 = list(state.freeway_density.get(link, [0.0] * n_seg))
+        speeds0 = list(state.freeway_speed.get(link, [net.v_free] * n_seg))
+        lanes0 = list(state.freeway_effective_lanes.get(link, [])) or [
+            float(net.freeway_lanes) for _ in range(n_seg)
+        ]
+        if len(lanes0) != n_seg:
+            lanes0 = [float(net.freeway_lanes) for _ in range(n_seg)]
+        origin_q0 = max(0.0, float(state.mainline_origin_queue.get(link, 0.0)))
+        occ0: Dict[str, float] = {}
+        storage_avail0: Dict[str, float] = {}
+        for off_ramp in link_model.owned_offramps:
+            cap_o = link_model.offramp_storage_cap.get(off_ramp, 0.0)
+            storage = net.off_ramp_storage_link.get(off_ramp, "")
+            avail = float(state.urban_link_storage.get(storage, cap_o))
+            occ0[off_ramp] = max(0.0, cap_o - avail)
+            storage_avail0[off_ramp] = max(0.0, avail)
+        offramp_cap0 = self._local_offramp_capacity(link, storage_avail0)
+        release0 = {
+            r: max(0.0, float(snapshot.ramp_metering.get(r, net.ramp_capacity_veh_h[r])))
+            for r in link_model.owned_ramps
+        }
+        # 궤적 교환(ỹ): 직전 Jacobi iteration의 예측 입력궤적이 있으면 그걸 동결 y로 쓴다.
+        # 없으면(첫 iteration) 현 상태 hold-constant. occupancy(urban 소유)·유출 cap은
+        # 항상 state 동결 — 교환 대상은 본선 (ρ,v,λ)와 owner 방류 스케줄만.
+        traj_prev = self._seg_traj.get(link) if self.seg13_traj_exchange else None
+        if traj_prev is not None and traj_prev.get("rhos"):
+            t_len = len(traj_prev["rhos"])
+            frozen = FrozenLinkTrajectory(
+                rhos=[list(r) for r in traj_prev["rhos"]],
+                speeds=[list(r) for r in traj_prev["speeds"]],
+                prev_lanes=[list(r) for r in traj_prev["lanes"]],
+                origin_queue=[origin_q0 for _ in range(t_len)],
+                ramp_release=[dict(r) for r in traj_prev["release"]],
+                occupancy=[dict(occ0) for _ in range(t_len)],
+                offramp_capacity=[dict(offramp_cap0) for _ in range(t_len)],
+            )
+            self._seg13_diag[f"wu_seg13_traj_used_{link}"] = 1.0
+        else:
+            frozen = FrozenLinkTrajectory(
+                rhos=[rhos0], speeds=[speeds0], prev_lanes=[lanes0],
+                origin_queue=[origin_q0], ramp_release=[release0],
+                occupancy=[occ0], offramp_capacity=[offramp_cap0],
+            )
+        ramp_q0 = {
+            r: max(0.0, float(state.ramp_queue.get(r, 0.0))) for r in link_model.owned_ramps
+        }
+
+        evals = 0
+        vsl_out: Dict[str, float] = {}
+        preferred_meter: Dict[str, float] = {}
+        best_offramp_flow: Dict[str, float] = {}
+        agent_best_traj: Dict[int, tuple] = {}
+        leader_present = (
+            leader is not None and float(getattr(leader, "N_UF_star", 0.0)) > 0.0
+        )
+        nuf_mode = str(getattr(
+            self.cfg.mpc, "wu_faithful_nuf_coordination_mode", "equality",
+        ))
+        # 8단계 ablation(dual): λ_UF·m — DUAL-STANDING 규약(windup 수정): 영속 가격이라
+        # incumbent(leader=None) solve에도 적용해 적분 루프의 액추에이터를 유지한다.
+        lambda_uf = float(self._lambda_UF)
+        dual_price_active = nuf_mode == "dual" and abs(lambda_uf) > 1.0e-12
+
+        for agent in agents:
+            seg = agent.seg
+            key = f"{link}__seg{seg}"
+            prev_v = float(segment_vsl(snapshot, link, seg, cfg))
+            v_cands = [
+                float(v) for v in ff.vsl_set
+                if abs(float(v) - prev_v) <= ff.max_vsl_step + 1.0e-9
+            ] or [prev_v]
+            own_ramp = agent.owned_ramps[0] if agent.owned_ramps else None
+            if own_ramp is not None and self.metering_enabled:
+                cap_r = float(net.ramp_capacity_veh_h[own_ramp])
+                # 내림차순(전량 방류 우선) — 7p 분율 순서(1.0, 0.7, …)와 동일 규약.
+                # own-TTS는 보존식 때문에 방류에 근사-무차별인 레짐이 흔해서 tie-break가
+                # 결정적: 오름차순이면 최소 방류로 쏠려 전면 질식(PFO 13p 실측 병리).
+                m_cands: List[Optional[float]] = sorted(
+                    {round(cap_r * f, 6) for f in self.ramp_metering_fractions},
+                    reverse=True,
+                )
+            else:
+                m_cands = [None]
+            best_cost, best_v, best_m = float("inf"), prev_v, None
+            best_flow_local: Dict[str, float] = {}
+            best_traj: Optional[tuple] = None  # (rho[t], v[t], lane[t], rel[t]) — 입력시점 기록
+            for v_cand in v_cands:
+                for m_cand in m_cands:
+                    cand = ControlAction(
+                        ramp_metering=dict(snapshot.ramp_metering),
+                        vsl=dict(snapshot.vsl),
+                        green_times=dict(snapshot.green_times),
+                        offsets=dict(snapshot.offsets),
+                        inflow_outflow_allocation={},
+                    )
+                    cand.vsl[key] = float(v_cand)
+                    if own_ramp is not None and m_cand is not None:
+                        cand.ramp_metering[own_ramp] = float(m_cand)
+                    own = SegmentLocalState(
+                        rho=float(rhos0[seg]), speed=float(speeds0[seg]),
+                        prev_lane=float(lanes0[seg]),
+                        origin_queue=origin_q0 if agent.owns_origin_queue else 0.0,
+                    )
+                    ramp_q = float(ramp_q0.get(own_ramp, 0.0)) if own_ramp else 0.0
+                    blocked = 0.0
+                    first_flow: Dict[str, float] = {}
+                    # radius-1 이웃 상태(활성 시): ±1 seg를 함께 전진(2차 이웃은 동결 y).
+                    nbr_states: Dict[int, SegmentLocalState] = {}
+                    if self.seg13_neighbor_weight > 0.0:
+                        for j in (seg - 1, seg + 1):
+                            if 0 <= j < n_seg:
+                                nbr_states[j] = SegmentLocalState(
+                                    rho=float(rhos0[j]), speed=float(speeds0[j]),
+                                    prev_lane=float(lanes0[j]),
+                                    origin_queue=origin_q0 if j == 0 else 0.0,
+                                )
+                    cost = 0.0
+                    tr_rho: List[float] = []
+                    tr_v: List[float] = []
+                    tr_lane: List[float] = []
+                    tr_rel: List[float] = []
+                    for t in range(substeps):
+                        # 궤적 교환용 입력시점 기록(substep t 시작 상태) — frozen.at(t) 의미와 정렬.
+                        tr_rho.append(float(own.rho))
+                        tr_v.append(float(own.speed))
+                        tr_lane.append(float(own.prev_lane))
+                        own_release: Dict[str, float] = {}
+                        if own_ramp is not None:
+                            # release는 T_f 시작 reservoir만 본다(spec 3.4.3) — 계산 후 적재.
+                            rhos_asm = list(rhos0)
+                            rhos_asm[seg] = float(own.rho)
+                            rel = self._local_ramp_release(
+                                link, rhos_asm, {own_ramp: ramp_q}, cand, demand,
+                            )
+                            r_own = max(0.0, float(rel.get(own_ramp, 0.0)))
+                            ramp_q = max(0.0, ramp_q - r_own * dt_h)
+                            approach = max(
+                                0.0, float(coupling.get(f"u_on_{own_ramp}", 0.0))
+                            )
+                            if self.count_blocked_ramp_inflow:
+                                space = max(0.0, net.ramp_queue_max_veh - ramp_q)
+                                arrival = approach * dt_h
+                                adm1 = min(blocked, space)
+                                adm2 = min(arrival, space - adm1)
+                                ramp_q = min(net.ramp_queue_max_veh, ramp_q + adm1 + adm2)
+                                blocked = blocked - adm1 + (arrival - adm2)
+                            else:
+                                ramp_q = min(
+                                    net.ramp_queue_max_veh, ramp_q + approach * dt_h,
+                                )
+                            own_release[own_ramp] = r_own
+                        tr_rel.append(float(own_release.get(own_ramp, 0.0)) if own_ramp else 0.0)
+                        # radius-1: 이웃을 time-t 상태 기준으로 동시(자코비) 전진 —
+                        # 이웃 방류는 동결 스케줄, 이웃 차량수는 w_nbr 가중 비용.
+                        new_nbr: Dict[int, SegmentLocalState] = {}
+                        if nbr_states:
+                            frz_rel = frozen.ramp_release[
+                                min(t, len(frozen.ramp_release) - 1)
+                            ]
+                            cur_all: Dict[int, SegmentLocalState] = dict(nbr_states)
+                            cur_all[seg] = own
+                            for j, st_j in nbr_states.items():
+                                agent_j = agents[j]
+                                rel_j = {
+                                    r: max(0.0, float(frz_rel.get(r, 0.0)))
+                                    for r in agent_j.owned_ramps
+                                }
+                                ov = {k: v for k, v in cur_all.items() if k != j}
+                                nst, _, veh_j = segment_substep_local(
+                                    agent_j, frozen, t, st_j, rel_j, cand, demand,
+                                    extra_overrides=ov,
+                                )
+                                new_nbr[j] = nst
+                                cost += self.seg13_neighbor_weight * float(veh_j) * dt_h
+                        own, off_flow, veh = segment_substep_local(
+                            agent, frozen, t, own, own_release, cand, demand,
+                            extra_overrides=nbr_states or None,
+                        )
+                        if nbr_states:
+                            nbr_states = new_nbr
+                        if t == 0:
+                            first_flow = dict(off_flow)
+                        cost += (
+                            float(veh) + ramp_q + blocked
+                            + (own.origin_queue if agent.owns_origin_queue else 0.0)
+                        ) * dt_h
+                    # 마찰(암묵적 신호검정) — 7p와 동일 규약(PRICE-TR 시 0).
+                    if not (self.price_smoothness_disabled and self.vsl_marginal_price):
+                        cost += smooth_w * abs(float(v_cand) - prev_v)
+                    # 가격항: g_vsl(전 seg), 소유 ramp의 g_meter + h cross(leader present).
+                    if self.vsl_marginal_price:
+                        g_vsl = self.vsl_marginal_price.get(key)
+                        if g_vsl is not None:
+                            ref_v = float(self.vsl_marginal_price_ref.get(key, prev_v))
+                            cost += self.vsl_marginal_price_weight * float(g_vsl) * (
+                                float(v_cand) - ref_v
+                            )
+                    if own_ramp is not None and m_cand is not None and (
+                        leader_present or self.seg13_meter_price_standing
+                    ):
+                        if self.metering_marginal_price:
+                            g_m = self.metering_marginal_price.get(own_ramp)
+                            if g_m is not None:
+                                m_ref = float(self.metering_marginal_price_ref.get(
+                                    own_ramp, float(m_cand),
+                                ))
+                                cost += (
+                                    self.metering_marginal_price_weight
+                                    * float(g_m) * (float(m_cand) - m_ref)
+                                )
+                        if self.vsl_meter_cross_price:
+                            h_c = self.vsl_meter_cross_price.get(own_ramp)
+                            if h_c is not None:
+                                m_ref2, v_ref2 = self.vsl_meter_cross_ref.get(
+                                    own_ramp, (0.0, vsl_max),
+                                )
+                                cost += self.vsl_meter_cross_weight * float(h_c) * (
+                                    (float(m_cand) - float(m_ref2))
+                                    * (float(v_cand) - float(v_ref2))
+                                )
+                    if own_ramp is not None and m_cand is not None and dual_price_active:
+                        cost += lambda_uf * float(m_cand)
+                    evals += 1
+                    if cost < best_cost:
+                        best_cost, best_v, best_m = cost, float(v_cand), m_cand
+                        best_flow_local = dict(first_flow)
+                        best_traj = (tr_rho, tr_v, tr_lane, tr_rel)
+            if best_traj is not None:
+                agent_best_traj[seg] = best_traj
+            vsl_out[key] = float(best_v)
+            if own_ramp is not None and best_m is not None:
+                preferred_meter[own_ramp] = float(best_m)
+            for o, fl in best_flow_local.items():
+                best_offramp_flow[o] = float(fl)
+
+        # ---- 궤적 교환 저장: 각 agent의 best 예측 입력궤적을 다음 iteration의 y로 ----
+        # α=0.5 under-relaxation(루프의 coupling 블렌딩과 동일 규약)으로 진동을 누른다.
+        if self.seg13_traj_exchange and len(agent_best_traj) == n_seg:
+            alpha = 0.5
+            new_rhos = [
+                [float(agent_best_traj[j][0][t]) for j in range(n_seg)]
+                for t in range(substeps)
+            ]
+            new_speeds = [
+                [float(agent_best_traj[j][1][t]) for j in range(n_seg)]
+                for t in range(substeps)
+            ]
+            new_lanes = [
+                [float(agent_best_traj[j][2][t]) for j in range(n_seg)]
+                for t in range(substeps)
+            ]
+            new_release: List[Dict[str, float]] = []
+            for t in range(substeps):
+                rel_t = dict(release0)
+                for a in agents:
+                    if a.owned_ramps and a.seg in agent_best_traj:
+                        rel_t[a.owned_ramps[0]] = float(agent_best_traj[a.seg][3][t])
+                new_release.append(rel_t)
+            prev_stored = self._seg_traj.get(link)
+            if prev_stored is not None and len(prev_stored.get("rhos", [])) == substeps:
+                for t in range(substeps):
+                    for j in range(n_seg):
+                        new_rhos[t][j] = (1.0 - alpha) * prev_stored["rhos"][t][j] + alpha * new_rhos[t][j]
+                        new_speeds[t][j] = (1.0 - alpha) * prev_stored["speeds"][t][j] + alpha * new_speeds[t][j]
+                        new_lanes[t][j] = (1.0 - alpha) * prev_stored["lanes"][t][j] + alpha * new_lanes[t][j]
+                    for r in new_release[t]:
+                        old = float(prev_stored["release"][t].get(r, new_release[t][r]))
+                        new_release[t][r] = (1.0 - alpha) * old + alpha * new_release[t][r]
+            self._seg_traj[link] = {
+                "rhos": new_rhos, "speeds": new_speeds,
+                "lanes": new_lanes, "release": new_release,
+            }
+
+        # link 대표 VSL(plant fallback·진단) = min seg — 7p 규약 유지.
+        seg_vals = [vsl_out.get(f"{link}__seg{i}", vsl_max) for i in range(n_seg)]
+        vsl_out[link] = float(min(seg_vals)) if seg_vals else vsl_max
+        # f→u 결합 캐시(선택 후보의 첫 substep off-ramp 유출) — 7p와 동일 규약.
+        for off_ramp in link_model.owned_offramps:
+            self._wu._last_offramp_flow[off_ramp] = float(
+                best_offramp_flow.get(off_ramp, 0.0)
+            )
+        self._wu._last_offramp_flow[link] = float(
+            sum(best_offramp_flow.get(o, 0.0) for o in link_model.owned_offramps)
+        )
+        self._wu._has_last_offramp_flow = True
+
+        # ---- 예산 simplex 사영(승인안 (ii)): Σmeter = ω_F·N_UF* (equality) ----
+        # dual 모드면 사영 없음 — 총량은 λ_UF(step 간 적분)가 추적, 레벨은 자율.
+        meter_out: Dict[str, float] = dict(preferred_meter)
+        if leader_present and nuf_mode == "equality" and preferred_meter:
+            caps = {r: float(net.ramp_capacity_veh_h[r]) for r in preferred_meter}
+            cap_sum = sum(caps.values())
+            omega_f = float(self._wu._omega_f.get(link, 0.0))
+            n_uf_star = float(getattr(leader, "N_UF_star", 0.0))
+            budget = min(max(omega_f * n_uf_star, 0.0), cap_sum)
+            total_pref = sum(preferred_meter.values())
+
+            def _scale_to(target: float) -> Dict[str, float]:
+                # 목표 합 target으로 비례 사영(용량 클립 + 잔여 재분배) — 기존 등식
+                # 로직을 회랑 상·하한이 공용하도록 함수화(로직 비트 동일).
+                if total_pref <= 1.0e-9:
+                    return {
+                        r: target * caps[r] / max(cap_sum, 1.0e-9)
+                        for r in preferred_meter
+                    }
+                scale = target / total_pref
+                out = {
+                    r: min(caps[r], m * scale) for r, m in preferred_meter.items()
+                }
+                deficit = target - sum(out.values())
+                if deficit > 1.0e-9:
+                    for r in sorted(
+                        out, key=lambda x: caps[x] - out[x], reverse=True,
+                    ):
+                        room = caps[r] - out[r]
+                        add = min(room, deficit)
+                        out[r] += add
+                        deficit -= add
+                        if deficit <= 1.0e-9:
+                            break
+                return out
+
+            if self.seg13_budget_inequality and total_pref <= budget + 1.0e-9:
+                # 회랑 예산(2026-07-14): α·budget ≤ Σmeter ≤ budget. 회랑 안이면 자율
+                # 존중(하향 자유), 하한 아래(과소방류 나선 조짐)면 α·budget으로 비례
+                # 상향. α=0이면 구 부등식(하한 없음), α=1이면 구 등식과 동치.
+                # 부하 적응형 α(2026-07-15): 나선은 혼잡(breakdown 근방)에서만 발생하므로
+                # 하한도 그때만 필요. 본선이 자유류면 α→0(follower 자율 존중, 경부하 과잉
+                # 조임 해소), 임계 근방이면 α→α_max(나선 방어). 본선 최대밀도/ρ_crit로 게이팅.
+                alpha_max = float(self.seg13_release_floor_frac)
+                if self.seg13_release_floor_adaptive:
+                    rho_crit = float(net.rho_crit)
+                    seg_rho = state.freeway_density.get(link, [])
+                    cong = (max(seg_rho) / rho_crit) if (seg_rho and rho_crit > 0) else 0.0
+                    c_lo = float(self.seg13_floor_cong_lo)
+                    c_hi = float(self.seg13_floor_cong_hi)
+                    span = max(c_hi - c_lo, 1.0e-9)
+                    frac = min(max((cong - c_lo) / span, 0.0), 1.0)
+                    alpha_eff = alpha_max * frac
+                    self._seg13_diag[f"wu_seg13_floor_cong_{link}"] = float(cong)
+                    self._seg13_diag[f"wu_seg13_floor_alpha_{link}"] = float(alpha_eff)
+                else:
+                    alpha_eff = alpha_max
+                floor_b = alpha_eff * budget
+                if total_pref >= floor_b - 1.0e-9:
+                    meter_out = dict(preferred_meter)
+                else:
+                    meter_out = _scale_to(floor_b)
+            else:
+                meter_out = _scale_to(budget)
+            self._seg13_diag[f"wu_seg13_budget_{link}"] = float(budget)
+            self._seg13_diag[f"wu_seg13_presplit_{link}"] = float(total_pref)
+            self._seg13_diag[f"wu_seg13_postsplit_{link}"] = float(
+                sum(meter_out.values())
+            )
+            # 나선 감시(2026-07-14): 실현 Σmeter/budget 비율 — 지속 하락 + 램프 큐
+            # 상승 동반이면 과소방류 나선 서명. 컨트롤러의 release-트리거 재선형화 재료.
+            self._seg13_diag[f"wu_b3_release_ratio_{link}"] = float(
+                sum(meter_out.values()) / max(budget, 1.0e-9)
+            )
+        self._seg13_diag[f"wu_seg13_evals_{link}"] = float(evals)
+        return vsl_out, meter_out, evals
+
     # ---------- freeway agent: 진짜 ramp metering 탐색 (핵심 신규) ----------
 
     def _solve_freeway_agent_metered(
@@ -2929,6 +3396,8 @@ class WuFaithfulFollower:
     ) -> tuple[ControlAction, int, bool, float, int]:
         net = self.cfg.network
         self._wu._repair_diagnostics = {}
+        self._seg13_diag = {}
+        self._seg_traj = {}  # 궤적 교환은 solve 단위 — 후보 간 오염 방지.
         control = ControlAction.uncontrolled(self.cfg)
         control.green_times = dict(previous.green_times)
         control.vsl = dict(previous.vsl)
@@ -2974,7 +3443,131 @@ class WuFaithfulFollower:
             )
         dual_active = leader is not None and self.use_dual_np and self.np_price_enabled
         n_p_star = float(getattr(leader, "N_P_star", 0.0)) if leader is not None else 0.0
+        np_cand_flag = bool(getattr(self.cfg.mpc, "np_candidate_lambda", False))
+        # 방법 A(2026-07-13): candidate 내부 primal-dual 반복 K. K>0이면 λ̂ 1회 선반영
+        # 대신 후보별 (λ, green) 안장점 반복으로 대체(np_cand_flag가 마스터 스위치).
+        np_pd_iters = int(getattr(self.cfg.mpc, "np_primal_dual_iters", 0))
+        np_pd_active = dual_active and np_cand_flag and np_pd_iters > 0
+        # ---- (51) corrector(원고 정식화): λ_{k+1} = Π[λ_k + γ_c(Q^real − Ñ_{c*})] ----
+        # 커밋 시점이 아니라 다음 step 시작 시(실현 유입 관측 후) standing λ를 1회 교정.
+        # Q^real은 보호구역 accumulation 차분(구간)을 horizon 배수로 환산해 측정한다
+        # (Σnin·target이 horizon 집계 veh 단위이므로). 후보 solve 간에는 state 시각
+        # 가드로 스텝당 1회만 실행된다.
+        # 방법 A(K>0)에서는 corrector를 통째로 생략한다 — λ는 스텝마다 warm start에서
+        # 후보별로 재유도되고, 실현-공간 교정(Q^real) 채널 자체를 쓰지 않는다.
+        if np_pd_active:
+            self._np_corrector_pending = None
+        if dual_active and np_cand_flag and not np_pd_active:
+            now_t = float(getattr(state, "time_sec", 0.0))
+            if self._np_step_time != now_t:
+                self._np_step_time = now_t
+                n_p_now_veh = float(state.protected_accumulation_veh(net))
+                if self._np_prev_accum is not None:
+                    self._np_last_real_q = (
+                        n_p_now_veh - float(self._np_prev_accum)
+                    ) * float(max(1, self.cfg.mpc.horizon_steps))
+                self._np_prev_accum = n_p_now_veh
+                # r̂ 갱신: 직전 commit 균형의 예측 Σnin(_np_last_sum_nin, commit 시 기록)과
+                # 방금 측정한 실현 유입의 쌍으로 EWMA(β=0.3). 음수 실현·0 나눗셈 가드로
+                # [0.05, 2.0] 클립. 플래그 OFF면 사용처에서 r̂=1로 무시된다.
+                if (
+                    self._np_last_real_q is not None
+                    and self._np_last_sum_nin is not None
+                ):
+                    denom = max(abs(float(self._np_last_sum_nin)), 1.0e-6)
+                    ratio = min(max(float(self._np_last_real_q) / denom, 0.05), 2.0)
+                    if self._np_bias_ratio is None:
+                        self._np_bias_ratio = ratio
+                    else:
+                        self._np_bias_ratio = 0.7 * self._np_bias_ratio + 0.3 * ratio
+                if (
+                    self._np_corrector_pending is not None
+                    and self._np_last_real_q is not None
+                ):
+                    lam_base, tgt_committed = self._np_corrector_pending
+                    r_hat_c = (
+                        float(self._np_bias_ratio)
+                        if bool(getattr(self.cfg.mpc, "np_bias_correction", False))
+                        and self._np_bias_ratio is not None
+                        else 1.0
+                    )
+                    deadband_c = float(getattr(self.cfg.mpc, "np_dual_deadband_frac", 0.0))
+                    crit_c = float(getattr(self.cfg.leader, "N_P_crit_veh", 0.0) or 0.0)
+                    low_stock_c = (
+                        deadband_c > 0.0 and crit_c > 0.0
+                        and n_p_now_veh < deadband_c * crit_c
+                    )
+                    # deadband v2(2026-07-13): 위반(실현 유입 > 환산 target)은 stock과 무관하게
+                    # 적분한다. 펄스 loading edge는 stock이 flow를 지연 추종해 절대 게이트가
+                    # 진짜 위반을 삼킨다(dhigh2 step7 +204 폐기 실측). 경부하 windup 수선은
+                    # 위반 없는 저stock 국면에만 적용되므로 보존. 플래그 OFF면 비트동일.
+                    viol_ovr = bool(
+                        getattr(self.cfg.mpc, "np_deadband_violation_override", False)
+                    )
+                    violated_c = (
+                        float(self._np_last_real_q) > r_hat_c * float(tgt_committed)
+                    )
+                    if low_stock_c and not (viol_ovr and violated_c):
+                        self._lambda_P = 0.5 * float(lam_base)
+                    else:
+                        self._lambda_P = self._lambda_np_update(
+                            float(lam_base),
+                            float(self._np_last_real_q),
+                            r_hat_c * float(tgt_committed),
+                        )
+                self._np_corrector_pending = None
         lambda_p = float(self._lambda_P) if dual_active else 0.0  # warm-start(직전 step 수렴값).
+        # ---- NP-CAND-λ̂(2026-07-12, 리뷰 4안): 후보별 λ 1회 선반영 ----
+        # 표준(플래그 OFF)에선 λ가 스텝 내 동결이라 follower 반응이 N_P 후보에 불변
+        # (리뷰 지적: R_S(N_P)가 아니라 R_S(λ)). ON이면 직전 committed Σnin과 이 후보의
+        # 투영 target으로 λ를 1회 적분 선반영한 λ̂ 아래서 Jacobi를 완전 재수렴시킨다.
+        # 폐지된 step 내 이분법(A1+A2 주석 참조)과 달리 반복 중 λ 갱신이 없어
+        # off-equilibrium commit이 없고, clip(0,cap)이 음수 보조금을 차단한다.
+        np_cand_lambda_applied = 0.0
+        # predictor(48)의 오차 신호 Q^prev: 실현 유입(우선) → 예측 Σnin(첫 스텝 fallback).
+        q_prev = (
+            self._np_last_real_q
+            if self._np_last_real_q is not None
+            else self._np_last_sum_nin
+        )
+        # 방법 A(K>0)면 1회 선반영을 건너뛴다 — λ는 아래 K-loop에서 계획 공간 반복으로 유도.
+        if dual_active and np_cand_flag and not np_pd_active and q_prev is not None:
+            pre_snapshot = ControlAction(
+                ramp_metering=dict(control.ramp_metering),
+                vsl=dict(control.vsl),
+                green_times=dict(control.green_times),
+                offsets=dict(control.offsets),
+                inflow_outflow_allocation={},
+            )
+            pre_min, pre_max = self._np_feasible_range(
+                state, coupling, pre_snapshot, forecast_arrivals, horizon_h,
+            )
+            interior_pre = float(getattr(self.cfg.mpc, "np_target_interior_frac", 0.0))
+            pre_lo = pre_min + max(0.0, interior_pre) * max(0.0, pre_max - pre_min)
+            pre_target = min(max(n_p_star, pre_lo), pre_max)
+            deadband_pre = float(getattr(self.cfg.mpc, "np_dual_deadband_frac", 0.0))
+            crit_pre = float(getattr(self.cfg.leader, "N_P_crit_veh", 0.0) or 0.0)
+            r_hat_p = (
+                float(self._np_bias_ratio)
+                if bool(getattr(self.cfg.mpc, "np_bias_correction", False))
+                and self._np_bias_ratio is not None
+                else 1.0
+            )
+            low_stock_pre = deadband_pre > 0.0 and crit_pre > 0.0 and float(
+                state.protected_accumulation_veh(net)
+            ) < deadband_pre * crit_pre
+            # deadband v2: 위반(q_prev > 환산 pre_target)은 stock 게이트를 우회(위 corrector 참조).
+            viol_ovr_pre = bool(
+                getattr(self.cfg.mpc, "np_deadband_violation_override", False)
+            )
+            violated_pre = float(q_prev) > r_hat_p * pre_target
+            if low_stock_pre and not (viol_ovr_pre and violated_pre):
+                lambda_p = 0.5 * lambda_p
+            else:
+                lambda_p = self._lambda_np_update(
+                    lambda_p, float(q_prev), r_hat_p * pre_target,
+                )
+            np_cand_lambda_applied = 1.0
         sum_nin = 0.0
         evals = 0
         # 듀얼 분해 N_P 추적은 **control step 간 λ 적분 갱신**으로 한다(A1+A2, 2026-07-02 진단).
@@ -2992,58 +3585,133 @@ class WuFaithfulFollower:
         residual = float("inf")
         converged = False
         iteration = 0
-        for iteration in range(1, s_max + 1):
-            # Jacobi: iteration 시작 control 스냅샷 고정 → 모든 agent 동일 z̃/previous 입력.
-            snapshot = ControlAction(
+
+        def _jacobi_consensus(lam_fixed: float) -> None:
+            # 방법 A 지원 추출(2026-07-13): 기존 합의 루프 본체를 λ 인자만 받는 클로저로
+            # 분리 — K=0(OFF) 경로는 이 클로저를 lambda_p로 1회 호출하므로 연산·순서가
+            # 기존과 동일(비트동일). K>0이면 λ^(κ)마다 재호출해 현 결합값에서 재수렴한다.
+            nonlocal coupling, sum_nin, evals, residual, converged, iteration
+            residual = float("inf")
+            converged = False
+            for iteration in range(1, s_max + 1):
+                # Jacobi: iteration 시작 control 스냅샷 고정 → 모든 agent 동일 z̃/previous 입력.
+                snapshot = ControlAction(
+                    ramp_metering=dict(control.ramp_metering),
+                    vsl=dict(control.vsl),
+                    green_times=dict(control.green_times),
+                    offsets=dict(control.offsets),
+                    inflow_outflow_allocation={},
+                )
+                new_green: Dict[str, float] = {}
+                new_vsl: Dict[str, float] = {}
+                sum_nin = 0.0  # 이 sweep의 Σ_i nin_i(현 λ에서 각 agent가 commit한 net inflow).
+                for signal in net.signals:
+                    arr_movement = self._per_movement_arrivals(signal, state, snapshot, demand)
+                    p1, _, e, nin_i = self._solve_urban_agent_local(
+                        signal, state, coupling, arr_movement, s_eff_frozen,
+                        reservoir_drain, freeway_congestion, snapshot, leader,
+                        lam_fixed, forecast_arrivals, horizon_h, demand,
+                    )
+                    new_green[f"{signal}_p1"] = p1
+                    new_green[f"{signal}_p2"] = net.effective_green_total - p1
+                    sum_nin += nin_i
+                    evals += e
+                # 합의 루프 동안 λ는 호출 인자 값으로 동결한다(스냅샷/결합 settle 우선). λ 갱신은
+                # step 간 적분(수렴 후 λ_next 계산, 아래 post-loop) 또는 방법 A K-loop(κ 간).
+                # PFO(leader=None)는 dual_active=False라 무영향.
+                # freeway agent(Jacobi 내부): VSL solve만 cheap하게 — VSL은 여기서 inert이고
+                # metering 좌표하강은 비싸므로 합의 루프 밖에서 1회만 돈다(아래 post-loop).
+                # 13-player(segment_agents): segment agent 8개가 (VSL, meter)를 루프 안에서
+                # best-response + 예산 사영 — meter 합의가 iteration을 필요로 하므로 in-loop.
+                new_meter: Dict[str, float] = {}
+                for link in net.freeway_links:
+                    if self.segment_agents and self.metering_enabled:
+                        vsl_dict, meter_dict, e = self._solve_freeway_segment_agents(
+                            link, state, coupling, demand, snapshot, leader,
+                        )
+                        new_meter.update(meter_dict)
+                    else:
+                        vsl_dict, _, e = self._solve_freeway_agent_local(
+                            link, state, coupling, demand, snapshot,
+                        )
+                    new_vsl.update(vsl_dict)
+                    evals += e
+                control.green_times.update(new_green)
+                control.vsl.update(new_vsl)
+                if new_meter:
+                    control.ramp_metering.update(new_meter)
+                # outgoing 결합변수 갱신 후 under-relaxation 합성.
+                predicted = self._wu._coupling(state, control, demand)
+                relaxed = {
+                    k: (1.0 - alpha) * coupling.get(k, 0.0) + alpha * predicted[k]
+                    for k in predicted
+                }
+                residual = max(
+                    (
+                        abs(relaxed[k] - coupling.get(k, 0.0)) / max(1.0, abs(coupling.get(k, 0.0)))
+                        for k in relaxed
+                    ),
+                    default=0.0,
+                )
+                coupling = relaxed
+                if residual < self.cfg.mpc.distributed_coupling_tol:
+                    converged = True
+                    break
+
+        # 방법 A 진단: 실사용 κ 횟수·최종 계획-공간 잔차(Σν − Ñ). OFF(K=0)면 0/0.
+        np_pd_iters_used = 0.0
+        np_pd_residual = 0.0
+        if np_pd_active:
+            # ---- 방법 A(2026-07-13): candidate 내부 primal-dual 반복 ----
+            # λ^(κ+1) = Π[λ^(κ) + γ_P(Σν^(κ) − Ñ^(c))]를 K회(조기수렴 허용) 반복하며
+            # 각 κ마다 Jacobi를 재수렴시켜 (λ*, green*) 안장점을 함께 얻는다.
+            # target은 현행 선반영과 동일하게 계획 공간에서 투영하되 r̂ 환산은 제거한다
+            # — 반복이 계획 공간 안에서 닫히므로 실현 보정(Q^real)이 필요 없다.
+            # deadband/위반 override도 K-loop 안에서는 미적용(제약을 직접 강제).
+            pd_snapshot = ControlAction(
                 ramp_metering=dict(control.ramp_metering),
                 vsl=dict(control.vsl),
                 green_times=dict(control.green_times),
                 offsets=dict(control.offsets),
                 inflow_outflow_allocation={},
             )
-            new_green: Dict[str, float] = {}
-            new_vsl: Dict[str, float] = {}
-            sum_nin = 0.0  # 이 sweep의 Σ_i nin_i(현 λ에서 각 agent가 commit한 net inflow).
-            for signal in net.signals:
-                arr_movement = self._per_movement_arrivals(signal, state, snapshot, demand)
-                p1, _, e, nin_i = self._solve_urban_agent_local(
-                    signal, state, coupling, arr_movement, s_eff_frozen,
-                    reservoir_drain, freeway_congestion, snapshot, leader,
-                    lambda_p, forecast_arrivals, horizon_h, demand,
-                )
-                new_green[f"{signal}_p1"] = p1
-                new_green[f"{signal}_p2"] = net.effective_green_total - p1
-                sum_nin += nin_i
-                evals += e
-            # 합의 루프 동안 λ는 warm-start 값으로 동결한다(스냅샷/결합 settle 우선). λ 갱신은
-            # step 간 적분(수렴 후 λ_next 계산, 아래 post-loop). PFO(leader=None)는 dual_active=False라 무영향.
-            # freeway agent(Jacobi 내부): VSL solve만 cheap하게 — VSL은 여기서 inert이고
-            # metering 좌표하강은 비싸므로 합의 루프 밖에서 1회만 돈다(아래 post-loop).
-            for link in net.freeway_links:
-                vsl_dict, _, e = self._solve_freeway_agent_local(
-                    link, state, coupling, demand, snapshot,
-                )
-                new_vsl.update(vsl_dict)
-                evals += e
-            control.green_times.update(new_green)
-            control.vsl.update(new_vsl)
-            # outgoing 결합변수 갱신 후 under-relaxation 합성.
-            predicted = self._wu._coupling(state, control, demand)
-            relaxed = {
-                k: (1.0 - alpha) * coupling.get(k, 0.0) + alpha * predicted[k]
-                for k in predicted
-            }
-            residual = max(
-                (
-                    abs(relaxed[k] - coupling.get(k, 0.0)) / max(1.0, abs(coupling.get(k, 0.0)))
-                    for k in relaxed
-                ),
-                default=0.0,
+            pd_min, pd_max = self._np_feasible_range(
+                state, coupling, pd_snapshot, forecast_arrivals, horizon_h,
             )
-            coupling = relaxed
-            if residual < self.cfg.mpc.distributed_coupling_tol:
-                converged = True
-                break
+            interior_pd = float(getattr(self.cfg.mpc, "np_target_interior_frac", 0.0))
+            pd_lo = pd_min + max(0.0, interior_pd) * max(0.0, pd_max - pd_min)
+            pd_target = min(max(n_p_star, pd_lo), pd_max)
+            # γ_P 배율: 표준 gain(0.01)은 K≤5 안에 수렴 불가 — 25배≈0.25로 반복 수렴.
+            gain_pd = self.lambda_np_step_gain * float(
+                getattr(self.cfg.mpc, "np_pd_gain_mult", 25.0)
+            )
+            lam_curr = lambda_p  # warm start = standing _lambda_P(직전 step 커밋 λ).
+            lam_last_sweep: Optional[float] = None
+            for _kappa in range(1, np_pd_iters + 1):
+                _jacobi_consensus(lam_curr)
+                lam_last_sweep = lam_curr
+                np_pd_iters_used = float(_kappa)
+                np_pd_residual = float(sum_nin - pd_target)
+                # 조기수렴 ①: 잔차가 target의 2% 이내 — λ 갱신 없이 종료(안장점 도달).
+                if abs(np_pd_residual) <= 0.02 * max(pd_target, 1.0):
+                    break
+                lam_new = min(
+                    max(0.0, lam_curr + gain_pd * np_pd_residual), self.lambda_np_cap
+                )
+                # 조기수렴 ②: λ 고정점(cap/0 clip 포함) — green이 이미 그 λ의 균형.
+                if abs(lam_new - lam_curr) <= 1.0e-6:
+                    lam_curr = lam_new
+                    break
+                lam_curr = lam_new
+            # 최종 λ로 1회 재수렴 — commit되는 green이 최종 λ의 균형이 되게
+            # (off-equilibrium commit 금지). 마지막 sweep이 이미 그 λ였으면 생략.
+            if lam_last_sweep is None or abs(lam_curr - lam_last_sweep) > 1.0e-6:
+                _jacobi_consensus(lam_curr)
+                np_pd_residual = float(sum_nin - pd_target)
+            lambda_p = lam_curr
+            np_cand_lambda_applied = 1.0
+        else:
+            _jacobi_consensus(lambda_p)
         # ---- 듀얼 분해 λ step 간 적분 갱신(A1+A2 — 이분법·commit sweep 폐지, 2026-07-02) ----
         # green은 Jacobi가 수렴시킨 값 그대로 커밋된다(A2: off-equilibrium commit 소멸). λ_next는
         # 마지막 합의 sweep의 Σnin과 투영 target으로 적분 갱신하되, 여기서 self._lambda_P에 쓰지
@@ -3067,9 +3735,31 @@ class WuFaithfulFollower:
             sigma_min, sigma_max = self._np_feasible_range(
                 state, coupling, commit_snapshot, forecast_arrivals, horizon_h,
             )
-            projected_target = min(max(n_p_star, sigma_min), sigma_max)
-            # 방향: Σnin > target(유입 과다) → λ 증가(억제 강화). max(0,·)이 A1(음수 금지)을 강제.
-            lambda_next = self._lambda_np_update(lambda_p, sum_nin, projected_target)
+            # windup 수선 ①(내부 투영): 모서리(feas_min)는 own-TTS와 타협하는 follower
+            # 균형이 도달하지 못하는 점이라 오차가 구조적 양수 → λ 단방향 적분(8-seg
+            # 155에서 cap 폭주, NP_OFF probe로 인과 확정). 내부점으로 클립하면 균형이
+            # target 양쪽에 놓일 수 있어 λ가 자가 복원한다. frac=0이면 구거동(비트동일).
+            interior = float(getattr(self.cfg.mpc, "np_target_interior_frac", 0.0))
+            proj_lo = sigma_min + max(0.0, interior) * max(0.0, sigma_max - sigma_min)
+            projected_target = min(max(n_p_star, proj_lo), sigma_max)
+            # windup 수선 ②(경부하 deadband): 보호구역 accumulation이 임계 대비 충분히
+            # 낮으면 보호가 무의미 — 적분 대신 감쇠로 λ를 회수(잔여 왜곡 제거).
+            deadband = float(getattr(self.cfg.mpc, "np_dual_deadband_frac", 0.0))
+            n_p_crit_veh = float(getattr(self.cfg.leader, "N_P_crit_veh", 0.0) or 0.0)
+            n_p_now = float(state.protected_accumulation_veh(net))
+            low_stock_post = (
+                deadband > 0.0 and n_p_crit_veh > 0.0
+                and n_p_now < deadband * n_p_crit_veh
+            )
+            # deadband v2: 위반(Σnin > projected_target)은 stock 게이트를 우회(corrector 참조).
+            viol_ovr_post = bool(
+                getattr(self.cfg.mpc, "np_deadband_violation_override", False)
+            )
+            if low_stock_post and not (viol_ovr_post and sum_nin > projected_target):
+                lambda_next = 0.5 * lambda_p
+            else:
+                # 방향: Σnin > target(유입 과다) → λ 증가(억제 강화). max(0,·)이 A1(음수 금지)을 강제.
+                lambda_next = self._lambda_np_update(lambda_p, sum_nin, projected_target)
         # ---- per-signal OFFSET 국소 탐색(PLATOON-AWARE, "proposed" authority 전용, step당 1회) ----
         # 수렴된 green/결합값을 고정한 뒤, 각 신호가 자기 corridor objective를 최소화하는 offset을
         # 탐색해 control.offsets에 commit한다. offset 채점은 phase-resolved 서비스 + 상류 platoon
@@ -3156,6 +3846,10 @@ class WuFaithfulFollower:
             inflow_outflow_allocation={},
         )
         for link in net.freeway_links:
+            if self.segment_agents and self.metering_enabled:
+                # 13-player: VSL·metering은 Jacobi 합의 안에서 segment agent들이 이미
+                # commit(예산 사영 포함) — post-loop 좌표하강 생략.
+                continue
             if self.metering_enabled:
                 vsl_dict, meter_dict, e = self._solve_freeway_agent_metered(
                     link, state, coupling, demand, meter_snapshot, leader,
@@ -3237,7 +3931,78 @@ class WuFaithfulFollower:
         # N_P 투영 진단: 리더 의도(original)·실현가능범위로 투영한 target·잔차. dual path에서만
         # 유의값, leader=None이면 모두 0(default). plant/run-log가 읽는 rate는 PROJECTED target.
         control.diagnostics["wu_faithful_np_original_target"] = float(n_p_star)
+        # ---- ε-best-response gap probe(2026-07-12, 진단 전용 — 행동 불변) ----
+        # 고정점(최종 결합변수·최종 control)에서 각 urban follower를 단독 재최적화해
+        # gap_i = J_i(committed) − J_i(BR) ≥ 0을 측정. freeway segment agent는 재-BR의
+        # 행동 변화량(L1)만 측정(예산 사영·궤적 캐시 부작용은 save/restore로 차단).
+        # 공유 등식 제약 하 metering의 단독 이탈은 실행가능집합 밖이므로 gap 정의에서 제외.
+        if bool(getattr(self.cfg.mpc, "eps_gap_probe", False)):
+            import copy as _copy
+            probe_snapshot = ControlAction(
+                ramp_metering=dict(control.ramp_metering),
+                vsl=dict(control.vsl),
+                green_times=dict(control.green_times),
+                offsets=dict(control.offsets),
+                inflow_outflow_allocation={},
+            )
+            gaps = []
+            rel_gaps = []
+            for signal in net.signals:
+                arr_probe = self._per_movement_arrivals(signal, state, probe_snapshot, demand)
+                _, j_br, _, _ = self._solve_urban_agent_local(
+                    signal, state, coupling, arr_probe, s_eff_frozen,
+                    reservoir_drain, freeway_congestion, probe_snapshot, leader,
+                    lambda_p, forecast_arrivals, horizon_h, demand,
+                )
+                p1_com = float(control.green_times.get(f"{signal}_p1", 0.0))
+                _, j_com, _, _ = self._solve_urban_agent_local(
+                    signal, state, coupling, arr_probe, s_eff_frozen,
+                    reservoir_drain, freeway_congestion, probe_snapshot, leader,
+                    lambda_p, forecast_arrivals, horizon_h, demand,
+                    candidates_override=[p1_com],
+                )
+                gap = max(0.0, float(j_com) - float(j_br))
+                gaps.append(gap)
+                rel_gaps.append(gap / max(abs(float(j_br)), 1.0e-9))
+            fw_vsl_l1 = 0.0
+            fw_meter_l1 = 0.0
+            if self.segment_agents and self.metering_enabled:
+                saved_traj = _copy.deepcopy(self._seg_traj)
+                saved_off = dict(self._wu._last_offramp_flow)
+                saved_has = bool(getattr(self._wu, "_has_last_offramp_flow", False))
+                saved_diag = dict(self._seg13_diag)
+                for link in net.freeway_links:
+                    vsl_p, meter_p, _ = self._solve_freeway_segment_agents(
+                        link, state, coupling, demand, probe_snapshot, leader,
+                    )
+                    for k, v in vsl_p.items():
+                        fw_vsl_l1 += abs(float(v) - float(control.vsl.get(k, v)))
+                    for k, v in meter_p.items():
+                        fw_meter_l1 += abs(float(v) - float(control.ramp_metering.get(k, v)))
+                self._seg_traj = saved_traj
+                self._wu._last_offramp_flow = saved_off
+                self._wu._has_last_offramp_flow = saved_has
+                self._seg13_diag = saved_diag
+            control.diagnostics["wu_eps_gap_probe"] = 1.0
+            control.diagnostics["wu_eps_gap_urban_max"] = float(max(gaps) if gaps else 0.0)
+            control.diagnostics["wu_eps_gap_urban_mean"] = float(
+                sum(gaps) / len(gaps) if gaps else 0.0
+            )
+            control.diagnostics["wu_eps_gap_urban_rel_max"] = float(
+                max(rel_gaps) if rel_gaps else 0.0
+            )
+            control.diagnostics["wu_eps_fw_vsl_l1"] = float(fw_vsl_l1)
+            control.diagnostics["wu_eps_fw_meter_l1"] = float(fw_meter_l1)
         control.diagnostics["wu_faithful_np_projected_target"] = float(projected_target)
+        control.diagnostics["wu_faithful_np_sum_nin"] = float(sum_nin)
+        control.diagnostics["wu_faithful_np_cand_lambda_applied"] = float(np_cand_lambda_applied)
+        control.diagnostics["wu_faithful_np_cand_lambda"] = float(lambda_p)
+        # 방법 A 진단: K-loop 실사용 횟수·최종 계획-공간 잔차(OFF면 0/0).
+        control.diagnostics["wu_faithful_np_pd_iters"] = float(np_pd_iters_used)
+        control.diagnostics["wu_faithful_np_pd_residual"] = float(np_pd_residual)
+        control.diagnostics["wu_faithful_np_bias_ratio"] = float(
+            self._np_bias_ratio if self._np_bias_ratio is not None else 1.0
+        )
         control.diagnostics["wu_faithful_np_feasible_min"] = float(sigma_min)
         control.diagnostics["wu_faithful_np_feasible_max"] = float(sigma_max)
         control.diagnostics["wu_faithful_np_projection_residual"] = float(n_p_star - projected_target)
@@ -3274,6 +4039,9 @@ class WuFaithfulFollower:
         control.diagnostics["wu_faithful_offsets_searched_off_zero"] = float(offsets_off_zero)
         control.diagnostics["wu_faithful_offset_evals"] = float(offset_evals)
         control.diagnostics.update(self._wu._repair_diagnostics)
+        if self.segment_agents:
+            control.diagnostics["wu_seg13_active"] = 1.0
+            control.diagnostics.update(self._seg13_diag)
         return control, iteration, converged, float(residual), evals
 
     # ---------- 외부 인터페이스 (DistributedCoordinator.solve와 동일) ----------

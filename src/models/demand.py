@@ -35,12 +35,27 @@ class ScenarioConfig:
     # 같도록 renormalize해 skew 효과를 demand 크기와 분리한다. None이면 기존 gradient 유지.
     urban_boundary_weight_override: Optional[Dict[str, float]] = None
     urban_west_east_ratio: Optional[float] = None
+    # 시변 skew 반전(2026-07-15): 지정 시 urban_west_east_ratio가 초기값, _late가 후기값이고
+    # _reversal_sec 중심 ±_reversal_win/2 구간에서 선형 crossfade. offset/green×offset 가격
+    # 활성화 무대(고정 skew면 offset 한 번 정해지고 불변 → 가격 0).
+    urban_we_ratio_late: Optional[float] = None
+    urban_we_reversal_sec: Optional[float] = None
+    urban_we_reversal_win: float = 600.0
     freeway_lane_closures: list[Dict[str, float | str]] = field(default_factory=list)
     surge_start_sec: Optional[float] = None
     surge_peak_sec: Optional[float] = None
     surge_end_sec: Optional[float] = None
     surge_peak_scale: float = 1.0
     surge_recovery_scale: float = 1.0
+    # 사다리꼴 펄스 프로파일(2026-07-12 승인, 청산형 설계): base 지대 → 램프업 →
+    # 플래토(class scale 도달) → 램프다운 → base 복귀. pulse_start_sec가 None이면
+    # 완전 휴면(기존 시나리오 비트 동일). 펄스 구성 시 내장 sine 피크파는 꺼서
+    # 설계 곡선이 그대로 실현되게 한다(effective scale = base + (class−base)·pulse(t)).
+    pulse_base_scale: Optional[float] = None
+    pulse_start_sec: Optional[float] = None
+    pulse_rampup_sec: float = 300.0
+    pulse_plateau_sec: float = 900.0
+    pulse_rampdown_sec: float = 300.0
     metadata: Dict[str, float] = field(default_factory=dict)
 
     @classmethod
@@ -68,6 +83,9 @@ class ScenarioConfig:
         west_east_ratio = raw.get("urban_west_east_ratio")
         if west_east_ratio is not None:
             known["urban_west_east_ratio"] = float(west_east_ratio)
+        for _k in ("urban_we_ratio_late", "urban_we_reversal_sec", "urban_we_reversal_win"):
+            if raw.get(_k) is not None:
+                known[_k] = float(raw[_k])
         lane_closures = raw.get("freeway_lane_closures")
         if isinstance(lane_closures, list):
             known["freeway_lane_closures"] = [
@@ -84,6 +102,14 @@ class ScenarioConfig:
                 known[key] = float(value)
         known["surge_peak_scale"] = float(raw.get("surge_peak_scale", 1.0))
         known["surge_recovery_scale"] = float(raw.get("surge_recovery_scale", 1.0))
+        for key in ("pulse_base_scale", "pulse_start_sec"):
+            value = raw.get(key)
+            if value is not None:
+                known[key] = float(value)
+        for key in ("pulse_rampup_sec", "pulse_plateau_sec", "pulse_rampdown_sec"):
+            value = raw.get(key)
+            if value is not None:
+                known[key] = float(value)
         return cls(name=name, **known)
 
 
@@ -163,6 +189,42 @@ class DemandProfile:
             return peak_scale + fraction * (recovery_scale - peak_scale)
         return recovery_scale
 
+    def _pulse_fraction(self, time_sec: float) -> Optional[float]:
+        # 사다리꼴 펄스 위치 함수 pulse(t)∈[0,1]. base 지대 0, 램프 선형, 플래토 1.
+        # 미구성(pulse_start_sec/base_scale None)이면 None → 기존 경로 비트 동일.
+        start = self.scenario.pulse_start_sec
+        base = self.scenario.pulse_base_scale
+        if start is None or base is None:
+            return None
+        up = max(0.0, self.scenario.pulse_rampup_sec)
+        plateau = max(0.0, self.scenario.pulse_plateau_sec)
+        down = max(0.0, self.scenario.pulse_rampdown_sec)
+        if time_sec <= start:
+            return 0.0
+        if time_sec <= start + up:
+            return (time_sec - start) / max(up, 1.0e-9)
+        if time_sec <= start + up + plateau:
+            return 1.0
+        if time_sec <= start + up + plateau + down:
+            return 1.0 - (time_sec - start - up - plateau) / max(down, 1.0e-9)
+        return 0.0
+
+    def _effective_we_ratio(self, time_sec: float) -> Optional[float]:
+        """시변 skew: _reversal_sec 중심 crossfade로 초기→후기 비율 보간. 미지정이면 고정값."""
+        r0 = self.scenario.urban_west_east_ratio
+        r1 = self.scenario.urban_we_ratio_late
+        rev = self.scenario.urban_we_reversal_sec
+        if r1 is None or rev is None or r0 is None:
+            return r0
+        win = max(float(self.scenario.urban_we_reversal_win), 1.0e-9)
+        lo, hi = rev - win / 2.0, rev + win / 2.0
+        if time_sec <= lo:
+            return r0
+        if time_sec >= hi:
+            return r1
+        f = (time_sec - lo) / win
+        return r0 + (r1 - r0) * f
+
     def _active_lane_loss(self, time_sec: float) -> Dict[str, Dict[int, float]]:
         # 차로 폐쇄는 DemandStep에 넣어 plant와 MPC forecast가 같은 incident 상태를 보게 한다.
         lane_loss: Dict[str, Dict[int, float]] = {}
@@ -187,9 +249,22 @@ class DemandProfile:
         peak = 1.0 + 0.22 * math.sin(math.pi * min(max(x, 0.0), 1.0))
 
         surge = self._surge_scale(time_sec)
-        freeway_base = 1650.0 * self.scenario.freeway_scale * peak * surge
-        ramp_base = 560.0 * self.scenario.ramp_scale * peak * surge
-        urban_base = 500.0 * self.scenario.urban_scale * peak * surge
+        pulse = self._pulse_fraction(time_sec)
+        if pulse is None:
+            urban_scale = self.scenario.urban_scale
+            freeway_scale = self.scenario.freeway_scale
+            ramp_scale = self.scenario.ramp_scale
+        else:
+            # 펄스 모드: class scale은 플래토 피크, base 지대는 pulse_base_scale.
+            # 내장 sine 피크파는 꺼서(peak=1) 설계 사다리꼴이 그대로 실현되게 한다.
+            peak = 1.0
+            base = max(0.0, float(self.scenario.pulse_base_scale))
+            urban_scale = base + (self.scenario.urban_scale - base) * pulse
+            freeway_scale = base + (self.scenario.freeway_scale - base) * pulse
+            ramp_scale = base + (self.scenario.ramp_scale - base) * pulse
+        freeway_base = 1650.0 * freeway_scale * peak * surge
+        ramp_base = 560.0 * ramp_scale * peak * surge
+        urban_base = 500.0 * urban_scale * peak * surge
 
         freeway = {
             link: freeway_base * (1.0 + 0.05 * idx)
@@ -208,7 +283,7 @@ class DemandProfile:
             w_total = sum(weighted.values())
             renorm = (base_total / w_total) if w_total > 1.0e-9 else 1.0
             in_base = {link: weighted[link] * renorm for link in weighted}
-        west_east_ratio = self.scenario.urban_west_east_ratio
+        west_east_ratio = self._effective_we_ratio(time_sec)
         if west_east_ratio is not None:
             # 서/동 측면 진입의 합만 재배분하고 북측 진입과 전체 urban demand 합은 보존한다.
             if west_east_ratio <= 0.0:

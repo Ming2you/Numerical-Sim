@@ -20,6 +20,7 @@ follower를 바꾸려면 `_make_follower_solver`만 오버라이드하면 된다
 """
 from __future__ import annotations
 
+from collections import deque
 from typing import Dict, List, Optional
 
 from src.controllers.stackelberg_mpc import (
@@ -77,6 +78,8 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         # 후보 격자(0.1~0.3·cap)가 δ(60veh/h)보다 커서, 반경과 **측정폭을 격자에 맞춘다**
         # (허용 이동폭만큼 측정: δ_r = trust·cap_r). None=무제한(-B3 재현, 과소방류 나선).
         # 기본 0.25 — metering_price_enabled를 켜면 trust가 함께 걸린다(러너 -B3TR).
+        # 플래그십(ALLPRICE-JOINT)은 make_controller에서 δ=300·trust_frac=0.20 짝으로
+        # override(2026-07-15 δ 스캔 승자 — 아래 make_controller 주석 참조).
         self.metering_price_trust_frac: Optional[float] = 0.25
         # B3CERT(2026-07-05, 사용자 승인 설계): **비대칭 안전 증명서**. trust의 전제(오류
         # 가역성)가 capacity drop에선 깨진다(B3TR v2: 한 칸씩 과방류로 걸어가 breakdown,
@@ -116,6 +119,9 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         # follower가 primal joint을 이미 포착 → cross 가격만 추가. 기본 OFF = 비트동일.
         self.green_offset_cross_price_enabled: bool = False
         self.green_offset_cross_weight: float = 1.0
+        # green×offset cross의 offset FD 폭(2026-07-14 Task C probe): None=cycle/8(기존
+        # 격자 1칸). 2차 혼합편미분은 소δ에서 잘 죽으므로 영역판별 시 cycle/4로 확대.
+        self.green_offset_cross_offset_delta_sec: Optional[float] = None
         self.vsl_meter_cross_price_enabled: bool = False
         self.vsl_meter_cross_weight: float = 1.0
         # ---------- A/B-패키지(2026-07-10): 계산비용 절감 ----------
@@ -211,9 +217,195 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         self.price_iter_max: int = 1
         self.price_iter_relax: float = 0.5
         self.price_iter_tol: float = 1.0e-2  # 상대 control 변화 수렴 문턱
+        # ---------- 층2(2026-07-14): β̂ 낙관편향 추정기 + trailing-regret 스위치 ----------
+        # leader 내부 rollout은 체계적으로 낙관(제약 누락·capacity-drop 절벽 평활·horizon
+        # 절단·동결 결합)이고 ~50 후보 argmax가 이를 증폭(optimizer's curse) — 예측 vs 예측
+        # 비교인 fallback guard는 실현 +49% 파국에서도 발화하지 못했다.
+        # 측정 기준(설계 선택, 2026-07-14): 이 코드베이스에서 1-step 예측(_predict)은 plant
+        # (run_coupled_interval)와 같은 함수·같은 demand·같은 state라 첫-interval 예측이
+        # 구성상 실현과 일치한다 — 첫-interval 비율은 낙관을 원리적으로 못 잰다. 따라서
+        # 스펙의 허용 대안대로 **horizon TTT + lag buffer**를 쓴다: 예측 = 커밋 계획의
+        # 채점 rollout TTT(distributed_response_rollout_ttt, held-plan H-step — guard가
+        # 비교하는 바로 그 값), 실현 = 이후 H개 interval의 사다리꼴 TTT 합(lag H).
+        # 닫힌루프 재결정·whipsaw·미계상 큐로 실현이 held-plan 예측에서 벗어나는 만큼이
+        # β̂>1로 잡힌다(cfg.mpc.leader_bias_estimator, 기본 OFF=비트동일).
+        self._beta_hat: Optional[float] = None
+        self._beta_ewma_weight: float = 0.2       # EWMA 갱신 가중(스펙 고정)
+        self._beta_ratio_clip: tuple = (0.5, 3.0)  # 단발 이상비율 클립(스펙 고정)
+        # lag buffer: 커밋 시 {pred(H-step TTT), remaining(H), acc(실현 누적)} 등록,
+        # 매 스텝 실현 interval을 전 항목에 가산 — remaining 소진 시 비율 확정·EWMA 갱신.
+        self._beta_pending: deque = deque()
+        self._beta_prev_total_veh: Optional[float] = None  # 직전 스텝 결정 시점 총 차량수 N_prev
+        self._beta_last_realized: Optional[float] = None   # 이번 스텝에서 측정한 직전 interval 실현 TTT
+        # β̂ 표류 재캘리브레이션 트리거: |β̂−1|>0.2 연속 스텝 카운터(5스텝 연속 시 제안).
+        self._beta_drift_streak: int = 0
+        # trailing-regret(cfg.mpc.regret_guard_steps=k>0): (실현 interval, incumbent 예측
+        # interval) 쌍의 최근 k-창. incumbent 예측 interval = incumbent의 채점 horizon TTT/H
+        # (이미 계산된 값 재사용 — 추가 rollout 0회). 창 전체에서 실현 합 > 예측 합×1.10이면
+        # 다음 k스텝 강제 incumbent 커밋(hysteresis: 강제 중에도 창 계속 갱신, k 소진 후 복귀).
+        self._regret_window: deque = deque()
+        self._regret_pending_inc_pred: Optional[float] = None  # 직전 스텝 incumbent 예측 interval TTT
+        self._regret_forced_remaining: int = 0
+        self._regret_force_this_step: bool = False
+        self._regret_last_gap: float = 0.0
 
     def _make_follower_solver(self, cfg: ExperimentConfig):
         return WuFaithfulFollower(cfg)
+
+    # ---------- 층2(2026-07-14): β̂ 추정 + trailing-regret — 스텝 시작/커밋 훅 ----------
+
+    def _beta_regret_on_entry(self, state: TrafficState) -> Dict[str, float]:
+        """스텝 시작(decide 진입) 훅: 직전 interval의 실현 TTT를 측정해 β̂·regret 창을 갱신.
+
+        실현 interval TTT ≈ ((N_prev + N_now)/2)·T_c_h — N = 총 urban+freeway 차량수
+        (사다리꼴 적분 근사, 예측 rollout TTT와 동일 단위 veh·h). β̂은 lag buffer의
+        H-스텝 창이 완성될 때마다 실현합/예측(H-step held-plan TTT) 비율로 EWMA 갱신.
+        두 플래그 모두 OFF면 즉시 반환(계산 0, 비트동일)."""
+        cfg_m = self.cfg.mpc
+        est_on = bool(getattr(cfg_m, "leader_bias_estimator", False))
+        regret_k = int(getattr(cfg_m, "regret_guard_steps", 0))
+        self._regret_force_this_step = False
+        if not est_on and regret_k <= 0:
+            return {}
+        net = self.cfg.network
+        t_c_h = float(self.cfg.simulation.T_c_h)
+        n_now = float(state.total_urban_vehicles(net)) + float(
+            state.total_freeway_vehicles(net)
+        )
+        meta: Dict[str, float] = {}
+        realized: Optional[float] = None
+        if self._beta_prev_total_veh is not None:
+            realized = 0.5 * (self._beta_prev_total_veh + n_now) * t_c_h
+            # β̂ lag buffer: 미결 예측 항목마다 실현 interval을 누적, H개 채워지면 확정.
+            if est_on:
+                while self._beta_pending and self._beta_pending[0]["remaining"] <= 0:
+                    self._beta_pending.popleft()
+                for item in self._beta_pending:
+                    item["acc"] += realized
+                    item["remaining"] -= 1
+                while self._beta_pending and self._beta_pending[0]["remaining"] <= 0:
+                    done = self._beta_pending.popleft()
+                    pred_h = float(done["pred"])
+                    if pred_h > 1.0e-9:
+                        ratio = float(done["acc"]) / pred_h
+                        lo, hi = self._beta_ratio_clip
+                        ratio = min(max(float(ratio), float(lo)), float(hi))
+                        w = float(self._beta_ewma_weight)
+                        self._beta_hat = (
+                            ratio
+                            if self._beta_hat is None
+                            else (1.0 - w) * float(self._beta_hat) + w * ratio
+                        )
+            # regret 창: 같은 interval의 (실현, incumbent 예측 interval) 쌍으로 갱신.
+            if regret_k > 0 and self._regret_pending_inc_pred is not None:
+                self._regret_window.append(
+                    (float(realized), float(self._regret_pending_inc_pred))
+                )
+                while len(self._regret_window) > regret_k:
+                    self._regret_window.popleft()
+        # 재캘리브레이션 트리거 ②: |β̂−1|>0.2가 5스텝 연속이면 표류 판정(진단·경고만).
+        if est_on and self._beta_hat is not None:
+            if abs(float(self._beta_hat) - 1.0) > 0.2:
+                self._beta_drift_streak += 1
+            else:
+                self._beta_drift_streak = 0
+            if self._beta_drift_streak >= 5:
+                self._recalib_needed = True
+        self._regret_pending_inc_pred = None
+        self._beta_last_realized = realized
+        # 이번 스텝 커밋 시점의 N — 다음 스텝 realized 계산 재료.
+        self._beta_prev_total_veh = n_now
+        if regret_k > 0:
+            gap = 0.0
+            if len(self._regret_window) >= regret_k:
+                sum_real = sum(r for r, _ in self._regret_window)
+                sum_inc = sum(p for _, p in self._regret_window)
+                gap = sum_real - 1.10 * sum_inc
+                # 트리거: 창 전체가 10% margin 넘게 나쁘고, 현재 강제 구간이 아니면 k스텝 강제.
+                if self._regret_forced_remaining <= 0 and gap > 0.0:
+                    self._regret_forced_remaining = regret_k
+            self._regret_last_gap = float(gap)
+            if self._regret_forced_remaining > 0:
+                self._regret_force_this_step = True
+                self._regret_forced_remaining -= 1
+        if realized is not None:
+            meta["leader_realized_interval_ttt"] = float(realized)
+        if self._beta_hat is not None:
+            meta["leader_beta_hat"] = float(self._beta_hat)
+        if regret_k > 0:
+            meta["leader_regret_active"] = float(self._regret_force_this_step)
+            meta["leader_regret_gap"] = float(self._regret_last_gap)
+            meta["leader_regret_window_len"] = float(len(self._regret_window))
+        return meta
+
+    def _committed_horizon_pred_ttt(
+        self,
+        state: TrafficState,
+        control: ControlAction,
+        forecast: List[DemandStep],
+        n_steps: int,
+    ) -> float:
+        """커밋된 control의 held-plan H-step 예측 TTT — 채점 진단 재사용, 결측 시 재계산.
+
+        1순위: follower solve가 채점 시 기록한 distributed_response_rollout_ttt
+        (wu_faithful_follower._rollout_horizon_ttt, horizon_steps개 interval — fallback
+        guard가 비교하는 바로 그 값이라 β̂ 보정과 차원이 정확히 맞는다, 추가 rollout 0회).
+        결측(이례)이면 같은 정의로 `_predict`(depth_override=H) 재계산."""
+        diag = getattr(control, "diagnostics", {}) or {}
+        raw = diag.get("distributed_response_rollout_ttt")
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            value = float("nan")
+        if value == value and value not in (float("inf"), -float("inf")):
+            return value
+        _, pred = self._predict(state, control, forecast, depth_override=n_steps)
+        return float(pred)
+
+    def _beta_regret_on_commit(
+        self,
+        state: TrafficState,
+        result: DecisionResult,
+        forecast: List[DemandStep],
+    ) -> Dict[str, float]:
+        """커밋 직후 훅: 커밋 계획(+regret용 incumbent)의 예측 horizon TTT를 등록.
+
+        예측은 채점 rollout 진단의 재사용이라 추가 rollout 0회. β̂용은 lag buffer에
+        {pred, remaining=H}로 등록(entry 훅이 실현 H개를 채워 확정), regret용 incumbent는
+        interval 평균(pred/H)으로 환산해 다음 실현 interval과 쌍을 만든다.
+        두 플래그 모두 OFF면 즉시 반환(계산 0, 비트동일)."""
+        cfg_m = self.cfg.mpc
+        est_on = bool(getattr(cfg_m, "leader_bias_estimator", False))
+        regret_k = int(getattr(cfg_m, "regret_guard_steps", 0))
+        if not est_on and regret_k <= 0:
+            return {}
+        meta: Dict[str, float] = {}
+        if not forecast:
+            return meta
+        n_steps = max(1, int(cfg_m.horizon_steps))
+        pred_h = self._committed_horizon_pred_ttt(
+            state, result.control, forecast, n_steps
+        )
+        meta["leader_pred_horizon_ttt"] = float(pred_h)
+        meta["leader_pred_interval_ttt"] = float(pred_h) / float(n_steps)
+        if est_on:
+            self._beta_pending.append(
+                {"pred": float(pred_h), "remaining": int(n_steps), "acc": 0.0}
+            )
+            # 안전 상한(정상 흐름에선 스텝당 1개 추가·1개 확정으로 길이 ≤ H+1).
+            while len(self._beta_pending) > 4 * n_steps + 4:
+                self._beta_pending.popleft()
+        if regret_k > 0:
+            pfo_eval = getattr(self, "_pfo_incumbent_eval", None)
+            if pfo_eval is not None:
+                inc_h = self._committed_horizon_pred_ttt(
+                    state, pfo_eval.nash.control, forecast, n_steps
+                )
+                self._regret_pending_inc_pred = float(inc_h) / float(n_steps)
+                meta["leader_regret_incumbent_pred_interval_ttt"] = float(
+                    self._regret_pending_inc_pred
+                )
+        return meta
 
     # ---------- B2: per-signal externality 가격 계산/refresh ----------
 
@@ -240,6 +432,9 @@ class StackelbergWuMeteredController(StackelbergMPCController):
             if self.previous_control is not None
             else ControlAction.fixed(self.cfg)
         )
+        # 층2(2026-07-14): β̂/regret 스텝 시작 갱신 — 직전 interval 실현 TTT 측정,
+        # β̂ EWMA·regret 창·강제 incumbent 여부 확정(플래그 OFF면 무동작=비트동일).
+        l2_meta = self._beta_regret_on_entry(state)
         # LINK-SHARE(2026-07-09): mode에 따라 step 시작 시 ω_F 설정.
         #  density → headroom 비례(상태 피드백), search/off → 균등(후보 평가 일관성).
         follower_ls = self.nash_solver
@@ -282,6 +477,12 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         if isinstance(self.nash_solver, WuFaithfulFollower):
             for link, w in self.nash_solver._wu._omega_f.items():
                 result.control.diagnostics[f"leader_nuf_omega_{link}"] = float(w)
+        # 층2: 커밋 계획(+incumbent)의 예측 첫-interval TTT 기록 + 진단 export
+        # (플래그 OFF면 두 훅 모두 {} — 진단 키 추가 없음, 비트동일).
+        l2_meta.update(self._beta_regret_on_commit(state, result, forecast))
+        if l2_meta:
+            result.metadata.update(l2_meta)
+            result.control.diagnostics.update(l2_meta)
         return result
 
     def _link_share_omega(self, state: TrafficState) -> Dict[str, float]:
@@ -879,12 +1080,26 @@ class StackelbergWuMeteredController(StackelbergMPCController):
                 if _circ(off_now, ref) >= float(self.offset_price_refresh_threshold_sec):
                     refresh = True
                     break
+        release_trigger = False
+        if not refresh and self.metering_price_enabled:
+            # release-트리거 재선형화(2026-07-14): 커밋된 직전 control의 실현
+            # Σmeter/budget(wu_b3_release_ratio_*)이 회랑 하한 α 근방(<α+0.05)까지
+            # 떨어지면(과소방류 나선 조짐) 가격 강제 재선형화 — 지연 불안정 완화.
+            # min(·,0.999)로 등식(α=1) 재현 시 상시 발화 방지(ratio≡1.0).
+            _floor = float(getattr(follower, "seg13_release_floor_frac", 0.0) or 0.0)
+            _thr = min(_floor + 0.05, 0.999)
+            for _k, _v in getattr(previous, "diagnostics", {}).items():
+                if _k.startswith("wu_b3_release_ratio_") and float(_v) < _thr:
+                    refresh = True
+                    release_trigger = True
+                    break
         if not refresh:
             self._signal_price_meta = dict(self._signal_price_meta)
             self._signal_price_meta["wu_b2_price_refreshed"] = 0.0
             return
 
         meta: Dict[str, float] = {"wu_b2_price_enabled": float(self.signal_price_enabled)}
+        meta["wu_b3_release_refresh"] = float(release_trigger)
         self._price_rollout_count = 0
 
         # ---- B-패키지: price-lite 경로(공용 baseline + one-sided + 스텐실 재활용 + 얕은 rollout) ----
@@ -1026,6 +1241,18 @@ class StackelbergWuMeteredController(StackelbergMPCController):
             rho_cert_limit = float(net.rho_crit) * (
                 1.0 - float(self.metering_release_cert_margin)
             )
+            # ---- 3점 곡률 진단(2026-07-14, δ 스캔): TTT(−Δ)/TTT(기준)/TTT(+Δ) ----
+            # 기준점 rollout은 동결 운영점(previous 그대로 — ramp를 자기 op값으로 덮어써도
+            # 동일 control)이라 전 램프 공용 → 1회만 추가 계산(refresh당 +1 rollout).
+            fd3_base_ttt: Optional[float] = None
+            if m_pts and spsa_g is None:
+                _r0 = next(iter(m_pts))
+                _x00 = m_pts[_r0][0]
+                _ttt_b, _, _ = self._global_rollout_metrics_with_metering(
+                    state, previous, forecast, _r0, _x00,
+                )
+                fd3_base_ttt = float(_ttt_b)
+            fd3_cliff_up: Dict[str, bool] = {}
             for ramp, (x0, m_lo, m_hi) in m_pts.items():
                 span = m_hi - m_lo
                 if span <= 1.0e-9:
@@ -1045,6 +1272,26 @@ class StackelbergWuMeteredController(StackelbergMPCController):
                             state, previous, forecast, ramp, m_lo,
                         )
                         g_i = (ttt_hi - ttt_lo) / span
+                        if fd3_base_ttt is not None:
+                            # 곡률 |hi+lo−2·base|: 0이면 선형. 문턱(breakdown) 구조면
+                            # 한쪽 팔만 급등해 곡률이 1차 전폭을 압도한다.
+                            curv = abs(ttt_hi + ttt_lo - 2.0 * fd3_base_ttt)
+                            meta[f"wu_b3_meter_fd3_{ramp}_lo"] = float(ttt_lo)
+                            meta[f"wu_b3_meter_fd3_{ramp}_base"] = float(fd3_base_ttt)
+                            meta[f"wu_b3_meter_fd3_{ramp}_hi"] = float(ttt_hi)
+                            meta[f"wu_b3_meter_fd3_{ramp}_curv"] = float(curv)
+                            # 선형화 불가 깃발: 2차 잔차 > 1차 전폭 |hi−lo| — secant 대표성 상실.
+                            meta[f"wu_b3_meter_fd3_{ramp}_nonlin"] = float(
+                                curv > abs(ttt_hi - ttt_lo) + 1.0e-9
+                            )
+                            # 위쪽 절벽: TTT(+Δ) ≫ base ≈ TTT(−Δ) — 방류 증가 방향만 급락.
+                            fd3_cliff_up[ramp] = bool(
+                                (ttt_hi - fd3_base_ttt)
+                                > 2.0 * abs(fd3_base_ttt - ttt_lo) + 1.0
+                            )
+                            meta[f"wu_b3_meter_fd3_{ramp}_cliffup"] = float(
+                                fd3_cliff_up[ramp]
+                            )
                     cost_lo, cost_hi = local_m[ramp]
                     g_ext = g_i - (cost_hi - cost_lo) / span
                     if self.barrier_price_enabled:
@@ -1059,6 +1306,17 @@ class StackelbergWuMeteredController(StackelbergMPCController):
                 meta[f"wu_b3_meter_price_{ramp}"] = float(g_ext)
                 meta[f"wu_b3_meter_price_ref_{ramp}"] = float(x0)
                 meta[f"wu_b3cert_{ramp}"] = float(m_certs[ramp])
+            # 링크별 '양 램프 동시 위쪽 절벽' 깃발(2026-07-14) — 大δ 과대 신호:
+            # 두 가격이 다 양수(전 램프 조임) → 과소방류 나선 위험의 사전 서명.
+            if fd3_base_ttt is not None:
+                for _link in net.freeway_links:
+                    _ramps_l = [
+                        r for r in m_pts if net.ramp_to_freeway.get(r) == _link
+                    ]
+                    if _ramps_l:
+                        meta[f"wu_b3_cliff_both_{_link}"] = float(
+                            all(fd3_cliff_up.get(r, False) for r in _ramps_l)
+                        )
             follower.metering_marginal_price = m_prices
             follower.metering_marginal_price_ref = m_refs
             follower.metering_release_certified = (
@@ -1258,6 +1516,10 @@ class StackelbergWuMeteredController(StackelbergMPCController):
                     g_ext = g_i - d_local
                 v_prices[key] = float(g_ext)
                 v_refs[key] = float(x0)
+                # 가시성(2026-07-14): per-seg VSL 가격을 meta로 export(기존엔 enabled
+                # 플래그만 나가 5채널 감사에서 vsl이 '안 보임'이었다 — 진단 전용).
+                meta[f"wu_b3_vsl_price_{key}"] = float(g_ext)
+                meta[f"wu_b3_vsl_price_ref_{key}"] = float(x0)
             follower.vsl_marginal_price = v_prices
             follower.vsl_marginal_price_ref = v_refs
             # PRICE-TR: VSL trust region 하달(±kmh — 가격이 측정된 이웃 밖 후보 제외).
@@ -1272,7 +1534,13 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         if self.green_offset_cross_price_enabled:
             meta["wu_joint_go_cross_enabled"] = 1.0
             dp = float(self.signal_price_delta_sec)
-            do = cycle / 8.0
+            do = (
+                float(self.green_offset_cross_offset_delta_sec)
+                if self.green_offset_cross_offset_delta_sec is not None
+                else cycle / 8.0
+            )
+            meta["wu_joint_go_cross_dp"] = float(dp)
+            meta["wu_joint_go_cross_do"] = float(do)
             nonramp = [s for s in net.signals if not follower._local_models[s].has_ramps]
             # 신호별 4-corner (p1, offset) 쌍 구성.
             gp_pairs: Dict[str, List[tuple]] = {}
@@ -1895,6 +2163,22 @@ class StackelbergWuMeteredController(StackelbergMPCController):
                 metadata["leader_fallback_guard_selected"] = 1.0
                 metadata["leader_fallback_guard_selected_pfo"] = 1.0
                 metadata["leader_fallback_guard_rejected_leader"] = 1.0
+        # 층2(2026-07-14) trailing-regret 강제 커밋: 최근 k-창에서 실현 TTT가 incumbent
+        # 예측×1.10을 넘었으면 leader 후보 대신 incumbent를 k스텝 강제 커밋한다
+        # (예측 vs 예측 guard가 못 잡는 실현 기반 안전장치; regret_guard_steps=0=OFF).
+        metadata["leader_regret_forced_commit"] = 0.0
+        if (
+            bool(getattr(self, "_regret_force_this_step", False))
+            and pfo_eval is not None
+            and best.stage != "fallback_pfo"
+        ):
+            best = pfo_eval
+            metadata["leader_regret_forced_commit"] = 1.0
+            metadata["leader_fallback_guard_selected"] = 1.0
+            metadata["leader_fallback_guard_selected_pfo"] = 1.0
+        elif bool(getattr(self, "_regret_force_this_step", False)) and best.stage == "fallback_pfo":
+            # 이미 guard/tie-break가 incumbent를 선택한 경우도 강제 상태를 기록.
+            metadata["leader_regret_forced_commit"] = 1.0
         metadata.update({
             "leader_pfo_incumbent_active": float(pfo_eval is not None),
             "leader_pfo_incumbent_selected": float(best.stage == "fallback_pfo"),
@@ -1943,7 +2227,30 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         # 하지 않고 유지한다 — 커밋된 제어가 PFO면 λ는 plant에 영향이 없으므로 새 정보가 없다.
         lam_next = best.nash.control.diagnostics.get("wu_faithful_lambda_next")
         if lam_next is not None:
-            self.nash_solver._lambda_P = float(lam_next)
+            if bool(getattr(self.cfg.mpc, "np_candidate_lambda", False)):
+                if int(getattr(self.cfg.mpc, "np_primal_dual_iters", 0)) > 0:
+                    # 방법 A: 선택 후보의 K-loop 최종 λ(안장점)를 다음 step warm start로
+                    # 직접 commit. corrector 체인은 사용하지 않는다(pending 해제) —
+                    # λ는 매 step 후보별 계획-공간 반복으로 재유도된다.
+                    lam_pd = best.nash.control.diagnostics.get("wu_faithful_np_cand_lambda")
+                    if lam_pd is not None:
+                        self.nash_solver._lambda_P = float(lam_pd)
+                    self.nash_solver._np_corrector_pending = None
+                else:
+                    # (51) corrector로 이관: 커밋 시점에는 standing λ를 갱신하지 않고
+                    # (λ_k, 커밋 후보의 투영 target)을 pending으로 넘겨, 다음 step 시작 시
+                    # 실현 유입 Q^real로 1회 교정한다(원고 정식화 정렬 — λ̂ 재적분 아님).
+                    tgt_c = best.nash.control.diagnostics.get("wu_faithful_np_projected_target")
+                    if tgt_c is not None:
+                        self.nash_solver._np_corrector_pending = (
+                            float(self.nash_solver._lambda_P), float(tgt_c),
+                        )
+            else:
+                self.nash_solver._lambda_P = float(lam_next)
+            # 첫 스텝 predictor fallback용 committed Σnin 저장(실현 유입 관측 전).
+            sum_nin_d = best.nash.control.diagnostics.get("wu_faithful_np_sum_nin")
+            if sum_nin_d is not None:
+                self.nash_solver._np_last_sum_nin = float(sum_nin_d)
         metadata["leader_lambda_np_committed"] = float(lam_next is not None)
         # N_UF dual λ_UF: 선택 후보 diagnostics에서 commit(λ_P와 동일 규약)하되,
         # BOOTSTRAP(2026-07-09): incumbent/fallback 선택으로 diagnostics에 λ_next가 없어도
@@ -2093,6 +2400,9 @@ class StackelbergWuMeteredController(StackelbergMPCController):
             action, state, forecast, previous
         )
         key = round(float(action_p.N_UF_star), 6)
+        if bool(getattr(self.cfg.mpc, "np_candidate_lambda", False)):
+            # NP-CAND-λ̂: λ̂가 N_P 의존이라 follower 반응이 후보별로 달라짐 → 키에 N_P 포함.
+            key = (key, round(float(action_p.N_P_star), 6))
         cached = self._nuf_solve_cache.get(key)
         dedupe_hit = cached is not None
         if dedupe_hit:

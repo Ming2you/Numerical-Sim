@@ -300,6 +300,10 @@ class CentralizedMPC:
             total_ttt += result.urban_ttt + result.freeway_ttt
             s.time_sec += self.cfg.simulation.control_interval
             states.append(s.copy())
+        # far(MFD tail, 2026-07-10): H 밖 잔여 accumulation 배수 비용 — 근시안 과잉 admission
+        # 방지(새 망에서 legacy가 이 부재로 붕괴). leader_mfd_far_enabled=False면 0(비트동일).
+        from src.controllers.stackelberg_mpc import mfd_far_cost_to_go
+        total_ttt += mfd_far_cost_to_go(self.cfg, s)
         return states, float(total_ttt)
 
     def _grid_authority(self) -> str:
@@ -328,6 +332,11 @@ class CentralizedMPC:
             if np.isfinite(incumbent_obj) and trajectory_ttt > incumbent_obj + 1.0e-12:
                 early_terminated = True
                 break
+        # far tail(2026-07-10): 완주 후보만 가산 — far ≥ 0이라 partial > incumbent 조기절단은
+        # 그대로 exact pruning(최종 obj는 반드시 더 큼).
+        if not early_terminated:
+            from src.controllers.stackelberg_mpc import mfd_far_cost_to_go
+            trajectory_ttt += mfd_far_cost_to_go(self.cfg, s)
         obj = self._objective(states, control, previous, trajectory_ttt)
         if early_terminated:
             obj = float(max(obj, incumbent_obj + 1.0e-9))

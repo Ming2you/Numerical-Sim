@@ -245,8 +245,9 @@ class StackelbergRLEnvironmentTest(unittest.TestCase):
             ]
             metadata = json.loads(paths["replay_metadata"].read_text(encoding="utf-8"))
 
-        self.assertEqual(len(transitions), 14)
-        self.assertEqual(metadata["transition_count"], 14)
+        expected_players = 1 + 5 + 2 * short_config().network.freeway_segments_per_link
+        self.assertEqual(len(transitions), expected_players)
+        self.assertEqual(metadata["transition_count"], expected_players)
         self.assertEqual(metadata["source"], "rl_stackelberg_smoke")
 
     def test_replay_transition_schema_accepts_leader_and_follower(self):
@@ -328,8 +329,9 @@ class StackelbergRLEnvironmentTest(unittest.TestCase):
 
         self.assertEqual(summary["episodes_recorded"], 1)
         self.assertEqual(summary["environment_steps_recorded"], 1)
-        self.assertEqual(summary["transitions_recorded"], 14)
-        self.assertEqual(len(transitions), 14)
+        expected_players = 1 + 5 + 2 * short_config().network.freeway_segments_per_link
+        self.assertEqual(summary["transitions_recorded"], expected_players)
+        self.assertEqual(len(transitions), expected_players)
 
     def test_nash_probe_returns_nonnegative_epsilon(self):
         env = StackelbergRLEnvironment(short_config(), ScenarioConfig("test"), seed=7)
