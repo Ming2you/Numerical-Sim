@@ -1,9 +1,12 @@
-# 결과 절 초안 v1 — 그림·캡션·본문 (현재 데이터 한정)
+# 결과 절 초안 v2 — 그림·캡션·본문 (현재 데이터 한정)
 
 > 작성일 2026-07-18. 동결 프레임 = `ANALYSIS_PLAN_FINAL.md`(§0~§5), 수치 출처 =
 > `analysis/tables/t1_macro_full.md`(2026-07-18 확정 런)과 `2026-07-17/notes.md`(측정 사실).
 > 그림 파일은 전부 `analysis/figures/`에 실존하는 것만 인용한다. 본문은 국문, 캡션은 영문.
 > §4는 런 미도착으로 구조만 배치한다.
+> v2(2026-07-18) — 사용자 결정 5건 반영: ① 고수요 본선 셀 = 190_w(200_w는 §5 전용 보조),
+> ② P-CENT = 의도적 rate-limit-free 상한 프레이밍, ③ 하드웨어·솔버 명세 확정,
+> ④ 표 1b/1c(urban/freeway 분해 + N_end) 추가, ⑤ ramp 큐 그림 기준선 = 저장 한계 180 veh.
 
 ---
 
@@ -36,8 +39,8 @@ T_total = 10,800 s(제어 주기 180 s × 60스텝)이고, 최초 20스텝(WARM 
 
 논문 본문 시나리오는 5개 — sweet_155_w(저수요), sweet_170_w(중수요·freeway 병목),
 sweet_170_skew15_w(urban 경계 불균형), sweet_170_incident_w(본선 폐색·용량 강하),
-sweet_200_w(극단 부하) — 이며, sweet_190_w(고전달·복합 스트레스)는 메커니즘 절(§2·§3)의
-대표 해부 셀로 사용하고 표에는 보조 행으로 유지한다.
+sweet_190_w(고전달·복합 스트레스) — 이며, 190_w는 메커니즘 절(§2·§3)의 대표 해부 셀을
+겸한다. sweet_200_w(극단 부하)는 §5 한계 서사 전용의 보조 행으로 표에 유지한다.
 
 - [TODO-P1: 네트워크 스키매틱 — 신호·세그먼트·램프 라벨 + 13-player 에이전트 소유권
   오버레이. 검증 비교 논문 6편 전원이 게재(완결성 감사 A1). §0 그림 1로 삽입.]
@@ -61,14 +64,13 @@ sweet_200_w(극단 부하) — 이며, sweet_190_w(고전달·복합 스트레�
 | WU-CD-F | 문헌(Wu 2022) 재현 분산 제어 — **권한 격차**의 하한. NC↔WU-CD-F 간극 = 문헌 권한 집합으로 얻는 가치, WU-CD-F↔PFO 간극 = 권한 확장(특히 ramp metering 소유권)의 가치 |
 | PFO | 제안 팔로워 단독(리더 없음, 이동 무제한) — **조정 격차**의 분리. PFO↔P-Stack 간극 = 리더 조정의 가치 |
 | PFO+box | PFO에 제안과 동일한 이동 한계(meter ±300 / VSL ±10 / green ±6) 부과 — **공정 액추에이터 기준선**. 동일 이동 한계 하에서 조정의 가치를 격리 |
-| P-CENT | 중앙집중 컨트롤러 — 계산을 무제한으로 허용한 **참조 상한**. 단 이동 한계 미적용(§1의 비교 조건 불일치 참조) |
+| P-CENT | 중앙집중·이동 한계 무적용(rate-limit-free) 컨트롤러 — 무제약 이동의 **성능 상한(upper bound)**을 재는 도구. 이동 한계는 의도적으로 적용하지 않는다 |
 | P-Stack | 제안 계층(Stackelberg) 컨트롤러, walk-MVG 구성 |
 
 **[검토 필요 — §0]**
-1. 하드웨어·솔버 명세 확정(§1 compute 문단의 [TODO]와 연동).
-2. [TODO-P1] 4건의 삽입 순서와 본문/부록 배분.
-3. 사고 시나리오 수치 명세(A5)를 수요 표에 통합할지 별도 문단으로 둘지.
-4. 결정론·model-plant match 선언의 §0 배치 위치(채점 규약 뒤 vs 절 서두).
+1. [TODO-P1] 4건의 삽입 순서와 본문/부록 배분.
+2. 사고 시나리오 수치 명세(A5)를 수요 표에 통합할지 별도 문단으로 둘지.
+3. 결정론·model-plant match 선언의 §0 배치 위치(채점 규약 뒤 vs 절 서두).
 
 ---
 
@@ -82,14 +84,51 @@ sweet_200_w(극단 부하) — 이며, sweet_190_w(고전달·복합 스트레�
 | sweet_170_w | 13,028 | 8,754 (+32.8) | 3,021 (+76.8) | 7,967 (+38.8) | 2,488 (+80.9) | 2,684 (+79.4) |
 | sweet_170_skew15_w | 13,175 | 12,183 (+7.5) | 2,957 (+77.6) | 2,838 (+78.5) | 2,517 (+80.9) | 2,667 (+79.8) |
 | sweet_170_incident_w | 9,581 | 9,111 (+4.9) | 2,367 (+75.3) | 7,413 (+22.6) | 2,354 (+75.4) | 2,295 (+76.0) |
-| sweet_190_w *(보조)* | 16,518 | 16,277 (+1.5) | 5,689 (+65.6) | 5,491 (+66.8) | 4,705 (+71.5) | 5,156 (+68.8) |
-| sweet_200_w | 18,115 | 17,955 (+0.9) | 7,195 (+60.3) | 17,474 (+3.5) | 7,480 (+58.7) | 8,684 (+52.1) |
+| sweet_190_w | 16,518 | 16,277 (+1.5) | 5,689 (+65.6) | 5,491 (+66.8) | 4,705 (+71.5) | 5,156 (+68.8) |
+| sweet_200_w *(보조)* | 18,115 | 17,955 (+0.9) | 7,195 (+60.3) | 17,474 (+3.5) | 7,480 (+58.7) | 8,684 (+52.1) |
 
 표 각주 — ① 개선% = (J_NC − J_ctrl)/J_NC × 100, wTTT는 §0.1 정의(WARM = 20 이후 창).
+190_w까지의 5개 행이 본선 시나리오이고 200_w는 §5 한계 서사 전용 보조 행이다.
 ② 이동 한계 준수 여부: P-Stack과 PFO+box는 meter ±300 / VSL ±10 / green ±6을 준수.
-PFO는 무제한(실측 per-step 최대 meter 1,125 / green 57 s). P-CENT는 미적용(실측 meter
-628 / VSL 30 / green 41). WU-CD-F(문헌 재현)도 미적용(VSL 50 / green 36). ③ wTTT에는
-on-ramp 대기 통행시간이 포함된다. ④ delay 열은 free-flow reference 확보 후 추가 [런 대기].
+PFO는 무제한(실측 per-step 최대 meter 1,125 / green 57 s). P-CENT는 상한(upper bound)
+도구로서 의도적 미적용(실측 meter 628 / VSL 30 / green 41). WU-CD-F(문헌 재현)도
+미적용(VSL 50 / green 36). ③ wTTT에는 on-ramp 대기 통행시간이 포함된다. ④ delay 열은
+free-flow reference 확보 후 추가 [런 대기].
+
+### 표 1b — wTTT의 urban/freeway 분해 [veh·h] (표기 = urban / freeway)
+
+| 셀 | NC | WU-CD-F | PFO | PFO+box | P-CENT | P-Stack(제안) |
+|---|---|---|---|---|---|---|
+| sweet_155_w | 4,106 / 4,872 | 3,411 / 3,016 | 884 / 891 | 844 / 845 | 885 / 728 | 952 / 733 |
+| sweet_170_w | 6,545 / 6,483 | 5,205 / 3,549 | 1,925 / 1,096 | 4,616 / 3,351 | 1,275 / 1,213 | 1,559 / 1,125 |
+| sweet_170_skew15_w | 6,689 / 6,486 | 6,192 / 5,990 | 1,895 / 1,062 | 1,751 / 1,087 | 1,397 / 1,121 | 1,515 / 1,152 |
+| sweet_170_incident_w | 4,764 / 4,817 | 4,555 / 4,556 | 1,363 / 1,004 | 4,168 / 3,245 | 1,395 / 959 | 1,323 / 972 |
+| sweet_190_w | 8,779 / 7,739 | 8,608 / 7,670 | 4,405 / 1,284 | 4,137 / 1,354 | 3,273 / 1,432 | 3,745 / 1,411 |
+| sweet_200_w *(보조)* | 9,845 / 8,269 | 9,693 / 8,262 | 5,781 / 1,415 | 9,720 / 7,754 | 5,420 / 2,060 | 6,373 / 2,311 |
+
+### 표 1c — 종단 잔존 차량 N_end [veh] (보조행)
+
+| 셀 | NC | WU-CD-F | PFO | PFO+box | P-CENT | P-Stack(제안) |
+|---|---|---|---|---|---|---|
+| sweet_155_w | 7,950 | 5,502 | 264 | 264 | 262 | 286 |
+| sweet_170_w | 10,859 | 7,187 | 277 | 6,262 | 262 | 278 |
+| sweet_170_skew15_w | 10,962 | 10,301 | 284 | 272 | 263 | 281 |
+| sweet_170_incident_w | 8,332 | 8,006 | 267 | 6,011 | 262 | 281 |
+| sweet_190_w | 13,342 | 13,280 | 1,496 | 1,243 | 606 | 1,107 |
+| sweet_200_w *(보조)* | 14,556 | 14,579 | 2,740 | 14,182 | 5,056 | 6,532 |
+
+표 1c 각주 — N_end = 마지막 180 s 스텝의 TTT 증분 × 20 = 종단 시점 망 내 차량 수(각
+스텝의 TTT 증분은 N/20 veh·h이므로). 이 보조행은 큐를 채점창 밖으로 미뤄 wTTT를 낮추는
+회계가 없는지 검사한다.
+
+**분해와 종단 회계.** NC는 창 종료 시점에 7,950~14,556대가 망 내에 잔존하는(미배수)
+반면, 제어군은 저·중부하 셀에서 약 260~290대 수준으로 배수를 완료한다 — 표 1의 개선이
+큐를 창 밖으로 미룬 결과가 아님을 보이는 회계다. 190_w에서 잔존은 P-CENT 606 <
+P-Stack 1,107 < PFO 1,496대의 순서로 wTTT 순위와 일치한다. 분해를 보면 P-Stack은
+190_w에서 urban TTT를 PFO 대비 4,405 → 3,745 veh·h로 크게 줄이는 대신 freeway에
+1,284 → 1,411 veh·h의 소폭 비용을 지불한다 — 총량이 양수(5,689 → 5,156)인 트레이드
+오프의 증거다. 보조 셀 200_w에서는 P-Stack 잔존 6,532대가 PFO 2,740대를 상회하며, 같은
+셀의 TTT 열세와 정합하는 정직한 회계로서 §5에서 부검한다.
 
 **Fig. 1 — `f_ttt_traj_sweet_170_w.png`** (대표 셀; 나머지 5셀은
 `f_ttt_traj_sweet_155_w.png`, `f_ttt_traj_sweet_170_skew15_w.png`,
@@ -114,30 +153,30 @@ on-ramp 대기 통행시간이 포함된다. ④ delay 열은 free-flow referenc
 
 **조정 격차 (P-Stack vs PFO).** 이동 무제한 PFO 대비 P-Stack은 155_w에서 91 veh·h(+5.1%),
 170_w에서 337 veh·h(+11.1%), 170_skew15_w에서 290 veh·h(+9.8%), 170_incident_w에서
-72 veh·h(+3.0%), 190_w에서 533 veh·h(+9.4%)를 추가로 회수한다(분모 = PFO). 단 200_w에서는
-P-Stack 8,684가 PFO 7,195 대비 1,489 veh·h(−20.7%) 열위이며, 이 셀은 침묵하지 않고 §5에서
-rate-limit 물리로 부검한다 — 다섯 시나리오 중 네 곳에서 이기고 어디서 지는지를 함께
-그리는 것이 이 표의 목적이다.
+72 veh·h(+3.0%), 190_w에서 533 veh·h(+9.4%)를 추가로 회수해 본선 다섯 셀 전부에서
+이긴다(분모 = PFO). 반면 보조 극단 셀 200_w에서는 P-Stack 8,684가 PFO 7,195 대비
+1,489 veh·h(−20.7%) 열위이며, 이 셀은 침묵하지 않고 §5에서 rate-limit 물리로 부검한다 —
+어디서 이기고 어디서 지는지를 함께 그리는 것이 이 표의 목적이다.
 
-**공정 액추에이터 관점 (PFO+box).** PFO에 제안과 동일한 이동 한계를 부과하면 세 셀이
-붕괴한다 — 170_w 7,967(PFO의 2.6배), 170_incident_w 7,413(3.1배), 200_w 17,474(2.4배).
+**공정 액추에이터 관점 (PFO+box).** PFO에 제안과 동일한 이동 한계를 부과하면 본선 두
+셀 — 170_w 7,967(PFO의 2.6배), 170_incident_w 7,413(3.1배) — 과 보조 셀 200_w
+(17,474, 2.4배)가 붕괴한다.
 같은 한계 아래에서 P-Stack은 여섯 셀 모두 정상 동작하며, PFO+box 대비 개선율 평균은
 +33.0%에 이르고 200_w는 −20.7%의 급소에서 +50.3%의 승리 셀로 반전된다(분모 = PFO+box).
 무제한 PFO가 스텝당 최대 1,125 veh/h의 이동으로 문제를 풀던 컨트롤러였음을 감안하면,
 동일한 액추에이터 물리가 강제될 때 리더 조정의 가치가 가장 크게 드러난다 — 단, 이는
 동일 이동 한계라는 조건 하의 결론이다.
 
-**중앙 참조 상한 (P-CENT).** P-CENT는 여섯 셀 중 네 셀(155_w, 170_w, 170_skew15_w,
-190_w)에서 전 컨트롤러 최저 wTTT를 기록하고, 170_incident_w에서는 P-Stack(2,295 vs
-2,354)에, 200_w에서는 PFO(7,195 vs 7,480)에 자리를 내준다. P-Stack과의 격차는 NC 대비
-개선율 기준 155~190 셀에서 0.8~2.7%p이고 170_incident_w에서는 P-Stack이 0.6%p 앞서므로,
-극단 부하 셀 200_w(6.6%p, §5 부검 대상)를 제외하면 제안이 중앙 참조에 등가에 가까운
-성능을 낸다고 서술할 수 있다.
-그러나 두 가지 이유로 "중앙을 상회한다"는 주장은 하지 않는다. 첫째, P-CENT에는 이동
-한계가 적용되지 않아(실측 meter 628 / VSL 30 / green 41) 비교 조건이 일치하지 않는다 —
-P-CENT+box는 미실행이다. 둘째, 본 데이터에서 P-CENT의 채점창 계산 시간(평균 44.1 s/step)이
-P-Stack(평균 69.1 s/step)보다 오히려 짧아, "계산을 아끼면서 중앙에 근접"이라는 통상 서사도
-현재 수치로는 지지되지 않는다. 현재 데이터로 정당화되는 서술은 등가 성능까지다.
+**중앙 상한 (P-CENT).** P-CENT는 중앙집중·이동 한계 무적용 구성으로 성능 상한(upper
+bound)을 재는 도구다 — 이길 수 없는 대상은 상한으로 명명하는 보고 관례를 따른다. 본선
+5셀 중 4셀(155_w, 170_w, 170_skew15_w, 190_w)에서 전 컨트롤러 최저 wTTT를 기록하며,
+P-Stack과의 격차는 NC 대비 개선율 기준 0.8~2.7%p에 그친다. 170_incident_w에서는 이동
+한계를 지키는 P-Stack(2,295)이 상한 참조(2,354)를 0.6%p 근소 상회하고, 보조 셀
+200_w에서는 PFO(7,195)가 최저다(6.6%p, §5 부검 대상). 즉 제안은 본선 전역에서 무제약
+중앙 상한에 등가에 가까운 성능을 이동 한계 준수 하에 달성하며, "중앙을 상회한다"는
+주장은 하지 않는다. 계산 면에서는 본 데이터에서 P-CENT(평균 44.1 s/step)가 P-Stack
+(평균 69.1 s/step)보다 오히려 짧아, "계산을 아끼면서 중앙에 근접"이라는 통상 서사는
+현재 수치로 지지되지 않음을 함께 기록한다.
 
 **계산 시간.** 채점창 기준 per-step 계산 시간(동일 머신, 20런 병렬 조건)은 다음과 같다.
 
@@ -147,17 +186,17 @@ P-Stack(평균 69.1 s/step)보다 오히려 짧아, "계산을 아끼면서 중�
 | 최대 | 34.5 | 5.0 | 3.5 | 96.6 | 132.4 |
 
 실시간성 판정은 최대값으로 건다 — 전 컨트롤러의 최악 스텝(132.4 s, P-Stack)이 제어 주기
-180 s를 하회하므로, 관측된 전 구성이 실시간 제약 안에 있다. [TODO: 하드웨어·솔버·반복
-상한 명세 — CPU/RAM, 솔버 종류, Nash/PD 반복 상한. 감사 B4.]
+180 s를 하회하므로, 관측된 전 구성이 실시간 제약 안에 있다. 전 실험은 12th Gen Intel
+Core i7-12700K(물리 12 / 논리 20코어), 16 GB RAM, Windows 11, Python 3.12.13에서
+수행했다. 최적화는 전부 순수 Python으로 구현한 자체 coordinate-descent/격자 탐색이며
+외부 LP/QP 솔버는 사용하지 않는다. 팔로워 Jacobi 합의는 최대 5 sweep, 리더는 정제 후보
+최대 25개(격자 최대 49)를 평가하고, N_P primal–dual 루프는 K = 4 반복으로 상한을 둔다.
+표의 계산 시간은 동일 머신에서 20런 병렬 조건으로 측정한 벽시계(wall-clock) 값이므로,
+같은 조건의 런끼리만 비교 가능하다.
 
 **[검토 필요 — §1]**
-1. 본문 5셀 규약 확정 — 190_w를 보조 행으로 유지할지, 200_w와의 역할 교환 여부.
-2. P-CENT+box 실행 여부(비교 조건 일치의 결정적 보강 — 실행 시 위 문단 재서술).
-3. 하드웨어·솔버 명세([TODO]) 확정.
-4. urban/freeway 분해 열(감사 B1)과 terminal 잔존 보조행(감사 B3) 추가 여부 — 데이터는
-   run_log에 존재, 표 확장만 결정하면 됨.
-5. delay 열 — free-flow reference 런 도착 후 일괄 갱신.
-6. Fig. 1의 곡선 구성(NC/WU-CD-F/P-CENT/P-Stack 4곡선 vs 6컨트롤러 전부) 확정.
+1. delay 열 — free-flow reference 런 도착 후 일괄 갱신.
+2. Fig. 1의 곡선 구성(NC/WU-CD-F/P-CENT/P-Stack 4곡선 vs 6컨트롤러 전부) 확정.
 
 ---
 
@@ -210,11 +249,11 @@ bang-bang과 정합한다. 해석 — 박스 제약은 명령의 외삽을 제�
 `f_rampq_R_F_E_190w.png`, `f_rampq_R_F_W_190w.png`)
 
 > **Caption.** On-ramp queue at R_D_E under the proposed controller (colored) and the pd4
-> reference (black), scenario sweet_190_w; the reference line marks 180. The proposed
-> controller dissolves the queue by about 145 min, whereas the reference still carries a
-> residual queue at 178 min, effectively until the end of the window. Ramp waiting time is
-> included in the TTT objective, so the gain in Table 1 is not obtained by parking vehicles
-> on the ramp.
+> reference (black), scenario sweet_190_w; the horizontal line marks the storage
+> constraint (the ramp storage limit, 180 veh). The proposed controller dissolves the queue by about 145 min,
+> whereas the reference still carries a residual queue at 178 min, effectively until the
+> end of the window. Ramp waiting time is included in the TTT objective, so the gain in
+> Table 1 is not obtained by parking vehicles on the ramp.
 
 관찰 — 제안 컨트롤러의 램프 큐는 약 145분에 해소되는 반면 pd4 팔의 큐는 178분까지
 잔류해 사실상 창 종료까지 남는다. 각주 — wTTT에는 램프 대기 통행시간이 포함되므로
@@ -265,11 +304,9 @@ bang-bang과 정합한다. 해석 — 박스 제약은 명령의 외삽을 제�
 물리 한계(남음)의 분리는 §5에서 비용 회계와 함께 마저 다룬다.
 
 **[검토 필요 — §2]**
-1. Fig. 2c 기준선 180의 의미 확정 — 저장 한계(veh) 수평선인지 창 종료(180분) 표지인지.
-   캡션 확정 전 그림 원본 대조 필요.
-2. 대표 램프 선택 — R_D_E 1개 본문 + 3개 보조인지, 4램프 격자 1그림인지.
-3. (e)의 §2/§5 배분 — 그림 3장을 §2에 두고 §5는 수치 재인용만 할지, 분할할지.
-4. Stage 2 이벤트 감사(counterfactual replay) 도착 후 (a)~(c)의 매개 정량 문장 보강.
+1. 대표 램프 선택 — R_D_E 1개 본문 + 3개 보조인지, 4램프 격자 1그림인지.
+2. (e)의 §2/§5 배분 — 그림 3장을 §2에 두고 §5는 수치 재인용만 할지, 분할할지.
+3. Stage 2 이벤트 감사(counterfactual replay) 도착 후 (a)~(c)의 매개 정량 문장 보강.
 
 ---
 
@@ -385,12 +422,15 @@ coupling flux — Stage 3 소거 8케이스 × 5셀(40런)로 방향별 한계�
 **Fig. 5b — `f_rampq_R_D_E_200w.png`** (나머지 램프 — `f_rampq_R_D_W_200w.png`,
 `f_rampq_R_F_E_200w.png`, `f_rampq_R_F_W_200w.png`)
 
-> **Caption.** On-ramp queues during the recovery phase of sweet_200_w. Under the
-> rate-limited configuration the queue reaches a mean of 2,763 and a peak of 4,317 veh,
-> 2.4× the unconstrained anchor — the queueing cost of the ±300 veh/h release limit at
-> extreme load.
+> **Caption.** On-ramp queues during the recovery phase of sweet_200_w; the horizontal
+> line marks the storage constraint (the ramp storage limit, 180 veh). Under the rate-limited
+> configuration the queue reaches a mean of 2,763 and a peak of 4,317 veh, 2.4× the
+> unconstrained anchor — the queueing cost of the ±300 veh/h release limit at extreme
+> load, far beyond the storage reference.
 
-200_w에서 P-Stack은 PFO 대비 −20.7%로 유일하게 진다(표 1). 부검 결과 손실은 두 성분으로
+200_w에서 P-Stack은 PFO 대비 −20.7%로 유일하게 진다(표 1, 보조 행). 종단 잔존 회계도
+이와 정합한다 — 창 종료 시점의 망 내 차량은 P-Stack 6,532대로 PFO 2,740대를 상회한다
+(표 1c). 부검 결과 손실은 두 성분으로
 분리된다. 첫째, 채점 맹점 — 박스 단독 구성에서 리더 의도가 박스 끝(3,190~3,374)에
 고착되는 현상은 BOX-WALK 실험이 확증했고(의도 3,190 → 5,805), rollout에 다중 스텝
 도달을 모델링하면 교정된다(§2e). 둘째, 잔여 손실은 액추에이터 물리다 — 밀도가
