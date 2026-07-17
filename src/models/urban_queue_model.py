@@ -39,6 +39,37 @@ def movement_specs(cfg: ExperimentConfig) -> Dict[str, Dict[str, object]]:
     return {key: dict(value) for key, value in cfg.network.urban_movements.items()}
 
 
+# _sync_legacy_queues/ensure_urban_state 전용 정적 캐시 — link↔movement 토폴로지
+# (origin/destination)와 키 집합 크기는 런 중 불변 전제(위반 시 캐시 무효화 필요).
+# network 객체 참조 동일성으로 재사용을 판정한다. 합산 순서는 urban_movements 삽입
+# 순서 그대로 보존해 기존 구현과 부동소수 비트동일을 유지한다.
+_SYNC_INDEX_NET = None
+_SYNC_INDEX: tuple = ()
+_SYNC_COUNTS: tuple = (0, 0, 0)
+
+
+def _legacy_sync_index(cfg: ExperimentConfig) -> tuple:
+    global _SYNC_INDEX_NET, _SYNC_INDEX, _SYNC_COUNTS
+    net = cfg.network
+    if net is not _SYNC_INDEX_NET:
+        index = []
+        for link in net.movement_links:
+            moves = tuple(
+                movement
+                for movement, spec in net.urban_movements.items()
+                if spec.get("origin") == link or spec.get("destination") == link
+            )
+            index.append((link, moves))
+        _SYNC_INDEX = tuple(index)
+        _SYNC_COUNTS = (
+            len(net.urban_movements),
+            len(approach_routing(cfg)),
+            len(net.urban_link_storage_veh),
+        )
+        _SYNC_INDEX_NET = net
+    return _SYNC_INDEX
+
+
 def movement_forecast_arrivals_veh(
     cfg: ExperimentConfig,
     forecast: Iterable[DemandStep],
@@ -298,6 +329,17 @@ def movement_balance_summary(
 
 def ensure_urban_state(state: TrafficState, cfg: ExperimentConfig) -> None:
     net = cfg.network
+    _legacy_sync_index(cfg)
+    n_moves, n_sources, n_links = _SYNC_COUNTS
+    if (
+        len(state.urban_movement_queue) >= n_moves
+        and len(state.urban_arrival_buffer) >= n_sources
+        and len(state.urban_link_storage) >= n_links
+        and len(state.urban_storage_release_buffer) >= n_links
+    ):
+        # 초기화 완료(이 dict들엔 키 제거 경로가 없음) — setdefault 전수 루프 스킵.
+        _sync_legacy_queues(state, cfg)
+        return
     for movement, spec in movement_specs(cfg).items():
         state.urban_movement_queue.setdefault(
             movement,
@@ -583,12 +625,11 @@ def _allocate_receiving_counts(rule: str, intended: Dict[str, float], total_spac
 
 
 def _sync_legacy_queues(state: TrafficState, cfg: ExperimentConfig) -> None:
-    specs = movement_specs(cfg)
-    for link in cfg.network.movement_links:
+    umq_get = state.urban_movement_queue.get
+    for link, moves in _legacy_sync_index(cfg):
         related = 0.0
-        for movement, spec in specs.items():
-            if spec.get("origin") == link or spec.get("destination") == link:
-                related += state.urban_movement_queue.get(movement, 0.0)
+        for movement in moves:
+            related += umq_get(movement, 0.0)
         state.boundary_queue[link] = max(0.0, related)
         state.urban_queue[link] = max(0.0, related)
 
