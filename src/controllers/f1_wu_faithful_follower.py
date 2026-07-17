@@ -333,12 +333,16 @@ class F1WuFaithfulFollower(WuFaithfulFollower):
                                  s_eff_frozen, reservoir_drain, freeway_congestion,
                                  previous, leader=None, lambda_p=0.0,
                                  forecast_arrivals=None, horizon_h=1.0, demand=None,
-                                 candidates_override=None):
+                                 candidates_override=None, committed_prev=None):
+        # committed_prev(2026-07-18): base의 BASELINE-BOX green 앵커용 신규 kwarg.
+        # 이 오버라이드가 시그니처에 없으면 base 호출부(L3804, committed_prev=previous)에서
+        # TypeError — 플래그십(F1) 런 전멸. spillback 경로(자체 구현)는 BASELINE_BOX를
+        # 쓰지 않으므로(플래그십은 해당 플래그 미설정) 전달만 하고 소비하지 않는다.
         if self.f1_spillback_weight <= 0.0:
             return super()._solve_urban_agent_local(
                 signal, state, coupling, arr_movement, s_eff_frozen, reservoir_drain,
                 freeway_congestion, previous, leader, lambda_p, forecast_arrivals,
-                horizon_h, demand, candidates_override,
+                horizon_h, demand, candidates_override, committed_prev,
             )
         net = self.cfg.network
         thr_frac = 1.0 - float(self.f1_spillback_frac)
