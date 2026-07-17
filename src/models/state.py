@@ -381,6 +381,10 @@ class MPCConfig:
     # 전부 '낮은 곳에 갇혀 못 올라옴'(리더 intent 후반 3651/4054 vs PD4 5895/5780)이라
     # 올림(방류·회복 방향)만 넓힌다. None=seg13_meter_box_veh_h와 동일(대칭, 기존 거동).
     seg13_meter_box_up_veh_h: Optional[float] = None
+    # VSL-BOX(2026-07-17): SEG13 VSL 후보 앵커를 Jacobi 내부 snapshot → 직전 step
+    # commit(previous)으로 + 반폭 R[km/h]. 기존은 sweep마다 재앵커돼 스텝당 실측 50
+    # (명목 max_vsl_step 20의 2.5배, ③ 10셀 위반 112/7020). None=기존(비트동일).
+    seg13_vsl_box_kmh: Optional[float] = None
     leader_continuous_max_evals: int = 25
     leader_continuous_seed_count: int = 7
     leader_continuous_prefilter_samples: int = 31

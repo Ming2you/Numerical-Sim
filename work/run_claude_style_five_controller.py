@@ -570,6 +570,9 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
     if _os.environ.get("METER_BOX_UP"):
         # 비대칭: 올림폭만 따로(내림=METER_BOX 유지). 파국=하방 고착이어서 회복만 가속.
         cfg.mpc.seg13_meter_box_up_veh_h = float(_os.environ["METER_BOX_UP"])
+    if _os.environ.get("VSL_BOX"):
+        # VSL 앵커를 previous로 + 반폭[km/h]. 기존 snapshot 앵커는 스텝당 최대 50 관측.
+        cfg.mpc.seg13_vsl_box_kmh = float(_os.environ["VSL_BOX"])
     if _os.environ.get("NUF_RADIUS"):
         # 반경 상수 override. trust 산수 복원치 = 4램프 × 0.20 × 1500 = 1200.
         cfg.mpc.leader_local_nuf_radius_veh_h = float(_os.environ["NUF_RADIUS"])

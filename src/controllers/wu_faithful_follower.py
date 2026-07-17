@@ -2371,10 +2371,23 @@ class WuFaithfulFollower:
             seg = agent.seg
             key = f"{link}__seg{seg}"
             prev_v = float(segment_vsl(snapshot, link, seg, cfg))
-            v_cands = [
-                float(v) for v in ff.vsl_set
-                if abs(float(v) - prev_v) <= ff.max_vsl_step + 1.0e-9
-            ] or [prev_v]
+            # VSL-BOX(2026-07-17, 사용자 지시): 기존 필터는 앵커가 Jacobi 반복 내부
+            # snapshot이라 sweep마다 ±max_vsl_step 재앵커 → 스텝당 20×sweep수
+            # (실측: ③ 10셀에서 max|Δ| 50 = 명목 20의 2.5배, 위반 112/7020).
+            # 박스 ON이면 앵커를 직전 step commit(previous)으로 고정 — METER-BOX와 동일
+            # 규약. vsl_set 간격 10이라 ±10이면 {prev-10, prev, prev+10}, 흡수 불가.
+            _vbox = getattr(self.cfg.mpc, "seg13_vsl_box_kmh", None)
+            if _vbox is not None and previous is not None:
+                _v_anchor = float(segment_vsl(previous, link, seg, cfg))
+                v_cands = [
+                    float(v) for v in ff.vsl_set
+                    if abs(float(v) - _v_anchor) <= float(_vbox) + 1.0e-9
+                ] or [_v_anchor]
+            else:
+                v_cands = [
+                    float(v) for v in ff.vsl_set
+                    if abs(float(v) - prev_v) <= ff.max_vsl_step + 1.0e-9
+                ] or [prev_v]
             own_ramp = agent.owned_ramps[0] if agent.owned_ramps else None
             if own_ramp is not None and self.metering_enabled:
                 cap_r = float(net.ramp_capacity_veh_h[own_ramp])
@@ -2755,6 +2768,10 @@ class WuFaithfulFollower:
             if _bu_d is not None:
                 # 비대칭 영수증 — 이 컬럼 존재 = up 플래그가 SEG13 경로에 도달.
                 self._seg13_diag[f"wu_seg13_meter_box_rup_{link}"] = float(_bu_d)
+        _vbox_d = getattr(self.cfg.mpc, "seg13_vsl_box_kmh", None)
+        if _vbox_d is not None:
+            # VSL-BOX 영수증 — 존재 = previous 앵커 필터가 SEG13 경로에 도달.
+            self._seg13_diag[f"wu_seg13_vsl_box_r_{link}"] = float(_vbox_d)
         return vsl_out, meter_out, evals
 
     # ---------- freeway agent: 진짜 ramp metering 탐색 (핵심 신규) ----------
@@ -3505,6 +3522,10 @@ class WuFaithfulFollower:
             raise RuntimeError(
                 "METER_BOX는 SEG13(segment_agents+metering) 전용인데 해당 경로가 꺼져 "
                 "있다 — 비-SEG13은 metering_marginal_price_trust_frac이 이미 묶는다."
+            )
+        if getattr(self.cfg.mpc, "seg13_vsl_box_kmh", None) is not None and not self.segment_agents:
+            raise RuntimeError(
+                "VSL_BOX는 SEG13 segment agent 경로 전용인데 segment_agents가 꺼져 있다."
             )
         self._wu._repair_diagnostics = {}
         self._seg13_diag = {}
