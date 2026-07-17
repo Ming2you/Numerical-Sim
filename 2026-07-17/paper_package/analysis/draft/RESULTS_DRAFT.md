@@ -42,16 +42,27 @@ sweet_170_skew15_w(urban 경계 불균형), sweet_170_incident_w(본선 폐색·
 sweet_190_w(고전달·복합 스트레스) — 이며, 190_w는 메커니즘 절(§2·§3)의 대표 해부 셀을
 겸한다. sweet_200_w(극단 부하)는 §5 한계 서사 전용의 보조 행으로 표에 유지한다.
 
-- [TODO-P1: 네트워크 스키매틱 — 신호·세그먼트·램프 라벨 + 21-player(코드 플래그명 SEG13은 4-seg 시절 레거시) 에이전트 소유권
-  오버레이. 검증 비교 논문 6편 전원이 게재(완결성 감사 A1). §0 그림 1로 삽입.]
-- [TODO-P1: 시나리오별 수요 표/그림 — origin별 수요 프로파일, 155/170/190/200의 정의와
-  skew15·incident의 조작 명세(용량 감소율·구간·시점·지속 포함). 감사 A2·A5.]
-- [TODO-P1: 파라미터 표 2장 — 모델(METANET·urban 큐) 파라미터와 컨트롤러 파라미터
-  (호라이즌·제어 간격 180 s·가중치·rate-limit 값 meter ±300 / VSL ±10 / green ±6)를 분리
-  게재. 감사 A3.]
-- [TODO-P1: 튜닝 절차 공개 — Wu 재현 충실도(원 논문과의 편차 목록), 동등 튜닝 노력 진술,
-  기준선 재현 검증 문장. 감사 A4. 참고로 신규 PFO 런 6/6이 구 기준선과 Δ < 0.6으로 일치함을
-  재현 게이트로 확인했다(t1_macro_full.md 메모).]
+- **그림 0a — 네트워크 스키매틱**: `analysis/figures/f0_network_schematic.pdf` —
+  2×3 그리드(신호 A–D,F / 비제어 E / 경계 게이트 7쌍) + 8-seg × 2링크 freeway,
+  다이아몬드 IC(D·F: off-ramp seg 2/4 → 60-veh urban 저장, on-ramp 합류 seg 3/5,
+  용량 1,500 veh/h, 큐 ≤ 180 veh), **21-player 소유권 오버레이**(urban 신호 5 +
+  세그먼트별 freeway 16; 합류 seg 소유자가 metering, seg 0이 origin 큐 소유.
+  코드 플래그명 SEG13은 4-seg 시절 레거시).
+- **표 0a·그림 0b — 수요·사고 명세**: `analysis/tables/t0_demand_scenarios.md`,
+  `analysis/figures/f0_demand_profile.pdf` — 전 셀 공통 사다리꼴(base 0.5, 65–125분
+  plateau), 클래스 배율 1.55/1.70/1.90/2.00, skew15는 서:동 = 1.5:1 부피보존.
+  **사고 명세**: FW_E seg 6, 차로 폐쇄 2→1(lane_loss 1.0), 4,500–6,300 s(75–105분,
+  plateau 내 30분).
+- **표 0b·0c — 파라미터**: `analysis/tables/t0_params_model.md`(플랜트 — 시간 격자·
+  METANET·capacity-drop·ramp·urban, state.py/default.yaml 줄 병기),
+  `analysis/tables/t0_params_controller.md`(P-Stack 전체 스펙 — horizon 3 +
+  value_depth 3 = rollout 6스텝(18분), 이동 한계 meter ±300 / VSL ±10 / green ±6 —
+  및 기준선 5행).
+- **튜닝·공정성·Wu 충실도**: `analysis/setup/fairness_tuning.md` — 10셀 A/B 사다리
+  공개(R=300 = 가격 FD 측정폭, VSL ±10 = 격자 간격, 기각 8팔), **정직성 조항**
+  (평가 셀 = 개발 셀, held-out 부재), PFO 재현 게이트 Δ<0.6(6/6), P-CENT 상한
+  프레이밍(structured grid 직렬 — SLSQP 아님), Wu 2022 충실도 6행 매트릭스
+  (SUMO 플랜트 vs 모델=플랜트 등 편차 명시).
 
 ### §0.3 비교 컨트롤러 — 각 기준선이 격리하는 격차
 
