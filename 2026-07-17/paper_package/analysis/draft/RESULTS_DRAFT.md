@@ -105,10 +105,10 @@ PFO는 **이동 한계 부과(box) 버전만** 사용한다 — 제안 컨트롤
 | Scenario | No control | Wu | PFO (box) | Centralized | P-Stack (walk-MVG) |
 |---|---|---|---|---|---|
 | Low demand | 8,977 | 6,427 (+28.4) | 1,689 (+81.2) | 1,614 (+82.0) | 1,686 (+81.2) |
-| Med demand | 13,028 | 8,754 (+32.8) | 7,967 (+38.8) | 2,488 (+80.9) | 2,684 (+79.4) |
+| Med demand | 13,028 | 8,754 (+32.8) | 7,967 (+38.8) | 2,488 (+80.9) | 2,683 (+79.4) |
 | Med demand (skewed) | 13,175 | 12,183 (+7.5) | 2,838 (+78.5) | 2,517 (+80.9) | 2,667 (+79.8) |
 | Med demand (incident) | 9,581 | 9,111 (+4.9) | 7,413 (+22.6) | 2,354 (+75.4) | 2,295 (+76.0) |
-| High demand | 16,518 | 16,277 (+1.5) | 5,491 (+66.8) | 4,705 (+71.5) | 5,148 (+68.8) |
+| High demand | 16,518 | 16,277 (+1.5) | 5,491 (+66.8) | 4,705 (+71.5) | 5,096 (+69.2) |
 
 표 각주 — ① 개선% = (J_NC − J_ctrl)/J_NC × 100, wTTT는 §0.1 정의(WARM = 20 이후 창).
 ② 이동 한계 준수: P-Stack과 PFO(box)는 meter ±300 / VSL ±10 / green ±6을 준수한다
@@ -122,20 +122,20 @@ PFO는 **이동 한계 부과(box) 버전만** 사용한다 — 제안 컨트롤
 | Scenario | No control | Wu | PFO (box) | Centralized | P-Stack (walk-MVG) |
 |---|---|---|---|---|---|
 | Low demand | 4,106 / 4,872 | 3,411 / 3,016 | 844 / 845 | 885 / 728 | 952 / 733 |
-| Med demand | 6,545 / 6,483 | 5,205 / 3,549 | 4,616 / 3,351 | 1,275 / 1,213 | 1,559 / 1,125 |
+| Med demand | 6,545 / 6,483 | 5,205 / 3,549 | 4,616 / 3,351 | 1,275 / 1,213 | 1,555 / 1,128 |
 | Med demand (skewed) | 6,689 / 6,486 | 6,192 / 5,990 | 1,751 / 1,087 | 1,397 / 1,121 | 1,515 / 1,152 |
 | Med demand (incident) | 4,764 / 4,817 | 4,555 / 4,556 | 4,168 / 3,245 | 1,395 / 959 | 1,323 / 972 |
-| High demand | 8,779 / 7,739 | 8,608 / 7,670 | 4,137 / 1,354 | 3,273 / 1,432 | 3,737 / 1,411 |
+| High demand | 8,779 / 7,739 | 8,608 / 7,670 | 4,137 / 1,354 | 3,273 / 1,432 | 3,672 / 1,424 |
 
 ### 표 1c — 종단 잔존 차량 N_end [veh] (보조행)
 
 | Scenario | No control | Wu | PFO (box) | Centralized | P-Stack (walk-MVG) |
 |---|---|---|---|---|---|
 | Low demand | 7,950 | 5,502 | 264 | 262 | 286 |
-| Med demand | 10,859 | 7,187 | 6,262 | 262 | 278 |
+| Med demand | 10,859 | 7,187 | 6,262 | 262 | 279 |
 | Med demand (skewed) | 10,962 | 10,301 | 272 | 263 | 281 |
 | Med demand (incident) | 8,332 | 8,006 | 6,011 | 262 | 281 |
-| High demand | 13,342 | 13,280 | 1,243 | 606 | 1,096 |
+| High demand | 13,342 | 13,280 | 1,243 | 606 | 1,020 |
 
 표 1c 각주 — N_end = 마지막 180 s 스텝의 TTT 증분 × 20 = 종단 시점 망 내 차량 수(각
 스텝의 TTT 증분은 N/20 veh·h이므로). 이 보조행은 큐를 채점창 밖으로 미뤄 wTTT를 낮추는
@@ -144,9 +144,9 @@ PFO는 **이동 한계 부과(box) 버전만** 사용한다 — 제안 컨트롤
 **분해와 종단 회계.** No control은 창 종료 시점에 7,950~13,342대가 망 내에 잔존하는(미배수)
 반면, 제어군은 저·중부하 셀에서 약 260~290대 수준으로 배수를 완료한다 — 표 1의 개선이
 큐를 창 밖으로 미룬 결과가 아님을 보이는 회계다. High demand에서 잔존은 Centralized 606 <
-P-Stack 1,096 < PFO(box) 1,243대의 순서로 wTTT 순위와 일치한다. 분해를 보면 P-Stack은
-High demand에서 urban TTT를 PFO(box) 대비 4,137 → 3,737 veh·h로 줄이면서 freeway는
-1,354 → 1,411 veh·h로 소폭만 늘려 총량을 5,491 → 5,148 veh·h로 낮춘다 — 계층 조정이
+P-Stack 1,020 < PFO(box) 1,243대의 순서로 wTTT 순위와 일치한다. 분해를 보면 P-Stack은
+High demand에서 urban TTT를 PFO(box) 대비 4,137 → 3,672 veh·h로 줄이면서 freeway는
+1,354 → 1,424 veh·h로 소폭만 늘려 총량을 5,491 → 5,096 veh·h로 낮춘다 — 계층 조정이
 urban·freeway를 함께 관리해 총 통행시간을 줄이는 증거다.
 
 **Fig. 1 — `f_ttt_traj_sweet_170_w.png`** (Med demand 대표; 나머지 4셀은
@@ -316,7 +316,7 @@ bang-bang과 정합한다. 해석 — 박스 제약은 명령의 외삽을 제�
 metering 권한이 없어 urban 저수지를 배수하지 못하는 것과 정합한다 — 반면 PFO(box)·
 Centralized·P-Stack은 정점을 3,000~3,700 veh로 억제하고 250~760 veh까지 배수한다.
 해석 — 계층 컨트롤러(및 PFO(box))는 freeway뿐 아니라 urban 저수지도 함께 관리하며,
-이것이 표 1b에서 P-Stack이 고수요 urban TTT를 No control 대비 8,779 → 3,737 veh·h로
+이것이 표 1b에서 P-Stack이 고수요 urban TTT를 No control 대비 8,779 → 3,672 veh·h로
 줄이는 분해의 메커니즘적 근거다.
 
 **[검토 필요 — §2]**
@@ -355,7 +355,8 @@ PD가 활성인 구성에서 커밋된 가격 λ_P(`wu_faithful_lambda_P`)는 �
 | green marginal price (`wu_b2_price_*`) | 40/40 | 활성 |
 | meter marginal price (`wu_b3_meter_price_*`) | 40/40 | 활성 |
 | VSL marginal price (`wu_b3_vsl_price_*`) | 24~40/40 | 활성 |
-| offset marginal price (`wu_f3_offset_price_*`) | 40/40 | **계산은 되나 한계가치 무시** — ‖가격‖≈0.01, offset 거의 부동 |
+| offset marginal price (비램프 A/B/C, `wu_f3_offset_price_*`) | 40/40 | **계산은 되나 한계가치 무시** — ‖가격‖≈0.01 |
+| ramp-aware offset (램프 D/F, `ramp_offset_enabled`) | High·Med서 활성 | **혼잡 구간서 실질 기여**(High −1.0%) |
 | N_UF hard budget (`wu_seg13_budget_*`) | 17/40 | 활성 |
 
 행동 검증도 일치한다 — λ_P를 끄는 NP_OFF 팔은 앵커와 10/10 bit-identical이다. 따라서
@@ -363,15 +364,18 @@ PD가 활성인 구성에서 커밋된 가격 λ_P(`wu_faithful_lambda_P`)는 �
 marginal price 두 가지다. Stackelberg dual 기계장치가 통째로 논다는 사실은 §5의 한계
 (1)로 정직하게 기재한다.
 
-**offset 가격 — 살아 있으나 한계가치가 무시할 수준.** offset marginal price 채널은 매 스텝
-계산·하달되지만(40/40, SQP식 inner-walk 4회로 재선형화), 이 망에서 offset의 TTT 기울기가
-극히 작아(‖가격‖≈0.008~0.03) 신호 위상은 거의 움직이지 않는다(High demand만 5신호 중 3개
-이동, 나머지 시나리오는 전부 부동). 그 결과 offset 활성/비활성의 wTTT 차이는 5셀 평균
-−0.02%(High demand −0.15%)로 사실상 무차별하다. 병목이 ramp·freeway 유입과 urban
-green-split에 있고 신호 progression(offset)에는 조율 여지가 작기 때문이며, 이는 가격의
-"지도"에서 offset이 **죽은 채널**임을 보이는 결과다 — 어떤 채널이 조정을 수행하고 어떤
-채널이 명목상만 존재하는지를 함께 그리는 것이 §3의 목적이다. (제안 컨트롤러는 offset
-가격을 포함하되, 그 기여가 무시 수준임을 정직하게 보고한다.)
+**offset — 비램프 신호는 죽은 채널, 램프 신호(D/F)는 혼잡 구간서 살아 있다.** offset
+조정은 두 갈래로 나뉜다. (i) 비램프 신호(A/B/C)의 offset marginal price는 매 스텝
+계산·하달되지만(40/40, SQP식 inner-walk 4회) 이 망에서 그 TTT 기울기가 극히 작아
+(‖가격‖≈0.008~0.03) 단독으로는 신호 위상을 거의 못 움직인다 — **비램프 offset 가격 단독의
+wTTT 효과는 평균 −0.02%로 사실상 무차별**하다. (ii) 반면 램프 신호(D·F, 다이아몬드 IC)의
+ramp-aware offset(램프 저장 동역학을 반영한 위상 탐색)은 **혼잡 구간에서 실질적으로 기여**한다
+— D/F offset을 켜면 High demand wTTT가 5,148 → 5,096(−1.0%, 52 veh·h) 개선되고 Med에서도
+−0.04%이며, D/F 활성화가 같은 셀의 비램프 offset까지 함께 각성시킨다(Med에서 A/B/C/D/F 5신호
+전부 이동, 이전엔 High만). 저·경계불균형·사고 셀에서는 여전히 offset이 부동이다. 즉 offset은
+**균일하게 죽은 채널이 아니라, 램프 접속부 혼잡이라는 특정 레짐에서만 살아나는 상태-의존
+채널**이며, 제안 컨트롤러는 두 갈래를 모두 포함한다(비램프 가격 + D/F ramp-aware). 어떤
+채널이 어디서 조정을 수행하는지 지도를 그리는 것이 §3의 목적이다.
 
 ### (c) 구조 진단 — 선형 가격 × 이산 후보
 

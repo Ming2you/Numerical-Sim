@@ -60,10 +60,10 @@ NC_REF = {
     "sweet_155_w": 8977, "sweet_170_w": 13028, "sweet_170_skew15_w": 13175,
     "sweet_170_incident_w": 9581, "sweet_190_w": 16518,
 }
-# walk-MVG NC대비 기대 개선% (sanity gate 목표치; offset price 편입판 2026-07-18)
+# walk-MVG NC대비 기대 개선% (sanity gate 목표치; offset price+D/F ramp offset 편입판 2026-07-18)
 EXPECTED_IMP = {
-    "sweet_155_w": 81.22, "sweet_170_w": 79.40, "sweet_170_skew15_w": 79.76,
-    "sweet_170_incident_w": 76.04, "sweet_190_w": 68.83,
+    "sweet_155_w": 81.22, "sweet_170_w": 79.41, "sweet_170_skew15_w": 79.76,
+    "sweet_170_incident_w": 76.04, "sweet_190_w": 69.15,
 }
 
 # ---------------------------------------------------------------- 컨트롤러 (5종, 표시 순서)
