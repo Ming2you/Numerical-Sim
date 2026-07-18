@@ -563,6 +563,13 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
         cfg.mpc.centralized_grid_dense = True  # P-CENT tightness: 레버별 격자 레벨 조밀화
     if _os.environ.get("MFD_FAR") == "1":
         cfg.mpc.leader_mfd_far_enabled = True  # far(MFD tail) cost-to-go 가산 → near 깊이 절감 검증
+    if _os.environ.get("MFD_FAR") == "0":
+        # terminal cost 없는 리더 A/B(2026-07-19 밤샘 sweep): far cost-to-go 완전 해제.
+        cfg.mpc.leader_mfd_far_enabled = False
+    if _os.environ.get("FOLLOWER_TC") == "1":
+        # (ii-b) follower own-TTS terminal tail(램프+blocked 삼각 배수) ON — 링크-agent 경로
+        # (_solve_freeway_agent_local, PFO 해당). seg13 경로는 미구현(P-Stack TC축=MFD_FAR).
+        cfg.mpc.follower_terminal_cost_enabled = True
     if _os.environ.get("FAR_STATE_AWARE") is not None:
         # ★동결 기본 ON(2026-07-16). far가 v_free·상수 g_fw=300으로 박혀 차선폐색·과포화를
         # 못 보던 결함 수정 — t_trav=Σℓ/V(ρ_i), g_fw=min_i cap(lanes_i)(METANET 기본도 유도,
