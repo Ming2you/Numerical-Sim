@@ -251,3 +251,43 @@ FW_E를 임계밀도로 metering해 jam 진입을 늦춤 → 아티팩트 TTT를
 **함의**: NC 기저선 TTT가 비물리적 90분 gridlock에 지배 → 컨트롤러 개선율(+66~82%) 부풀려짐.
 **처리는 사용자 결정 대기**: (A) 터미널 경계 수정+전면 재실행 / (B) base 수요 문턱 아래로 /
 (C) §5 한계 공개. 모델 코드는 아직 미수정(probe만 저장).
+
+## ★경계 수정 채택(사용자 A) + 수요 재캘리브레이션 sweep (2026-07-18 밤)
+
+**경계 수정 확정 커밋 b281e4d**: metanet.py+local_freeway_plant.py 2지점에 (i) 터미널
+downstream_rho=min(rho,rho_crit) (ii) 터미널 배출 용량 cap+flow-정합 속도 cap. 검증 3종 PASS —
+probe 격리실험 / NC plant 물리(배수 step44→52 점진 회복) / 정합 테스트(test_segment_local_plant·
+test_local_signal_plant·test_constraints). 전체 unittest 실패 11건(8F/3E)은 **수정 전 커밋
+508455f worktree에서도 동일 프로파일** → 전부 기존 낡은 테스트(forecast_awareness·post_analysis·
+six_controller·rl_ddqn·wu_faithful λ), 수정과 무관.
+
+**신 NC 기저선(수정 후)**: 155=1790 / 170=2641 / skew=2697 / incident=2673 / 190=4420
+(구 대비 −72~80%). incident>170 순서 복원. 구 컨트롤러 절대값(walk-MVG 170=2684)이 신 NC와
+비슷 → 구 개선율 +79~81%는 아티팩트 재앙 회피분이었음.
+
+**수요 sweep(NC, 155~300%)**: wTTT 단조 1790→20946, 절벽 없음(knife-edge 소멸), 전 스케일 종단
+회복, 240+에서 피크 rho ~74 포화. 경계 유입큐는 TTT 정상 계상 확인(urban_movement_queue 소속).
+
+**무대 곡선(Wu/PFO probe 8점)**: 3레짐 구조 —
+| 스케일 | NC | Wu | PFO(box) |
+|---|---|---|---|
+| 155 | 1790 | +2.6% | +3.1% |
+| 170 | 2641 | +1.0% | −10.0% |
+| 190 | 4420 | +0.2% | −19.8% |
+| 200 | 5612 | −5.5% | −24.1% |
+| 210 | 7005 | −0.4% | −20.0% |
+| 220 | 8614 | +2.5% | −10.7% |
+| 240 | 11835 | +3.4% | −5.5% |
+| 280 | 17993 | +4.0% | −4.0% |
+①경부하(155) 다 이득 ②**자기회복 경계=해악의 계곡(190~210, 바닥 200)** — 개입 자체가 손해,
+분산격차 최대 ~20%p ③지속 병목(220+) Wu 이득 증가. 240 변형 순서 정상(incid 11924>skew 11902>
+plain 11835).
+
+**PFO −24%@200 해부(사용자 의심 → 측정 귀속)**: 오작동 아님 — freeway TTT −537 개선을 위해
+metering(R_F_E min 150)으로 urban TTT +1891 전가(urban max 4542 vs NC 3501, FW_W 초임계 0스텝).
+VSL 비활성. **box 무관**: no-box PFO가 더 나쁨(−26.0%, freeway 1286·urban 5784) → 이기적
+own-TTS 비용전가가 원인, rate limit 아님. 자기회복 경계선 freeway 이득≈0인데 전가비용 그대로라
+계곡 바닥이 됨.
+
+**미결(사용자 결정 대기)**: 새 셀 구성 (가) 계곡 편입 Low=200/Med=240(+변형)/High=280 vs
+(나) 안전 Low=220/Med=240/High=280. 확정 후 5컨트롤러 풀 매트릭스(_paper2_*) 재발주.
