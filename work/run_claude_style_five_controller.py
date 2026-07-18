@@ -569,6 +569,15 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
         # 새 상수 0). 170_incident −10.45%→+1.21%, 최악 −10.45%→−4.34%.
         # FAR_STATE_AWARE=0으로 구 상수식 복원(재현용).
         cfg.mpc.leader_mfd_far_state_aware = _os.environ["FAR_STATE_AWARE"] == "1"
+    # 6월말 hysteresis 작업 물리 원복 A/B 훅(2026-07-19): RHO_MAX=180(문헌값, 2e9d084가 95로
+    # 반토막)·CAPDROP=0(ν regime-split OFF, f329696이 ON+250). 기본 미설정 시 현행 유지.
+    if _os.environ.get("RHO_MAX"):
+        cfg.network.rho_max = float(_os.environ["RHO_MAX"])
+    if _os.environ.get("CAPDROP") is not None:
+        cfg.network.capacity_drop_anticipation = _os.environ["CAPDROP"] == "1"
+    if _os.environ.get("NU_CONG"):
+        # ν_cong 재캘리브레이션(2026-07-19): ρ180 물리에서 실증 capacity drop 5~15%에 맞춤.
+        cfg.network.metanet_nu_cong_km2_h = float(_os.environ["NU_CONG"])
     # far(MFD tail) 배수율 재캘리브레이션 훅(2026-07-19): 경계 수정 후 신물리 NC 실측으로
     # urban 혼잡 배수율이 구 캘리브레이션(g_cong=500)의 절반 수준(~280)임이 확인됨 —
     # 잔존 urban 비용 과소평가가 P-CENT/계층의 과잉 metering(근시 병리) 원인.

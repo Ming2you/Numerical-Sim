@@ -345,3 +345,27 @@ lock 회피 능력" 순서였음.
 후보 간 상수**(지평 내 metering이 n_u를 못 움직임 → G 변경이 순위 불변)라는 구조 가설과 정합
 (미확정). P-CENT 교정은 ramp-spillback→urban 연쇄를 예측/far에 넣어야 함(ramp 큐 만석 시
 urban reservoir 편입 등) — 별도 수술.
+
+## ★6월말 hysteresis 작업 고고학 + ν 기전 사망 판정 (2026-07-19)
+
+**사용자 기억("hysteresis 구현하다 꼬임") 확증 — 커밋 3개**: 030885b(6/24, ν regime-split 구현,
+기본 OFF·no-op, 깨끗) / **2e9d084(6/24, "Refactor MPC controller validation" 제목 속에
+rho_max 180→95.02 은닉** — "observed density-jump" 캘리브레이션 = 고장난 경계 위 관측에 맞춘
+순환 캘리브레이션 의심) / f329696(6/28, toggle ON + ν 65→250). 사본 브랜치
+**pre-hysteresis-jun24**(=dfe12c4) origin 푸시 완료. 러너 훅 RHO_MAX/CAPDROP/NU_CONG 추가.
+
+**물리 원복 A/B(ρ180+drop off, NC 170/200/240)**: 총 wTTT ±3~5%뿐(2554/5343/12140) — 결과
+지형의 주인은 경계수정이지 6월 물리 아님. 단 구조는 상이: 피크 rho 109~137(저장 2배),
+240은 창내 미회복(끝 rho 60.9).
+
+**PFO 강건성(원복 물리)**: -5.3/-14.7/-5.8 — 계곡 병리 생존, 6월 물리는 깊이의 ~40% 증폭기.
+아티팩트 후보 전소거(경계·hysteresis 캘리브레이션) → **구조적 발견 확정**.
+
+**ν_cong 재캘리브레이션 시도 → 기전 사망**: ρ180 물리서 ν∈{80,120,160,250} 전부 혼잡 중
+본선배출 강하 0.1~0.7%(기준 7898 veh/h) — 실증 5~15% 도달 불가. ν-split은 구모델에서
+경계 아티팩트를 증폭했을 뿐 진짜 capacity drop을 만든 적 없음. **belief 효과도 미미**:
+PFO가 ν120을 믿게 해도 ±2%p(170 +2.0/200 -1.1/240 +0.3), metering만 소폭 과격(900→750 등).
+
+**권고 물리 확정안**: rho_max=180(문헌) + capacity_drop_anticipation=false(죽은 노브 제거).
+공개 단서: 이 모델엔 실질 capacity drop 부재 → VSL의 교과서 근거 소멸(원래도 near-inert)을
+§5에 명시하거나, 진짜 배출강하 기전(merge discharge cap hysteresis)을 후속 구현.
