@@ -1,0 +1,88 @@
+# 2026-07-18 작업 노트 — P-Stack 계산량 사다리
+
+## 배경
+
+프로파일(1 결정스텝, 302.9s, 배경부하 14프로세스): `run_coupled_interval` ×690 = 88%.
+분해 — `_sync_legacy_queues` 38%(162,925회, dict.get 495M) / 가격 refresh 41%(FD rollout 51회) /
+proxy prefilter 38%(49회 × 2.35s) / full eval 17%(5회 × 10.3s).
+사다리(사용자 승인): 0단 sync 캐시 → 1단 proxy 축소 → 2단 가격 refresh 간격 → 3단 PD4 K 축소.
+**각 단마다 성능 검증(비트동일 또는 A/B + 벽시계) 통과 후 다음 단 진행.**
+
+## 0단 — _sync_legacy_queues 정적 역인덱스 캐시 (커밋 0af5167) ✅ PASS
+
+- 원인: 호출마다 `movement_specs()`가 78-movement dict 사본을 재조립 + 14링크×78무브먼트
+  전수 스캔(호출당 dict 연산 ~2,200). 토폴로지(origin/destination)는 런 중 불변.
+- 수정: `_legacy_sync_index(cfg)` — network 객체 참조 동일성 키로 link→movements 역인덱스
+  1회 구축(합산 순서 = urban_movements 삽입 순서 보존 → 부동소수 비트동일).
+  `ensure_urban_state`엔 초기화 완료 시(4개 dict 키 개수 충족) setdefault 전수 루프 스킵
+  fast-path. 안전조건: 해당 dict들에 pop/clear/del 경로 전무(전역 grep 확인).
+- 검증(190_w, T=4680, 26스텝, walk-MVG 플래그):
+  - 비트동일: `cumulative_total_ttt` 26/26행 완전 정밀도 문자열 일치 (최종 535.316).
+  - 벽시계: 결정스텝 solve 평균 **81.6s → 54.1s (−33.8%)**, 6스텝 균일 감소.
+    (주의: after 런 중 B8 h2_170 종료로 부하 14→13 — 감소가 전 스텝 균일해 최적화 효과 지배.)
+
+## 1단 — proxy prefilter 축소 (진행 중)
+
+- 대상: `_prefilter_leader_candidates` → `_proxy_score_candidate` ×49 (proxy가 rollout 수행).
+- 제약: 후보 루프 serial은 설계(OPT2 exact pruning, stage_incumbent 스레딩 — argmin 불변식).
+- 검증 계획: 비트동일 불가(선택 변경 가능) → TTT A/B (190_w + 170_w) + 벽시계.
+
+## ★SLSQP 밤샘 결과 — 가정 반전: SLSQP는 천장이 아니라 grid보다도 나쁨
+
+6셀 완주(190_w는 밤샘 런이 60스텝 완주·백업 run_log.BACKUP.csv, 내 불필요 재발주 PID는
+정리). 게이트(scipy 실가동): 6셀 전부 available=1.0·fallback=0·mode_slsqp=1.0 = PASS.
+windowed wTTT = cum_ttt[last]−cum_ttt[19] (WARM=20; grid 6셀 표1값 정확 재현으로 정의 확정).
+
+| 셀 | grid(P-CENT) | SLSQP | P-Stack | SLSQP/grid | mean_solve | 수렴% |
+|---|---|---|---|---|---|---|
+| 155 | 1614 | 6326 | 1685 | 3.92× | 516s | 85% |
+| 170 | 2488 | 7877 | 2684 | 3.17× | 507s | 70% |
+| 170_skew15 | 2517 | 7922 | 2667 | 3.15× | 507s | 80% |
+| 170_incident | 2354 | 7820 | 2295 | 3.32× | 511s | 65% |
+| 190 | 4705 | 9989 | 5156 | 2.12× | 548s | 92% |
+| 200 | 7480 | 11137 | 8684 | 1.49× | 528s | 80% |
+
+**SLSQP는 grid보다(1.49~3.92×), 제안 컨트롤러 P-Stack보다도 나쁘다.** "offline ceiling"
+가정 붕괴. mean_solve 507~548s ≫ 180s 제어주기 → 실시간 불가(예상대로).
+
+원인 = 비수렴 + closed-loop 누적 (measure로 확증; "매 스텝 로컬 갇힘"은 probe가 반증):
+- grid·SLSQP는 같은 `_predict_with_ttt`·`_objective` 공유(centralized_mpc.py:602,707).
+  예측모델이 원인이면 grid도 나빠야 하는데 grid는 우수 → 예측모델 무죄.
+- **probe_slsqp_vs_grid_obj.py (155_w, 동일 no-control 전진 state, 단일 스텝 목적값)**:
+  step20 grid1565.5/slsqp1644.2(+5.0%), step30 6534.2/6501.7(−0.5%), step40 21113.8/
+  21154.4(+0.2%) — 전부 slsqp_success=1.0. **단일 스텝 목적값은 grid와 거의 대등**
+  (gap 0.2~5.0%, 2:1 grid 근소우세). 즉 "SLSQP가 매 스텝 크게 나쁜 로컬에 갇힌다"는 틀림.
+- 그런데 closed-loop wTTT는 2~4배 벌어짐 → 괴리의 원인:
+  (a) 결정스텝의 8~35%가 **비수렴**(success_count=0, 5-start 전멸, grid 폴백 없이 SLSQP
+      best 사용) → 그 스텝의 나쁜 제어,
+  (b) 오차가 closed-loop에서 누적·발산(단일 스텝 5% 열화가 다음 state를 악화, 눈덩이).
+- non-smooth 목적(metering_shortfall/target_infeasible/projection_protected 등 kink 다수)라
+  gradient SQP가 (a) 비수렴에 취약. (b) 발산은 실측(2~4배)+단일스텝대등에서 추론 —
+  no-control probe라 self-previous 갇힘은 미측정("consistent with"로만 서술할 것).
+
+논문 처리 = **사용자 서사 결정 대기**(반전이라 기계적 숫자교체 부적절). 옵션:
+(A) SLSQP 열 제거 + §5/방법론에 "gradient SQP도 시험, grid보다 열등한 로컬 수렴 → grid 채택" 1문단.
+(B) 표에 "gradient 기준선(로컬해)"로 정직 게재 — grid·P-Stack 대비 열등을 보여
+    "non-convex 교통 문제엔 구조적 전역탐색 필수"라는 방법론 기여(VdB07/Haddad13 실패 정직게재 계보).
+→ 기존 "ceiling 컬럼/§0 offline-ceiling 선언/§1 ceiling-tightness" 계획은 전부 무효.
+
+## B8 민감도 8런 완료 — horizon·box R 모두 기본값이 최적 구간(U자형)
+
+walk-MVG 기준 170_w=2684 / 190_w=5156 대비 (wTTT, 결정스텝 60):
+| arm | 170_w | 190_w | 해석 |
+|---|---|---|---|
+| h2(horizon 2) | 8741 (+225.7%) | 9805 (+90.2%) | **파국** — 예측 시야 부족 |
+| h3(기본 3) | 2684 | 5156 | 기준 |
+| h4(horizon 4) | 2554 (−4.8%) | 5274 (+2.3%) | 이득 없음(혼조) |
+| r225(box R 225) | 2592 (−3.4%) | 10942 (+112.2%) | 190 **파국** — 고부하 회복 시야 상실 |
+| r300(기본 300) | 2684 | 5156 | 기준 |
+| r375(box R 375) | 2622 (−2.3%) | 7068 (+37.1%) | 190 악화 — bang-bang 재유입 |
+
+핵심: **고부하 190_w가 양쪽 극단에서 파국** → 기본값(h3/R300)은 튜닝이 아니라 물리적 최적
+구간. §4 민감도 그림 서사(U자, "for the network considered here" 한정, 단일시드 진술).
+
+## 배경 런 현황 (이 날 시점)
+
+- SLSQP P-CENT 6셀: 완주·게이트 PASS(위 표). 190_w 재발주 중복 프로세스 정리(6h 절약).
+- B8 민감도 8런: 완료(위 표).
+- 코드 편집은 이미 임포트를 마친 실행 중 프로세스에 영향 없음(전 런 serial/thread, 재임포트 스폰 없음).
