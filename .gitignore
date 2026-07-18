@@ -15,3 +15,6 @@ results/
 
 # run outputs (regenerable)
 post_analysis/
+
+# 그림은 재생성 가능 — 추적/푸시 제외(사용자 지시 2026-07-18)
+2026-07-17/paper_package/analysis/figures/
