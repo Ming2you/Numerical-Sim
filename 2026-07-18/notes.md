@@ -21,11 +21,23 @@ proxy prefilter 38%(49회 × 2.35s) / full eval 17%(5회 × 10.3s).
   - 벽시계: 결정스텝 solve 평균 **81.6s → 54.1s (−33.8%)**, 6스텝 균일 감소.
     (주의: after 런 중 B8 h2_170 종료로 부하 14→13 — 감소가 전 스텝 균일해 최적화 효과 지배.)
 
-## 1단 — proxy prefilter 축소 (진행 중)
+## 1단 — proxy prefilter 축소 = 후보 수 축소 (leader_candidate_count 49→25) ✅ 부분검증
 
-- 대상: `_prefilter_leader_candidates` → `_proxy_score_candidate` ×49 (proxy가 rollout 수행).
-- 제약: 후보 루프 serial은 설계(OPT2 exact pruning, stage_incumbent 스레딩 — argmin 불변식).
-- 검증 계획: 비트동일 불가(선택 변경 가능) → TTT A/B (190_w + 170_w) + 벽시계.
+- 대상: `_prefilter_leader_candidates`→`_proxy_score_candidate` ×49(proxy가 full rollout 수행).
+- proxy rollout depth 축소는 이미 OPT3(leader_proxy_near_far)로 기각(far 랭킹 불가, 단독 +1036).
+  dedupe(candidate_dedupe)는 `_evaluate_full_candidate`(full 5회)에만 붙어 proxy 미적용·부적합.
+- 유일 경로 = 후보 수 축소. 후보 = local `refined_candidates(count=leader_candidate_count)`
+  49개(+global 스텝 75개). CAND env로 override(runner:707).
+- **A/B(190_w·170_w, CAND 49 vs 25, T=4680 26스텝)**: cum_ttt **26행 완전 비트동일**
+  (190=535.3158633714312, 170=499.2302325151652), solve **−13~14%**(41.8→35.8 / 40.4→35.0s).
+  후보 24개(global 75→51)는 순수 낭비 — prefilter top_k=7 선택이 25개 격자로도 동일.
+  → 0단처럼 **행동 불변 최적화**(비트동일이라 TTT 무손실 확정).
+- **확대 검증 완료**: 후보 **25 = 안전 하한**. 155/170/170_skew15/190 = 완전 비트동일,
+  170_incident만 0.001% 차이(499.3194 vs 499.3243 — 선택 미세 갈림, 사실상 무손실).
+  후보 **15는 과도**: 비트동일 깨짐(190 +0.14% 악화 536.04 vs 535.32, 170 −0.004%).
+  결론: leader_candidate_count 49→**25** 채택 가능(solve −13~14%, 4/5셀 비트동일+1셀 0.001%).
+  단, state.py 기본값(49) 변경은 **사용자 승인 대기**(무손실이나 완전 비트동일은 아님).
+- 2단(가격 refresh 간격)·3단(PD4 K=4→2)은 미착수.
 
 ## ★SLSQP 밤샘 결과 — 가정 반전: SLSQP는 천장이 아니라 grid보다도 나쁨
 
