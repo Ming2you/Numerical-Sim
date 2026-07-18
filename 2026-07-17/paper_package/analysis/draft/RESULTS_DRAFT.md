@@ -8,6 +8,14 @@
 > P-Stack (walk-MVG); 무제한 PFO 제거), 시나리오 통용명(Low / Med / Med (skewed) /
 > Med (incident) / High demand), sweet_200_w 제외, urban 분석 신규(§2e: green 배분·
 > urban 큐). P-CENT = 의도적 rate-limit-free 상한. 표 1b/1c(urban/freeway 분해 + N_end).
+>
+> **★[결과 갈음 예정 — 초안 지금 작성 가능, 아래 2건만 나중에 교체]**
+> 1. **§1 계산시간 표** — 현재 값은 pre-0단·배치부하 실측(+캐비앗). 0단 적용·전 컨트롤러
+>    1코어 직렬 solo 재측정 결과로 교체 예정(P-Stack은 0단서 ~37s/step 확인, P-CENT는
+>    solo 측정 대기). **성능(wTTT) 값은 0단이 비트동일이라 안 바뀜** — 표1/1b/1c는 확정.
+> 2. **§5 상한 tightness 문단** — dense 그리드(후보 ~1000+/global 매스텝)로 P-CENT를 더
+>    뒤졌을 때 현행(4,705 등) 대비 개선폭 = 상한 빡빡함. 5셀 dense 실행 중, 완료 시 추가.
+> 그 외(표1 성능·urban·§2~§4 본문·그림)는 전부 확정이니 초안 작성 진행 가능.
 
 ---
 
