@@ -225,3 +225,29 @@ D/F 활성화가 같은 셀 비램프 offset까지 각성(Med서 5신호 전부 
 저·skew·incident는 여전히 offset 부동 → offset은 **균일 죽음이 아니라 램프 접속부 혼잡
 레짐서만 살아나는 상태-의존 채널**. 패키지 walk_mvg +D/F 교체(High 5096·imp 69.15%),
 표·그림 재생성·sanity PASS, 드래프트 §1값·§3 offset 문단 2갈래 재작성. §3 표에 ramp offset 행 추가.
+
+## ★터미널 경계조건 아티팩트 발견 (2026-07-18 저녁) — incident<170 이상현상의 근본 원인
+
+**증상**: incident TTT(2295)가 아무 일 없는 Med(2683)보다 낮음 → 추적 결과 NC 기저선에서
+FW_E가 step 29부터 끝까지(약 90분) rho=92·v=6km/h·flow≈1196에 **영구 고착**. base 수요는
+1204 veh/h = 자유류 용량(3922)의 31%인데 gridlock이 안 풀림 — 비물리적.
+
+**원인 확정(probe: work/probe_terminal_boundary_lock.py, 실제 metanet 함수 import)**:
+`metanet.py:508` 터미널 segment의 `downstream_rho = rho_for_flow[i]`(자기 밀도, zero-gradient
+외삽). 자유 출구에 이 경계를 붙이면 "하류에 같은 jam이 무한히 이어짐"이 되어 anticipation=0
+→ 가속 신호 없음 → v가 v_min(5)에 눌러앉음 → 터미널 배출 = 92×5×2 ≈ 920 veh/h 고정.
+
+**격리 실험(유입 1204 고정, rho0=92, 100분)**:
+| 조건 | 결과 |
+|---|---|
+| 현재 모델(경계=자기밀도, v_min=5) | rho 고착·v=5.00 영구 (재현) |
+| 하류경계만 자유출구(rho=8)로 | rho→6.5, v→93.2 즉시 배수 (원인 확정) |
+| v_min만 0.3으로 | rho 폭발·q_out 778로 악화 (v_min 가설 반증) |
+
+**knife-edge**: tipping point = jam 배출률 ≈ 920 veh/h. 유입 900이면 잠기고 800이면 회복.
+base 수요 1204가 문턱 바로 위라 영구 jam. incident<170 역전은 이 아티팩트의 증상(폐쇄가
+FW_E를 임계밀도로 metering해 jam 진입을 늦춤 → 아티팩트 TTT를 덜 쌓음).
+
+**함의**: NC 기저선 TTT가 비물리적 90분 gridlock에 지배 → 컨트롤러 개선율(+66~82%) 부풀려짐.
+**처리는 사용자 결정 대기**: (A) 터미널 경계 수정+전면 재실행 / (B) base 수요 문턱 아래로 /
+(C) §5 한계 공개. 모델 코드는 아직 미수정(probe만 저장).
