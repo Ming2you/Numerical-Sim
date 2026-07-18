@@ -227,8 +227,8 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         # >1이면 price를 response에 되먹여 수렴까지 재선형화(under-relaxation으로 안정화).
         self.price_iter_max: int = 1
         self.price_iter_relax: float = 0.5
-        # 2단(2026-07-18): 가격 refresh 스텝 간격. 1=매 결정스텝(비트동일 기본).
-        # N>1이면 step_idx % N != 0인 스텝은 직전 refresh 가격을 재사용해 FD rollout 절감.
+        # ★2단 채택 철회(2026-07-18): 26스텝 A/B는 +0.1%였으나 60스텝 전체 실행선 파국
+        # (가격 스킵이 혼잡 plateau서 눈덩이). 기본 1=매 스텝 refresh(비트동일). N>1은 env로만.
         self.price_refresh_interval: int = 1
         self._signal_price_last_step: Optional[int] = None
         self.price_iter_tol: float = 1.0e-2  # 상대 control 변화 수렴 문턱

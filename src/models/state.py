@@ -354,7 +354,7 @@ class MPCConfig:
     # follower 응답 proxy 랭킹 — 채점 형태 고정한 "얕은 leader" 검정용). 기본 False.
     leader_mfd_far_at_d0: bool = False
     leader_search_mode: str = "continuous"
-    leader_candidate_count: int = 49
+    leader_candidate_count: int = 49  # ★1단 채택 철회(2026-07-18): 60스텝선 파국(26스텝 A/B가 은폐). CAND=25 env로만.
     leader_refinement_candidate_count: int = 25
     leader_global_refresh_sec: float = 1800.0
     leader_local_np_radius_veh: float = 40.0
