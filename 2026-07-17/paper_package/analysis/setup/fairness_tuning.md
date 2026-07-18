@@ -48,12 +48,10 @@ meter ≤300 / green ≤6을 전 셀에서 지키며 이동성(34회)이 보존�
 **P-CENT.** 중앙화 기준선에는 이동 한계를 **의도적으로 부과하지 않았다**(사용자 결정
 2026-07-18). 이는 비교 조건 불일치가 아니라 rate-limit-free **상한(upper bound)**
 프레이밍이다 — 분산·이동 한계·가격 전송이 모두 제거된 지점의 도달 성능을 재는
-도구다. 정밀화하면, 실런의 P-CENT 솔버는 연속 NLP가 아니라 **전권 joint 행동공간의
-centralized structured grid search(coarse→fine), serial(단일 프로세스 직렬)**이다 —
-이 런타임에 scipy가 없어 SLSQP 경로가 성립하지 않았고 ImportError 폴백이 발동했음이
-실런 진단(`centralized_slsqp_available=0.0`)으로 확정되었다(cm:554–577, 437–501).
-따라서 P-CENT는 spec 16.13의 "동일 budget centralized numerical reference"이지 연속
-최적화 천장이 아니며, 본문에서도 그렇게 서술한다.
+도구다. 실런의 P-CENT 솔버는 **전권 joint 행동공간의 centralized structured grid
+search(coarse→fine), serial(단일 프로세스 직렬)**이다(cm:437–501). 따라서 P-CENT는
+spec 16.13의 "동일 budget centralized numerical reference"이며, 제어주기 180 s를 큰
+여유로 하회하는 실시간 가능한 중앙집중 참조다.
 
 **WU-CD-F.** 문헌 재현 기준선에는 본 논문의 이동 한계를 부과하지 않았다(문헌 충실
 유지; 실측 per-step 최대 VSL 50 / green 36). Wu의 명목 제약에 대응하는 것은 내부
@@ -79,6 +77,3 @@ Urban and Freeway Networks," IEEE TCST 30(1), pp. 57–70을 로컬 PDF에서 �
 수의 본문 상충 — p. 65는 "two freeway agents", p. 66은 "six freeway agents"로
 서술이 엇갈린다(재현에는 영향 없음 — 본 구현의 agent 분할은 자체 망 기준). ③ 시나리오
 1–3의 수요 프로파일 수치(정성 서술만 확인됨).
-
-
-**SLSQP 변형 실측(2026-07-18)**: scipy 설치 후 단독 런에서 첫 결정 스텝 425.8 s(제어주기 180 s의 2.4배, grid의 ~10배) — **실시간 위반으로 제외**. P-CENT-grid가 '동일 budget의 실시간 가능한 중앙집중 참조'로 정당함이 사후 확인됨. (역사적으로는 scipy 부재로 조용히 grid 폴백됐던 것 — 진단 마커 slsqp_available=0.0이 증거.)

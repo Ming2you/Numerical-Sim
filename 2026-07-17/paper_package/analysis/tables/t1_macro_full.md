@@ -22,8 +22,8 @@ NC 대비 개선%:
 compute [s/step] (채점창 — ★주의: 팔마다 병렬 부하가 달라 교락됨. P-CENT=6런 배치,
 P-Stack=10런 배치, NC/WU-CD-F/PFO=18런 배치. **단독 동일 조건 재측정(190_w, 3 결정스텝):
 P-CENT 40.4s(최대 50.2) vs P-Stack 45.7s(최대 54.9) — 근사 동급, P-CENT ~12% 빠름.**
-P-CENT 솔버 확정(런 진단): scipy 부재로 SLSQP 아님 — coarse→fine structured grid,
-병렬 백엔드 serial=1.0(단일 프로세스). 단독 비교는 단일코어 대 단일코어로 공정. 2026-07-18):
+P-CENT 솔버 = coarse→fine structured grid, 병렬 백엔드 serial=1.0(단일 프로세스).
+단독 비교는 단일코어 대 단일코어로 공정. 2026-07-18):
 | | WU-CD-F | PFO | PFO+box | P-CENT | P-Stack |
 |---|---|---|---|---|---|
 | 평균 | 15.9 | 4.6 | 2.8 | 44.1 | 69.1 |
