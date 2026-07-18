@@ -1,17 +1,17 @@
-# 논문 그림 공통 모듈 — Times New Roman 단일 axes 스타일, 컨트롤러 스타일맵, 데이터 로더, wTTT 채점·sanity gate
+# 논문 그림 공통 모듈 — Times New Roman 단일 axes, 5컨트롤러 스타일맵, 통용 시나리오명, 데이터 로더, NC기준 sanity gate
 """
 사용법: 모든 그림 스크립트는
     import pubstyle as ps
-    ps.sanity_gate()          # §0.4 PFO 기준선 대비 walk_mvg 개선% 재계산 검증 (불일치 시 즉시 중단)
+    ps.sanity_gate()          # walk_mvg 5셀 NC대비 개선%를 표1과 재대조 (불일치 시 즉시 중단)
     fig, ax = ps.new_fig()
     ...
     ps.save(fig, "f_xxx_yyy") # analysis/figures/에 PDF + PNG(600dpi) 동시 저장
 
-채점 규약 (ANALYSIS_PLAN_FINAL.md §0.3):
-  wTTT = cumulative_total_ttt[마지막 행] − cumulative_total_ttt[웜업 종료 행]
-  ★주의: run_log의 step 컬럼은 0-인덱스(0..59). 계획서의 "step==20 행"은 1-기반 서술이며,
-  실제 웜업 종료 행은 step==19 (0..19 = NC 웜업 20스텝, 채점창 = step 20..59).
-  이 해석으로 6셀 전부 §0.2 기대 개선%와 소수 2자리까지 일치함을 sanity_gate()가 보증.
+채점 규약:
+  wTTT = cumulative_total_ttt[마지막 행] − cumulative_total_ttt[step==19 행 (웜업 20스텝 종료)]
+  개선% = (NC_wTTT − wTTT)/NC_wTTT × 100  (표1과 동일한 NC 기준)
+컨트롤러(2026-07-18 사용자 확정 5종): no control / wu / pfo (box) / p-stack(walk-MVG) / centralized.
+무제한 PFO·sweet_200_w는 논문에서 제외.
 """
 import warnings
 from pathlib import Path
@@ -35,43 +35,65 @@ TABDIR.mkdir(parents=True, exist_ok=True)
 STEP_MIN = 3.0            # 1 step = 180 s = 3 min
 WARM_STEPS = 20           # step 0..19 = NC 웜업
 WARM_END_MIN = WARM_STEPS * STEP_MIN   # 60 min
-WARM_ROW = WARM_STEPS - 1              # wTTT 기준 행: step==19 (0-인덱스, 웜업 20스텝 누적치)
+WARM_ROW = WARM_STEPS - 1              # wTTT 기준 행: step==19 (0-인덱스)
 
-# ---------------------------------------------------------------- 셀/팔 정의
+# ---------------------------------------------------------------- 셀 정의 (5셀, 200 제외)
 CELLS = [
     "sweet_155_w", "sweet_170_w", "sweet_170_skew15_w",
-    "sweet_170_incident_w", "sweet_190_w", "sweet_200_w",
+    "sweet_170_incident_w", "sweet_190_w",
 ]
-# §0.4 PFO 수치 기준선 (정수 반올림)
-PFO_REF = {
-    "sweet_155_w": 1776, "sweet_170_w": 3021, "sweet_170_skew15_w": 2957,
-    "sweet_170_incident_w": 2367, "sweet_190_w": 5689, "sweet_200_w": 7196,
-}
-# §0.2 walk-MVG 기대 개선% (sanity gate 목표치)
-EXPECTED_IMP = {
-    "sweet_155_w": 5.10, "sweet_170_w": 11.14, "sweet_170_skew15_w": 9.81,
-    "sweet_170_incident_w": 3.03, "sweet_190_w": 9.38, "sweet_200_w": -20.68,
+# 통용 시나리오명 (그림 축·범례·캡션·표에 사용)
+SCEN_NAME = {
+    "sweet_155_w": "Low demand",
+    "sweet_170_w": "Med demand",
+    "sweet_170_skew15_w": "Med demand (skewed)",
+    "sweet_170_incident_w": "Med demand (incident)",
+    "sweet_190_w": "High demand",
 }
 
-ARMS = ["walk_mvg", "farsa_ref", "pd4_ref", "box300_vsl10_ref"]
+def scen(cell):
+    """내부 셀명 → 통용 시나리오명."""
+    return SCEN_NAME.get(cell, cell)
+
+# NC 기준선 wTTT (표1 확정값) — 개선%·sanity의 분모
+NC_REF = {
+    "sweet_155_w": 8977, "sweet_170_w": 13028, "sweet_170_skew15_w": 13175,
+    "sweet_170_incident_w": 9581, "sweet_190_w": 16518,
+}
+# walk-MVG NC대비 기대 개선% (sanity gate 목표치, 표1 확정)
+EXPECTED_IMP = {
+    "sweet_155_w": 81.23, "sweet_170_w": 79.40, "sweet_170_skew15_w": 79.76,
+    "sweet_170_incident_w": 76.05, "sweet_190_w": 68.79,
+}
+
+# ---------------------------------------------------------------- 컨트롤러 (5종, 표시 순서)
+CONTROLLERS = ["nc", "wu", "pfo_box", "pcent", "walk_mvg"]
 LABEL = {
-    "walk_mvg": "walk-MVG (P-Stack)",
+    "nc": "No control",
+    "wu": "Wu",
+    "pfo_box": "PFO (box)",
+    "pcent": "Centralized",
+    "walk_mvg": "P-Stack (walk-MVG)",
+    # P-Stack 변형 — §3 처방사다리(기각 계보) 전용, 메인 비교엔 미사용
     "farsa_ref": "FAR-SA anchor",
     "pd4_ref": "PD4 (no box)",
     "box300_vsl10_ref": "BOX (no walk)",
-    "nc": "NC",
-    "pfo": "PFO",
 }
-# 고정 컨트롤러 스타일맵 — 전 그림 공통. 흑백 인쇄에서도 선종+명도로 구분되도록 설계.
+# 고정 스타일맵 — 흑백 인쇄에서도 선종+명도로 구분. walk_mvg=주인공(검정 실선).
 STYLE = {
-    "walk_mvg":         dict(color="#000000", linestyle="-",  linewidth=1.3),
-    "farsa_ref":        dict(color="#4D4D4D", linestyle="--", linewidth=1.1),
-    "pd4_ref":          dict(color="#4477AA", linestyle=":",  linewidth=1.4),
-    "box300_vsl10_ref": dict(color="#EE7733", linestyle="-.", linewidth=1.1),
-    # 예약 (런 도착 후 사용) — NC / PFO
-    "nc":  dict(color="#66CCEE", linestyle=(0, (5, 1.5, 1, 1.5, 1, 1.5)), linewidth=1.1),
-    "pfo": dict(color="#AA3377", linestyle=(0, (7, 3)), linewidth=1.1),
+    "nc":       dict(color="#66CCEE", linestyle=(0, (5, 1.5, 1, 1.5)), linewidth=1.0),
+    "wu":       dict(color="#AA3377", linestyle=(0, (7, 3)),           linewidth=1.0),
+    "pfo_box":  dict(color="#EE7733", linestyle="-.",                  linewidth=1.1),
+    "pcent":    dict(color="#4477AA", linestyle=":",                   linewidth=1.4),
+    "walk_mvg": dict(color="#000000", linestyle="-",                   linewidth=1.4),
+    # 변형(예약)
+    "farsa_ref":        dict(color="#4D4D4D", linestyle="--", linewidth=1.0),
+    "pd4_ref":          dict(color="#228833", linestyle=":",  linewidth=1.1),
+    "box300_vsl10_ref": dict(color="#CCBB44", linestyle="-.", linewidth=1.0),
 }
+# P-Stack 처방사다리 변형(§3d 기각계보/§5 전용)
+PSTACK_VARIANTS = ["walk_mvg", "farsa_ref", "pd4_ref", "box300_vsl10_ref"]
+ARMS = PSTACK_VARIANTS  # 하위호환 별칭(변형 비교 그림) — 메인 5컨트롤러는 CONTROLLERS
 
 # ---------------------------------------------------------------- rcParams (import 시 적용)
 _FONT = "Times New Roman"
@@ -95,7 +117,7 @@ plt.rcParams.update({
     "savefig.dpi": 600,
     "pdf.fonttype": 42,             # TrueType 임베드 (저널 요구)
     "ps.fonttype": 42,
-    "legend.frameon": True,         # 곡선 위에 얹혀도 읽히도록 흰 배경
+    "legend.frameon": True,
     "legend.framealpha": 0.9,
     "legend.edgecolor": "none",
     "legend.borderpad": 0.3,
@@ -121,7 +143,7 @@ def save(fig, name):
 
 
 def shade_warmup(ax):
-    """NC 웜업(0–60 min) 음영 + 종료 경계선. 텍스트 라벨은 캡션 담당(충돌 방지)."""
+    """NC 웜업(0–60 min) 음영 + 종료 경계선. 텍스트 라벨은 캡션 담당."""
     ax.axvspan(0.0, WARM_END_MIN, color="0.92", zorder=0, linewidth=0)
     ax.axvline(WARM_END_MIN, color="0.6", linewidth=0.6, linestyle=(0, (2, 2)), zorder=1)
 
@@ -134,8 +156,14 @@ def time_axis(ax, tmax_min=180.0):
 
 
 def minutes(steps):
-    """step 인덱스(0-기반) → 분. step s의 제어는 [3s, 3(s+1)) min 구간에 적용."""
+    """step 인덱스(0-기반) → 분."""
     return np.asarray(steps, dtype=float) * STEP_MIN
+
+
+def style(arm):
+    """컨트롤러/변형 스타일 dict + label 반환용 헬퍼."""
+    return dict(STYLE.get(arm, dict(color="0.3", linestyle="-", linewidth=1.0)),
+                label=LABEL.get(arm, arm))
 
 
 # ---------------------------------------------------------------- 데이터 로더
@@ -158,16 +186,20 @@ def wttt(run_log):
     return float(cum.iloc[-1] - base)
 
 
-def sanity_gate(tol=0.005, verbose=True):
-    """walk_mvg 6셀 개선%를 §0.4 기준선으로 재계산해 §0.2 목표치와 소수 2자리 일치 검증.
-    불일치 시 SystemExit — 그림 생성 전 반드시 호출."""
+def improvement(arm, cell):
+    """NC 대비 개선% (표1 규약)."""
+    rl = load(arm, cell, "run_log", usecols=["step", "cumulative_total_ttt"])
+    return (NC_REF[cell] - wttt(rl)) / NC_REF[cell] * 100.0
+
+
+def sanity_gate(tol=0.05, verbose=True):
+    """walk_mvg 5셀 NC대비 개선%를 표1 목표치와 대조. 불일치 시 SystemExit."""
     fails = []
     for cell in CELLS:
-        rl = load("walk_mvg", cell, "run_log", usecols=["step", "cumulative_total_ttt"])
-        imp = (PFO_REF[cell] - wttt(rl)) / PFO_REF[cell] * 100.0
+        imp = improvement("walk_mvg", cell)
         if abs(imp - EXPECTED_IMP[cell]) >= tol:
             fails.append(f"{cell}: got {imp:+.2f}% expected {EXPECTED_IMP[cell]:+.2f}%")
     if fails:
         raise SystemExit("SANITY GATE FAIL — 채점 규약/데이터 불일치:\n  " + "\n  ".join(fails))
     if verbose:
-        print("sanity gate PASS (walk_mvg 6/6 cells match expected improvement to 2 dp)")
+        print("sanity gate PASS (walk_mvg 5/5 cells match expected NC-relative improvement)")

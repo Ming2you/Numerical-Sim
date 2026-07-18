@@ -3,7 +3,7 @@ import pubstyle as ps
 
 RHO_CRIT = 33.5  # veh/km/lane
 LINKS = ["FW_E", "FW_W"]
-CELLS = ["sweet_190_w", "sweet_200_w"]
+CELLS = ["sweet_190_w"]
 ARMS = ["farsa_ref", "pd4_ref", "walk_mvg"]
 
 
@@ -28,8 +28,7 @@ def main():
             ps.time_axis(ax)
             ax.set_ylim(0, ymax * 1.14)
             ax.set_ylabel("Mean density (veh/km/lane)")
-            short = cell.replace("sweet_", "").replace("_w", "")
-            ax.text(0.98, 0.03, f"{link.replace('_', '–')}, {short}",
+            ax.text(0.98, 0.03, f"{link.replace('_', '–')}, {ps.scen(cell)}",
                     transform=ax.transAxes, ha="right", va="bottom",
                     fontsize=8, color="0.3")
             ax.legend(loc="upper left")

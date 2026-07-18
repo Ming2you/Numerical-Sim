@@ -20,10 +20,9 @@ T_TOTAL = 10800.0
 INCIDENT = (4500.0, 6300.0)  # sweet_170_incident_w, FW_E seg6, 1/2 lanes
 
 CURVES = [  # (class scale, label, gray level)
-    (1.55, "×1.55 (155_w)", "0.72"),
-    (1.70, "×1.70 (170_w / skew15 / incident)", "0.50"),
-    (1.90, "×1.90 (190_w)", "0.28"),
-    (2.00, "×2.00 (200_w)", "0.0"),
+    (1.55, "×1.55 (Low demand)", "0.72"),
+    (1.70, "×1.70 (Med demand / skewed / incident)", "0.50"),
+    (1.90, "×1.90 (High demand)", "0.0"),
 ]
 
 

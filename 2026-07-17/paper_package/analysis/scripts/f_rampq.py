@@ -1,4 +1,4 @@
-# 그림9: 램프 대기행렬[veh] 시계열 — 190w(pd4 vs walk) 4장 + 200w(회복 스토리의 비용측) 4장, 저장한계 180 수평선
+# 그림: 램프 대기행렬[veh] 시계열 — high demand(pd4 vs walk) 4장, 저장한계 180 수평선
 import pubstyle as ps
 
 RAMPS = ["R_D_E", "R_D_W", "R_F_E", "R_F_W"]
@@ -6,7 +6,6 @@ STORAGE_LIMIT = 180.0  # veh — 램프 저장 한계
 # (셀, 팔 목록, 파일명 접미사)
 FAMILIES = [
     ("sweet_190_w", ["pd4_ref", "walk_mvg"], "190w"),
-    ("sweet_200_w", ["farsa_ref", "box300_vsl10_ref", "walk_mvg"], "200w"),
 ]
 
 
