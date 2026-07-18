@@ -369,3 +369,22 @@ PFO가 ν120을 믿게 해도 ±2%p(170 +2.0/200 -1.1/240 +0.3), metering만 소
 **권고 물리 확정안**: rho_max=180(문헌) + capacity_drop_anticipation=false(죽은 노브 제거).
 공개 단서: 이 모델엔 실질 capacity drop 부재 → VSL의 교과서 근거 소멸(원래도 near-inert)을
 §5에 명시하거나, 진짜 배출강하 기전(merge discharge cap hysteresis)을 후속 구현.
+
+## ★비대칭 셀(urban 1.7 고정) + urban 악화 해부 (2026-07-19, ρ180+capdrop off)
+
+**urban I/O 수지 정정(사용자 산수 지적)**: 이전 "실효 유출 8600"은 boundary_out과 on-ramp
+이탈을 뒤섞은 오귀속. 정정 — urban 배수 채널 2개: ①신호 묶인 boundary_out ≈ 게이트당
+green×Q_sat(1000)=500~1000, 7게이트 합 3.5~7k(sink cap 1600은 대부분 비구속) ②on-ramp→freeway
+≈ 6k(4×1500). **metering이 조이는 게 ②채널** — urban 배수의 ~45%를 잠그는 행위.
+
+**비대칭 셀(NC/PFO, fw{200,240,280}×u170)**: NC 4465/8747/13148, PFO −12.0%/−7.1%/**+2.1%**.
+①계곡은 urban 과적 탓도 아님(u170 한산해도 −12%) — **4중 소거 완료(경계·hysteresis·drop믿음·
+urban수요), 비용전가 병리 구조적 확정**. ②**교차점 최초 발견**: fw280×u170서 PFO 양전 —
+분산 metering 가치 = (freeway 부하 × urban 여유)의 **2D 레짐 지도**, 계곡은 선이 아니라 영역.
+
+**urban 악화 2성분 해부(movement 큐 Δ top5)**: 280은 전부 `*_to_on*`(freeway행 대기 = 순수
+이전, 상쇄 가능) vs 200은 `C_N_to_S`/`A_N_to_S` 등 **일반 직진**(spillback이 무관 교통 질식 =
+혼잡 외부효과). 계곡 파국의 정체 = 외부효과 지배 레짐. capdrop-off서 PFO +2.1%의 이득 채널 =
+처리량 증가가 아니라 "남을 느리게 하는 밀집본선 → 혼자 기다리는 게이트 줄" 대기 재배치.
+**논문 서사 완결형: 이기적 metering = 본선 혼잡외부효과 ↔ urban 큐 외부효과 거래; 조정의 일 =
+거래를 수지 맞을 때만, spillback 가격 치르고 하게 만드는 것.**
