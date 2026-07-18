@@ -160,3 +160,33 @@ walk-MVG 기준 170_w=2684 / 190_w=5156 대비 (wTTT, 결정스텝 60):
 - SLSQP P-CENT 6셀: 완주·게이트 PASS(위 표). 190_w 재발주 중복 프로세스 정리(6h 절약).
 - B8 민감도 8런: 완료(위 표).
 - 코드 편집은 이미 임포트를 마친 실행 중 프로세스에 영향 없음(전 런 serial/thread, 재임포트 스폰 없음).
+
+## ★★SLSQP landmine 발견·수정 + P-CENT 재현·0단 계산표 (2026-07-18 저녁)
+
+**landmine**: default.yaml `centralized_solver_mode: slsqp`. 초기 논문 P-CENT(_paper_pcent,
+4705 등)는 scipy 부재로 grid로 silent fallback했으나, 이후 scipy 설치로 **P-CENT 재실행 시
+SLSQP가 실제 가동** → 논문 grid(4705) 대신 SLSQP(9989)를 얻게 됨. dense tightness 첫 시도가
+값이 이전 SLSQP(170=7877/190=9989)와 정확히 일치해 발각(dense 플래그는 grid 경로 전용이라
+무시되고 SLSQP로 샜음; run_log 진단 solver_mode_slsqp=1.0·grid진단 전무로 확정).
+**수정**: default.yaml → `centralized_solver_mode: structured_grid` 고정(scipy 무관 재현,
+SLSQP 제외 결정과 정합). YAML 인라인 한글 주석이 로더를 깨 validation 에러 → 주석 윗줄 이동.
+
+**재현 확인(grid 고정 후 5셀 재실행)**: P-CENT grid가 논문값을 Δ<0.5로 재현
+(Low1614/Med2488/skew2517/incid2354/High4705, slsqp?=False, grid후보 451~470) →
+**패키지 P-CENT 데이터는 정상 grid, config 수정 안전**.
+
+**0단 계산시간 표(High demand, 전 컨트롤러 1코어 직렬 — 러너가 backend=serial 고정)**:
+| s/step | Wu | PFO(box) | Centralized | P-Stack |
+|---|---|---|---|---|
+| 평균 | 6.3 | 1.6 | 22.7 | 30.5 |
+| 최대 | 13.1 | 2.0 | 46.4 | 50.6 |
+pre-0단(15.9/2.8/44.1/69.1) 대비 전부 단축. 최악 50.6s ≪ 180s 제어주기. 드래프트 §1 갱신·푸시(cf2dedc).
+**공정성**: P-CENT도 1코어 직렬(parallel_workers=1) — 코어 왜곡 없음. P-CENT가 빠른 건
+후보당 중첩 follower 없어 저렴(스텝당 ~450후보). P-Stack은 후보마다 follower Nash 중첩.
+
+**tightness 재실행**: 진짜 grid+dense(CENT_DENSE=1, green 7→19·metering 6→13·VSL 5→13레벨·
+global 매스텝)로 5셀 재발주. 완료 시 현행(4705 등) 대비 개선폭으로 상한 빡빡함 판정 후 §5 추가.
+
+**교훈**: 재실행 결과가 다른 컨트롤러 값과 "정확히 일치"하면 솔버 오배선 의심(landmine).
+config 기본값이 환경(scipy 유무)에 따라 다른 알고리즘을 타면 재현성 붕괴 — 논문 컨트롤러는
+솔버를 명시 고정할 것.
