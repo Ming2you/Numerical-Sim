@@ -28,10 +28,15 @@
 | pcent | Centralized | _paper_pcent/{cell}/P-CENT |
 
 ## 작업 목록
-- [ ] 1. 비교 컨트롤러 데이터 복사 (nc/wu/pfo_box/pcent × 5셀 → 패키지 data/)
-- [ ] 2. pubstyle.py 재작성 (CELLS 5, 컨트롤러 5 LABEL/STYLE, SCEN_NAME 매핑, 로더)
-- [ ] 3. make_table1.py 재작성 → 표1/1b/1c 5컨트롤러 실데이터·통용이름·200제거
-- [ ] 4. 신규 urban 그림: green split 반응, urban queue 궤적 (5컨트롤러, 대표셀)
-- [ ] 5. 기존 그림 재생성: 이름 통용화, 무제한PFO·200 그림 제거
-- [ ] 6. RESULTS_DRAFT.md: §0.2 이름/§0.3 컨트롤러/§1 표/§2 urban소절 추가/§2e·§5 200서사 제거
-- [ ] 7. sanity gate 통과 확인 + 커밋
+- [x] 1. 비교 컨트롤러 데이터 복사 (nc/wu/pfo_box/pcent × 5셀 → 패키지 data/) — 표1 값 정합 검증 PASS
+- [x] 2. pubstyle.py 재작성 (CELLS 5, 컨트롤러 5 LABEL/STYLE, SCEN_NAME 매핑, 로더) — sanity PASS
+- [x] 3. make_table1.py 재작성 → 표1/1b/1c 5컨트롤러 실데이터·통용이름·200제거
+- [x] 4. 신규 urban 그림: green split(skewed 신호 D), urban queue(high demand) — 5컨트롤러
+- [x] 5. 기존 그림 재생성: fig_ttt_traj 5컨트롤러, 이름 통용화, 무제한PFO·200 그림 제거
+- [x] 6. RESULTS_DRAFT.md: §0.2 이름/§0.3 컨트롤러/§1 표·서술/§2 urban소절/§2e·§5 200서사·무제한PFO 제거, 캡션 통용화
+- [x] 7. sanity gate 통과 + 커밋(0d2b934 그림·표·데이터)
+
+## 후속(사용자 검토 대기)
+- §1 조정격차를 PFO(box) 기준으로 재프레이밍함(무제한 PFO 제거) — box 붕괴 셀에서 조정가치 극대화 서사.
+- §5(2) rate-limit 한계를 200 대신 B8 민감도(box R·지평 U자 파국)로 재작성.
+- §4(네트워크 임계성)는 여전히 [런 대기](105런 미실행).
