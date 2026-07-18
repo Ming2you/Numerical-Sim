@@ -442,7 +442,7 @@ class CentralizedMPC:
     ) -> tuple[float, ControlAction, int, bool]:
         authority = self._grid_authority()
         center = previous.copy()
-        refresh_sec = 1800.0
+        refresh_sec = float(getattr(self.cfg.mpc, "centralized_grid_refresh_sec", 1800.0))
         interval = max(self.cfg.simulation.control_interval, 1.0e-9)
         step_index = int(round(state.time_sec / interval))
         refresh_steps = max(1, int(round(refresh_sec / interval)))

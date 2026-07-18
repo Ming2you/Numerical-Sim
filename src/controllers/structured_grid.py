@@ -164,9 +164,18 @@ def _cap_mean(cfg: ExperimentConfig) -> float:
     return float(np.mean([cfg.network.ramp_capacity_veh_h[ramp] for ramp in cfg.network.ramps]))
 
 
+def _dense(cfg: ExperimentConfig) -> bool:
+    return bool(getattr(cfg.mpc, "centralized_grid_dense", False))
+
+
 def _global_metering_rates(cfg: ExperimentConfig) -> list[float]:
     cap = _cap_mean(cfg)
-    return [cap * fraction for fraction in (1.0, 0.9, 0.8, 0.7333333333, 0.667, 0.6)]
+    if _dense(cfg):
+        # tightness: 0.40~1.00을 0.05 간격(13레벨, 낮은 metering까지 확장)
+        fracs = [round(0.40 + 0.05 * i, 2) for i in range(13)]
+    else:
+        fracs = [1.0, 0.9, 0.8, 0.7333333333, 0.667, 0.6]
+    return [cap * fraction for fraction in fracs]
 
 
 def _local_metering_rates(cfg: ExperimentConfig, center: ControlAction) -> list[float]:
@@ -178,6 +187,9 @@ def _local_metering_rates(cfg: ExperimentConfig, center: ControlAction) -> list[
 
 
 def _global_green_values(cfg: ExperimentConfig) -> list[float]:
+    if _dense(cfg):
+        # tightness: 20~92를 4 간격(19레벨)
+        return _bounded_green_values(cfg, [20.0 + 4.0 * i for i in range(19)])
     return _bounded_green_values(cfg, [20.0, 32.0, 44.0, 56.0, 68.0, 80.0, 92.0])
 
 
@@ -489,7 +501,11 @@ def structured_grid_candidates(
                 _set_one_metering(cand, cfg, ramp, rate)
                 _add(out, seen, cfg, authority, f"rm_{ramp}_{rate:.0f}", stage, scope, cand)
 
-    vsl_values = [100.0, 90.0, 80.0, 70.0, 60.0] if scope == "global" else []
+    if scope == "global":
+        # tightness dense: 40~100을 5 간격(13레벨), 낮은 VSL까지 확장
+        vsl_values = [40.0 + 5.0 * i for i in range(13)] if _dense(cfg) else [100.0, 90.0, 80.0, 70.0, 60.0]
+    else:
+        vsl_values = []
     if scope == "local":
         for link in net.freeway_links:
             current = center.vsl.get(link, max(cfg.freeway_follower.vsl_set))

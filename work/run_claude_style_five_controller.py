@@ -545,6 +545,11 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
         # 다음 전역 탐색(step 30)까지 15분간 무효한 해 주변만 뒤진다 — 그 구멍의 상한 측정용.
         # =180이면 매 스텝 전역(상한). 미지정=기본 1800(비트동일).
         cfg.mpc.leader_global_refresh_sec = float(_os.environ["GLOBAL_REFRESH_SEC"])
+    if _os.environ.get("CENT_REFRESH_SEC"):
+        # P-CENT tightness: 전역 재탐색 주기[s]. 180=매 스텝 전역 그리드(기본 1800=10스텝마다).
+        cfg.mpc.centralized_grid_refresh_sec = float(_os.environ["CENT_REFRESH_SEC"])
+    if _os.environ.get("CENT_DENSE") == "1":
+        cfg.mpc.centralized_grid_dense = True  # P-CENT tightness: 레버별 격자 레벨 조밀화
     if _os.environ.get("MFD_FAR") == "1":
         cfg.mpc.leader_mfd_far_enabled = True  # far(MFD tail) cost-to-go 가산 → near 깊이 절감 검증
     if _os.environ.get("FAR_STATE_AWARE") is not None:

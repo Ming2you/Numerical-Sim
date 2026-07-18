@@ -429,6 +429,10 @@ class MPCConfig:
     optimizer_n_starts: int = 2
     centralized_solver_mode: str = "slsqp"
     centralized_slsqp_ftol: float = 1.0e-3
+    # P-CENT 구조적 그리드 tightness 실험 노브(기본=현행). refresh_sec 낮추면 전역 재탐색을
+    # 매 스텝, dense=True면 레버별 격자 레벨을 조밀하게(상한 빡빡함 측정용).
+    centralized_grid_refresh_sec: float = 1800.0
+    centralized_grid_dense: bool = False
     relaxed_quantized_controls: bool = False
     relaxed_green_quantum_sec: float = 1.0
     relaxed_vsl_quantum_km_h: float = 10.0
