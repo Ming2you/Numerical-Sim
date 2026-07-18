@@ -842,6 +842,23 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
             control = baseline_control("no_control", cfg, sim.state, forecast[0])
         else:
             control = decide(controller_id, controller, sim, forecast, previous, cfg, step)
+        # METER_QOVR(2026-07-19, 사용자 제안): spillback 금지 queue-override — ALINEA queue
+        # override/VdB max-queue 제약과 동형. 램프 큐가 임계(기본 0.8×180)를 넘으면 다음
+        # 인터벌에 임계 아래로 돌아오도록 방류 하한을 강제(간선 역류=blocked 큐 형성 차단).
+        # 감독층 clamp라 어떤 컨트롤러에도 동일 적용(A/B용, 기본 미설정=무변경).
+        if _os.environ.get("METER_QOVR") == "1" and control.ramp_metering:
+            _q_frac = float(_os.environ.get("METER_QOVR_FRAC", "0.8"))
+            _q_thr = _q_frac * float(cfg.network.ramp_queue_max_veh)
+            _tc_h = cfg.simulation.T_c_h
+            for _ramp in list(control.ramp_metering.keys()):
+                _q_now = max(0.0, float(sim.state.ramp_queue.get(_ramp, 0.0)))
+                _arr = max(0.0, float(forecast[0].ramp_arrival.get(_ramp, 0.0)))
+                _m_need = _arr + max(0.0, _q_now - _q_thr) / max(_tc_h, 1.0e-9)
+                _cap = float(cfg.network.ramp_capacity_veh_h.get(_ramp, 1500.0))
+                _m_new = max(float(control.ramp_metering[_ramp]), min(_cap, _m_need))
+                if _m_new > float(control.ramp_metering[_ramp]) + 1.0e-9:
+                    control.diagnostics[f"meter_qovr_{_ramp}"] = _m_new - float(control.ramp_metering[_ramp])
+                control.ramp_metering[_ramp] = _m_new
         compute_time = time.perf_counter() - t0
         log = sim.step(control, forecast[0], step)
         previous = control.copy()
