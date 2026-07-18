@@ -8,10 +8,11 @@
 
 이웃 본선 경계 동결:
 - `freeway_substep`의 본선 갱신은 애초에 link 간 결합이 없다. segment 0의 upstream 속도는
-  상수 `net.v_free`(metanet.py:438), 마지막 segment의 downstream 밀도는 자기 자신
-  `rho_for_flow[i]`(metanet.py:439)이다. 즉 plant 자체가 link을 독립적으로 전진시킨다.
+  상수 `net.v_free`, 마지막 segment의 downstream 밀도는 자유출구 표준 경계
+  `min(rho_for_flow[i], rho_crit)`이고 터미널 배출은 용량 cap(2026-07-18 경계 수정, plant와
+  동일). 즉 plant 자체가 link을 독립적으로 전진시킨다.
   따라서 단일-link 복제는 별도의 이웃 동결 조작 없이 plant와 비트 동일한 본선 거동을 낸다
-  (upstream=v_free·downstream=self 라는 plant 경계 규약을 그대로 따른다 = de facto 동결).
+  (upstream=v_free·downstream 경계 규약을 plant와 그대로 공유한다 = de facto 동결).
 - 후보 채점 동안 이 link의 segment 밀도/속도만 갱신되고 다른 link 상태는 절대 건드리지 않는다.
 
 on-ramp/off-ramp:
@@ -216,7 +217,14 @@ def freeway_substep_local(
     for i, rho in enumerate(rho_for_flow):
         q_in = entry_realized if i == 0 else q_inter[i - 1]
         q_in += ramp_in_by_segment[i]
-        q_out = mainline_sending[i] if i == model.n_seg - 1 else q_inter[i]
+        terminal_out = None
+        if i == model.n_seg - 1:
+            # plant(metanet.py freeway_substep)와 동일한 자유출구 CTM supply cap.
+            terminal_cap = q_cap * max(lanes_now[i], 1.0e-9) / max(float(net.freeway_lanes), 1.0e-9)
+            terminal_out = min(mainline_sending[i], terminal_cap)
+            q_out = terminal_out
+        else:
+            q_out = q_inter[i]
         boundary_speed_cap = None
         effective_off_total = 0.0
         normal_off_total = 0.0
@@ -232,12 +240,23 @@ def freeway_substep_local(
             q_out += effective_off_total
             if normal_off_total > effective_off_total + 1.0e-9:
                 boundary_speed_cap = q_out / max(rho * lanes_now[i], 1.0e-9)
+        if terminal_out is not None and terminal_out < mainline_sending[i] - 1.0e-9:
+            # plant와 동일: 터미널 배출이 용량에 걸리면 속도도 flow-정합으로 cap.
+            exit_speed_cap = q_out / max(rho * lanes_now[i], 1.0e-9)
+            boundary_speed_cap = (
+                exit_speed_cap if boundary_speed_cap is None
+                else min(boundary_speed_cap, exit_speed_cap)
+            )
         vehicle_raw = vehicles[i] + dt_h * (q_in - q_out)
         vehicle_new = max(0.0, vehicle_raw)
         rho_new = vehicle_new / max(net.freeway_segment_length_km * max(lanes_now[i], 1.0e-9), 1.0e-9)
 
         upstream_speed = net.v_free if i == 0 else speeds[i - 1]
-        downstream_rho = rho_for_flow[i + 1] if i + 1 < model.n_seg else rho_for_flow[i]
+        if i + 1 < model.n_seg:
+            downstream_rho = rho_for_flow[i + 1]
+        else:
+            # plant와 동일한 자유출구 표준 경계: 가상 하류밀도 = min(자기, 임계).
+            downstream_rho = min(rho_for_flow[i], float(net.rho_crit))
         vsl_i = segment_vsl(control, link, i, cfg)
         vsl_max = max(cfg.freeway_follower.vsl_set)
         vsl_active_i = vsl_i < vsl_max - 0.5

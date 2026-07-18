@@ -468,7 +468,14 @@ def freeway_substep(
             # Spec 3.1.2 밀도 갱신: q_in/q_out은 veh/h, dt는 hour 단위로 계산한다.
             q_in = entry_realized if i == 0 else q_inter[i - 1]
             q_in += ramp_in_by_link[link][i]
-            q_out = mainline_sending[i] if i == len(rhos) - 1 else q_inter[i]
+            if i == len(rhos) - 1:
+                # 자유출구 CTM supply: 비혼잡 하류의 최대 수용량 = 용량(차로·incident 계수 반영).
+                # sending 그대로 내보내면 경계 속도 회복 과도기에 용량 6배 방류가 생긴다(비물리).
+                terminal_cap = q_cap * max(lanes_now[i], 1.0e-9) / max(float(net.freeway_lanes), 1.0e-9)
+                terminal_out = min(mainline_sending[i], terminal_cap)
+                q_out = terminal_out
+            else:
+                q_out = q_inter[i]
             boundary_speed_cap = None
             effective_off_total = 0.0
             normal_off_total = 0.0
@@ -497,7 +504,15 @@ def freeway_substep(
                 if normal_off_total > effective_off_total + 1.0e-9:
                     boundary_speed_cap = q_out / max(rho * lanes_now[i], 1.0e-9)
             if i == len(rhos) - 1:
-                mainline_exit_acc[link] += mainline_sending[i]
+                mainline_exit_acc[link] += terminal_out
+                if terminal_out < mainline_sending[i] - 1.0e-9:
+                    # 배출이 용량에 걸리면 속도도 flow-정합으로 cap(off-ramp blocking과 동일 관행).
+                    exit_speed_cap = q_out / max(rho * lanes_now[i], 1.0e-9)
+                    boundary_speed_cap = (
+                        exit_speed_cap
+                        if boundary_speed_cap is None
+                        else min(boundary_speed_cap, exit_speed_cap)
+                    )
             vehicle_raw = vehicles[i] + dt_h * (q_in - q_out)
             vehicle_new = max(0.0, vehicle_raw)
             if abs(vehicle_new - vehicle_raw) > 1.0e-9:
@@ -505,7 +520,13 @@ def freeway_substep(
             rho_new = vehicle_new / max(net.freeway_segment_length_km * max(lanes_now[i], 1.0e-9), 1.0e-9)
 
             upstream_speed = net.v_free if i == 0 else speeds[i - 1]
-            downstream_rho = rho_for_flow[i + 1] if i + 1 < len(rhos) else rho_for_flow[i]
+            if i + 1 < len(rhos):
+                downstream_rho = rho_for_flow[i + 1]
+            else:
+                # 자유출구 표준 경계(uncongested downstream): 가상 하류밀도 = min(자기, 임계).
+                # 자기밀도 그대로(zero-gradient)면 anticipation=0이라 터미널 jam이 영구 고착
+                # (2026-07-18 규명, work/probe_terminal_boundary_lock.py).
+                downstream_rho = min(rho_for_flow[i], float(net.rho_crit))
             # Option C: VSL을 segment별로 읽는다(segment 키 없으면 link 키 fallback).
             vsl_i = segment_vsl(control, link, i, cfg)
             vsl_active_i = vsl_i < vsl_max - 0.5
