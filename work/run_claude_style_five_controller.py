@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
 
 from src.analysis.free_flow_reference import compute_free_flow_reference
 from src.controllers.classical_hierarchical import ClassicalHierarchicalController
+from src.controllers.centralized_mpc import CentralizedMPC
 from src.controllers.distributed_coordinator import DistributedCoordinator
 from src.controllers.f1_wu_faithful_follower import (
     F1StackelbergWuMeteredController,
@@ -37,9 +38,34 @@ CONTROLLERS = [
     "NO-CONTROL",
     "WU-CD-F",
     "WU-FAITHFUL-FOLLOWER",
-    "P-STACK-WU-FAITHFUL",
-    "CLASSICAL-HIERARCHICAL",
+    "P-STACK-WU-FAITHFUL-APJOINT-FINAL",
+    "P-CENT-SLSQP",
 ]
+
+FINAL_W_SCENARIOS = {
+    "sweet_155_w",
+    "sweet_170_w",
+    "sweet_190_w",
+    "sweet_200_w",
+    "sweet_170_skew15_w",
+    "sweet_170_incident_w",
+}
+
+FINAL_8SEG_NETWORK_OVERRIDES = {
+    "freeway_segments_per_link": 8,
+    "ramp_merge_segment_index": {
+        "R_D_W": 4,
+        "R_F_W": 4,
+        "R_D_E": 4,
+        "R_F_E": 4,
+    },
+    "off_ramp_segment_index": {
+        "OR_D_W": 2,
+        "OR_F_W": 4,
+        "OR_D_E": 2,
+        "OR_F_E": 4,
+    },
+}
 
 # 3점 사다리(2026-07-03 §4d) 변형 ID — 기본 5종의 거동은 불변:
 #   WU-FAITHFUL-FOLLOWER-NOP1 : rung1 = PFO 순수 own-TTS(P1 blocked-inflow 가격 OFF).
@@ -86,6 +112,8 @@ def build_cfg(scenario_name: str, t_total: float) -> tuple[ExperimentConfig, Any
     scenarios = load_scenarios(str(ROOT / "src" / "config" / "scenarios.yaml"))
     scenario = scenarios[scenario_name]
     cfg = apply_scenario_network_overrides(cfg, scenario)
+    if scenario_name in FINAL_W_SCENARIOS:
+        cfg = cfg.with_updates({"network": FINAL_8SEG_NETWORK_OVERRIDES})
     return cfg, scenario
 
 
@@ -93,8 +121,8 @@ def make_controller(controller_id: str, cfg: ExperimentConfig):
     if controller_id == "NO-CONTROL":
         return None
     if controller_id == "WU-CD-F":
-        return DistributedCoordinator(cfg, ablation="WU_GREEN_VSL_ONLY_TTT")
-    if controller_id == "WU-FAITHFUL-FOLLOWER":
+        return WuFaithfulFollower(cfg, authority="wu")
+    if controller_id in {"WU-FAITHFUL-FOLLOWER", "PROPOSED-FOLLOWERS-ONLY", "PFO-link"}:
         return WuFaithfulFollower(cfg)
     if controller_id == "WU-FAITHFUL-FOLLOWER-NOP1":
         follower = WuFaithfulFollower(cfg)
@@ -258,6 +286,35 @@ def make_controller(controller_id: str, cfg: ExperimentConfig):
         controller.vsl_meter_cross_price_enabled = True
         controller.nash_solver.joint_green_offset_enabled = True
         return controller
+    if controller_id in {"P-STACK-WU-FAITHFUL-APJOINT-FINAL", "P-STACK-FINAL", "P-Stack"}:
+        import os as _os_final
+        if "LEADER_V_DEPTH" not in _os_final.environ and int(
+            getattr(cfg.mpc, "leader_value_depth", 0)
+        ) == 0:
+            cfg.mpc.leader_value_depth = 3
+        if _os_final.environ.get("OPT12") != "0":
+            cfg.mpc.leader_skip_local_refinement = True
+            cfg.mpc.leader_rollout_early_stop = True
+        controller = F1StackelbergWuMeteredController(cfg)
+        controller.nash_solver.f1_spillback_weight = 0.0
+        controller.signal_price_enabled = True
+        controller.offset_price_enabled = True
+        controller.metering_price_enabled = True
+        controller.metering_price_delta_veh_h = 300.0
+        controller.metering_price_trust_frac = 0.20
+        controller.vsl_price_enabled = True
+        controller.green_offset_cross_price_enabled = False
+        controller.vsl_meter_cross_price_enabled = False
+        controller.nash_solver.joint_green_offset_enabled = True
+        return controller
+    if controller_id in {"P-CENT-SLSQP", "P-CENT", "P-Cent", "PROPOSED-CENTRALIZED"}:
+        cfg.mpc.centralized_solver_mode = "slsqp"
+        cfg.mpc.optimizer_maxiter = max(int(cfg.mpc.optimizer_maxiter), 40)
+        cfg.mpc.optimizer_n_starts = max(int(cfg.mpc.optimizer_n_starts), 5)
+        return CentralizedMPC(cfg, mode="proposed")
+    if controller_id in {"P-CENT-GRID", "Centralized-grid"}:
+        cfg.mpc.centralized_solver_mode = "structured_grid"
+        return CentralizedMPC(cfg, mode="proposed")
     # ---- G1DF-NORHO(2026-07-07): g1df에서 rho_crit 안전장치 2종 제거 — 진단 ----
     # 사용자 진단: freeway follower의 F1 ρ_crit hinge(own-TTS penalty)와 leader의 density_headroom
     # 캡(N_UF 예산을 merge 밀도가 rho_crit 닿는 flow로 상한)이 freeway 유입을 과하게 조여 격차의
@@ -424,14 +481,25 @@ def decide(controller_id: str, controller, sim: MixedTrafficSimulator, forecast,
     if controller_id in {
         "WU-CD-F",
         "WU-FAITHFUL-FOLLOWER",
+        "PROPOSED-FOLLOWERS-ONLY",
+        "PFO-link",
         "WU-FAITHFUL-FOLLOWER-NOP1",
         "WU-FAITHFUL-FOLLOWER-P15SAT",
         "WU-FAITHFUL-FOLLOWER-P15AUTO",
         "WU-FAITHFUL-FOLLOWER-F1",
     }:
         return controller.solve(sim.state.copy(), None, forecast, previous).control
-    if controller_id.startswith("P-STACK-WU-FAITHFUL"):
+    if controller_id.startswith("P-STACK-WU-FAITHFUL") or controller_id in {"P-STACK-FINAL", "P-Stack"}:
         return controller.decide(sim.state.copy(), forecast, previous, cfg)
+    if controller_id in {
+        "P-CENT-SLSQP",
+        "P-CENT",
+        "P-Cent",
+        "PROPOSED-CENTRALIZED",
+        "P-CENT-GRID",
+        "Centralized-grid",
+    }:
+        return controller.decide_with_info(sim.state.copy(), forecast, previous).control
     if controller_id == "CLASSICAL-HIERARCHICAL":
         return controller.decide(sim.state.copy(), forecast, previous)
     raise ValueError(f"Unknown controller: {controller_id}")
@@ -563,7 +631,7 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
         # 가격(wu_b2_/b3_/b4_/f3_)·P1.5(wu_p15_)·joint(wu_j_) 진단은 control_row에 안 실리므로 수집.
         decision.update({
             k: float(v) for k, v in control.diagnostics.items()
-            if k.startswith(("wu_b2_", "wu_b3_", "wu_b4_", "wu_p15_", "wu_f3_", "wu_j_"))
+            if k.startswith(("wu_b2_", "wu_b3_", "wu_b4_", "wu_p15_", "wu_f3_", "wu_j_", "centralized_"))
             and isinstance(v, (int, float, bool))
         })
         decision_rows.append(decision)
