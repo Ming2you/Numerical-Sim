@@ -569,6 +569,17 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
         # 새 상수 0). 170_incident −10.45%→+1.21%, 최악 −10.45%→−4.34%.
         # FAR_STATE_AWARE=0으로 구 상수식 복원(재현용).
         cfg.mpc.leader_mfd_far_state_aware = _os.environ["FAR_STATE_AWARE"] == "1"
+    # far(MFD tail) 배수율 재캘리브레이션 훅(2026-07-19): 경계 수정 후 신물리 NC 실측으로
+    # urban 혼잡 배수율이 구 캘리브레이션(g_cong=500)의 절반 수준(~280)임이 확인됨 —
+    # 잔존 urban 비용 과소평가가 P-CENT/계층의 과잉 metering(근시 병리) 원인.
+    for _far_env, _far_attr in (
+        ("FAR_G_FREE", "leader_mfd_far_g_free"),
+        ("FAR_G_CONG", "leader_mfd_far_g_cong"),
+        ("FAR_NCRIT", "leader_mfd_far_ncrit"),
+        ("FAR_G_FW", "leader_mfd_far_g_fw"),
+    ):
+        if _os.environ.get(_far_env):
+            setattr(cfg.mpc, _far_attr, float(_os.environ[_far_env]))
     if _os.environ.get("BUDGET_OFF") == "1":
         # "가격만" arm: N_UF hard budget 제거, follower는 PFO autonomous metering.
         # 리더는 여전히 가격(green/metering/vsl/offset)을 계산·전달한다.
