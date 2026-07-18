@@ -204,3 +204,24 @@ config 기본값이 환경(scipy 유무)에 따라 다른 알고리즘을 타면
 wTTT Δ평균 −0.02%(High −0.15%). 병목이 ramp/freeway·green-split이라 offset 조율 여지 작음.
 = §3 "죽은 채널" 결과(가격 지도에 정직 게재). 패키지 walk_mvg 데이터 offset-ON 교체(1685→1686·
 5156→5148 등 미미), 표·그림 재생성·sanity PASS, 드래프트 §1값·§3 offset문단 갱신.
+
+## ★D/F(램프 신호) ramp-aware offset 편입 (2026-07-18, 사용자 요청) — 혼잡서 실질 기여
+
+앞선 offset price(비램프 A/B/C)는 죽은 채널(−0.02%)이었으나, D/F 램프 신호는 다른 메커니즘
+(`nash_solver.ramp_offset_enabled`, G1DF 계보 — 램프 저장 동역학 반영 위상 탐색)이라 별도 편입.
+플래그십(ALLPRICE-JOINT)에 기본 ON(RAMP_OFFSET=0로 해제).
+
+측정(walk-MVG+A/B/C price+D/F ramp offset, vs offset-only):
+| 셀 | offset-only | +D/F | Δ | offset σ(A/B/C/D/F) |
+|---|---|---|---|---|
+| Low | 1686 | 1686 | −0.02% | 0/0/0/0/0 |
+| Med | 2684 | 2683 | −0.04% | 18/22/19/**12.7/12.2**★ |
+| skew | 2667 | 2667 | 0% | 0/0/0/0/0 |
+| incid | 2295 | 2295 | +0.01% | 0/0/0/0/0 |
+| **High** | 5148 | **5096** | **−1.00%** | 10/14/16/**9.5/12.2**★ |
+
+**핵심**: D/F offset이 **High demand −1.0%(5148→5096, 52 veh·h) 실질 개선**, Med −0.04%.
+D/F 활성화가 같은 셀 비램프 offset까지 각성(Med서 5신호 전부 이동, 이전엔 High만).
+저·skew·incident는 여전히 offset 부동 → offset은 **균일 죽음이 아니라 램프 접속부 혼잡
+레짐서만 살아나는 상태-의존 채널**. 패키지 walk_mvg +D/F 교체(High 5096·imp 69.15%),
+표·그림 재생성·sanity PASS, 드래프트 §1값·§3 offset 문단 2갈래 재작성. §3 표에 ramp offset 행 추가.

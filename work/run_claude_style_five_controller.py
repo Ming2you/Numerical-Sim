@@ -280,6 +280,10 @@ def make_controller(controller_id: str, cfg: ExperimentConfig):
         if _os_ap.environ.get("OFFSET_PRICE") != "0":
             controller.offset_price_enabled = True
             controller.offset_price_inner_iters = int(_os_ap.environ.get("OFFSET_INNER_ITER", "4"))
+        # D/F(램프 신호) offset 편입(2026-07-18, 사용자 요청): A/B/C는 위 offset price(비램프),
+        # D/F는 ramp-aware offset 탐색(G1DF 계보 nash_solver.ramp_offset_enabled). RAMP_OFFSET=0로 해제.
+        if _os_ap.environ.get("RAMP_OFFSET") != "0":
+            controller.nash_solver.ramp_offset_enabled = True
         # metering δ 스캔 승자(2026-07-15): δ=300 + trust_frac=0.20(=반경 300veh/h) 짝.
         # 170_skew_w wTTT 3244.7(baseline)→3089(회랑 floor 0.65 단독)→3028(δ=300 추가),
         # 190_w 5419.4→5357(floor)→5045(δ). METER_PRICE_DELTA env가 미지정일 때만 적용
