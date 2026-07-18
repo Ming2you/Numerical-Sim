@@ -578,6 +578,12 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
     if _os.environ.get("NU_CONG"):
         # ν_cong 재캘리브레이션(2026-07-19): ρ180 물리에서 실증 capacity drop 5~15%에 맞춤.
         cfg.network.metanet_nu_cong_km2_h = float(_os.environ["NU_CONG"])
+    if _os.environ.get("METER_QCON") == "1":
+        # spillback-방지 제약 내재화(2026-07-19): follower 후보·budget 사영·최종 조립이
+        # 공유하는 metering 하한(계획-집행 정합). 외부 감독층 METER_QOVR와 구분.
+        cfg.mpc.meter_queue_constraint_enabled = True
+        if _os.environ.get("METER_QCON_FRAC"):
+            cfg.mpc.meter_queue_constraint_frac = float(_os.environ["METER_QCON_FRAC"])
     # far(MFD tail) 배수율 재캘리브레이션 훅(2026-07-19): 경계 수정 후 신물리 NC 실측으로
     # urban 혼잡 배수율이 구 캘리브레이션(g_cong=500)의 절반 수준(~280)임이 확인됨 —
     # 잔존 urban 비용 과소평가가 P-CENT/계층의 과잉 metering(근시 병리) 원인.

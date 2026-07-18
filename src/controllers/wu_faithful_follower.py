@@ -2222,6 +2222,22 @@ class WuFaithfulFollower:
                     cost += (
                         link_vehicles + link_ramp_queue + link_offramp_storage + link_blocked_queue
                     ) * dt_h
+            # (ii-b 2026-07-19, 기본 OFF) follower terminal cost: rollout 끝에 남은 ramp+blocked
+            # 큐의 삼각 배수 tail(Q²/2R)을 own-TTS에 가산 — 창 밖 배수 비용이 무가격이라
+            # metering이 과대평가되는 근시 병리 교정. R = ramp_cap×receiving(ρ_merge_end),
+            # far(MFD tail)의 ramp 항과 동일 형태·상수 0(상태 유도).
+            if getattr(self.cfg.mpc, "follower_terminal_cost_enabled", False):
+                _rho_crit_tc = float(net.rho_crit)
+                _rho_max_tc = float(net.rho_max)
+                for _ramp_tc in model.owned_ramps:
+                    _q_end = max(0.0, ramp_q.get(_ramp_tc, 0.0)) + max(0.0, blocked_q.get(_ramp_tc, 0.0))
+                    if _q_end <= 0.0:
+                        continue
+                    _m_idx = model.ramp_merge_idx[_ramp_tc]
+                    _rho_m = float(rhos[_m_idx]) if _m_idx < len(rhos) else 0.0
+                    _recv = min(1.0, max(0.0, (_rho_max_tc - _rho_m) / max(_rho_max_tc - _rho_crit_tc, 1.0e-9)))
+                    _r_end = max(1.0, float(net.ramp_capacity_veh_h.get(_ramp_tc, 0.0)) * _recv)
+                    cost += _q_end * _q_end / (2.0 * _r_end)
             smooth = sum(abs(first_vec[i] - prev_vec[i]) for i in range(min(n_seg, len(first_vec))))
             for prev_step, next_step in zip(sequence, sequence[1:]):
                 smooth += sum(
@@ -2272,6 +2288,22 @@ class WuFaithfulFollower:
         vsl_dict: Dict[str, float] = {f"{link}__seg{i}": float(v) for i, v in enumerate(best_vec)}
         vsl_dict[link] = float(min(best_vec)) if best_vec else vsl_max
         return vsl_dict, best_obj, evals
+
+    def _meter_spillback_floor(self, ramp: str, state, coupling, cap: float) -> float:
+        """spillback-방지 metering 하한(내재화 2026-07-19, 기본 OFF): 램프 큐가 임계
+        (frac×ramp_queue_max)를 넘으면 다음 T_c 안에 임계 아래로 복귀시키는 최소 방류.
+        ALINEA queue-override의 내부화 — 후보 격자·budget 사영이 이 하한을 공유해
+        계획-집행 정합을 보장한다(외부 감독층 패치는 asym_200서 -4.4→-8.5%p 부정합 실측)."""
+        if not getattr(self.cfg.mpc, "meter_queue_constraint_enabled", False):
+            return 0.0
+        net = self.cfg.network
+        frac = float(getattr(self.cfg.mpc, "meter_queue_constraint_frac", 0.8))
+        q_thr = frac * float(net.ramp_queue_max_veh)
+        q_now = max(0.0, float(state.ramp_queue.get(ramp, 0.0)))
+        arrival = max(0.0, float(coupling.get(f"u_on_{ramp}", 0.0)))
+        tc_h = max(self.cfg.simulation.T_c_h, 1.0e-9)
+        need = arrival + max(0.0, q_now - q_thr) / tc_h
+        return min(float(cap), need)
 
     # ---------- 13-player: freeway segment agent 분해 (2026-07-10 승인 매핑) ----------
 
@@ -2444,6 +2476,15 @@ class WuFaithfulFollower:
                     )
             else:
                 m_cands = [None]
+            # 내재화(2026-07-19): spillback-방지 하한을 후보 격자에 적용 — 하한 아래
+            # 후보는 하한으로 끌어올려(중복 제거) rollout 채점이 실제 집행값을 본다.
+            if own_ramp is not None and m_cands and m_cands[0] is not None:
+                _m_floor = self._meter_spillback_floor(own_ramp, state, coupling, cap_r)
+                if _m_floor > 0.0:
+                    m_cands = sorted(
+                        {round(max(float(m), _m_floor), 6) for m in m_cands},
+                        reverse=True,
+                    )
             best_cost, best_v, best_m = float("inf"), prev_v, None
             best_flow_local: Dict[str, float] = {}
             best_traj: Optional[tuple] = None  # (rho[t], v[t], lane[t], rel[t]) — 입력시점 기록
@@ -2690,6 +2731,15 @@ class WuFaithfulFollower:
             else:
                 _rl_lo = {r: 0.0 for r in preferred_meter}
                 _rl_hi = dict(caps)
+            # 내재화(2026-07-19): spillback-방지 하한을 사영 회랑 lo에 합류 — 기존
+            # "박스=하드, 예산이 양보" 규약에 제약이 올라타 leader budget이 자동 양보.
+            # 하한이 박스 상단을 넘으면 제약 우선(hi도 상향).
+            for r in preferred_meter:
+                _fl_r = self._meter_spillback_floor(r, state, coupling, caps[r])
+                if _fl_r > _rl_lo[r]:
+                    _rl_lo[r] = _fl_r
+                if _rl_hi[r] < _rl_lo[r]:
+                    _rl_hi[r] = _rl_lo[r]
 
             def _scale_to(target: float) -> Dict[str, float]:
                 # 목표 합 target으로 비례 사영(용량 클립 + 잔여 재분배) — 기존 등식
@@ -2789,6 +2839,15 @@ class WuFaithfulFollower:
         if _vbox_d is not None:
             # VSL-BOX 영수증 — 존재 = previous 앵커 필터가 SEG13 경로에 도달.
             self._seg13_diag[f"wu_seg13_vsl_box_r_{link}"] = float(_vbox_d)
+        # 내재화 최종 정합(2026-07-19): 어떤 경로(budget off/inequality 자율 존중 포함)든
+        # 반환 metering은 spillback 하한 이상 — 컨트롤러 반환값 = plant 집행값 보장.
+        if getattr(self.cfg.mpc, "meter_queue_constraint_enabled", False) and meter_out:
+            for _r_fl in list(meter_out.keys()):
+                _cap_fl = float(net.ramp_capacity_veh_h.get(_r_fl, meter_out[_r_fl]))
+                _fl_v = self._meter_spillback_floor(_r_fl, state, coupling, _cap_fl)
+                if meter_out[_r_fl] < _fl_v:
+                    self._seg13_diag[f"wu_seg13_qcon_lift_{_r_fl}"] = _fl_v - meter_out[_r_fl]
+                    meter_out[_r_fl] = _fl_v
         return vsl_out, meter_out, evals
 
     # ---------- freeway agent: 진짜 ramp metering 탐색 (핵심 신규) ----------
