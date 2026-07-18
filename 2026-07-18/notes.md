@@ -190,3 +190,17 @@ global 매스텝)로 5셀 재발주. 완료 시 현행(4705 등) 대비 개선�
 **교훈**: 재실행 결과가 다른 컨트롤러 값과 "정확히 일치"하면 솔버 오배선 의심(landmine).
 config 기본값이 환경(scipy 유무)에 따라 다른 알고리즘을 타면 재현성 붕괴 — 논문 컨트롤러는
 솔버를 명시 고정할 것.
+
+## ★offset price 편입 (2026-07-18, 사용자 지적 — 플래그십서 누락됐었음)
+
+**발견**: walk-MVG(ALLPRICE-JOINT)에 offset price가 안 들어가 있었음 —
+`offset_price_enabled=False`, green×offset cross도 CROSS_OFF로 꺼져, offset이 5신호 전부
+**0 고정**(control_timeseries σ=0). P-CENT는 offset 능동 사용(σ최대 17.9)이라 레버 자체는 실재.
+**수정**: ALLPRICE-JOINT 컨트롤러에 offset_price_enabled=True + offset_price_inner_iters=4
+(SQP inner-walk) 기본 편입(OFFSET_PRICE=0로 해제). 플래그십 기본-ON 확증(wu_f3_offset_price_enabled=1.0).
+
+**측정(walk-MVG+offset, 5셀 전체)**: 훅 발화 확증(가격 A/B/C 매 스텝 계산)이나 **한계가치
+무시 수준** — ‖가격‖≈0.008~0.03, offset 거의 부동(High demand만 3/5 이동, 나머지 0/5),
+wTTT Δ평균 −0.02%(High −0.15%). 병목이 ramp/freeway·green-split이라 offset 조율 여지 작음.
+= §3 "죽은 채널" 결과(가격 지도에 정직 게재). 패키지 walk_mvg 데이터 offset-ON 교체(1685→1686·
+5156→5148 등 미미), 표·그림 재생성·sanity PASS, 드래프트 §1값·§3 offset문단 갱신.

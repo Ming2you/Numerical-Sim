@@ -273,6 +273,13 @@ def make_controller(controller_id: str, cfg: ExperimentConfig):
         controller.green_offset_cross_price_enabled = False
         controller.vsl_meter_cross_price_enabled = False
         controller.nash_solver.joint_green_offset_enabled = True
+        # offset price 편입(2026-07-18, 사용자 요청): "ALLPRICE"에 offset marginal price도 포함.
+        # SQP식 inner-walk 4회로 trust 한 칸 갇힘 해소. 실측 이 망에선 offset 한계가치 무시 수준
+        # (‖가격‖~0.01, wTTT −0.02%, High demand만 offset 3/5 이동) — §3 "죽은 채널"로 보고.
+        # OFFSET_PRICE=0 env로 해제(구거동 재현). 미지정=ON.
+        if _os_ap.environ.get("OFFSET_PRICE") != "0":
+            controller.offset_price_enabled = True
+            controller.offset_price_inner_iters = int(_os_ap.environ.get("OFFSET_INNER_ITER", "4"))
         # metering δ 스캔 승자(2026-07-15): δ=300 + trust_frac=0.20(=반경 300veh/h) 짝.
         # 170_skew_w wTTT 3244.7(baseline)→3089(회랑 floor 0.65 단독)→3028(δ=300 추가),
         # 190_w 5419.4→5357(floor)→5045(δ). METER_PRICE_DELTA env가 미지정일 때만 적용
