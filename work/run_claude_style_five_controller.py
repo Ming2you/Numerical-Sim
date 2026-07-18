@@ -605,6 +605,9 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
     controller = make_controller(controller_id, cfg)
     if _os.environ.get("PRICE_ITER") and hasattr(controller, "price_iter_max"):
         controller.price_iter_max = int(_os.environ["PRICE_ITER"])  # B: leader↔follower dual-ascent 반복 횟수
+    if _os.environ.get("PRICE_REFRESH_INTERVAL") and hasattr(controller, "price_refresh_interval"):
+        # 2단(2026-07-18): 가격 refresh 스텝 간격. 1=매스텝(비트동일), 2=격스텝(FD rollout 절반).
+        controller.price_refresh_interval = int(_os.environ["PRICE_REFRESH_INTERVAL"])
     if _os.environ.get("PRICE_SPSA") == "1" and hasattr(controller, "price_spsa_enabled"):
         controller.price_spsa_enabled = True  # SPSA: per-lever FD → 동시섭동(가격층 O(n))
     if _os.environ.get("SPSA_K") and hasattr(controller, "price_spsa_pairs"):

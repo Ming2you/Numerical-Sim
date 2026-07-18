@@ -227,6 +227,10 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         # >1이면 price를 response에 되먹여 수렴까지 재선형화(under-relaxation으로 안정화).
         self.price_iter_max: int = 1
         self.price_iter_relax: float = 0.5
+        # 2단(2026-07-18): 가격 refresh 스텝 간격. 1=매 결정스텝(비트동일 기본).
+        # N>1이면 step_idx % N != 0인 스텝은 직전 refresh 가격을 재사용해 FD rollout 절감.
+        self.price_refresh_interval: int = 1
+        self._signal_price_last_step: Optional[int] = None
         self.price_iter_tol: float = 1.0e-2  # 상대 control 변화 수렴 문턱
         # ---------- 층2(2026-07-14): β̂ 낙관편향 추정기 + trailing-regret 스위치 ----------
         # leader 내부 rollout은 체계적으로 낙관(제약 누락·capacity-drop 절벽 평활·horizon
@@ -463,7 +467,24 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         max_iter = max(1, int(self.price_iter_max))
         if max_iter <= 1:
             # single-shot(기존): price 1회 → follower 응답 1회 → commit.
-            self._maybe_refresh_signal_prices(state, forecast, previous)
+            # 2단: refresh 간격 게이트. 스킵 스텝은 follower에 남은 직전 가격을 재사용한다.
+            interval = max(1, int(self.price_refresh_interval))
+            step_idx = int(round(
+                state.time_sec / max(self.cfg.simulation.control_interval, 1.0e-9)))
+            do_refresh = (
+                interval <= 1
+                or self._signal_price_last_step is None
+                or step_idx % interval == 0
+            )
+            if do_refresh:
+                self._maybe_refresh_signal_prices(state, forecast, previous)
+                self._signal_price_last_step = step_idx
+                if self._signal_price_meta:
+                    self._signal_price_meta["wu_b2_price_skipped"] = 0.0
+            else:
+                self._signal_price_meta = dict(self._signal_price_meta)
+                self._signal_price_meta["wu_b2_price_skipped"] = 1.0
+                self._signal_price_meta["wu_b2_price_refreshed"] = 0.0
             result = super().decide_with_info(state, forecast, previous_control, config)
         else:
             # B: leader↔follower price↔response 반복(dual ascent). 매 iteration마다 현재
