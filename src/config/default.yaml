@@ -217,7 +217,8 @@ mpc:
   urban_freeway_tts_weight_alpha: 1.0
   optimizer_maxiter: 40
   optimizer_n_starts: 5
-  centralized_solver_mode: slsqp
+  # 논문 P-CENT=grid(SLSQP 제외 결정 2026-07-18). scipy 유무와 무관 재현 위해 고정(구 slsqp는 scipy 부재 시 grid로 silent fallback).
+  centralized_solver_mode: structured_grid
   centralized_slsqp_ftol: 0.001
   relaxed_quantized_controls: false
   relaxed_green_quantum_sec: 1.0
