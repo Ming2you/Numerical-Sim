@@ -5,7 +5,8 @@ import glob
 import os
 import sys
 
-WARM_STEPS = 20  # 3600s / 180s
+WARM_STEPS = int(os.environ.get('WARM_STEPS', '20'))  # 기본 20 = 3600s / 180s (w36 계열은 WARM_STEPS=5)
+STEP_SEC = float(os.environ.get('STEP_SEC', '180'))
 
 
 def windowed(d):
@@ -24,7 +25,7 @@ def windowed(d):
         comp = 0.0
         for r in rows[WARM_STEPS:]:
             comp += float(r.get('boundary_out_sink_veh') or 0)
-            comp += float(r.get('mainline_exit_flow_total') or 0) * (180.0 / 3600.0)
+            comp += float(r.get('mainline_exit_flow_total') or 0) * (STEP_SEC / 3600.0)
         out.append((os.path.basename(s), cum_T - cum_w, comp))
     return out
 
