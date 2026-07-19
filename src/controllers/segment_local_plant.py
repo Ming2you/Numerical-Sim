@@ -70,6 +70,8 @@ def build_segment_agent_models(cfg: ExperimentConfig, link: str) -> List[Segment
 
 @dataclass
 class FrozenLinkTrajectory:
+    # Phase B: 완충 plant 동결 경계 (bu_send, bu_speed, bd_rho0) — None이면 무완충.
+    buffer_bc = None
     """이웃 agent들이 내놓은 link 전체 궤적의 동결 스냅샷 — substep t 인덱스, hold-last."""
 
     rhos: List[List[float]]
@@ -156,6 +158,7 @@ def segment_substep_local(
             cap,
             control,
             demand,
+            buffer_bc=getattr(frozen, "buffer_bc", None),
         )
     )
     next_state = SegmentLocalState(
@@ -205,7 +208,7 @@ def frozen_trajectory_from_state(
         avail = float(state.urban_link_storage.get(storage, cap))
         occ0[off_ramp] = max(0.0, cap - avail)
     steps = max(1, int(horizon_substeps))
-    return FrozenLinkTrajectory(
+    traj = FrozenLinkTrajectory(
         rhos=[list(rhos0) for _ in range(steps)],
         speeds=[list(speeds0) for _ in range(steps)],
         prev_lanes=[list(lanes0) for _ in range(steps)],
@@ -214,3 +217,16 @@ def frozen_trajectory_from_state(
         occupancy=[dict(occ0) for _ in range(steps)],
         offramp_capacity=[{} for _ in range(steps)],
     )
+    # Phase B(완충 동결 결합): 완충 plant면 결정시점 완충 경계를 동결해 첨부.
+    if int(getattr(net, "freeway_buffer_segments", 0)) > 0:
+        _bu_r = state.freeway_buffer_up_density.get(link) or []
+        _bu_v = state.freeway_buffer_up_speed.get(link) or []
+        _bd_r = state.freeway_buffer_down_density.get(link) or []
+        if _bu_r and _bd_r:
+            from src.models.metanet import segment_flow_veh_h as _sfvh
+            traj.buffer_bc = (
+                _sfvh(_bu_r[-1], _bu_v[-1], float(net.freeway_lanes)),
+                float(_bu_v[-1]),
+                float(_bd_r[0]),
+            )
+    return traj

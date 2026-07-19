@@ -2098,6 +2098,19 @@ class WuFaithfulFollower:
         if len(lanes0) != n_seg:
             lanes0 = [float(net.freeway_lanes) for _ in range(n_seg)]
         origin_q0 = max(0.0, float(state.mainline_origin_queue.get(link, 0.0)))
+        # Phase B(완충 동결 결합): 완충 plant면 상·하류 완충 경계를 결정시점 값으로 동결해 전달.
+        _buf_bc = None
+        if int(getattr(net, "freeway_buffer_segments", 0)) > 0:
+            _bu_r_bc = state.freeway_buffer_up_density.get(link) or []
+            _bu_v_bc = state.freeway_buffer_up_speed.get(link) or []
+            _bd_r_bc = state.freeway_buffer_down_density.get(link) or []
+            if _bu_r_bc and _bd_r_bc:
+                from src.models.metanet import segment_flow_veh_h as _sfvh_bc
+                _buf_bc = (
+                    _sfvh_bc(_bu_r_bc[-1], _bu_v_bc[-1], float(net.freeway_lanes)),
+                    float(_bu_v_bc[-1]),
+                    float(_bd_r_bc[0]),
+                )
         ramp_q0 = {r: max(0.0, float(state.ramp_queue.get(r, 0.0))) for r in model.owned_ramps}
         # off-ramp storage 초기 점유[veh] + receiving 도시 링크 초기 점유[veh].
         occ0: Dict[str, float] = {}
@@ -2190,6 +2203,7 @@ class WuFaithfulFollower:
                     rhos, speeds, prev_lanes, origin_q, offramp_flow, veh_count = freeway_substep_local(
                         model, rhos, speeds, prev_lanes, occ, origin_q,
                         ramp_release, offramp_capacity, candidate_control, demand,
+                        buffer_bc=_buf_bc,
                     )
                     # off-ramp storage 점유 갱신(_update_probe_offramp_storage 국소 복제).
                     for off_ramp in model.owned_offramps:

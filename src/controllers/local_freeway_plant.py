@@ -143,6 +143,7 @@ def freeway_substep_local(
     offramp_capacity: Mapping[str, float],
     control: ControlAction,
     demand,
+    buffer_bc=None,
 ) -> Tuple[List[float], List[float], List[float], float, Dict[str, float], List[float]]:
     """단일 link METANET 한 substep 전진 — `metanet.freeway_substep`의 이 link 루프 바디를 복제.
 
@@ -206,7 +207,12 @@ def freeway_substep_local(
     mainline_demand = max(0.0, demand.freeway_mainline.get(link, 0.0)) if demand is not None else 0.0
     queued_flow = mainline_origin_queue / max(dt_h, 1.0e-9)
     entry_request = mainline_demand + queued_flow
-    entry_realized = min(entry_request, q_cap, receiving_for_mainline[0])
+    if buffer_bc is not None:
+        # 완충 plant 동결 결합(Phase B): 코어 유입 = 상류 완충 끝 sending(동결) ∧ 코어 수용.
+        _bu_send_bc, _bu_speed_bc, _bd_rho0_bc = buffer_bc
+        entry_realized = min(_bu_send_bc, receiving_for_mainline[0])
+    else:
+        entry_realized = min(entry_request, q_cap, receiving_for_mainline[0])
     next_origin_queue = max(0.0, mainline_origin_queue + dt_h * (mainline_demand - entry_realized))
 
     offramp_flow: Dict[str, float] = {o: 0.0 for o in model.owned_offramps}
@@ -219,7 +225,14 @@ def freeway_substep_local(
         q_in += ramp_in_by_segment[i]
         terminal_out = None
         if i == model.n_seg - 1:
-            if getattr(net, "terminal_zero_gradient", False):
+            if buffer_bc is not None:
+                # 완충 동결 결합: 하류 완충 머리 수용량(동결 밀도 기반)으로 배출 제한.
+                terminal_out = min(
+                    mainline_sending[i],
+                    max(0.0, (net.rho_max - _bd_rho0_bc) * net.freeway_segment_length_km
+                        * max(lanes_now[i], 1.0e-9) / max(dt_h, 1.0e-9)),
+                )
+            elif getattr(net, "terminal_zero_gradient", False):
                 # 구경계 복원 모드(plant와 동일): sending 그대로 배출(cap 없음).
                 terminal_out = mainline_sending[i]
             else:
@@ -255,9 +268,12 @@ def freeway_substep_local(
         vehicle_new = max(0.0, vehicle_raw)
         rho_new = vehicle_new / max(net.freeway_segment_length_km * max(lanes_now[i], 1.0e-9), 1.0e-9)
 
-        upstream_speed = net.v_free if i == 0 else speeds[i - 1]
+        upstream_speed = (_bu_speed_bc if buffer_bc is not None else net.v_free) if i == 0 else speeds[i - 1]
         if i + 1 < model.n_seg:
             downstream_rho = rho_for_flow[i + 1]
+        elif buffer_bc is not None:
+            # 완충 동결 결합: 코어 터미널 하류밀도 = 하류 완충 첫 셀(결정시점 동결).
+            downstream_rho = _bd_rho0_bc
         elif getattr(net, "terminal_zero_gradient", False):
             # 구경계 복원 모드(plant와 동일): sink 밀도 = 자기 밀도(zero-gradient).
             downstream_rho = rho_for_flow[i]
