@@ -2238,9 +2238,8 @@ class WuFaithfulFollower:
                     _recv = min(1.0, max(0.0, (_rho_max_tc - _rho_m) / max(_rho_max_tc - _rho_crit_tc, 1.0e-9)))
                     _r_end = max(1.0, float(net.ramp_capacity_veh_h.get(_ramp_tc, 0.0)) * _recv)
                     cost += _q_end * _q_end / (2.0 * _r_end)
-            # VdB4 보호큐 벌점 — metering 배선(2026-07-19 2차, 기본 OFF): 보호 movement가
-            # 이 agent 소유 램프의 진입로면, "현재 보호큐 + rollout 끝 blocked" 초과분에 w를
-            # 부과. 신호 green만으론 metering-bound 큐를 못 지키는 배선 결함의 교정.
+            # VdB4 보호큐 벌점 — 링크-agent metering 배선(2026-07-19 3차, 기본 OFF):
+            # 방류-결합형(초과 지속 중 미방류 몫 과금). rollout 전체의 평균 release로 근사.
             _pq_mv_f = str(getattr(self.cfg.mpc, "protected_queue_movement", "") or "")
             _pq_w_f = float(getattr(self.cfg.mpc, "protected_queue_weight", 0.0))
             if _pq_mv_f and _pq_w_f > 0.0:
@@ -2249,8 +2248,12 @@ class WuFaithfulFollower:
                 if _pq_ramp_f in model.owned_ramps:
                     _pq_max_f = float(getattr(self.cfg.mpc, "protected_queue_max_veh", 50.0))
                     _pq_now_f = max(0.0, float(state.urban_movement_queue.get(_pq_mv_f, 0.0)))
-                    _pq_proj_f = _pq_now_f + max(0.0, blocked_q.get(_pq_ramp_f, 0.0))
-                    cost += _pq_w_f * max(0.0, _pq_proj_f - _pq_max_f)
+                    _pq_exc_f = max(0.0, _pq_now_f - _pq_max_f)
+                    if _pq_exc_f > 0.0:
+                        _cap_f = max(float(net.ramp_capacity_veh_h.get(_pq_ramp_f, 1500.0)), 1.0e-9)
+                        _rel_f = max(0.0, float(ramp_release.get(_pq_ramp_f, 0.0)))
+                        _idle_f = 1.0 - min(1.0, _rel_f / _cap_f)
+                        cost += _pq_w_f * _pq_exc_f * _idle_f * (sim.T_c_h)
             smooth = sum(abs(first_vec[i] - prev_vec[i]) for i in range(min(n_seg, len(first_vec))))
             for prev_step, next_step in zip(sequence, sequence[1:]):
                 smooth += sum(
@@ -2601,9 +2604,10 @@ class WuFaithfulFollower:
                             float(veh) + ramp_q + blocked
                             + (own.origin_queue if agent.owns_origin_queue else 0.0)
                         ) * dt_h
-                        # VdB4 보호큐 벌점 — seg13 metering 배선(2026-07-19 2차, 기본 OFF):
-                        # 보호 movement의 진입 램프를 이 segment agent가 소유하면 blocked
-                        # 초과 투영에 w 부과(링크-agent 경로와 동일 형태).
+                        # VdB4 보호큐 벌점 — seg13 metering 배선(2026-07-19 3차, 기본 OFF).
+                        # 2차(blocked 투영)는 후보 불변항 지배로 기울기 0(비트동일 실측) —
+                        # 방류-결합형으로 교체: 보호 큐가 한계 초과인 동안 "방류 안 한 몫"
+                        # (1 − release/cap)에 초과분×w를 부과 → release↑가 직접 벌점을 줄인다.
                         if own_ramp is not None:
                             _pq_w_s = float(getattr(self.cfg.mpc, "protected_queue_weight", 0.0))
                             if _pq_w_s > 0.0:
@@ -2613,7 +2617,10 @@ class WuFaithfulFollower:
                                     if _pq_ramp_s == own_ramp:
                                         _pq_max_s = float(getattr(self.cfg.mpc, "protected_queue_max_veh", 50.0))
                                         _pq_now_s = max(0.0, float(state.urban_movement_queue.get(_pq_mv_s, 0.0)))
-                                        cost += _pq_w_s * max(0.0, _pq_now_s + blocked - _pq_max_s) * dt_h
+                                        _pq_exc_s = max(0.0, _pq_now_s - _pq_max_s)
+                                        if _pq_exc_s > 0.0:
+                                            _idle_s = 1.0 - min(1.0, r_own / max(cap_r, 1.0e-9))
+                                            cost += _pq_w_s * _pq_exc_s * _idle_s * dt_h
                     # 마찰(암묵적 신호검정) — 7p와 동일 규약(PRICE-TR 시 0).
                     if not (self.price_smoothness_disabled and self.vsl_marginal_price):
                         cost += smooth_w * abs(float(v_cand) - prev_v)
