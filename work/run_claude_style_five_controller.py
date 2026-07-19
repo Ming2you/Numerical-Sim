@@ -585,6 +585,12 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
     if _os.environ.get("NU_CONG"):
         # ν_cong 재캘리브레이션(2026-07-19): ρ180 물리에서 실증 capacity drop 5~15%에 맞춤.
         cfg.network.metanet_nu_cong_km2_h = float(_os.environ["NU_CONG"])
+    if _os.environ.get("QPROT_MV"):
+        # VdB 시나리오4 재현: 보호 큐(최대길이 제약) 설정. QPROT_W>0이면 예측형 벌점
+        # (local_signal_plant ramp-aware rollout에 소프트 제약), 0이면 계측만.
+        cfg.mpc.protected_queue_movement = _os.environ["QPROT_MV"]
+        cfg.mpc.protected_queue_max_veh = float(_os.environ.get("QPROT_MAX", "50"))
+        cfg.mpc.protected_queue_weight = float(_os.environ.get("QPROT_W", "0"))
     if _os.environ.get("METER_QCON") == "1":
         # spillback-방지 제약 내재화(2026-07-19): follower 후보·budget 사영·최종 조립이
         # 공유하는 metering 하한(계획-집행 정합). 외부 감독층 METER_QOVR와 구분.
@@ -872,6 +878,25 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
                 if _m_new > float(control.ramp_metering[_ramp]) + 1.0e-9:
                     control.diagnostics[f"meter_qovr_{_ramp}"] = _m_new - float(control.ramp_metering[_ramp])
                 control.ramp_metering[_ramp] = _m_new
+        # QPROT_REACT(2026-07-19): VdB SCOOT/UTOPIA 아날로그 — 보호 큐가 한계 90%를 넘으면
+        # 해당 phase green을 반응적으로 증가(예측 없음, 집행만). 예측형(QPROT_W 벌점)과 대조용.
+        if _os.environ.get("QPROT_REACT") == "1" and _os.environ.get("QPROT_MV"):
+            _mv_p = _os.environ["QPROT_MV"]
+            _qmax_p = float(_os.environ.get("QPROT_MAX", "50"))
+            _qnow_p = max(0.0, float(sim.state.urban_movement_queue.get(_mv_p, 0.0)))
+            if _qnow_p > 0.9 * _qmax_p:
+                _spec_p = cfg.network.urban_movements.get(_mv_p, {})
+                _ph_p = str(_spec_p.get("phase", ""))
+                _sig_p = str(_spec_p.get("signal", ""))
+                if _ph_p and _sig_p:
+                    _other_p = f"{_sig_p}_p2" if _ph_p.endswith("p1") else f"{_sig_p}_p1"
+                    _tot_p = float(cfg.network.effective_green_total)
+                    _cur_p = float(control.green_times.get(_ph_p, _tot_p / 2.0))
+                    _boost_p = min(10.0, max(0.0, _tot_p - 6.0 - _cur_p))
+                    if _boost_p > 0.0:
+                        control.green_times[_ph_p] = _cur_p + _boost_p
+                        control.green_times[_other_p] = _tot_p - control.green_times[_ph_p]
+                        control.diagnostics["qprot_react_boost"] = _boost_p
         compute_time = time.perf_counter() - t0
         log = sim.step(control, forecast[0], step)
         previous = control.copy()

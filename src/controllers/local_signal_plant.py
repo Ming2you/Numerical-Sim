@@ -456,4 +456,13 @@ def rollout_local_tts_ramp_aware(
 
         # (e) own-TTS = Σ(movement 큐 + off-ramp storage 점유 + reservoir 큐)·dt.
         cost += (sum(q.values()) + sum(occ.values()) + sum(res.values())) * dt_h
+        # (f) VdB 시나리오4 재현(2026-07-19, 기본 OFF): 보호 큐 최대길이 제약의 소프트 벌점.
+        # 이 신호가 보호 movement를 소유하면 초과분(q−q_max)+에 가중 w를 곱해 비용에 가산 —
+        # 예측형 컨트롤러가 제약을 rollout 안에서 미리 보게 한다(반응형 집행과 대조 실험용).
+        _pq_mv = str(getattr(model.cfg.mpc, "protected_queue_movement", "") or "")
+        if _pq_mv and _pq_mv in q:
+            _pq_w = float(getattr(model.cfg.mpc, "protected_queue_weight", 0.0))
+            if _pq_w > 0.0:
+                _pq_max = float(getattr(model.cfg.mpc, "protected_queue_max_veh", 50.0))
+                cost += _pq_w * max(0.0, q[_pq_mv] - _pq_max) * dt_h
     return float(cost)
