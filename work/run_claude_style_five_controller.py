@@ -276,6 +276,13 @@ def make_controller(controller_id: str, cfg: ExperimentConfig):
         # offset price 편입(2026-07-18, 사용자 요청): "ALLPRICE"에 offset marginal price도 포함.
         # SQP식 inner-walk 4회로 trust 한 칸 갇힘 해소. 실측 이 망에선 offset 한계가치 무시 수준
         # (‖가격‖~0.01, wTTT −0.02%, High demand만 offset 3/5 이동) — §3 "죽은 채널"로 보고.
+        # green 채널 진단 훅(2026-07-19, 보호큐/Wu격차 공통 병소 규명용):
+        # GREEN_TRUST_SEC=k → 가격 trust 반경 확대(기본 ±6s — 보행 속도 제한 가설 A/B),
+        # GREEN_PRICE=0 → 리더 B2 green 가격 해제(가격-벌점 상쇄 가설 A/B).
+        if _os_ap.environ.get("GREEN_TRUST_SEC"):
+            controller.signal_price_trust_sec = float(_os_ap.environ["GREEN_TRUST_SEC"])
+        if _os_ap.environ.get("GREEN_PRICE") == "0":
+            controller.signal_price_enabled = False
         # OFFSET_PRICE=0 env로 해제(구거동 재현). 미지정=ON.
         if _os_ap.environ.get("OFFSET_PRICE") != "0":
             controller.offset_price_enabled = True
