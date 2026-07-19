@@ -585,6 +585,10 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
         cfg.mpc.leader_mfd_far_state_aware = _os.environ["FAR_STATE_AWARE"] == "1"
     # 6월말 hysteresis 작업 물리 원복 A/B 훅(2026-07-19): RHO_MAX=180(문헌값, 2e9d084가 95로
     # 반토막)·CAPDROP=0(ν regime-split OFF, f329696이 ON+250). 기본 미설정 시 현행 유지.
+    if _os.environ.get("TERM_ZG") == "1":
+        # 구경계 복원(2026-07-19): sink 밀도 = 직전 세그먼트(zero-gradient) + 배출 cap 해제.
+        # ρ180 조합 검증용 — plant·예측모델 동시 적용(terminal_zero_gradient).
+        cfg.network.terminal_zero_gradient = True
     if _os.environ.get("RHO_MAX"):
         cfg.network.rho_max = float(_os.environ["RHO_MAX"])
     if _os.environ.get("CAPDROP") is not None:

@@ -219,9 +219,13 @@ def freeway_substep_local(
         q_in += ramp_in_by_segment[i]
         terminal_out = None
         if i == model.n_seg - 1:
-            # plant(metanet.py freeway_substep)와 동일한 자유출구 CTM supply cap.
-            terminal_cap = q_cap * max(lanes_now[i], 1.0e-9) / max(float(net.freeway_lanes), 1.0e-9)
-            terminal_out = min(mainline_sending[i], terminal_cap)
+            if getattr(net, "terminal_zero_gradient", False):
+                # 구경계 복원 모드(plant와 동일): sending 그대로 배출(cap 없음).
+                terminal_out = mainline_sending[i]
+            else:
+                # plant(metanet.py freeway_substep)와 동일한 자유출구 CTM supply cap.
+                terminal_cap = q_cap * max(lanes_now[i], 1.0e-9) / max(float(net.freeway_lanes), 1.0e-9)
+                terminal_out = min(mainline_sending[i], terminal_cap)
             q_out = terminal_out
         else:
             q_out = q_inter[i]
@@ -254,6 +258,9 @@ def freeway_substep_local(
         upstream_speed = net.v_free if i == 0 else speeds[i - 1]
         if i + 1 < model.n_seg:
             downstream_rho = rho_for_flow[i + 1]
+        elif getattr(net, "terminal_zero_gradient", False):
+            # 구경계 복원 모드(plant와 동일): sink 밀도 = 자기 밀도(zero-gradient).
+            downstream_rho = rho_for_flow[i]
         else:
             # plant와 동일한 자유출구 표준 경계: 가상 하류밀도 = min(자기, 임계).
             downstream_rho = min(rho_for_flow[i], float(net.rho_crit))

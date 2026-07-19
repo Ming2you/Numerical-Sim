@@ -469,10 +469,14 @@ def freeway_substep(
             q_in = entry_realized if i == 0 else q_inter[i - 1]
             q_in += ramp_in_by_link[link][i]
             if i == len(rhos) - 1:
-                # 자유출구 CTM supply: 비혼잡 하류의 최대 수용량 = 용량(차로·incident 계수 반영).
-                # sending 그대로 내보내면 경계 속도 회복 과도기에 용량 6배 방류가 생긴다(비물리).
-                terminal_cap = q_cap * max(lanes_now[i], 1.0e-9) / max(float(net.freeway_lanes), 1.0e-9)
-                terminal_out = min(mainline_sending[i], terminal_cap)
+                if getattr(net, "terminal_zero_gradient", False):
+                    # 구경계 복원 모드(2026-07-19, ρ180 조합 검증): sending 그대로 배출(cap 없음).
+                    terminal_out = mainline_sending[i]
+                else:
+                    # 자유출구 CTM supply: 비혼잡 하류의 최대 수용량 = 용량(차로·incident 계수 반영).
+                    # sending 그대로 내보내면 경계 속도 회복 과도기에 용량 6배 방류가 생긴다(비물리).
+                    terminal_cap = q_cap * max(lanes_now[i], 1.0e-9) / max(float(net.freeway_lanes), 1.0e-9)
+                    terminal_out = min(mainline_sending[i], terminal_cap)
                 q_out = terminal_out
             else:
                 q_out = q_inter[i]
@@ -522,10 +526,14 @@ def freeway_substep(
             upstream_speed = net.v_free if i == 0 else speeds[i - 1]
             if i + 1 < len(rhos):
                 downstream_rho = rho_for_flow[i + 1]
+            elif getattr(net, "terminal_zero_gradient", False):
+                # 구경계 복원 모드: sink 밀도 = 직전(자기) 세그먼트 밀도(zero-gradient).
+                downstream_rho = rho_for_flow[i]
             else:
                 # 자유출구 표준 경계(uncongested downstream): 가상 하류밀도 = min(자기, 임계).
                 # 자기밀도 그대로(zero-gradient)면 anticipation=0이라 터미널 jam이 영구 고착
-                # (2026-07-18 규명, work/probe_terminal_boundary_lock.py).
+                # (2026-07-18 규명, work/probe_terminal_boundary_lock.py — 단 ρ95 물리에서;
+                # ρ180 조합은 TERM_ZG=1로 별도 검증).
                 downstream_rho = min(rho_for_flow[i], float(net.rho_crit))
             # Option C: VSL을 segment별로 읽는다(segment 키 없으면 link 키 fallback).
             vsl_i = segment_vsl(control, link, i, cfg)
