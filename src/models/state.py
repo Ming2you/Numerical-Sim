@@ -179,6 +179,9 @@ class SimulationConfig:
 class NetworkConfig:
     freeway_links: List[str] = field(default_factory=lambda: ["FW_W", "FW_E"])
     freeway_segments_per_link: int = 4
+    # 완충 세그먼트 수(양쪽 각각, 2026-07-19): 0=완충 없음(기존 거동 비트동일). 코어 배열
+    # 길이는 불변 — controllers/SEG13/VSL 키 전부 무접촉, plant만 상·하류 체인 연장.
+    freeway_buffer_segments: int = 0
     freeway_segment_length_km: float = 0.5
     freeway_lanes: int = 2
     v_free: float = 100.0
@@ -834,6 +837,12 @@ class TrafficState:
     # 본선 진입 origin 큐[veh]: CTM receiving 제약으로 segment 0에 못 들어간 본선 수요를
     # 링크별로 보관한다(spec §3.1.2 demand-supply 개정, 차량보존). freeway entry에서만 사용.
     mainline_origin_queue: Dict[str, float] = field(default_factory=dict)
+    # 완충 세그먼트(2026-07-19, FW_BUFFER): 코어 밖 상·하류 무제어 METANET 셀 — plant 전용.
+    # 혼잡이 경계 가정 대신 실제 셀에서 퍼지고 배수되게 한다(controllers 무접촉).
+    freeway_buffer_up_density: Dict[str, List[float]] = field(default_factory=dict)
+    freeway_buffer_up_speed: Dict[str, List[float]] = field(default_factory=dict)
+    freeway_buffer_down_density: Dict[str, List[float]] = field(default_factory=dict)
+    freeway_buffer_down_speed: Dict[str, List[float]] = field(default_factory=dict)
     urban_movement_queue: Dict[str, float] = field(default_factory=dict)
     urban_link_storage: Dict[str, float] = field(default_factory=dict)
     urban_arrival_buffer: Dict[str, Dict[int, float]] = field(default_factory=dict)

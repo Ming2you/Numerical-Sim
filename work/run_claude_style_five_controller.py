@@ -585,6 +585,10 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
         cfg.mpc.leader_mfd_far_state_aware = _os.environ["FAR_STATE_AWARE"] == "1"
     # 6월말 hysteresis 작업 물리 원복 A/B 훅(2026-07-19): RHO_MAX=180(문헌값, 2e9d084가 95로
     # 반토막)·CAPDROP=0(ν regime-split OFF, f329696이 ON+250). 기본 미설정 시 현행 유지.
+    if _os.environ.get("FW_BUFFER"):
+        # 완충 세그먼트(2026-07-19): 양쪽 각 N셀 무제어 METANET 체인 — 혼잡의 자연 형성·해소를
+        # 경계 가정 대신 실제 셀로. plant 전용(컨트롤러 무접촉), 최종 경계는 표준 자유출구.
+        cfg.network.freeway_buffer_segments = int(_os.environ["FW_BUFFER"])
     if _os.environ.get("TERM_ZG") == "1":
         # 구경계 복원(2026-07-19): sink 밀도 = 직전 세그먼트(zero-gradient) + 배출 cap 해제.
         # ρ180 조합 검증용 — plant·예측모델 동시 적용(terminal_zero_gradient).

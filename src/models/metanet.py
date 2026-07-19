@@ -392,6 +392,24 @@ def freeway_substep(
                 len(rhos),
             )
             offramps_by_segment.setdefault(segment_idx, []).append(off_ramp)
+        # 완충 세그먼트(2026-07-19, FW_BUFFER): 코어 밖 상·하류 무제어 METANET 체인.
+        # 코어의 진입·배출 경계가 "가정" 대신 실제 완충 셀 밀도와 결합된다(경계는 완충 끝으로).
+        buf_n = int(getattr(net, "freeway_buffer_segments", 0))
+        _buf_lane = float(net.freeway_lanes)
+        _buf_len = float(net.freeway_segment_length_km)
+        if buf_n > 0:
+            for _bd, _bv, _init in (
+                (state.freeway_buffer_up_density, state.freeway_buffer_up_speed, 0.0),
+                (state.freeway_buffer_down_density, state.freeway_buffer_down_speed, 0.0),
+            ):
+                if len(_bd.setdefault(link, [])) != buf_n:
+                    _bd[link] = [_init] * buf_n
+                if len(_bv.setdefault(link, [])) != buf_n:
+                    _bv[link] = [float(net.v_free)] * buf_n
+            bu_r = list(state.freeway_buffer_up_density[link])
+            bu_v = list(state.freeway_buffer_up_speed[link])
+            bd_r = list(state.freeway_buffer_down_density[link])
+            bd_v = list(state.freeway_buffer_down_speed[link])
         vehicles = [
             max(0.0, rho) * net.freeway_segment_length_km * max(lane, 1.0e-9)
             for rho, lane in zip(rhos, previous_lanes)
@@ -452,7 +470,15 @@ def freeway_substep(
         mainline_demand = max(0.0, demand.freeway_mainline.get(link, 0.0))
         queued_flow = state.mainline_origin_queue[link] / max(dt_h, 1.0e-9)
         entry_request = mainline_demand + queued_flow
-        entry_realized = min(entry_request, q_cap, receiving_for_mainline[0])
+        if buf_n > 0:
+            # 완충 모드: 수요는 상류 완충 머리로 진입, 코어 진입은 완충→코어 실제 흐름.
+            _bu_recv0 = max(0.0, (net.rho_max - bu_r[0]) * _buf_len * _buf_lane / max(dt_h, 1.0e-9))
+            entry_realized = min(entry_request, q_cap, _bu_recv0)
+            _bu_send_last = segment_flow_veh_h(bu_r[-1], bu_v[-1], _buf_lane)
+            core_in0 = min(_bu_send_last, receiving_for_mainline[0])
+        else:
+            entry_realized = min(entry_request, q_cap, receiving_for_mainline[0])
+            core_in0 = entry_realized
         # 큐 갱신: 새 본선 수요 중 실제 진입 못한 분량을 origin 큐에 보관.
         state.mainline_origin_queue[link] = max(
             0.0,
@@ -466,10 +492,14 @@ def freeway_substep(
         next_vehicle_count = []
         for i, rho in enumerate(rho_for_flow):
             # Spec 3.1.2 밀도 갱신: q_in/q_out은 veh/h, dt는 hour 단위로 계산한다.
-            q_in = entry_realized if i == 0 else q_inter[i - 1]
+            q_in = core_in0 if i == 0 else q_inter[i - 1]
             q_in += ramp_in_by_link[link][i]
             if i == len(rhos) - 1:
-                if getattr(net, "terminal_zero_gradient", False):
+                if buf_n > 0:
+                    # 완충 모드: 코어 터미널 = 하류 완충 머리와의 일반 CTM 인터페이스(가정 없음).
+                    _bd_recv0 = max(0.0, (net.rho_max - bd_r[0]) * _buf_len * _buf_lane / max(dt_h, 1.0e-9))
+                    terminal_out = min(mainline_sending[i], _bd_recv0)
+                elif getattr(net, "terminal_zero_gradient", False):
                     # 구경계 복원 모드(2026-07-19, ρ180 조합 검증): sending 그대로 배출(cap 없음).
                     terminal_out = mainline_sending[i]
                 else:
@@ -508,7 +538,9 @@ def freeway_substep(
                 if normal_off_total > effective_off_total + 1.0e-9:
                     boundary_speed_cap = q_out / max(rho * lanes_now[i], 1.0e-9)
             if i == len(rhos) - 1:
-                mainline_exit_acc[link] += terminal_out
+                if buf_n <= 0:
+                    # 완충 모드에선 시스템 이탈이 완충 끝에서 일어남(아래 완충 전진부에서 회계).
+                    mainline_exit_acc[link] += terminal_out
                 if terminal_out < mainline_sending[i] - 1.0e-9:
                     # 배출이 용량에 걸리면 속도도 flow-정합으로 cap(off-ramp blocking과 동일 관행).
                     exit_speed_cap = q_out / max(rho * lanes_now[i], 1.0e-9)
@@ -523,9 +555,12 @@ def freeway_substep(
                 density_projection_count += 1
             rho_new = vehicle_new / max(net.freeway_segment_length_km * max(lanes_now[i], 1.0e-9), 1.0e-9)
 
-            upstream_speed = net.v_free if i == 0 else speeds[i - 1]
+            upstream_speed = (bu_v[-1] if buf_n > 0 else net.v_free) if i == 0 else speeds[i - 1]
             if i + 1 < len(rhos):
                 downstream_rho = rho_for_flow[i + 1]
+            elif buf_n > 0:
+                # 완충 모드: 코어 터미널의 하류밀도 = 완충 첫 셀의 실제 밀도(관측, 가정 아님).
+                downstream_rho = bd_r[0]
             elif getattr(net, "terminal_zero_gradient", False):
                 # 구경계 복원 모드: sink 밀도 = 직전(자기) 세그먼트 밀도(zero-gradient).
                 downstream_rho = rho_for_flow[i]
@@ -579,6 +614,56 @@ def freeway_substep(
         state.freeway_flow[link] = next_flows
         state.freeway_effective_lanes[link] = next_lanes
         freeway_ttt += sum(next_vehicle_count) * dt_h
+
+        # 완충 체인 전진(2026-07-19): 코어와 같은 substep 안에서 스냅샷 기반 Jacobi 갱신.
+        # 상류: 수요→bu[0]→…→bu[-1]→코어(core_in0로 이미 소비). 하류: 코어(terminal_out)→
+        # bd[0]→…→bd[-1]→표준 자유출구(min(ρ,ρ_crit)+용량 cap = 시스템 이탈 지점).
+        if buf_n > 0:
+            def _adv_chain(r0, v0, head_in, tail_out, ds_last_rho, up_head_speed):
+                n = len(r0)
+                sends = [segment_flow_veh_h(r0[j], v0[j], _buf_lane) for j in range(n)]
+                recvs = [max(0.0, (net.rho_max - r0[j]) * _buf_len * _buf_lane / max(dt_h, 1.0e-9)) for j in range(n)]
+                flows_in = [0.0] * n
+                flows_out = [0.0] * n
+                flows_in[0] = head_in
+                for j in range(n - 1):
+                    f = min(sends[j], recvs[j + 1])
+                    flows_out[j] = f
+                    flows_in[j + 1] = f
+                flows_out[n - 1] = tail_out
+                nr, nv = [], []
+                for j in range(n):
+                    veh = r0[j] * _buf_len * _buf_lane + dt_h * (flows_in[j] - flows_out[j])
+                    nr.append(max(0.0, veh) / (_buf_len * _buf_lane))
+                    up_v = up_head_speed if j == 0 else v0[j - 1]
+                    ds_rho = r0[j + 1] if j + 1 < n else ds_last_rho
+                    v_eff = effective_desired_speed_kmh(
+                        r0[j], net.v_free, net.rho_crit, net.v_free, net.alpha_vsl, False,
+                        net.metanet_a_m, getattr(net, "vsl_fd_two_branch", False),
+                        net.rho_max, float(getattr(net, "rho_crit_two_branch", 0.0) or 0.0),
+                    )
+                    nv.append(metanet_speed_update_kmh(
+                        v0[j], up_v, r0[j], ds_rho, v_eff, dt_h, _buf_len,
+                        net.metanet_tau_h, select_anticipation_nu(r0[j], net),
+                        net.metanet_kappa_veh_km_lane, net.v_min,
+                    ))
+                return nr, nv
+            # 상류: tail_out = 코어가 소비한 core_in0, 마지막 셀 하류밀도 = 코어 seg0(스냅샷).
+            _bu_nr, _bu_nv = _adv_chain(bu_r, bu_v, entry_realized, core_in0, rho_for_flow[0], net.v_free)
+            # 하류: head_in = 코어 터미널 배출, 끝 셀 = 표준 자유출구(가상 하류 min(ρ,ρ_crit), 용량 cap).
+            _bd_tail_send = segment_flow_veh_h(bd_r[-1], bd_v[-1], _buf_lane)
+            _bd_tail_out = min(_bd_tail_send, q_cap)
+            _bd_nr, _bd_nv = _adv_chain(bd_r, bd_v, terminal_out, _bd_tail_out, min(bd_r[-1], float(net.rho_crit)), speeds[-1])
+            # 끝 셀 flow-정합 속도 cap(코어 표준출구와 동일 관행).
+            if _bd_tail_out < _bd_tail_send - 1.0e-9:
+                _cap_v = _bd_tail_out / max(bd_r[-1] * _buf_lane, 1.0e-9)
+                _bd_nv[-1] = max(net.v_min, min(_bd_nv[-1], _cap_v))
+            mainline_exit_acc[link] += _bd_tail_out
+            state.freeway_buffer_up_density[link] = _bu_nr
+            state.freeway_buffer_up_speed[link] = _bu_nv
+            state.freeway_buffer_down_density[link] = _bd_nr
+            state.freeway_buffer_down_speed[link] = _bd_nv
+            freeway_ttt += (sum(_bu_nr) + sum(_bd_nr)) * _buf_len * _buf_lane * dt_h
 
     if include_ramp_queue_ttt:
         freeway_ttt += sum(state.ramp_queue.values()) * dt_h
