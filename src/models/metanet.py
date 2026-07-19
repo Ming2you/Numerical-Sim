@@ -339,6 +339,7 @@ def freeway_substep(
     for link in net.freeway_links:
         state.mainline_origin_queue.setdefault(link, 0.0)
     freeway_ttt = 0.0
+    _buffer_diag: Dict[str, float] = {}
     density_projection_count = 0
     speed_projection_count = 0
     flow_acc = 0.0
@@ -650,10 +651,17 @@ def freeway_substep(
                 return nr, nv
             # 상류: tail_out = 코어가 소비한 core_in0, 마지막 셀 하류밀도 = 코어 seg0(스냅샷).
             _bu_nr, _bu_nv = _adv_chain(bu_r, bu_v, entry_realized, core_in0, rho_for_flow[0], net.v_free)
-            # 하류: head_in = 코어 터미널 배출, 끝 셀 = 표준 자유출구(가상 하류 min(ρ,ρ_crit), 용량 cap).
+            # 하류: head_in = 코어 터미널 배출. 끝 셀 경계는 TERM_ZG에 따라 —
+            #   구경계(zero-gradient): 가상 하류 = 자기 밀도, cap 없음(사용자 선택: 가정 없는 원형).
+            #   표준(기본): 가상 하류 min(ρ,ρ_crit) + 용량 cap.
             _bd_tail_send = segment_flow_veh_h(bd_r[-1], bd_v[-1], _buf_lane)
-            _bd_tail_out = min(_bd_tail_send, q_cap)
-            _bd_nr, _bd_nv = _adv_chain(bd_r, bd_v, terminal_out, _bd_tail_out, min(bd_r[-1], float(net.rho_crit)), speeds[-1])
+            if getattr(net, "terminal_zero_gradient", False):
+                _bd_tail_out = _bd_tail_send
+                _bd_tail_ds_rho = bd_r[-1]
+            else:
+                _bd_tail_out = min(_bd_tail_send, q_cap)
+                _bd_tail_ds_rho = min(bd_r[-1], float(net.rho_crit))
+            _bd_nr, _bd_nv = _adv_chain(bd_r, bd_v, terminal_out, _bd_tail_out, _bd_tail_ds_rho, speeds[-1])
             # 끝 셀 flow-정합 속도 cap(코어 표준출구와 동일 관행).
             if _bd_tail_out < _bd_tail_send - 1.0e-9:
                 _cap_v = _bd_tail_out / max(bd_r[-1] * _buf_lane, 1.0e-9)
@@ -664,6 +672,10 @@ def freeway_substep(
             state.freeway_buffer_down_density[link] = _bd_nr
             state.freeway_buffer_down_speed[link] = _bd_nv
             freeway_ttt += (sum(_bu_nr) + sum(_bd_nr)) * _buf_len * _buf_lane * dt_h
+            # 완충 진단: jam이 완충 끝까지 닿는지(끝 셀 밀도)와 침투 깊이 판독용.
+            _buffer_diag[f"buffer_down_max_rho_{link}"] = float(max(_bd_nr))
+            _buffer_diag[f"buffer_down_end_rho_{link}"] = float(_bd_nr[-1])
+            _buffer_diag[f"buffer_up_max_rho_{link}"] = float(max(_bu_nr))
 
     if include_ramp_queue_ttt:
         freeway_ttt += sum(state.ramp_queue.values()) * dt_h
@@ -671,6 +683,7 @@ def freeway_substep(
         freeway_ttt += sum(max(0.0, q) for q in state.mainline_origin_queue.values()) * dt_h
 
     diagnostics: Dict[str, float] = {}
+    diagnostics.update(_buffer_diag)
     avg_metering = float(sum(ramp_release.values()))
     avg_no_meter = ramp_diag["total_no_meter_flow"]
     diagnostics["total_metering_flow"] = avg_metering
