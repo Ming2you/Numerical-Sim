@@ -651,6 +651,19 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         far는 leader 전용 목적항이라 d_local 차감 없음(B4 barrier와 동일 규약). 기본 OFF."""
         if self.price_far_enabled and states:
             ttt += self._mfd_far_cost_to_go(states[-1])
+        # VdB4 보호큐 벌점 — 리더 가격 편입(2026-07-19 4차, 기본 OFF): 전역 rollout 상태의
+        # 보호 movement 큐 초과분을 가격 목적에 가산 → 모든 리더 한계가격(green/metering/VSL)이
+        # 제약-인지. 소거 실측: follower 벌점은 리더 B2 가격이 상쇄(가격OFF 시 green 30→89s,
+        # 큐 459→150) — 제약은 가격 계산 지점(여기)에 있어야 계층이 한 방향을 가리킨다.
+        _pq_mv = str(getattr(self.cfg.mpc, "protected_queue_movement", "") or "")
+        if _pq_mv and states:
+            _pq_w = float(getattr(self.cfg.mpc, "protected_queue_weight", 0.0))
+            if _pq_w > 0.0:
+                _pq_max = float(getattr(self.cfg.mpc, "protected_queue_max_veh", 50.0))
+                _tc_h = float(self.cfg.simulation.T_c_h)
+                for _s in states:
+                    _q = max(0.0, float(_s.urban_movement_queue.get(_pq_mv, 0.0)))
+                    ttt += _pq_w * max(0.0, _q - _pq_max) * _tc_h
         return float(ttt)
 
     def _global_rollout_metrics_with_green(
