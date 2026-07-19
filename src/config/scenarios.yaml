@@ -610,6 +610,42 @@
       "pulse_rampdown_sec": 360.0,
       "required": false
     },
+    "sweet_220_w36": {
+      "urban_scale": 2.2,
+      "freeway_scale": 2.2,
+      "ramp_scale": 2.2,
+      "incident_capacity_factor": 1.0,
+      "pulse_base_scale": 0.5,
+      "pulse_start_sec": 900.0,
+      "pulse_rampup_sec": 360.0,
+      "pulse_plateau_sec": 1800.0,
+      "pulse_rampdown_sec": 360.0,
+      "required": false
+    },
+    "sweet_240_w36": {
+      "urban_scale": 2.4,
+      "freeway_scale": 2.4,
+      "ramp_scale": 2.4,
+      "incident_capacity_factor": 1.0,
+      "pulse_base_scale": 0.5,
+      "pulse_start_sec": 900.0,
+      "pulse_rampup_sec": 360.0,
+      "pulse_plateau_sec": 1800.0,
+      "pulse_rampdown_sec": 360.0,
+      "required": false
+    },
+    "sweet_280_w36": {
+      "urban_scale": 2.8,
+      "freeway_scale": 2.8,
+      "ramp_scale": 2.8,
+      "incident_capacity_factor": 1.0,
+      "pulse_base_scale": 0.5,
+      "pulse_start_sec": 900.0,
+      "pulse_rampup_sec": 360.0,
+      "pulse_plateau_sec": 1800.0,
+      "pulse_rampdown_sec": 360.0,
+      "required": false
+    },
     "dc_f240_u150_w": {
       "urban_scale": 1.5,
       "freeway_scale": 2.4,
