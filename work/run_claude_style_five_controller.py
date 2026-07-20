@@ -956,6 +956,18 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
         start_step = int(_snap["step"]) + 1
         print(f"[resume] {_os.environ['INIT_STATE']} step {_snap['step']} → {start_step}부터 재개", flush=True)
 
+    # ---- FAR_GATE(2026-07-20 밤, 사용자 설계): far를 구조적 교란에만 자동 연동 ----
+    # b6 해부 판정: far는 평시 순손해(대리모형 오차 > 시력), incident에선 +7p(회복기 관리).
+    # 게이트 = 폐쇄가 forecast에 존재 OR (폐쇄 이력 링크가 아직 임계 위 = 회복 미완).
+    # 시계 상수 없음 — 이벤트(폐쇄 일정)+상태(배수 완료)만으로 개폐. FAR_GATE=1일 때만.
+    # FAR_GATE=1: 폐쇄 일정 트리거. FAR_GATE=2(사용자 설계): capacity-drop 상태 트리거 —
+    # "임계 초과 + 실배출 < 0.95·용량" 세그 존재 시 ON(예방 실패 → 회복 관리 국면),
+    # 전 링크 최대 ρ < ρ_crit로 회복하면 OFF(히스테리시스, 시계 상수 없음).
+    _fargate_mode = _os.environ.get("FAR_GATE", "")
+    _fargate_on = _fargate_mode in ("1", "2")
+    _fargate_links: set = set()
+    _fargate_stress = False
+
     _ckpt_on = _os.environ.get("CHECKPOINT", "1") == "1"
     _pg_core = ["step", "time_sec", "step_total_ttt", "step_urban_ttt", "step_freeway_ttt",
                 "cumulative_total_ttt", "cumulative_urban_ttt", "cumulative_freeway_ttt",
@@ -968,6 +980,52 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
         t0 = time.perf_counter()
         # WARMUP_NC_STEPS: 웜업 구간은 전 arm 공통 no-control(분석창 진입 상태 동일화 +
         # 컨트롤러 계산 절약, 표준 관행). 미지정(0)이면 기존 거동.
+        if _fargate_on:
+            if _fargate_mode == "1":
+                from src.models.demand import merge_freeway_lane_loss
+                _fg_merged = merge_freeway_lane_loss(list(forecast))
+                _fg_active = {
+                    l for l, segs in _fg_merged.items()
+                    if any(float(v) > 0.0 for v in segs.values())
+                }
+                _fargate_links |= _fg_active
+                for _l in list(_fargate_links):
+                    if _l in _fg_active:
+                        continue
+                    _dens = sim.state.freeway_density.get(_l, [])
+                    if _dens and max(_dens) < float(cfg.network.rho_crit):
+                        _fargate_links.discard(_l)  # 회복 완료 → 게이트 해제
+                _fg_new = bool(_fargate_links)
+            else:
+                # mode 2: capacity-drop 상태 검출(사용자 설계).
+                from src.models.metanet import segment_flow_veh_h, desired_speed_kmh
+                _rc = float(cfg.network.rho_crit)
+                _vf = float(cfg.network.v_free)
+                _all_sub = True
+                _drop_seen = False
+                for _l in cfg.network.freeway_links:
+                    _dens = sim.state.freeway_density.get(_l, [])
+                    _spds = sim.state.freeway_speed.get(_l, [])
+                    _lns = sim.state.freeway_effective_lanes.get(_l, [])
+                    for _i in range(len(_dens)):
+                        _rho = float(_dens[_i])
+                        if _rho <= _rc:
+                            continue
+                        _all_sub = False
+                        _lam = float(_lns[_i]) if _i < len(_lns) else float(cfg.network.freeway_lanes)
+                        _v = float(_spds[_i]) if _i < len(_spds) else 0.0
+                        _flow = segment_flow_veh_h(_rho, _v, _lam)
+                        _cap = segment_flow_veh_h(_rc, desired_speed_kmh(_rc, _vf, _rc), _lam)
+                        if _flow < 0.95 * _cap:
+                            _drop_seen = True
+                if _drop_seen:
+                    _fargate_stress = True   # drop 발생 → ON 래치
+                elif _all_sub:
+                    _fargate_stress = False  # 전 세그 임계 아래 = 회복 완료 → OFF
+                _fg_new = _fargate_stress
+            if _fg_new != bool(cfg.mpc.leader_mfd_far_enabled):
+                print(f"[FAR_GATE m{_fargate_mode}] step {step}: far {'ON' if _fg_new else 'OFF'}", flush=True)
+            cfg.mpc.leader_mfd_far_enabled = _fg_new
         if step < int(_os.environ.get("WARMUP_NC_STEPS", "0")):
             control = baseline_control("no_control", cfg, sim.state, forecast[0])
         else:
