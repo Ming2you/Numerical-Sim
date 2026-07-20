@@ -572,6 +572,10 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
         # queue-discharge capacity drop 민감도(2026-07-20): 혼잡 세그먼트 배출 ≤ φ·용량.
         # 문헌 실측 5~18% 감소 — 민감도 arm은 φ=0.85(사용자 채택). plant+복제본 동시 적용.
         cfg.network.capacity_drop_discharge_phi = float(_os.environ["CAPDROP_PHI"])
+    if _os.environ.get("TAU_H"):
+        # 정통 METANET 창발 capacity drop 프로브(2026-07-20): 완화시간 τ[h] 상향 → jam 머리
+        # 가속 지연으로 배출 결손이 스위치 없이 창발(Papageorgiou 계열). 미설정=기본(비트동일).
+        cfg.network.metanet_tau_h = float(_os.environ["TAU_H"])
     if _os.environ.get("MFD_FAR") == "1":
         cfg.mpc.leader_mfd_far_enabled = True  # far(MFD tail) cost-to-go 가산 → near 깊이 절감 검증
     if _os.environ.get("MFD_FAR") == "0":
