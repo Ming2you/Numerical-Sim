@@ -579,6 +579,15 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
     if _os.environ.get("MERGE_DELTA"):
         # METANET 표준 merge 항(2026-07-20): 합류 유입의 본선 속도 교란 δ(문헌 0.0122).
         cfg.network.metanet_delta_merge = float(_os.environ["MERGE_DELTA"])
+    if _os.environ.get("NU_BASE"):
+        # Wang et al. 세트 재현용(2026-07-20): base ν(비혼잡 포함 단일 anticipation 계수).
+        cfg.network.metanet_nu_km2_h = float(_os.environ["NU_BASE"])
+    if _os.environ.get("KAPPA"):
+        cfg.network.metanet_kappa_veh_km_lane = float(_os.environ["KAPPA"])
+    if _os.environ.get("VFREE"):
+        cfg.network.v_free = float(_os.environ["VFREE"])
+    if _os.environ.get("RHO_CRIT"):
+        cfg.network.rho_crit = float(_os.environ["RHO_CRIT"])
     if _os.environ.get("MFD_FAR") == "1":
         cfg.mpc.leader_mfd_far_enabled = True  # far(MFD tail) cost-to-go 가산 → near 깊이 절감 검증
     if _os.environ.get("MFD_FAR") == "0":
