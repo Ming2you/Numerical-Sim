@@ -740,6 +740,18 @@
       "pulse_rampdown_sec": 360.0,
       "required": false
     },
+    "sweet_200_w60": {
+      "urban_scale": 2.0,
+      "freeway_scale": 2.0,
+      "ramp_scale": 2.0,
+      "incident_capacity_factor": 1.0,
+      "pulse_base_scale": 0.5,
+      "pulse_start_sec": 900.0,
+      "pulse_rampup_sec": 360.0,
+      "pulse_plateau_sec": 3600.0,
+      "pulse_rampdown_sec": 360.0,
+      "required": false
+    },
     "sweet_220_w60": {
       "urban_scale": 2.2,
       "freeway_scale": 2.2,
