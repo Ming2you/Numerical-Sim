@@ -314,13 +314,17 @@ leader:
   uncongested_nuf_floor_frac: 0.0
 freeway_follower:
   eps_F: 100.0
+  # VSL 메뉴 재보정(2026-07-20, Wang v_free=115, 사용자 확정): 구 활성 옵션(50~100) 보존
+  # + 115를 no-VSL 앵커로 추가(vsl_active 판정 max−0.5 기준이라 NC/무VSL 거동 불변).
+  # 첫 활성 칸 115→100 간격 15 — seg13 VSL_BOX ≥15 필요(잡 env에서 15로 상향).
   vsl_set:
-  - 50
-  - 60
-  - 70
-  - 80
-  - 90
+  - 115
   - 100
+  - 90
+  - 80
+  - 70
+  - 60
+  - 50
   max_vsl_step: 20.0
   ramp_queue_penalty: 10.0
   density_penalty: 10.0
