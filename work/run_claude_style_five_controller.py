@@ -579,6 +579,9 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
     if _os.environ.get("MERGE_DELTA"):
         # METANET 표준 merge 항(2026-07-20): 합류 유입의 본선 속도 교란 δ(문헌 0.0122).
         cfg.network.metanet_delta_merge = float(_os.environ["MERGE_DELTA"])
+    if _os.environ.get("FAR_REAL_V") == "1":
+        # 실제-v far(2026-07-20, 사용자 설계): far 속도원 = 말단 state 실제 속도(캡드롭 반영).
+        cfg.mpc.leader_mfd_far_real_speed = True
     if _os.environ.get("NU_BASE"):
         # Wang et al. 세트 재현용(2026-07-20): base ν(비혼잡 포함 단일 anticipation 계수).
         cfg.network.metanet_nu_km2_h = float(_os.environ["NU_BASE"])

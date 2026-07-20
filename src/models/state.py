@@ -362,6 +362,11 @@ class MPCConfig:
     leader_mfd_far_enabled: bool = True
     # far 항의 주행시간·배수율을 state(rho·유효차선)에서 유도(2026-07-16). 기본 False=상수식.
     leader_mfd_far_state_aware: bool = True
+    # 실제-v far(2026-07-20, 사용자 설계): state-aware 유도의 속도원(源)을 정적 FD V(ρ) 대신
+    # rollout 말단 state의 **실제 속도**로 — Wang 물리의 동적 capacity drop(정적 FD에 없음)이
+    # 말단 v에 이미 반영돼 있으므로 추가 적분 없이 배수율·주행시간에 전파. 혼잡(ρ>ρ_crit)
+    # 병목의 배수율도 실제 유량(ρ·v·λ)으로 cap. 기본 False=기존 FD 유도(비트동일).
+    leader_mfd_far_real_speed: bool = False
     leader_mfd_far_weight: float = 1.0
     # FAR-D0(2026-07-09): depth=0에서도 rollout TTT + far로 후보 채점(역사적 d0는
     # follower 응답 proxy 랭킹 — 채점 형태 고정한 "얕은 leader" 검정용). 기본 False.

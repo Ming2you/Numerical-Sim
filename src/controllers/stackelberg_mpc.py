@@ -102,6 +102,8 @@ def mfd_far_cost_to_go(cfg: "ExperimentConfig", state: "TrafficState") -> float:
     w = float(getattr(cfg.mpc, "leader_mfd_far_weight", 1.0))
     # far 항의 t_trav·배수율을 state(ρ·유효차선)에서 유도할지 — 기본 False=기존 상수식(비트동일).
     state_aware = bool(getattr(cfg.mpc, "leader_mfd_far_state_aware", False))
+    # 실제-v far(2026-07-20): 속도원을 FD V(ρ) 대신 말단 state 실제 속도로(상세 state.py 주석).
+    real_v = bool(getattr(cfg.mpc, "leader_mfd_far_real_speed", False))
     # ---- urban reservoir ----
     # boundary_in 큐도 accumulation에 포함: gating(유입 조임)은 차를 boundary 큐로 옮길 뿐
     # (여전히 TTT 발생)이라, in-network(N_P)만 세면 gating이 far상 공짜로 보여 leader가 과-gate.
@@ -144,16 +146,26 @@ def mfd_far_cost_to_go(cfg: "ExperimentConfig", state: "TrafficState") -> float:
                 # METANET 기본도가 있으므로 둘 다 유도한다 — 새 튜닝 상수 없음.
                 #   t_trav = Σ_i ℓ / V(ρ_i)        (자유류 대신 실제 밀도 속도)
                 #   g_fw   = min_i cap(lanes_i)    (병목 세그먼트 용량; 폐색이면 자동 하락)
+                spd_l = state.freeway_speed.get(link, []) if real_v else []
                 t_trav_l = 0.0
                 caps = []
                 for i in range(len(dens)):
-                    v_i = desired_speed_kmh(max(0.0, float(dens[i])), v_free, net.rho_crit)
+                    if real_v and i < len(spd_l):
+                        # 실제-v: rollout 동역학이 계산한 말단 속도(캡드롭 반영) 그대로.
+                        v_i = max(float(spd_l[i]), 1.0)
+                    else:
+                        v_i = desired_speed_kmh(max(0.0, float(dens[i])), v_free, net.rho_crit)
                     t_trav_l += seg_len / max(v_i, 1.0)
-                    caps.append(segment_flow_veh_h(
+                    cap_i = segment_flow_veh_h(
                         net.rho_crit,
                         desired_speed_kmh(net.rho_crit, v_free, net.rho_crit),
                         _lane_at(i),
-                    ))
+                    )
+                    if real_v and i < len(spd_l) and float(dens[i]) > float(net.rho_crit):
+                        # 혼잡 병목의 배수율은 용량이 아니라 실측 유량(ρ·v·λ) — 자유류 세그는
+                        # 용량 유지(경부하서 실유량으로 나누면 배수시간 과대라는 역왜곡 방지).
+                        cap_i = min(cap_i, max(float(dens[i]) * max(float(spd_l[i]), 1.0) * _lane_at(i), 1.0))
+                    caps.append(cap_i)
                 g_fw_l = min(caps) if caps else g_fw
             drainable_l = g_fw_l * (t_trav_l / max(tc_h, 1.0e-9))
             n_eff = max(0.0, n_l - drainable_l)
@@ -175,8 +187,13 @@ def mfd_far_cost_to_go(cfg: "ExperimentConfig", state: "TrafficState") -> float:
         merge_interval = float(net.ramp_capacity_veh_h[ramp]) * recv * tc_h  # veh/interval
         if state_aware:
             # 합류 후 하류 통과도 자유류가 아니라 실제 밀도 속도로(위와 동일 취지).
+            spd_r = state.freeway_speed.get(link, []) if real_v else []
             t_ramp_traverse = sum(
-                seg_len / max(desired_speed_kmh(max(0.0, float(dens[i])), v_free, net.rho_crit), 1.0)
+                seg_len / max(
+                    (float(spd_r[i]) if real_v and i < len(spd_r)
+                     else desired_speed_kmh(max(0.0, float(dens[i])), v_free, net.rho_crit)),
+                    1.0,
+                )
                 for i in range(midx, len(dens))
             )
         else:
