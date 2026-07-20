@@ -963,8 +963,10 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
     # FAR_GATE=1: 폐쇄 일정 트리거. FAR_GATE=2(사용자 설계): capacity-drop 상태 트리거 —
     # "임계 초과 + 실배출 < 0.95·용량" 세그 존재 시 ON(예방 실패 → 회복 관리 국면),
     # 전 링크 최대 ρ < ρ_crit로 회복하면 OFF(히스테리시스, 시계 상수 없음).
+    # FAR_GATE=3(하이브리드, 2026-07-21): 폐쇄 예보 OR capdrop 실측 — incident 선제 포석
+    # (b4의 s5~10 사전 배치) + 평시 b9 동일. 폐쇄 없는 셀에선 m2와 완전 동치.
     _fargate_mode = _os.environ.get("FAR_GATE", "")
-    _fargate_on = _fargate_mode in ("1", "2")
+    _fargate_on = _fargate_mode in ("1", "2", "3")
     _fargate_links: set = set()
     _fargate_stress = False
 
@@ -1023,6 +1025,12 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
                 elif _all_sub:
                     _fargate_stress = False  # 전 세그 임계 아래 = 회복 완료 → OFF
                 _fg_new = _fargate_stress
+                if _fargate_mode == "3":
+                    # 하이브리드: 예보 지평 내 폐쇄가 있으면 선제 ON(capdrop 실측 전이라도).
+                    from src.models.demand import merge_freeway_lane_loss
+                    _fg_m3 = merge_freeway_lane_loss(list(forecast))
+                    if any(float(v) > 0.0 for segs in _fg_m3.values() for v in segs.values()):
+                        _fg_new = True
             if _fg_new != bool(cfg.mpc.leader_mfd_far_enabled):
                 print(f"[FAR_GATE m{_fargate_mode}] step {step}: far {'ON' if _fg_new else 'OFF'}", flush=True)
             cfg.mpc.leader_mfd_far_enabled = _fg_new
