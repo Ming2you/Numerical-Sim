@@ -188,6 +188,11 @@ class NetworkConfig:
     rho_crit: float = 33.5
     rho_max: float = 95.01964207118104
     freeway_capacity_veh_h: float = 3600.0
+    # queue-discharge capacity drop(2026-07-20): 혼잡(ρ>ρ_crit_eff) 세그먼트의 송출을
+    # 용량의 φ배로 제한. 1.0(기본)=완전 비활성(비트동일). 실측 근거: breakdown 후 배출률
+    # 5~18% 감소(Hall & Agyemang-Duah 1991; Cassidy & Bertini 1999). ρ95식 FD 변형과 달리
+    # 정적 FD·저장용량 불변 — 혼잡 진입의 동적 비용만 추가(민감도 arm φ=0.85).
+    capacity_drop_discharge_phi: float = 1.0
     ramps: List[str] = field(default_factory=lambda: ["R_D_W", "R_F_W", "R_D_E", "R_F_E"])
     ramp_to_freeway: Dict[str, str] = field(default_factory=lambda: {
         "R_D_W": "FW_W", "R_F_W": "FW_W", "R_D_E": "FW_E", "R_F_E": "FW_E"

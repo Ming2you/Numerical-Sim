@@ -2106,8 +2106,13 @@ class WuFaithfulFollower:
             _bd_r_bc = state.freeway_buffer_down_density.get(link) or []
             if _bu_r_bc and _bd_r_bc:
                 from src.models.metanet import segment_flow_veh_h as _sfvh_bc
+                _bu_send_bc = _sfvh_bc(_bu_r_bc[-1], _bu_v_bc[-1], float(net.freeway_lanes))
+                _phi_bc = float(getattr(net, "capacity_drop_discharge_phi", 1.0) or 1.0)
+                if _phi_bc < 1.0 and _bu_r_bc[-1] > float(net.rho_crit):
+                    # plant capacity drop과 동일 cap(동결 BC 정합).
+                    _bu_send_bc = min(_bu_send_bc, _phi_bc * float(net.freeway_capacity_veh_h))
                 _buf_bc = (
-                    _sfvh_bc(_bu_r_bc[-1], _bu_v_bc[-1], float(net.freeway_lanes)),
+                    _bu_send_bc,
                     float(_bu_v_bc[-1]),
                     float(_bd_r_bc[0]),
                 )

@@ -350,6 +350,10 @@ def freeway_substep(
     mainline_exit_acc: Dict[str, float] = {link: 0.0 for link in net.freeway_links}
     cap_factor = getattr(demand, "incident_capacity_factor", 1.0)
     q_cap = net.freeway_capacity_veh_h * cap_factor
+    # queue-discharge capacity drop(2026-07-20, CAPDROP_PHI): 혼잡 세그먼트 송출 ≤ φ·용량.
+    # φ=1(기본)이면 비활성(비트동일). VSL이 ρ_crit(VSL)을 올려 subcritical로 지키면 drop을
+    # 실제로 회피한다 — 제어의 물리적 payoff 지점(상세 근거는 state.py 필드 주석).
+    phi_cd = float(getattr(net, "capacity_drop_discharge_phi", 1.0) or 1.0)
     target_flow = _nuf_target_flow_veh_h(control, cfg)
 
     if ramp_release_veh_h is None:
@@ -425,6 +429,14 @@ def freeway_substep(
             segment_flow_veh_h(rho, speed, lane)
             for rho, speed, lane in zip(rho_for_flow, speeds, lanes_now)
         ]
+        if phi_cd < 1.0:
+            # capacity drop: 혼잡 세그먼트의 송출 수요 cap(off-ramp 분기·터미널에도 자동 전파).
+            for _i in range(len(q_values)):
+                if rho_for_flow[_i] > effective_rho_crit(net, segment_vsl(control, link, _i, cfg)):
+                    q_values[_i] = min(
+                        q_values[_i],
+                        phi_cd * q_cap * max(lanes_now[_i], 1.0e-9) / max(float(net.freeway_lanes), 1.0e-9),
+                    )
         flow_acc += sum(q_values)
         flow_count += len(q_values)
 
@@ -476,6 +488,9 @@ def freeway_substep(
             _bu_recv0 = max(0.0, (net.rho_max - bu_r[0]) * _buf_len * _buf_lane / max(dt_h, 1.0e-9))
             entry_realized = min(entry_request, q_cap, _bu_recv0)
             _bu_send_last = segment_flow_veh_h(bu_r[-1], bu_v[-1], _buf_lane)
+            if phi_cd < 1.0 and bu_r[-1] > float(net.rho_crit):
+                # capacity drop: 혼잡 완충 끝 셀의 코어 유입도 동일 cap(무VSL이라 nominal 임계).
+                _bu_send_last = min(_bu_send_last, phi_cd * q_cap)
             core_in0 = min(_bu_send_last, receiving_for_mainline[0])
         else:
             entry_realized = min(entry_request, q_cap, receiving_for_mainline[0])
@@ -623,6 +638,12 @@ def freeway_substep(
             def _adv_chain(r0, v0, head_in, tail_out, ds_last_rho, up_head_speed):
                 n = len(r0)
                 sends = [segment_flow_veh_h(r0[j], v0[j], _buf_lane) for j in range(n)]
+                if phi_cd < 1.0:
+                    # capacity drop: 혼잡 완충 셀 간 흐름도 동일 cap(코어와 물리 일관).
+                    sends = [
+                        min(s, phi_cd * q_cap) if r0[j] > float(net.rho_crit) else s
+                        for j, s in enumerate(sends)
+                    ]
                 recvs = [max(0.0, (net.rho_max - r0[j]) * _buf_len * _buf_lane / max(dt_h, 1.0e-9)) for j in range(n)]
                 flows_in = [0.0] * n
                 flows_out = [0.0] * n
@@ -655,6 +676,9 @@ def freeway_substep(
             #   구경계(zero-gradient): 가상 하류 = 자기 밀도, cap 없음(사용자 선택: 가정 없는 원형).
             #   표준(기본): 가상 하류 min(ρ,ρ_crit) + 용량 cap.
             _bd_tail_send = segment_flow_veh_h(bd_r[-1], bd_v[-1], _buf_lane)
+            if phi_cd < 1.0 and bd_r[-1] > float(net.rho_crit):
+                # capacity drop: 혼잡 상태의 시스템 이탈 배출도 동일 cap.
+                _bd_tail_send = min(_bd_tail_send, phi_cd * q_cap)
             if getattr(net, "terminal_zero_gradient", False):
                 _bd_tail_out = _bd_tail_send
                 _bd_tail_ds_rho = bd_r[-1]

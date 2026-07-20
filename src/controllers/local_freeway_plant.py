@@ -32,6 +32,7 @@ from src.models.metanet import (
     _configured_segment_index,
     _ramp_merge_index,
     effective_desired_speed_kmh,
+    effective_rho_crit,
     metanet_speed_update_kmh,
     offramp_spillback_lambda_eff,
     segment_flow_veh_h,
@@ -178,6 +179,15 @@ def freeway_substep_local(
         segment_flow_veh_h(rho, speed, lane)
         for rho, speed, lane in zip(rho_for_flow, speeds, lanes_now)
     ]
+    # plant(metanet.py)의 queue-discharge capacity drop 복제 — 예측-플랜트 정합 필수.
+    phi_cd = float(getattr(net, "capacity_drop_discharge_phi", 1.0) or 1.0)
+    if phi_cd < 1.0:
+        for _i in range(model.n_seg):
+            if rho_for_flow[_i] > effective_rho_crit(net, segment_vsl(control, link, _i, cfg)):
+                q_values[_i] = min(
+                    q_values[_i],
+                    phi_cd * q_cap * max(lanes_now[_i], 1.0e-9) / max(float(net.freeway_lanes), 1.0e-9),
+                )
     receiving = [
         max(
             0.0,
