@@ -880,6 +880,42 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
         _seg_t = getattr(controller, "nash_solver", controller)
         if hasattr(_seg_t, "seg13_meter_price_standing"):
             _seg_t.seg13_meter_price_standing = True
+    # ---- SUP_PFO(2026-07-20, 사용자 설계): 기권 후보 내장 감독자 ----
+    # 매 스텝 P-Stack 해와 링크-PFO 에뮬레이션 해를 둘 다 계산, 리더 채점 V(=h3 결합
+    # rollout TTT + far)로 공통 채점해 나은 쪽을 집행 — 리더 후보군에 "무개입(=PFO 위임)"
+    # 옵션이 상시 포함되는 것과 등가라 채점 정확도 한도 내에서 P-Stack ≥ PFO 구조 보장.
+    # PFO 인스턴스는 새로 생성(SEG13 env는 본 컨트롤러 인스턴스에만 적용됐으므로 링크 모드,
+    # BASELINE_BOX=1이면 cfg 경유로 동일 이동한계). 미설정=기존 거동.
+    _sup_pfo = None
+    _sup_pfo_cfg = None
+    if _os.environ.get("SUP_PFO") == "1" and controller_id.startswith("P-STACK"):
+        import copy as _copy
+        # PFO 인스턴스용 cfg 사본: seg13 전용 박스 필드를 기본값으로 되돌림(링크 경로 가드 회피)
+        # + baseline_move_box 보장(walk-MVG와 동일 이동한계). 본 cfg는 무접촉.
+        _sup_pfo_cfg = _copy.deepcopy(cfg)
+        # seg13 전용 박스 가드는 `is not None` 검사 — 반드시 None으로 되돌린다.
+        _sup_pfo_cfg.mpc.seg13_meter_box_veh_h = None
+        if hasattr(_sup_pfo_cfg.mpc, "seg13_meter_box_up_veh_h"):
+            _sup_pfo_cfg.mpc.seg13_meter_box_up_veh_h = None
+        _sup_pfo_cfg.mpc.seg13_vsl_box_kmh = None
+        _sup_pfo_cfg.mpc.baseline_move_box = True
+        _sup_pfo = make_controller("WU-FAITHFUL-FOLLOWER", _sup_pfo_cfg)
+        print("[SUP_PFO] 기권 후보(링크-PFO 에뮬레이션) 활성", flush=True)
+
+    def _sup_score(ctrl: ControlAction, forecast) -> float:
+        """감독자 공통 채점: 고정 control로 h3 결합 rollout TTT + far(리더 V와 동형)."""
+        from src.simulation.coupling import run_coupled_interval
+        from src.controllers.stackelberg_mpc import mfd_far_cost_to_go
+        s = sim.state.copy()
+        total = 0.0
+        h = max(1, int(cfg.mpc.horizon_steps))
+        for k in range(min(h, len(forecast))):
+            res = run_coupled_interval(s, ctrl, forecast[k], cfg)
+            total += float(res.urban_ttt + res.freeway_ttt)
+            s.time_sec += cfg.simulation.control_interval
+        total += float(mfd_far_cost_to_go(cfg, s))
+        return total
+
     previous: Optional[ControlAction] = None
     steps = max(1, int(round(cfg.simulation.T_total / cfg.simulation.control_interval)))
     run_rows: List[Dict[str, Any]] = []
@@ -936,6 +972,20 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
             control = baseline_control("no_control", cfg, sim.state, forecast[0])
         else:
             control = decide(controller_id, controller, sim, forecast, previous, cfg, step)
+            if _sup_pfo is not None:
+                # 기권 후보: 링크-PFO 해를 같은 상태에서 계산해 공통 V로 채점, 승자 집행.
+                _pfo_ctrl = decide("WU-FAITHFUL-FOLLOWER", _sup_pfo, sim, forecast, previous, _sup_pfo_cfg, step)
+                _v_ps = _sup_score(control, forecast)
+                _v_pfo = _sup_score(_pfo_ctrl, forecast)
+                if _v_pfo < _v_ps - 1.0e-9:
+                    _pfo_ctrl.diagnostics["sup_pick_pfo"] = 1.0
+                    _pfo_ctrl.diagnostics["sup_v_pstack"] = _v_ps
+                    _pfo_ctrl.diagnostics["sup_v_pfo"] = _v_pfo
+                    control = _pfo_ctrl
+                else:
+                    control.diagnostics["sup_pick_pfo"] = 0.0
+                    control.diagnostics["sup_v_pstack"] = _v_ps
+                    control.diagnostics["sup_v_pfo"] = _v_pfo
         # METER_QOVR(2026-07-19, 사용자 제안): spillback 금지 queue-override — ALINEA queue
         # override/VdB max-queue 제약과 동형. 램프 큐가 임계(기본 0.8×180)를 넘으면 다음
         # 인터벌에 임계 아래로 돌아오도록 방류 하한을 강제(간선 역류=blocked 큐 형성 차단).
@@ -989,7 +1039,7 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
         # 가격(wu_b2_/b3_/b4_/f3_)·P1.5(wu_p15_)·joint(wu_j_) 진단은 control_row에 안 실리므로 수집.
         decision.update({
             k: float(v) for k, v in control.diagnostics.items()
-            if k.startswith(("wu_b2_", "wu_b3_", "wu_b4_", "wu_p15_", "wu_f3_", "wu_j_", "wu_joint_", "wu_lead_off_", "wu_eps_", "wu_faithful_np_", "wu_seg13_"))
+            if k.startswith(("wu_b2_", "wu_b3_", "wu_b4_", "wu_p15_", "wu_f3_", "wu_j_", "wu_joint_", "wu_lead_off_", "wu_eps_", "wu_faithful_np_", "wu_seg13_", "sup_"))
             and isinstance(v, (int, float, bool))
         })
         decision_rows.append(decision)
