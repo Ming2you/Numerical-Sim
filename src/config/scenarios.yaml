@@ -610,6 +610,42 @@
       "pulse_rampdown_sec": 360.0,
       "required": false
     },
+    "sweet_mrg_r30_w60": {
+      "urban_scale": 1.2,
+      "freeway_scale": 1.4,
+      "ramp_scale": 3.0,
+      "incident_capacity_factor": 1.0,
+      "pulse_base_scale": 0.5,
+      "pulse_start_sec": 900.0,
+      "pulse_rampup_sec": 360.0,
+      "pulse_plateau_sec": 3600.0,
+      "pulse_rampdown_sec": 360.0,
+      "required": false
+    },
+    "sweet_mrg_r40_w60": {
+      "urban_scale": 1.2,
+      "freeway_scale": 1.4,
+      "ramp_scale": 4.0,
+      "incident_capacity_factor": 1.0,
+      "pulse_base_scale": 0.5,
+      "pulse_start_sec": 900.0,
+      "pulse_rampup_sec": 360.0,
+      "pulse_plateau_sec": 3600.0,
+      "pulse_rampdown_sec": 360.0,
+      "required": false
+    },
+    "sweet_mrg_r30f16_w60": {
+      "urban_scale": 1.2,
+      "freeway_scale": 1.6,
+      "ramp_scale": 3.0,
+      "incident_capacity_factor": 1.0,
+      "pulse_base_scale": 0.5,
+      "pulse_start_sec": 900.0,
+      "pulse_rampup_sec": 360.0,
+      "pulse_plateau_sec": 3600.0,
+      "pulse_rampdown_sec": 360.0,
+      "required": false
+    },
     "sweet_155_w60": {
       "urban_scale": 1.55,
       "freeway_scale": 1.55,
