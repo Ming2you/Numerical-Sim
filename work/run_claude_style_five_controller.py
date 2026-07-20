@@ -887,9 +887,46 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
     state_rows: List[Dict[str, Any]] = []
     decision_rows: List[Dict[str, Any]] = []
     out_dir = output_root / controller_id
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # ---- Tier1 체크포인트/재개(2026-07-20, 사용자 설계) ----
+    # CHECKPOINT=1(기본): 매 스텝 plant 전체 상태+누적치를 checkpoints.pkl에 append-pickle.
+    # INIT_STATE=<checkpoints.pkl 경로>(+INIT_STEP=k, 기본 -1=마지막): 그 스냅샷에서 재개.
+    # 한계(문서화): 컨트롤러 내부 상태(λ·r̂·incumbent)는 미저장 — NC는 정확 재개,
+    # 컨트롤러 런은 plant 정확·컨트롤러 cold start 근사(T연장·프로브·진단용).
+    import pickle as _pk
+    start_step = 0
+    if _os.environ.get("INIT_STATE"):
+        _want = int(_os.environ.get("INIT_STEP", "-1"))
+        _snap = None
+        with open(_os.environ["INIT_STATE"], "rb") as _f:
+            while True:
+                try:
+                    _s = _pk.load(_f)
+                except EOFError:
+                    break
+                if _want < 0 or _s["step"] <= _want:
+                    _snap = _s
+                if _want >= 0 and _s["step"] >= _want:
+                    break
+        if _snap is None:
+            raise SystemExit(f"INIT_STATE에서 스냅샷을 못 찾음: {_os.environ['INIT_STATE']}")
+        sim.state = _snap["state"]
+        for _k, _v in _snap.get("sim_num", {}).items():
+            setattr(sim, _k, _v)
+        for _k, _v in _snap.get("sim_dicts", {}).items():
+            setattr(sim, _k, dict(_v))
+        previous = _snap.get("previous_control")
+        start_step = int(_snap["step"]) + 1
+        print(f"[resume] {_os.environ['INIT_STATE']} step {_snap['step']} → {start_step}부터 재개", flush=True)
+
+    _ckpt_on = _os.environ.get("CHECKPOINT", "1") == "1"
+    _pg_core = ["step", "time_sec", "step_total_ttt", "step_urban_ttt", "step_freeway_ttt",
+                "cumulative_total_ttt", "cumulative_urban_ttt", "cumulative_freeway_ttt",
+                "computation_time_sec"]
 
     print(f"=== {controller_id} ===", flush=True)
-    for step in range(steps):
+    for step in range(start_step, steps):
         t = step * cfg.simulation.control_interval
         forecast = profile.horizon(t, cfg.mpc.horizon_steps + max(0, cfg.mpc.leader_value_depth))
         t0 = time.perf_counter()
@@ -971,6 +1008,25 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
         }
         row.update({k: v for k, v in log.diagnostics.items() if isinstance(v, (int, float, bool))})
         run_rows.append(row)
+        # ---- Tier1: 체크포인트 append + progress.csv 즉시 기록(중단 시 데이터 소실 방지) ----
+        if _ckpt_on:
+            _sim_num = {k: v for k, v in vars(sim).items() if isinstance(v, (int, float)) and not k.startswith("_")}
+            _sim_dicts = {
+                k: dict(v) for k, v in vars(sim).items()
+                if isinstance(v, dict) and v and not k.startswith("_")
+                and all(isinstance(x, (int, float)) for x in v.values())
+            }
+            with open(out_dir / "checkpoints.pkl", "wb" if step == start_step else "ab") as _f:
+                _pk.dump({
+                    "step": step, "time_sec": sim.state.time_sec, "state": sim.state.copy(),
+                    "previous_control": control.copy(), "sim_num": _sim_num, "sim_dicts": _sim_dicts,
+                }, _f)
+        _pg_path = out_dir / "progress.csv"
+        _pg_new = (step == start_step and start_step == 0) or not _pg_path.exists()
+        with open(_pg_path, "w" if (step == start_step and start_step == 0) else "a", encoding="utf-8") as _f:
+            if _pg_new:
+                _f.write(",".join(_pg_core) + "\n")
+            _f.write(",".join(str(row.get(c, "")) for c in _pg_core) + "\n")
         print(
             f"{controller_id} step {step + 1}/{steps} "
             f"cum_ttt={sim.total_ttt:.3f} step_ttt={row['step_total_ttt']:.3f} "
