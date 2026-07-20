@@ -193,6 +193,11 @@ class NetworkConfig:
     # 5~18% 감소(Hall & Agyemang-Duah 1991; Cassidy & Bertini 1999). ρ95식 FD 변형과 달리
     # 정적 FD·저장용량 불변 — 혼잡 진입의 동적 비용만 추가(민감도 arm φ=0.85).
     capacity_drop_discharge_phi: float = 1.0
+    # METANET 표준 on-ramp merge 항 δ(2026-07-20, Messmer & Papageorgiou): 합류 유입이
+    # 본선 속도를 교란 Δv=−δ·T·q_ramp·v/(L·λ·(ρ+κ)). 0(기본)=비활성(비트동일).
+    # 문헌 표준값 δ≈0.0122 — merge 지점에서 breakdown이 촉발되는 현실 재현 + metering의
+    # 교과서적 payoff(합류 교란 저감) 신설.
+    metanet_delta_merge: float = 0.0
     ramps: List[str] = field(default_factory=lambda: ["R_D_W", "R_F_W", "R_D_E", "R_F_E"])
     ramp_to_freeway: Dict[str, str] = field(default_factory=lambda: {
         "R_D_W": "FW_W", "R_F_W": "FW_W", "R_D_E": "FW_E", "R_F_E": "FW_E"

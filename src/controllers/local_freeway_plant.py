@@ -303,6 +303,16 @@ def freeway_substep_local(
             net.freeway_segment_length_km, net.metanet_tau_h,
             select_anticipation_nu(rho, net), net.metanet_kappa_veh_km_lane, net.v_min,
         )
+        _delta_m = float(getattr(net, "metanet_delta_merge", 0.0) or 0.0)
+        if _delta_m > 0.0 and ramp_in_by_segment[i] > 0.0:
+            # plant merge 항 복제(예측-플랜트 정합): Δv=−δ·T·q_ramp·v/(L·λ·(ρ+κ)).
+            v_new = max(
+                net.v_min,
+                v_new
+                - _delta_m * dt_h * ramp_in_by_segment[i] * speeds[i]
+                / (net.freeway_segment_length_km * max(lanes_now[i], 1.0e-9)
+                   * (rho + net.metanet_kappa_veh_km_lane)),
+            )
         if boundary_speed_cap is not None and v_new > boundary_speed_cap:
             v_new = max(net.v_min, boundary_speed_cap)
         next_rhos.append(rho_new)

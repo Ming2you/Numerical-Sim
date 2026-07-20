@@ -354,6 +354,8 @@ def freeway_substep(
     # φ=1(기본)이면 비활성(비트동일). VSL이 ρ_crit(VSL)을 올려 subcritical로 지키면 drop을
     # 실제로 회피한다 — 제어의 물리적 payoff 지점(상세 근거는 state.py 필드 주석).
     phi_cd = float(getattr(net, "capacity_drop_discharge_phi", 1.0) or 1.0)
+    # METANET 표준 merge 항 δ(2026-07-20): 0(기본)=비활성. 상세는 state.py 필드 주석.
+    delta_m = float(getattr(net, "metanet_delta_merge", 0.0) or 0.0)
     target_flow = _nuf_target_flow_veh_h(control, cfg)
 
     if ramp_release_veh_h is None:
@@ -614,6 +616,15 @@ def freeway_substep(
                 net.metanet_kappa_veh_km_lane,
                 net.v_min,
             )
+            if delta_m > 0.0 and ramp_in_by_link[link][i] > 0.0:
+                # merge 항: 합류 유입의 본선 속도 교란(Δv=−δ·T·q_ramp·v/(L·λ·(ρ+κ))).
+                v_new = max(
+                    net.v_min,
+                    v_new
+                    - delta_m * dt_h * ramp_in_by_link[link][i] * speeds[i]
+                    / (net.freeway_segment_length_km * max(lanes_now[i], 1.0e-9)
+                       * (rho + net.metanet_kappa_veh_km_lane)),
+                )
             if v_new <= net.v_min + 1.0e-9:
                 speed_projection_count += 1
             if boundary_speed_cap is not None and v_new > boundary_speed_cap:
