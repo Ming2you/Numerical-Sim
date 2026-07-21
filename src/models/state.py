@@ -365,6 +365,8 @@ class MPCConfig:
     # proxy-gradient 유도 리더 시드(2026-07-21): coarse 시드에 -∇f_proxy 하강 광선 추가.
     # False(기본)=원본 균등 Halton만(비트동일). enable_gradseed()가 True로 세팅.
     leader_gradseed_enabled: bool = False
+    # box 상단 편향 Halton warp 지수(2026-07-21): u->u^p, p<1이면 상단 집중. 1.0=균등(비트동일).
+    leader_bias_sample_pow: float = 1.0
     # 실제-v far(2026-07-20, 사용자 설계): state-aware 유도의 속도원(源)을 정적 FD V(ρ) 대신
     # rollout 말단 state의 **실제 속도**로 — Wang 물리의 동적 capacity drop(정적 FD에 없음)이
     # 말단 v에 이미 반영돼 있으므로 추가 적분 없이 배수율·주행시간에 전파. 혼잡(ρ>ρ_crit)

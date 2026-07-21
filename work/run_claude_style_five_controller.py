@@ -265,6 +265,12 @@ def make_controller(controller_id: str, cfg: ExperimentConfig):
             # 시드 추가 — 적은 평가로 최적 예산 접근. 미설정 시 완전 비활성(원본 동일).
             from src.controllers.gradseed_mpc import enable_gradseed
             enable_gradseed(controller)
+        if _os_ap.environ.get("BIAS_SAMPLE") == "1":
+            # box 상단 편향 샘플링(2026-07-21, 사용자 설계): 선택점이 box 상단 0.85~0.94에
+            # 몰려 있어 Halton을 상단 warp. BIAS_POW=p(<1). CAND와 병용해 후보 더 축소.
+            from src.controllers.biasedsample_mpc import enable_biased_sampling
+            cfg.mpc.leader_bias_sample_pow = float(_os_ap.environ.get("BIAS_POW", "0.4"))
+            enable_biased_sampling(controller)
         controller.nash_solver.f1_spillback_weight = 0.0
         controller.signal_price_enabled = True
         controller.metering_price_enabled = True
