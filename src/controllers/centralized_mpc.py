@@ -583,17 +583,25 @@ class CentralizedMPC:
         span = np.maximum(upper - lower, 1.0e-9)
         maxiter = max(1, int(self.cfg.mpc.optimizer_maxiter))
         n_starts = max(1, int(self.cfg.mpc.optimizer_n_starts))
+        # 하드 평가예산(0=무제한). >0이면 소진 시 best-so-far 반환 후 종료 — grid와 동일 예산 공정비교.
+        max_eval = max(0, int(getattr(self.cfg.mpc, "centralized_slsqp_max_eval", 0)))
         time_index = int(round(state.time_sec / max(self.cfg.simulation.control_interval, 1.0e-9)))
         rng = np.random.default_rng(int(self.cfg.simulation.random_seed) + 15485863 * time_index)
+
+        class _BudgetExhausted(Exception):
+            pass
 
         evals = 0
         best_obj = float("inf")
         best_control = previous.copy()
         success_count = 0
         last_message = ""
+        budget_hit = False
 
         def evaluate(vec: np.ndarray) -> float:
             nonlocal evals, best_obj, best_control
+            if max_eval and evals >= max_eval:
+                raise _BudgetExhausted()
             evals += 1
             try:
                 clipped = np.clip(np.asarray(vec, dtype=float), lower, upper)
@@ -620,22 +628,30 @@ class CentralizedMPC:
         starts = starts[:n_starts]
 
         # 모든 초기점에서 같은 중앙 NLP를 풀고, Wu 논문처럼 objective가 가장 낮은 해를 채택한다.
+        # max_eval>0이면 예산 소진 즉시 _BudgetExhausted로 빠져나와 best-so-far를 채택한다.
         for start_vec in starts:
-            result = minimize(
-                evaluate,
-                start_vec,
-                method="SLSQP",
-                bounds=bounds,
-                options={
-                    "maxiter": maxiter,
-                    "ftol": float(self.cfg.mpc.centralized_slsqp_ftol),
-                    "disp": False,
-                },
-            )
-            last_message = str(getattr(result, "message", ""))
-            if bool(getattr(result, "success", False)):
-                success_count += 1
-            evaluate(np.asarray(result.x, dtype=float))
+            if budget_hit:
+                break
+            try:
+                result = minimize(
+                    evaluate,
+                    start_vec,
+                    method="SLSQP",
+                    bounds=bounds,
+                    options={
+                        "maxiter": maxiter,
+                        "ftol": float(self.cfg.mpc.centralized_slsqp_ftol),
+                        "disp": False,
+                    },
+                )
+                last_message = str(getattr(result, "message", ""))
+                if bool(getattr(result, "success", False)):
+                    success_count += 1
+                evaluate(np.asarray(result.x, dtype=float))
+            except _BudgetExhausted:
+                budget_hit = True
+                last_message = "budget_exhausted"
+                break
 
         if not np.isfinite(best_obj):
             best_obj, best_control, evals_grid, fine_improved = self._structured_grid_search(
@@ -663,6 +679,8 @@ class CentralizedMPC:
             "centralized_slsqp_maxiter": float(maxiter),
             "centralized_slsqp_ftol": float(self.cfg.mpc.centralized_slsqp_ftol),
             "centralized_slsqp_last_message_length": float(len(last_message)),
+            "centralized_slsqp_max_eval": float(max_eval),
+            "centralized_slsqp_budget_hit": float(budget_hit),
         })
         return float(best_obj), best_control, evals, success_count == 0
 

@@ -452,6 +452,9 @@ class MPCConfig:
     optimizer_n_starts: int = 2
     centralized_solver_mode: str = "slsqp"
     centralized_slsqp_ftol: float = 1.0e-3
+    # SLSQP 하드 평가예산(스텝당 full-network rollout 상한). 0=무제한(수렴까지, 비평활서 폭주).
+    # >0이면 예산 소진 시 best-so-far 반환 후 종료 — grid와 동일 예산 공정비교용(2026-07-21).
+    centralized_slsqp_max_eval: int = 0
     # P-CENT 구조적 그리드 tightness 실험 노브(기본=현행). refresh_sec 낮추면 전역 재탐색을
     # 매 스텝, dense=True면 레버별 격자 레벨을 조밀하게(상한 빡빡함 측정용).
     centralized_grid_refresh_sec: float = 1800.0

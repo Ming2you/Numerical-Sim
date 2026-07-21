@@ -584,6 +584,10 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
         # Wang 물리 재검). capacity-drop=비볼록·비평활이라 gradient가 헤매는지 실측 —
         # "왜 grid인가/왜 분산이 강건한가"의 대조. 목적함수·far·refresh는 grid와 동일.
         cfg.mpc.centralized_solver_mode = "slsqp"
+    if _os.environ.get("CENT_SLSQP_MAXEVAL"):
+        # SLSQP 하드 평가예산(스텝당 rollout 상한). grid와 동일 예산(=maxiter*n_starts) 주고
+        # 소진 시 best-so-far 반환 → 무제한 수렴(비평활서 폭주) 대신 완주+공정비교(2026-07-21).
+        cfg.mpc.centralized_slsqp_max_eval = int(_os.environ["CENT_SLSQP_MAXEVAL"])
     if _os.environ.get("CAPDROP_PHI"):
         # queue-discharge capacity drop 민감도(2026-07-20): 혼잡 세그먼트 배출 ≤ φ·용량.
         # 문헌 실측 5~18% 감소 — 민감도 arm은 φ=0.85(사용자 채택). plant+복제본 동시 적용.

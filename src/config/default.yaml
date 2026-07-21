@@ -230,9 +230,11 @@ mpc:
   relaxed_wu_vsl_include_neutral: true
   grid_global_refresh_sec: 1800.0
   # follower grid 평가는 순수 파이썬 dict 루프(GIL-bound)라 thread는 무효(serial=24.7s vs thread=25.1s).
-  # process는 production 하네스에서 정상 동작·정확도 동일·2.49× 단축(2026-06-21 검증). leader는 serial로
-  # 두어 중첩 pool을 피한다(leader=serial+grid=process가 최적: 229s vs leader=process 362s vs serial 569s).
-  grid_parallel_backend: process
+  # SERIAL 고정(2026-07-21, 사용자 지시): 모든 컨트롤러를 단일코어 동일환경서 비교(공정성).
+  # 실측 확인 — 최근 w60u 매트릭스 전 런은 이미 serial로 실행됐고(진단 parallel_backend_serial=1.0,
+  # 벽시계도 직렬과 일치) 병렬 발동 이력 없음. 이 고정은 동작 비트동일이며 config를 현실과 일치시킴.
+  # (과거 process 벤치 근거는 별개 무대: 229s vs leader=process 362s vs serial 569s — 참고 보존.)
+  grid_parallel_backend: serial
   # 워커 수는 풀 closed-loop 매트릭스 런의 메모리가 상한을 정한다(각 워커=풀 Python 프로세스).
   # 12는 일회성 decide엔 ~20% 빨랐으나 다중 컨트롤러 풀런에서 MemoryError → 8이 안정 상한(2026-06-22).
   grid_parallel_max_workers: 8
