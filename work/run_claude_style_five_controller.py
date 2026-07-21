@@ -1056,7 +1056,12 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
             if _sup_pfo is not None and not _sup_off:
                 # 기권 후보: 링크-PFO 해를 같은 상태에서 계산해 공통 V로 채점, 승자 집행.
                 _pfo_ctrl = decide("WU-FAITHFUL-FOLLOWER", _sup_pfo, sim, forecast, previous, _sup_pfo_cfg, step)
-                _v_ps = _sup_score(control, forecast)
+                # SUP_FAST(2026-07-21): P-Stack 해의 V는 리더가 방금 계산한 best_objective를
+                # 재사용(rollout 1회 절감, 무손실). 리더 objective와 감독 채점이 동형(near+far).
+                if _os.environ.get("SUP_FAST") == "1" and "leader_candidate_best_objective" in control.diagnostics:
+                    _v_ps = float(control.diagnostics["leader_candidate_best_objective"])
+                else:
+                    _v_ps = _sup_score(control, forecast)
                 _v_pfo = _sup_score(_pfo_ctrl, forecast)
                 if _v_pfo < _v_ps - 1.0e-9:
                     _pfo_ctrl.diagnostics["sup_pick_pfo"] = 1.0
