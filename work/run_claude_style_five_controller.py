@@ -260,6 +260,11 @@ def make_controller(controller_id: str, cfg: ExperimentConfig):
             cfg.mpc.leader_skip_local_refinement = True
             cfg.mpc.leader_rollout_early_stop = True
         controller = F1StackelbergWuMeteredController(cfg)
+        if _os_ap.environ.get("GRAD_SEED") == "1":
+            # proxy-gradient 유도 시드(2026-07-21, 사용자 설계): 균등 Halton 대신 하강 방향
+            # 시드 추가 — 적은 평가로 최적 예산 접근. 미설정 시 완전 비활성(원본 동일).
+            from src.controllers.gradseed_mpc import enable_gradseed
+            enable_gradseed(controller)
         controller.nash_solver.f1_spillback_weight = 0.0
         controller.signal_price_enabled = True
         controller.metering_price_enabled = True
