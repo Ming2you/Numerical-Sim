@@ -972,6 +972,9 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
     # (b4의 s5~10 사전 배치) + 평시 b9 동일. 폐쇄 없는 셀에선 m2와 완전 동치.
     _fargate_mode = _os.environ.get("FAR_GATE", "")
     _fargate_on = _fargate_mode in ("1", "2", "3")
+    # capdrop 검출 문턱(2026-07-21): 실배출 < thr·용량이면 drop. 기본 0.95(실측 지속 ~10%의
+    # 절반). FAR_GATE_THR로 하향(예 0.90) — 일시적 딥 무시, 진짜 지속붕괴에만 게이트 개방.
+    _fargate_thr = float(_os.environ.get("FAR_GATE_THR", "0.95"))
     _fargate_links: set = set()
     _fargate_stress = False
 
@@ -1023,7 +1026,7 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
                         _v = float(_spds[_i]) if _i < len(_spds) else 0.0
                         _flow = segment_flow_veh_h(_rho, _v, _lam)
                         _cap = segment_flow_veh_h(_rc, desired_speed_kmh(_rc, _vf, _rc), _lam)
-                        if _flow < 0.95 * _cap:
+                        if _flow < _fargate_thr * _cap:
                             _drop_seen = True
                 if _drop_seen:
                     _fargate_stress = True   # drop 발생 → ON 래치
