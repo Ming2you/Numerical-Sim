@@ -1,0 +1,25 @@
+[
+  {
+    "controller_id": "P-STACK-WU-FAITHFUL-ALLPRICE-JOINT",
+    "total_ttt": 5844.48,
+    "urban_ttt": 2788.036,
+    "freeway_ttt": 3056.444,
+    "free_flow_reference_total_ttt": 2059.784,
+    "total_delay": 3784.696,
+    "urban_delay": 1377.7,
+    "freeway_delay": 2406.996,
+    "completed_vehicles": 36600.8,
+    "completed_urban_vehicles": 16948.5,
+    "completed_freeway_vehicles": 19652.3,
+    "network_throughput_veh_h": 9150.2,
+    "terminal_total_vehicles": 260.5,
+    "terminal_urban_vehicles": 165.0,
+    "terminal_onramp_vehicles": 16.2,
+    "terminal_freeway_vehicles": 93.0,
+    "computation_time_sec": 3456.177,
+    "mean_step_compute_sec": 43.202,
+    "max_step_compute_sec": 109.98,
+    "ttt_improvement_vs_no_control_pct": 0.0,
+    "delay_improvement_vs_no_control_pct": 0.0
+  }
+]

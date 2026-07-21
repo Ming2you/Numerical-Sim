@@ -1,0 +1,25 @@
+[
+  {
+    "controller_id": "P-CENT",
+    "total_ttt": 7337.477,
+    "urban_ttt": 4337.626,
+    "freeway_ttt": 2999.851,
+    "free_flow_reference_total_ttt": 2123.942,
+    "total_delay": 5213.535,
+    "urban_delay": 2883.314,
+    "freeway_delay": 2330.222,
+    "completed_vehicles": 37764.6,
+    "completed_urban_vehicles": 17488.1,
+    "completed_freeway_vehicles": 20276.5,
+    "network_throughput_veh_h": 9441.1,
+    "terminal_total_vehicles": 241.1,
+    "terminal_urban_vehicles": 148.7,
+    "terminal_onramp_vehicles": 11.1,
+    "terminal_freeway_vehicles": 85.8,
+    "computation_time_sec": 15595.657,
+    "mean_step_compute_sec": 194.946,
+    "max_step_compute_sec": 259.114,
+    "ttt_improvement_vs_no_control_pct": 0.0,
+    "delay_improvement_vs_no_control_pct": 0.0
+  }
+]

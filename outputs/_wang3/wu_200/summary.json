@@ -1,0 +1,25 @@
+[
+  {
+    "controller_id": "WU-CD-F",
+    "total_ttt": 8808.601,
+    "urban_ttt": 4830.246,
+    "freeway_ttt": 3978.355,
+    "free_flow_reference_total_ttt": 2123.942,
+    "total_delay": 6684.66,
+    "urban_delay": 3375.933,
+    "freeway_delay": 3308.726,
+    "completed_vehicles": 37750.3,
+    "completed_urban_vehicles": 17473.9,
+    "completed_freeway_vehicles": 20276.5,
+    "network_throughput_veh_h": 9437.6,
+    "terminal_total_vehicles": 246.1,
+    "terminal_urban_vehicles": 165.0,
+    "terminal_onramp_vehicles": 19.8,
+    "terminal_freeway_vehicles": 78.6,
+    "computation_time_sec": 603.797,
+    "mean_step_compute_sec": 7.547,
+    "max_step_compute_sec": 18.104,
+    "ttt_improvement_vs_no_control_pct": 0.0,
+    "delay_improvement_vs_no_control_pct": 0.0
+  }
+]

@@ -1,0 +1,25 @@
+[
+  {
+    "controller_id": "NO-CONTROL",
+    "total_ttt": 3170.367,
+    "urban_ttt": 1159.068,
+    "freeway_ttt": 2011.299,
+    "free_flow_reference_total_ttt": 1835.23,
+    "total_delay": 1335.138,
+    "urban_delay": -97.345,
+    "freeway_delay": 1432.483,
+    "completed_vehicles": 32629.9,
+    "completed_urban_vehicles": 15105.3,
+    "completed_freeway_vehicles": 17524.5,
+    "network_throughput_veh_h": 8157.5,
+    "terminal_total_vehicles": 248.2,
+    "terminal_urban_vehicles": 165.1,
+    "terminal_onramp_vehicles": 17.7,
+    "terminal_freeway_vehicles": 80.7,
+    "computation_time_sec": 0.002,
+    "mean_step_compute_sec": 0.0,
+    "max_step_compute_sec": 0.0,
+    "ttt_improvement_vs_no_control_pct": 0.0,
+    "delay_improvement_vs_no_control_pct": 0.0
+  }
+]
