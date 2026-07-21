@@ -1038,7 +1038,14 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
             control = baseline_control("no_control", cfg, sim.state, forecast[0])
         else:
             control = decide(controller_id, controller, sim, forecast, previous, cfg, step)
-            if _sup_pfo is not None:
+            # SUP_GATE=fargate(2026-07-21, 사용자 설계): far 게이트가 ON인 스텝엔 감독자 OFF.
+            # 원리 — 동일한 물리 조건(조율 지배 국면: capdrop/사고)이 far를 부르고 감독자를
+            # 쫓아낸다. far ON(회복 다단계 조율)일 때 근시 PFO 스위칭이 포석을 깨므로(b11
+            # incident/220/240 병리), 그 국면에선 리더 계획을 그대로 집행. 별도 신호 없이
+            # 기존 far 게이트 상태(leader_mfd_far_enabled) 재사용 — 단일 게이트, 이중 스위치.
+            _sup_off = (_os.environ.get("SUP_GATE") == "fargate"
+                        and bool(cfg.mpc.leader_mfd_far_enabled))
+            if _sup_pfo is not None and not _sup_off:
                 # 기권 후보: 링크-PFO 해를 같은 상태에서 계산해 공통 V로 채점, 승자 집행.
                 _pfo_ctrl = decide("WU-FAITHFUL-FOLLOWER", _sup_pfo, sim, forecast, previous, _sup_pfo_cfg, step)
                 _v_ps = _sup_score(control, forecast)
