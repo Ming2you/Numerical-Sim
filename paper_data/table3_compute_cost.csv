@@ -1,0 +1,25 @@
+controller,cell,mean_step_sec,setting,note
+No control,155,0.0,-,no optimization
+No control,170,0.0,-,no optimization
+Dist.,155,7.795,-,Wu WU-CD-F
+Dist.,170,10.183,-,Wu WU-CD-F
+Dist.,skew15,10.197,-,Wu WU-CD-F
+Dist.,incident,10.507,-,Wu WU-CD-F
+Dist.,190,10.811,-,Wu WU-CD-F
+Aug. Dist.,155,1.731,-,PFO link-local follower
+Aug. Dist.,170,2.169,-,PFO link-local follower
+Aug. Dist.,skew15,2.149,-,PFO link-local follower
+Aug. Dist.,incident,2.544,-,PFO link-local follower
+Aug. Dist.,190,2.141,-,PFO link-local follower
+Proposed,155,36.284,CAND49,b13 full sampling
+Proposed,170,36.203,CAND49,b13 full sampling
+Proposed,skew15,37.178,CAND49,b13 full sampling
+Proposed,incident,36.403,CAND49,b13 full sampling
+Proposed,190,36.834,CAND49,b13 full sampling
+Proposed,170,26.065,CAND25,adopted lossless setting
+Proposed,incident,27.046,CAND25,adopted lossless setting
+Centralized,155,211.273,dense,exceeds 180s interval
+Centralized,170,209.68,dense,exceeds 180s interval
+Centralized,skew15,211.17,dense,exceeds 180s interval
+Centralized,incident,196.926,dense,exceeds 180s interval
+Centralized,190,202.016,dense,exceeds 180s interval
