@@ -619,10 +619,59 @@ class StackelbergMPCController:
             }
             for item in all_evaluations
         ]
+        # price 곡률 진단(2026-07-22): LEADER_CAND_LOG 지정 시 스텝별 전 후보 (N_UF,objective)를
+        # 남겨 목적함수 곡면 곡률을 사후 측정한다(추가 계산 없음, env-gated).
+        _cand_log = os.environ.get("LEADER_CAND_LOG")
+        if _cand_log:
+            _step = os.environ.get("NUMSIM_STACKELBERG_PROGRESS_STEP", "")
+            _p = Path(_cand_log).with_suffix(".allcand.csv")
+            try:
+                _p.parent.mkdir(parents=True, exist_ok=True)
+                _new = not _p.exists()
+                with _p.open("a", newline="", encoding="utf-8") as _fh:
+                    _w = csv.writer(_fh)
+                    if _new:
+                        _w.writerow(["step", "index", "N_P_star", "N_UF_star",
+                                     "objective", "base", "follower_ttt", "stage"])
+                    for _it in all_evaluations:
+                        _w.writerow([
+                            _step, _it.index, _it.action.N_P_star, _it.action.N_UF_star,
+                            _it.objective,
+                            _it.objective_terms.get("leader_objective_base", ""),
+                            _it.objective_terms.get("leader_follower_ttt_base", ""),
+                            _it.stage,
+                        ])
+            except OSError:
+                pass
         best_eval, fallback_metadata = self._select_with_fallback_guard(
             full_evaluations,
             fallback_evaluations,
         )
+        # price 곡률 진단 능동 스윕(2026-07-22): LEADER_CURV_SWEEP 지정 시, 선택된 N_P 고정하고
+        # N_UF를 넓게 11점 스윕하며 J를 찍는다(클리프 가로지르는 진짜 곡률용). search 후 별도
+        # 평가라 결정·궤적 불변. env-gated.
+        _sweep = os.environ.get("LEADER_CURV_SWEEP")
+        if _sweep:
+            _step_s = os.environ.get("NUMSIM_STACKELBERG_PROGRESS_STEP", "")
+            _npv = float(best_eval.action.N_P_star)
+            _nuf0 = float(best_eval.action.N_UF_star)
+            _span = max(abs(_nuf0) * 0.5, 300.0)
+            _sp = Path(_sweep).with_suffix(".sweep.csv")
+            try:
+                _sp.parent.mkdir(parents=True, exist_ok=True)
+                _newp = not _sp.exists()
+                with _sp.open("a", newline="", encoding="utf-8") as _sfh:
+                    _sw = csv.writer(_sfh)
+                    if _newp:
+                        _sw.writerow(["step", "req_N_UF", "N_P", "objective", "realized_N_UF"])
+                    for _k in range(11):
+                        _nuf = _nuf0 - _span + 2.0 * _span * _k / 10.0
+                        _ev = self._evaluate_full_candidate(
+                            900000 + _k, LeaderAction(_npv, _nuf), state, forecast, previous,
+                        )
+                        _sw.writerow([_step_s, _nuf, _npv, _ev.objective, _ev.action.N_UF_star])
+            except OSError:
+                pass
         metadata = dict(base_metadata)
         metadata.update(proxy_metadata)
         metadata.update(refined_proxy_metadata)

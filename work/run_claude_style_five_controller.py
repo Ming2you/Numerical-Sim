@@ -1001,6 +1001,11 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
     print(f"=== {controller_id} ===", flush=True)
     for step in range(start_step, steps):
         t = step * cfg.simulation.control_interval
+        # 리더 후보 곡면 로깅(2026-07-22, price 곡률 진단용). LEADER_CAND_LOG=<path> 지정 시
+        # 스텝별 (N_P,N_UF,objective) 후보 평가를 그대로 남긴다(추가 계산 없음, env-gated).
+        if _os.environ.get("LEADER_CAND_LOG"):
+            _os.environ["NUMSIM_STACKELBERG_PROGRESS_FILE"] = _os.environ["LEADER_CAND_LOG"]
+            _os.environ["NUMSIM_STACKELBERG_PROGRESS_STEP"] = str(step)
         forecast = profile.horizon(t, cfg.mpc.horizon_steps + max(0, cfg.mpc.leader_value_depth))
         t0 = time.perf_counter()
         # WARMUP_NC_STEPS: 웜업 구간은 전 arm 공통 no-control(분석창 진입 상태 동일화 +
