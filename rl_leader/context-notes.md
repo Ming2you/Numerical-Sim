@@ -31,6 +31,11 @@
 - forecast: `DemandProfile(cfg, scenario).horizon(t, K)`.
 - **Phase 0 단순화**: budget만(price/far/closure 처리 생략) — nash_solver.solve 원 control 사용. 충실판은 `_evaluate_full_candidate` 경유(closure·far 포함)로 Phase 3에서.
 
+## 환경 제약 (중요)
+- **torch·sklearn 둘 다 없음**(codex-runtime python). Phase 1 BC는 **순수 numpy MLP**로 구현(`bc_train.py`).
+- **Phase 2 SAC는 torch 필요** → 별도 셋업(pip install torch, 또는 numpy로 SAC 구현은 큰 비용). RL 학습 본격화 전 결정 필요.
+- teacher decide ~36s/스텝 → BC 데이터 수집이 비쌈(시나리오당 ~45–90분). 다양성 위해 여러 시나리오 필요하니 밤샘 배치 고려.
+
 ## 미해결/주의
 - env._observe 정규화 상수는 임시(1000/100 등) — Phase 1 전 러너 스케일과 정렬 필요.
 - np/nuf action bound (0~400 / 0~8000)는 잠정 — feasible box 실측으로 조정.

@@ -48,8 +48,8 @@ class RLLeaderEnv:
 
     def __init__(self, scenario_name: str = "sweet_170_incident_w60", T_total: float = 14400.0,
                  warmup_nc_steps: int = 5,
-                 np_bounds: tuple[float, float] = (0.0, 400.0),
-                 nuf_bounds: tuple[float, float] = (0.0, 8000.0)):
+                 np_bounds: tuple[float, float] = (0.0, 2200.0),
+                 nuf_bounds: tuple[float, float] = (0.0, 6000.0)):
         self.scenario_name = scenario_name
         self.cfg, self.scenario = make_cfg(scenario_name)
         self.T_total = float(T_total)
@@ -97,6 +97,21 @@ class RLLeaderEnv:
         info = {"step_ttt": step_ttt, "cum_ttt": float(self.sim.total_ttt),
                 "N_P": float(n_p), "N_UF": float(n_uf)}
         return self._observe(), reward, done, info
+
+    # ---------- BC 수집용 ----------
+    def budget_to_action(self, n_p: float, n_uf: float) -> np.ndarray:
+        a0 = 2.0 * (float(n_p) - self.np_lo) / max(self.np_hi - self.np_lo, 1e-9) - 1.0
+        a1 = 2.0 * (float(n_uf) - self.nuf_lo) / max(self.nuf_hi - self.nuf_lo, 1e-9) - 1.0
+        return np.clip(np.array([a0, a1], dtype=np.float32), -1.0, 1.0)
+
+    def step_with_control(self, control):
+        """teacher가 만든 control을 직접 적용(follower 재실행 없이). 반환: obs, step_ttt, done."""
+        forecast = self._forecast()
+        log = self.sim.step(control, forecast[0], self.step_idx)
+        self.previous = control.copy()
+        self.step_idx += 1
+        step_ttt = float(log.urban_ttt + log.freeway_ttt)
+        return self._observe(), step_ttt, self.step_idx >= self.n_steps
 
     # ---------- 내부 ----------
     def _forecast(self):
