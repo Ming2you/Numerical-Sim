@@ -16,7 +16,7 @@ import torch.nn.functional as F
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from rl_leader.env import RLLeaderEnv
+from rl_leader.env import RLLeaderEnv, make_random_scenario
 from rl_leader.nets import Actor, Critic
 
 
@@ -36,10 +36,21 @@ class Replay:
 
 def train(args):
     torch.manual_seed(args.seed); np.random.seed(args.seed)
-    scenarios = [s.strip() for s in args.scenarios.split(",") if s.strip()]
-    envs = {s: RLLeaderEnv(scenario_name=s, T_total=args.T) for s in scenarios}
-    cur = scenarios[0]; env = envs[cur]
-    print(f"multi-scenario SAC: {scenarios}", flush=True)
+    rng = np.random.default_rng(args.seed)
+    # continuous: 에피소드마다 연속 수요분포(155~240)+랜덤 stressor에서 새 env 샘플(도메인 랜덤화).
+    # hold-out: stressor 활성 시 수요≤holdout_demand → 190+stressor는 학습에 없음(test 전용).
+    if args.continuous:
+        def new_env():
+            scen = make_random_scenario(rng, args.holdout_demand)
+            return RLLeaderEnv(scenario_dict=scen, T_total=args.T)
+        env = new_env(); cur = "random"; envs = None
+        print(f"continuous SAC: demand~U[1.55,2.40], stressor∈{{none,skew,incident}}, "
+              f"holdout_demand={args.holdout_demand}", flush=True)
+    else:
+        scenarios = [s.strip() for s in args.scenarios.split(",") if s.strip()]
+        envs = {s: RLLeaderEnv(scenario_name=s, T_total=args.T) for s in scenarios}
+        cur = scenarios[0]; env = envs[cur]
+        print(f"multi-scenario SAC: {scenarios}", flush=True)
     od, ad = env.obs_dim, env.action_dim
     actor = Actor(od, ad)
     if args.bc and Path(args.bc).exists():
@@ -62,7 +73,11 @@ def train(args):
             ep_i += 1
             print(f"  ep {ep_i} [{cur}]: return={ep_r:.0f} cum_ttt={info['cum_ttt']:.0f} "
                   f"step={step} elapsed={time.time()-t0:.0f}s", flush=True)
-            cur = scenarios[np.random.randint(len(scenarios))]; env = envs[cur]
+            if args.continuous:
+                env = new_env()
+                cur = f"d{env.scenario.urban_scale:.2f}"
+            else:
+                cur = scenarios[np.random.randint(len(scenarios))]; env = envs[cur]
             obs = env.reset(); ep_r = 0.0
         if rb.n >= max(args.batch, args.warmup_rand):
             o, ac, rw, o2b, db = rb.sample(args.batch)
@@ -90,6 +105,8 @@ if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--bc", default=str(ROOT / "rl_leader" / "actor_bc.pt"))
     p.add_argument("--scenarios", default="sweet_155_w60,sweet_170_w60,sweet_170_skew15_w60,sweet_170_incident_w60,sweet_190_w60")
+    p.add_argument("--continuous", action="store_true", help="연속 수요분포 도메인 랜덤화(hold-out 프로토콜)")
+    p.add_argument("--holdout_demand", type=float, default=1.80, help="stressor 활성 시 수요 상한(190은 test 전용)")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--T", type=float, default=14400.0)
     p.add_argument("--steps", type=int, default=8000)

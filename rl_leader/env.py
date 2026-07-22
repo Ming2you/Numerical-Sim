@@ -20,7 +20,7 @@ import sys
 sys.path.insert(0, str(ROOT))
 
 from src.models.state import ExperimentConfig
-from src.models.demand import DemandProfile, apply_scenario_network_overrides, load_scenarios
+from src.models.demand import DemandProfile, apply_scenario_network_overrides, load_scenarios, ScenarioConfig
 from src.simulation.simulator import MixedTrafficSimulator
 from src.controllers.stackelberg_wu_metered import StackelbergWuMeteredController
 from src.controllers.leader import LeaderAction
@@ -31,10 +31,13 @@ WANG = dict(v_free=115.0, rho_crit=31.5, metanet_tau_h=0.0056111,
             metanet_delta_merge=0.9)
 
 
-def make_cfg(scenario_name: str, fw_buffer: int = 8) -> tuple[ExperimentConfig, dict]:
+def make_cfg(scenario, fw_buffer: int = 8) -> tuple[ExperimentConfig, dict]:
+    """scenario: yaml 이름(str) 또는 시나리오 dict(도메인 랜덤화용)."""
     cfg = ExperimentConfig.from_file(str(ROOT / "src" / "config" / "default.yaml"), {})
-    scenarios = load_scenarios(str(ROOT / "src" / "config" / "scenarios.yaml"))
-    scenario = scenarios[scenario_name]
+    if isinstance(scenario, str):
+        scenario = load_scenarios(str(ROOT / "src" / "config" / "scenarios.yaml"))[scenario]
+    elif isinstance(scenario, dict):
+        scenario = ScenarioConfig.from_mapping("random", scenario)
     cfg = apply_scenario_network_overrides(cfg, scenario)
     for k, v in WANG.items():
         setattr(cfg.network, k, v)
@@ -43,15 +46,42 @@ def make_cfg(scenario_name: str, fw_buffer: int = 8) -> tuple[ExperimentConfig, 
     return cfg, scenario
 
 
+def make_random_scenario(rng, holdout_demand: float = 1.80):
+    """도메인 랜덤화 시나리오 dict. hold-out 프로토콜: stressor(사고/skew) 활성 시
+    수요를 holdout_demand(=1.80) 이하로 제한 → 190+stressor(=1.90)는 학습에 없음(test 전용)."""
+    demand = float(rng.uniform(1.55, 2.40))
+    stressor = rng.choice(["none", "skew", "incident"], p=[0.4, 0.3, 0.3])
+    if stressor != "none":
+        demand = min(demand, holdout_demand)
+    demand *= float(rng.uniform(0.98, 1.02))  # 소음
+    scen = {
+        "urban_scale": demand, "freeway_scale": demand, "ramp_scale": demand,
+        "incident_capacity_factor": 1.0,
+        "pulse_base_scale": 0.5, "pulse_start_sec": 900.0, "pulse_rampup_sec": 360.0,
+        "pulse_plateau_sec": 3600.0, "pulse_rampdown_sec": 360.0, "required": False,
+    }
+    if stressor == "skew":
+        scen["urban_west_east_ratio"] = float(rng.uniform(1.3, 2.0))
+    elif stressor == "incident":
+        seg = int(rng.integers(3, 8))                        # 하류 세그(off-ramp/merge 이후)
+        start = float(rng.choice([1260.0, 1800.0, 2400.0]))  # plateau 중
+        dur = float(rng.choice([1200.0, 1800.0, 2400.0]))
+        scen["freeway_lane_closures"] = [{
+            "link": str(rng.choice(["FW_E", "FW_W"])), "segment": seg,
+            "lane_loss": 1.0, "start_sec": start, "end_sec": start + dur}]
+    return scen
+
+
 class RLLeaderEnv:
     """Phase 0: action=(N_P,N_UF) 정규화, follower 실행, reward=-ΔTTT."""
 
     def __init__(self, scenario_name: str = "sweet_170_incident_w60", T_total: float = 14400.0,
                  warmup_nc_steps: int = 5,
                  np_bounds: tuple[float, float] = (0.0, 2200.0),
-                 nuf_bounds: tuple[float, float] = (0.0, 6000.0)):
-        self.scenario_name = scenario_name
-        self.cfg, self.scenario = make_cfg(scenario_name)
+                 nuf_bounds: tuple[float, float] = (0.0, 6000.0),
+                 scenario_dict: dict | None = None):
+        self.scenario_name = scenario_name if scenario_dict is None else "random"
+        self.cfg, self.scenario = make_cfg(scenario_dict if scenario_dict is not None else scenario_name)
         self.T_total = float(T_total)
         self.dt = float(self.cfg.simulation.control_interval)
         self.n_steps = int(self.T_total / self.dt)
