@@ -698,6 +698,9 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
     if _os.environ.get("NUF_RADIUS"):
         # 반경 상수 override. trust 산수 복원치 = 4램프 × 0.20 × 1500 = 1200.
         cfg.mpc.leader_local_nuf_radius_veh_h = float(_os.environ["NUF_RADIUS"])
+    if _os.environ.get("NUF_UPPER"):
+        # 반사실(2026-07-23): N_UF 상한 강제 → 리더를 tight metering으로 눌러 loose와 비교.
+        cfg.mpc.N_UF_star_range = [0.0, float(_os.environ["NUF_UPPER"])]
     if _os.environ.get("MFD_FAR_W"):
         cfg.mpc.leader_mfd_far_weight = float(_os.environ["MFD_FAR_W"])
     if _os.environ.get("FAR_D0") == "1":
@@ -731,6 +734,14 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
         controller.price_hinge_enabled = True  # rho_crit hinge를 가격 FD에(2026-07-23 사용자)
         if _os.environ.get("PRICE_HINGE_W"):
             controller.price_hinge_weight = float(_os.environ["PRICE_HINGE_W"])
+    if _os.environ.get("ALLPRICE_OFF") == "1":
+        # 전체 가격 채널 OFF(2026-07-23 사용자): budget(N_UF)만 남기고 green/metering/vsl/offset
+        # 한계가격 전부 끔 → "가격이 TTT에 얼마나 기여하나" 격리. metering weight도 0.
+        for _pa in ("signal_price_enabled", "metering_price_enabled", "vsl_price_enabled", "offset_price_enabled"):
+            if hasattr(controller, _pa):
+                setattr(controller, _pa, False)
+        if hasattr(getattr(controller, "nash_solver", None), "metering_marginal_price_weight"):
+            controller.nash_solver.metering_marginal_price_weight = 0.0
     if _os.environ.get("LINK_SHARE") and hasattr(controller, "nuf_link_share_mode"):
         controller.nuf_link_share_mode = str(_os.environ["LINK_SHARE"])  # {density, search, off}
     if _os.environ.get("VSL_TRUST") and hasattr(controller, "vsl_price_trust_kmh"):
@@ -1070,26 +1081,35 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
             control = baseline_control("no_control", cfg, sim.state, forecast[0])
         else:
             control = decide(controller_id, controller, sim, forecast, previous, cfg, step)
-            # PRICE-CF(2026-07-23, 사용자 설계): 같은 state·같은 budget에서 metering price만 끈
-            # follower 선택을 함께 계산·기록(적용 안 함). price가 lever를 얼마나 바꿨나의 clean
-            # 측정 — 발산한 두 궤적 비교(confound) 대신 동일 state 반사실. PRICE_CF=1로 활성.
+            # PRICE-CF(2026-07-23, 사용자 설계): 같은 state·같은 budget에서 **전체 가격 OFF**
+            # (green/metering/vsl/offset) follower 선택을 함께 계산·기록(적용 안 함). price가
+            # lever를 얼마나 바꿨나의 clean 측정 — 발산 두 궤적(confound) 대신 동일 state 반사실.
             if _os.environ.get("PRICE_CF") == "1" and controller_id.startswith("P-STACK") and control.ramp_metering:
                 _ns = getattr(controller, "nash_solver", None)
                 if _ns is not None and hasattr(_ns, "metering_marginal_price_weight"):
                     from src.controllers.leader import LeaderAction as _LA
                     _nuf = float(control.diagnostics.get("leader_realized_N_UF_star", getattr(control, "N_UF_star", 0.0)))
                     _npv = float(control.diagnostics.get("leader_realized_N_P_star", getattr(control, "N_P_star", 0.0)))
+                    _pas = ("signal_price_enabled", "metering_price_enabled", "vsl_price_enabled", "offset_price_enabled")
+                    _saved = {_a: getattr(controller, _a) for _a in _pas if hasattr(controller, _a)}
                     _w = _ns.metering_marginal_price_weight
                     try:
+                        for _a in _saved:
+                            setattr(controller, _a, False)
                         _ns.metering_marginal_price_weight = 0.0
                         _cf = _ns.solve(sim.state.copy(), _LA(_npv, _nuf), list(forecast), previous)
                         _cfc = getattr(_cf, "control", _cf)
                         for _r in control.ramp_metering:
                             control.diagnostics[f"cfon_meter_{_r}"] = float(control.ramp_metering[_r])
                             control.diagnostics[f"cfoff_meter_{_r}"] = float(_cfc.ramp_metering.get(_r, 0.0))
+                        for _sg in list(control.green_times.keys()):
+                            control.diagnostics[f"cfon_green_{_sg}"] = float(control.green_times[_sg])
+                            control.diagnostics[f"cfoff_green_{_sg}"] = float(_cfc.green_times.get(_sg, 0.0))
                     except Exception as _e:
                         control.diagnostics["cf_error"] = 1.0
                     finally:
+                        for _a, _v in _saved.items():
+                            setattr(controller, _a, _v)
                         _ns.metering_marginal_price_weight = _w
             # SUP_GATE=fargate(2026-07-21, 사용자 설계): far 게이트가 ON인 스텝엔 감독자 OFF.
             # 원리 — 동일한 물리 조건(조율 지배 국면: capdrop/사고)이 far를 부르고 감독자를
