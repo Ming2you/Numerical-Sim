@@ -331,7 +331,8 @@ freeway_follower:
   ramp_queue_penalty: 10.0
   density_penalty: 10.0
   metering_smoothness_weight: 0.1
-  vsl_smoothness_weight: 0.1
+  # 2026-07-23: 0.1은 cooldown VSL을 100에 고착시켜 115 미회복. 0으로 두면 5셀 TTT -3~-41 개선+회복(순수 VSL 이득). green_smoothness는 0.1 유지 필수(제거 시 +300~440 손해).
+  vsl_smoothness_weight: 0.0
   horizon_beam_width: 2
   horizon_ramp_candidate_limit: 3
   horizon_vsl_candidate_limit_per_link: 3

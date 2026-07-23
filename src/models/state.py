@@ -601,7 +601,7 @@ class FreewayFollowerConfig:
     ramp_queue_penalty: float = 10.0
     density_penalty: float = 10.0
     metering_smoothness_weight: float = 0.1
-    vsl_smoothness_weight: float = 0.1
+    vsl_smoothness_weight: float = 0.0  # 2026-07-23: cooldown VSL 115 회복 위해 0(green은 0.1 유지). 근거·분해는 default.yaml 주석 참조.
     # WU-CD-F freeway agent의 VSL multi-step 예측 horizon(Wu Np=10). storage-aware probe가
     # "VSL↓→off-ramp 유입↓→storage 회복→λ_eff 회복→본선 차량수↓"의 multi-step 이득을
     # 보려면 한두 step으로는 부족하다(off-ramp 동역학이 여러 step에 걸쳐 회복). 0 이하면
