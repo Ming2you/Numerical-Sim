@@ -1070,6 +1070,27 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
             control = baseline_control("no_control", cfg, sim.state, forecast[0])
         else:
             control = decide(controller_id, controller, sim, forecast, previous, cfg, step)
+            # PRICE-CF(2026-07-23, 사용자 설계): 같은 state·같은 budget에서 metering price만 끈
+            # follower 선택을 함께 계산·기록(적용 안 함). price가 lever를 얼마나 바꿨나의 clean
+            # 측정 — 발산한 두 궤적 비교(confound) 대신 동일 state 반사실. PRICE_CF=1로 활성.
+            if _os.environ.get("PRICE_CF") == "1" and controller_id.startswith("P-STACK") and control.ramp_metering:
+                _ns = getattr(controller, "nash_solver", None)
+                if _ns is not None and hasattr(_ns, "metering_marginal_price_weight"):
+                    from src.controllers.leader import LeaderAction as _LA
+                    _nuf = float(control.diagnostics.get("leader_realized_N_UF_star", getattr(control, "N_UF_star", 0.0)))
+                    _npv = float(control.diagnostics.get("leader_realized_N_P_star", getattr(control, "N_P_star", 0.0)))
+                    _w = _ns.metering_marginal_price_weight
+                    try:
+                        _ns.metering_marginal_price_weight = 0.0
+                        _cf = _ns.solve(sim.state.copy(), _LA(_npv, _nuf), list(forecast), previous)
+                        _cfc = getattr(_cf, "control", _cf)
+                        for _r in control.ramp_metering:
+                            control.diagnostics[f"cfon_meter_{_r}"] = float(control.ramp_metering[_r])
+                            control.diagnostics[f"cfoff_meter_{_r}"] = float(_cfc.ramp_metering.get(_r, 0.0))
+                    except Exception as _e:
+                        control.diagnostics["cf_error"] = 1.0
+                    finally:
+                        _ns.metering_marginal_price_weight = _w
             # SUP_GATE=fargate(2026-07-21, 사용자 설계): far 게이트가 ON인 스텝엔 감독자 OFF.
             # 원리 — 동일한 물리 조건(조율 지배 국면: capdrop/사고)이 far를 부르고 감독자를
             # 쫓아낸다. far ON(회복 다단계 조율)일 때 근시 PFO 스위칭이 포석을 깨므로(b11
