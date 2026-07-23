@@ -34,7 +34,7 @@ CALIBRATION_FINGERPRINTS: Dict[str, Dict[str, Dict[str, int]]] = {
 _calib_fingerprint_warned: set = set()
 
 
-def leader_hinge_cost(cfg: "ExperimentConfig", states: list, forecast=None) -> float:
+def leader_hinge_cost(cfg: "ExperimentConfig", states: list, forecast=None, force: bool = False) -> float:
     """Leader 채점 전용 hinge(2026-07-12 복원, 사용자 지시 — follower/가격 채널 불변).
 
     구 F1 follower hinge 2종을 leader의 candidate 채점(rollout 궤적)으로 이관:
@@ -42,8 +42,9 @@ def leader_hinge_cost(cfg: "ExperimentConfig", states: list, forecast=None) -> f
       urban:   Σ_t Σ_link max(0, 점유 − frac·cap)            [spillback 여유부족, frac=0.5]
     선형·차량수×T_c_h = veh·h(TTT 동단위, w=1이 1차 정확값). far와 같은 격리 수준 —
     후보 랭킹에만 작용하고 가격 probe·follower 목적에는 들어가지 않는다(이중계상 방지).
-    leader_hinge_enabled=False(기본)면 0 — 비트동일."""
-    if not getattr(cfg.mpc, "leader_hinge_enabled", False):
+    leader_hinge_enabled=False(기본)면 0 — 비트동일.
+    force=True면 플래그 무관 계산(price-hinge용 — 가격 FD에서 직접 호출)."""
+    if not force and not getattr(cfg.mpc, "leader_hinge_enabled", False):
         return 0.0
     from src.models.metanet import effective_rho_crit
     net = cfg.network

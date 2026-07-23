@@ -727,6 +727,10 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
         controller.price_spsa_pairs = int(_os.environ["SPSA_K"])
     if _os.environ.get("MFD_FAR_PRICE") == "1" and hasattr(controller, "price_far_enabled"):
         controller.price_far_enabled = True  # E1: 가격 FD에도 far 합산(MFD_FAR=1 필요)
+    if _os.environ.get("PRICE_HINGE") == "1" and hasattr(controller, "price_hinge_enabled"):
+        controller.price_hinge_enabled = True  # rho_crit hinge를 가격 FD에(2026-07-23 사용자)
+        if _os.environ.get("PRICE_HINGE_W"):
+            controller.price_hinge_weight = float(_os.environ["PRICE_HINGE_W"])
     if _os.environ.get("LINK_SHARE") and hasattr(controller, "nuf_link_share_mode"):
         controller.nuf_link_share_mode = str(_os.environ["LINK_SHARE"])  # {density, search, off}
     if _os.environ.get("VSL_TRUST") and hasattr(controller, "vsl_price_trust_kmh"):

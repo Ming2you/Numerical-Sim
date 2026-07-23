@@ -159,6 +159,13 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         # far는 leader 후보 채점(V=near+far)에서만 기본 작동. 켜면 E1(far도 가격에).
         # far 자체는 leader_mfd_far_enabled로도 게이트(내부 0 반환).
         self.price_far_enabled: bool = False
+        # PRICE-HINGE(2026-07-23, 사용자 아이디어): rho_crit hinge를 가격 FD에도 합산.
+        # 진단(190-skew): metering marginal price가 ~0인 이유 = 이득이 capacity-drop 문턱
+        # 비선형이라 선형 FD가 보존식-평탄 영역서 0을 읽음. hinge(Σ max(0,ρ−ρ_crit)·L·λ)를
+        # 가격 목적에 넣으면 ∂(문턱초과)/∂meter가 잡혀 rho_crit 근처 램프 가격이 살아난다.
+        # 기본 OFF(price_hinge_enabled=False)면 비트동일. weight는 PRICE_HINGE_W 노브.
+        self.price_hinge_enabled: bool = False
+        self.price_hinge_weight: float = 1.0
         # ---------- LINK-SHARE(2026-07-09, 사용자 지시): network→link 배분 자유도 개방 ----------
         # ω_F 고정 균등분할(1/n_links)이 link 간 budget 배분을 pressure 무관하게 강제하던
         # 것을 개방. dual의 "link 간 재배분" 자유를 가격이 아닌 수량 채널로 흡수.
@@ -644,13 +651,19 @@ class StackelbergWuMeteredController(StackelbergMPCController):
                 barrier += self.barrier_weight * deficit * t_c_h
         return float(barrier)
 
-    def _price_ttt(self, states: List[TrafficState], ttt: float) -> float:
+    def _price_ttt(self, states: List[TrafficState], ttt: float, forecast=None) -> float:
         """가격 FD용 rollout 채점 — E1 활성 시 TTT + far(terminal state의 MFD tail).
 
         leader 후보 채점(_leader_evaluation_base)과 같은 V=near+far 형태로 가격을 정렬한다.
         far는 leader 전용 목적항이라 d_local 차감 없음(B4 barrier와 동일 규약). 기본 OFF."""
         if self.price_far_enabled and states:
             ttt += self._mfd_far_cost_to_go(states[-1])
+        # PRICE-HINGE(2026-07-23): rho_crit 문턱 hinge를 가격 목적에 합산 → metering 한계가격이
+        # capacity-drop 비선형(∂문턱초과/∂meter)을 잡는다. forecast는 폐쇄세그 면제용(skew=무관).
+        if self.price_hinge_enabled and states:
+            from src.controllers.stackelberg_mpc import leader_hinge_cost
+            ttt += self.price_hinge_weight * leader_hinge_cost(
+                self.cfg, states, forecast, force=True)
         # VdB4 보호큐 벌점 — 리더 가격 편입(2026-07-19 4차, 기본 OFF): 전역 rollout 상태의
         # 보호 movement 큐 초과분을 가격 목적에 가산 → 모든 리더 한계가격(green/metering/VSL)이
         # 제약-인지. 소거 실측: follower 벌점은 리더 B2 가격이 상쇄(가격OFF 시 green 30→89s,
@@ -706,7 +719,7 @@ class StackelbergWuMeteredController(StackelbergMPCController):
             for s in states:
                 for rho in s.freeway_density.get(link, []):
                     max_rho = max(max_rho, float(rho))
-        return self._price_ttt(states, ttt), float(barrier), float(max_rho)
+        return self._price_ttt(states, ttt, forecast), float(barrier), float(max_rho)
 
     def _global_rollout_ttt_with_vsl(
         self,
