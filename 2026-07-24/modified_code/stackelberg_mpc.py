@@ -101,11 +101,6 @@ def mfd_far_cost_to_go(cfg: "ExperimentConfig", state: "TrafficState") -> float:
     net = cfg.network
     tc_h = float(cfg.simulation.T_c_h)
     w = float(getattr(cfg.mpc, "leader_mfd_far_weight", 1.0))
-    # 분리 가중(2026-07-24, 사용자 설계): urban reservoir·freeway reservoir에 개별 가중.
-    # 기본 1.0/1.0 → w*(far_urban+far_fw)=w*far로 기존과 비트동일. freeway엔 램프 큐 항도
-    # 포함되니(본선밀도+램프큐 뭉침) freeway_weight 조정은 둘 다 스케일함(해석 주의).
-    w_urban = float(getattr(cfg.mpc, "leader_mfd_far_urban_weight", 1.0))
-    w_fw = float(getattr(cfg.mpc, "leader_mfd_far_freeway_weight", 1.0))
     # far 항의 t_trav·배수율을 state(ρ·유효차선)에서 유도할지 — 기본 False=기존 상수식(비트동일).
     state_aware = bool(getattr(cfg.mpc, "leader_mfd_far_state_aware", False))
     # 실제-v far(2026-07-20): 속도원을 FD V(ρ) 대신 말단 state 실제 속도로(상세 state.py 주석).
@@ -118,8 +113,7 @@ def mfd_far_cost_to_go(cfg: "ExperimentConfig", state: "TrafficState") -> float:
     g_free = float(getattr(cfg.mpc, "leader_mfd_far_g_free", 640.0))
     g_cong = float(getattr(cfg.mpc, "leader_mfd_far_g_cong", 500.0))
     g_u = g_free if n_u < n_crit else g_cong
-    far_urban = (n_u * n_u) * tc_h / (2.0 * max(g_u, 1.0))
-    far_fw = 0.0
+    far = (n_u * n_u) * tc_h / (2.0 * max(g_u, 1.0))
     # ---- freeway reservoir: 본선 2차(exit 병목 큐잉, urban과 대칭) ----
     seg_len = float(net.freeway_segment_length_km)
     v_free = float(net.v_free)
@@ -176,9 +170,9 @@ def mfd_far_cost_to_go(cfg: "ExperimentConfig", state: "TrafficState") -> float:
                 g_fw_l = min(caps) if caps else g_fw
             drainable_l = g_fw_l * (t_trav_l / max(tc_h, 1.0e-9))
             n_eff = max(0.0, n_l - drainable_l)
-            far_fw += (n_eff * n_eff) * tc_h / (2.0 * max(g_fw_l, 1.0)) + n_l * t_trav_l / 2.0
+            far += (n_eff * n_eff) * tc_h / (2.0 * max(g_fw_l, 1.0)) + n_l * t_trav_l / 2.0
     else:
-        far_fw += (n_main * n_main) * tc_h / (2.0 * max(g_fw, 1.0))
+        far += (n_main * n_main) * tc_h / (2.0 * max(g_fw, 1.0))
     # ---- freeway reservoir: ramp 큐 merge-병목 대기 + 통과 ----
     for ramp in net.ramps:
         q = max(0.0, float(state.ramp_queue.get(ramp, 0.0)))
@@ -205,8 +199,8 @@ def mfd_far_cost_to_go(cfg: "ExperimentConfig", state: "TrafficState") -> float:
             )
         else:
             t_ramp_traverse = (len(dens) - midx) * seg_len / max(v_free, 1.0)
-        far_fw += (q * q) * tc_h / (2.0 * max(merge_interval, 1.0e-6)) + q * t_ramp_traverse
-    return w * (w_urban * far_urban + w_fw * far_fw)
+        far += (q * q) * tc_h / (2.0 * max(merge_interval, 1.0e-6)) + q * t_ramp_traverse
+    return w * far
 
 
 @dataclass
@@ -599,23 +593,6 @@ class StackelbergMPCController:
             ),
         })
         all_evaluations = full_evaluations + fallback_evaluations
-        # PFO_ANCHOR(2026-07-24, 사용자 설계): 리더 선택을 PFO incumbent ± radius로 제한.
-        # 사고 순간 과잉반응(step 25류 N_UF −2700 슬램 → 지평 밖 urban cascade)을 원천 차단.
-        # grid+fallback+incumbent가 여기서 합류하므로 모든 후보 소스에 일괄 적용. incumbent 자신은
-        # 항상 통과(|0|≤r)라 리스트 비지 않음. 기본 미설정=비트동일.
-        if os.environ.get("PFO_ANCHOR") == "1" and getattr(self, "_pfo_incumbent_eval", None) is not None:
-            _inc_a = self._pfo_incumbent_eval.action
-            _r_nuf = float(os.environ.get(
-                "PFO_ANCHOR_NUF", getattr(self.cfg.mpc, "leader_local_nuf_radius_veh_h", 1200.0)))
-            _r_np = float(os.environ.get(
-                "PFO_ANCHOR_NP", getattr(self.cfg.mpc, "leader_local_np_radius_veh", 1200.0)))
-            _kept = [
-                _it for _it in all_evaluations
-                if abs(float(_it.action.N_UF_star) - float(_inc_a.N_UF_star)) <= _r_nuf + 1.0e-9
-                and abs(float(_it.action.N_P_star) - float(_inc_a.N_P_star)) <= _r_np + 1.0e-9
-            ]
-            if _kept:
-                all_evaluations = _kept
         evaluations: list[dict[str, object]] = [
             {
                 "index": float(item.index),

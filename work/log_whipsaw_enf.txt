@@ -1,0 +1,19 @@
+[경고] leader_hinge 성분은 merge {4,6} 기하에서 캘리브레이션됨 - 현재 {3,5}, 재검증 필요
+[경고] np_deadband 성분은 merge {4,6} 기하에서 캘리브레이션됨 - 현재 {3,5}, 재검증 필요
+[경고] leader_mfd_far 성분은 merge {4,6} 기하에서 캘리브레이션됨 - 현재 {3,5}, 재검증 필요
+SC=sweet_170_incident_w STEPS=40 WARM=20 RADIUS_ENFORCE=True
+radius=1500.0  refresh=1800.0s(=10 steps)  skip_local_refine=True
+[제안] 캘리브레이션 표류 감지 - component_canary.py 실행 권장
+step 20 GLOBAL nuf=  5475.0 np=  464.4 stepTTT=   13.19  ref_calls=1 cand[3900,6000] center=5400 outside=8
+step 21 local  nuf=  5982.7 np=  602.4 stepTTT=   21.60  ref_calls=1 cand[4500,6000] center=6000 outside=18
+step 22 local  nuf=  5250.0 np=  801.0 stepTTT=   36.72  ref_calls=1 cand[4500,6000] center=6000 outside=18
+step 23 local  nuf=  6000.0 np=  914.5 stepTTT=   47.97  ref_calls=1 cand[4500,6000] center=6000 outside=15
+step 24 local  nuf=  6000.0 np=  940.6 stepTTT=   53.28  ref_calls=1 cand[4500,6000] center=6000 outside=21
+step 25 local  nuf=  6000.0 np=  957.8 stepTTT=   56.83  ref_calls=1 cand[4500,6000] center=6000 outside=18
+step 26 local  nuf=  6000.0 np=  847.5 stepTTT=   60.17  ref_calls=1 cand[2731,4231] center=4231 outside=12
+step 27 local  nuf=  6000.0 np=  897.4 stepTTT=   62.79  ref_calls=1 cand[4500,6000] center=6000 outside=18
+step 28 local  nuf=  5585.2 np=  846.9 stepTTT=   65.78  ref_calls=1 cand[4500,6000] center=6000 outside=21
+step 29 local  nuf=  6000.0 np=  864.0 stepTTT=   68.16  ref_calls=1 cand[4500,6000] center=6000 outside=18
+step 30 GLOBAL nuf=  3528.9 np= 1143.7 stepTTT=   71.36  ref_calls=1 cand[2029,4296] center=3529 outside=4
+step 31 local  nuf=  6000.0 np=  893.5 stepTTT=   74.99  ref_calls=1 cand[4500,6000] center=6000 outside=18
+step 32 local  nuf=  6000.0 np= 1088.6 stepTTT=   78.17  ref_calls=1 cand[4500,6000] center=6000 outside=15

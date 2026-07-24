@@ -701,8 +701,23 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
     if _os.environ.get("NUF_UPPER"):
         # 반사실(2026-07-23): N_UF 상한 강제 → 리더를 tight metering으로 눌러 loose와 비교.
         cfg.mpc.N_UF_star_range = [0.0, float(_os.environ["NUF_UPPER"])]
+    if _os.environ.get("VSL_SMOOTH_W"):
+        # VSL 마찰 override(2026-07-23): cooldown VSL 미회복 원인 — 마찰(0.1×15=1.5) > 이득 → 0으로 제거 테스트.
+        cfg.freeway_follower.vsl_smoothness_weight = float(_os.environ["VSL_SMOOTH_W"])
+    if _os.environ.get("NO_FRICTION") == "1":
+        # 모든 마찰(smoothness) 끄기(2026-07-23 사용자) — metering/vsl/offset/green 전부 0.
+        cfg.freeway_follower.metering_smoothness_weight = 0.0
+        cfg.freeway_follower.vsl_smoothness_weight = 0.0
+        cfg.urban_follower.offset_smoothness_weight = 0.0
+        cfg.urban_follower.green_smoothness_weight = 0.0
     if _os.environ.get("MFD_FAR_W"):
         cfg.mpc.leader_mfd_far_weight = float(_os.environ["MFD_FAR_W"])
+    if _os.environ.get("MFD_FAR_W_URBAN"):
+        # 분리 가중(2026-07-24): urban reservoir far 개별 스케일. 기본 1.0=비트동일.
+        cfg.mpc.leader_mfd_far_urban_weight = float(_os.environ["MFD_FAR_W_URBAN"])
+    if _os.environ.get("MFD_FAR_W_FREEWAY"):
+        # 분리 가중(2026-07-24): freeway reservoir(본선밀도+램프큐) far 개별 스케일. 기본 1.0.
+        cfg.mpc.leader_mfd_far_freeway_weight = float(_os.environ["MFD_FAR_W_FREEWAY"])
     if _os.environ.get("FAR_D0") == "1":
         cfg.mpc.leader_mfd_far_at_d0 = True  # depth=0에서도 rollout+far 채점(얕은 leader 검정)
     if _os.environ.get("EARLY_STOP") == "1":
@@ -1018,9 +1033,10 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
         t = step * cfg.simulation.control_interval
         # 리더 후보 곡면 로깅(2026-07-22, price 곡률 진단용). LEADER_CAND_LOG=<path> 지정 시
         # 스텝별 (N_P,N_UF,objective) 후보 평가를 그대로 남긴다(추가 계산 없음, env-gated).
-        if _os.environ.get("LEADER_CAND_LOG"):
-            _os.environ["NUMSIM_STACKELBERG_PROGRESS_FILE"] = _os.environ["LEADER_CAND_LOG"]
-            _os.environ["NUMSIM_STACKELBERG_PROGRESS_STEP"] = str(step)
+        if _os.environ.get("LEADER_CAND_LOG") or _os.environ.get("LEADER_GRID_SWEEP"):
+            if _os.environ.get("LEADER_CAND_LOG"):
+                _os.environ["NUMSIM_STACKELBERG_PROGRESS_FILE"] = _os.environ["LEADER_CAND_LOG"]
+            _os.environ["NUMSIM_STACKELBERG_PROGRESS_STEP"] = str(step)  # grid probe도 스텝 라벨 필요
         forecast = profile.horizon(t, cfg.mpc.horizon_steps + max(0, cfg.mpc.leader_value_depth))
         t0 = time.perf_counter()
         # WARMUP_NC_STEPS: 웜업 구간은 전 arm 공통 no-control(분석창 진입 상태 동일화 +
@@ -1111,6 +1127,37 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
                         for _a, _v in _saved.items():
                             setattr(controller, _a, _v)
                         _ns.metering_marginal_price_weight = _w
+            # GREEN_SWEEP(2026-07-23, 사용자 가설검증): 혼잡 스텝서 green을 넓게(±범위) 쓸어
+            # TTT_global(green) 곡선 기록. 6s 국소 probe가 큰-스케일 이득을 놓치나 판정(곡선이
+            # 선형이면 6s 충분, 비선형이면 넓은 probe가 이득). 가격 FD가 쓰는 바로 그 함수 호출.
+            if _os.environ.get("GREEN_SWEEP") == "1" and controller_id.startswith("P-STACK") \
+               and hasattr(controller, "_global_rollout_metrics_with_green"):
+                _sw_steps = [int(x) for x in _os.environ.get("GREEN_SWEEP_STEPS", "14,17,20").split(",")]
+                if step in _sw_steps:
+                    import csv as _csv2
+                    _tot_g = float(cfg.network.effective_green_total)
+                    _sigs_g = _os.environ.get("GREEN_SWEEP_SIGS", "A,D").split(",")
+                    _rng = float(_os.environ.get("GREEN_SWEEP_RANGE", "30"))
+                    _stp = float(_os.environ.get("GREEN_SWEEP_STEP", "2"))
+                    _pth_g = f"outputs/_diag/green_sweep_{_os.environ.get('GREEN_SWEEP_TAG','x')}.csv"
+                    _new_g = not _os.path.exists(_pth_g)
+                    with open(_pth_g, "a", newline="") as _fg:
+                        _wr = _csv2.writer(_fg)
+                        if _new_g:
+                            _wr.writerow(["step", "time_sec", "signal", "p1", "ttt", "barrier", "ref_p1"])
+                        for _sig in _sigs_g:
+                            _ref_g = float(control.green_times.get(f"{_sig}_p1", _tot_g / 2.0))
+                            _lo_g = max(6.0, _ref_g - _rng)
+                            _hi_g = min(_tot_g - 6.0, _ref_g + _rng)
+                            _p1 = _lo_g
+                            while _p1 <= _hi_g + 1e-9:
+                                try:
+                                    _ttt_g, _bar_g = controller._global_rollout_metrics_with_green(
+                                        sim.state.copy(), previous, list(forecast), _sig, _p1)
+                                    _wr.writerow([step, t, _sig, round(_p1, 1), _ttt_g, _bar_g, round(_ref_g, 1)])
+                                except Exception as _eg:
+                                    _wr.writerow([step, t, _sig, round(_p1, 1), "ERR", str(_eg)[:50], round(_ref_g, 1)])
+                                _p1 += _stp
             # SUP_GATE=fargate(2026-07-21, 사용자 설계): far 게이트가 ON인 스텝엔 감독자 OFF.
             # 원리 — 동일한 물리 조건(조율 지배 국면: capdrop/사고)이 far를 부르고 감독자를
             # 쫓아낸다. far ON(회복 다단계 조율)일 때 근시 PFO 스위칭이 포석을 깨므로(b11
@@ -1173,6 +1220,12 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
                         control.green_times[_ph_p] = _cur_p + _boost_p
                         control.green_times[_other_p] = _tot_p - control.green_times[_ph_p]
                         control.diagnostics["qprot_react_boost"] = _boost_p
+        # 반사실(2026-07-23): cooldown 구간 freeway VSL 강제 override — VSL이 회복 안 하는 게 TTT 까먹나 검증.
+        if _os.environ.get("FORCE_VSL_COOLDOWN") and step >= int(_os.environ.get("VSL_COOLDOWN_STEP", "29")):
+            _vv = float(_os.environ["FORCE_VSL_COOLDOWN"])
+            for _k in list(getattr(control, "vsl", {}).keys()):
+                if str(_k).startswith("FW"):
+                    control.vsl[_k] = _vv
         compute_time = time.perf_counter() - t0
         log = sim.step(control, forecast[0], step)
         previous = control.copy()

@@ -394,10 +394,12 @@ class F1WuFaithfulFollower(WuFaithfulFollower):
         demand: DemandStep,
         previous: ControlAction,
         vsl_override: Optional[Sequence[float]] = None,
+        seg_range: Optional[tuple[int, int]] = None,
     ):
         if self.f1_rho_weight <= 0.0:
             return super()._solve_freeway_agent_local(
                 link, state, coupling, demand, previous, vsl_override=vsl_override,
+                seg_range=seg_range,
             )
         net = self.cfg.network
         sim = self.cfg.simulation
@@ -413,6 +415,21 @@ class F1WuFaithfulFollower(WuFaithfulFollower):
         rho_crit = float(net.rho_crit)
         seg_veh = float(net.freeway_segment_length_km) * float(net.freeway_lanes)
         w_rho = float(self.f1_rho_weight)
+        # PFO_SPLIT(2026-07-24): base와 동일 — seg_range=(lo,hi)면 own-TTS 채점을 그 구간의
+        # 세그먼트·ramp·off-ramp로 제한한다(F1 ρ_crit hinge도 그 구간만; VSL 후보 동결은 아래).
+        # None이면 전 구간(_score_*=model.owned_* 동일 객체)이라 기존 F1 거동과 비트동일.
+        if seg_range is None:
+            _sr_lo, _sr_hi = 0, n_seg
+            _score_ramps = model.owned_ramps
+            _score_offramps = model.owned_offramps
+        else:
+            _sr_lo, _sr_hi = int(seg_range[0]), int(seg_range[1])
+            _score_ramps = [
+                r for r in model.owned_ramps if _sr_lo <= model.ramp_merge_idx[r] < _sr_hi
+            ]
+            _score_offramps = [
+                o for o in model.owned_offramps if _sr_lo <= model.offramp_seg_idx[o] < _sr_hi
+            ]
 
         candidates = (
             self._wu._relaxed_freeway_segment_candidates(link, n_seg, state, coupling, previous, demand)
@@ -444,6 +461,21 @@ class F1WuFaithfulFollower(WuFaithfulFollower):
                     kept.append(seq)
             if kept:
                 vsl_sequences = kept
+
+        # PFO_SPLIT: seg_range 밖 세그먼트는 previous(prev_vec)로 동결 — 후보는 [lo,hi)만 변한다.
+        # (release/plant 전진은 full owned_ramps로 그대로 — 아래 rollout 미변경.)
+        if seg_range is not None:
+            _frozen_sequences = []
+            for _seq in vsl_sequences:
+                _new_seq = []
+                for _vec in _seq:
+                    _nv = list(_vec)
+                    for _i in range(len(_nv)):
+                        if not (_sr_lo <= _i < _sr_hi) and _i < len(prev_vec):
+                            _nv[_i] = float(prev_vec[_i])
+                    _new_seq.append(_nv)
+                _frozen_sequences.append(_new_seq)
+            vsl_sequences = _frozen_sequences
 
         rhos0 = list(state.freeway_density.get(link, []))
         speeds0 = list(state.freeway_speed.get(link, []))
@@ -550,10 +582,14 @@ class F1WuFaithfulFollower(WuFaithfulFollower):
                     if first_substep:
                         first_offramp_flow = {o: max(0.0, float(offramp_flow.get(o, 0.0))) for o in best_offramp_flow}
                         first_substep = False
-                    link_vehicles = sum(veh_count)
-                    link_ramp_queue = sum(max(0.0, ramp_q.get(r, 0.0)) for r in model.owned_ramps)
-                    link_offramp_storage = sum(occ.get(o, 0.0) for o in model.owned_offramps)
-                    link_blocked_queue = sum(blocked_q.values())
+                    if seg_range is None:
+                        link_vehicles = sum(veh_count)
+                        link_blocked_queue = sum(blocked_q.values())
+                    else:
+                        link_vehicles = sum(veh_count[_sr_lo:_sr_hi])
+                        link_blocked_queue = sum(blocked_q.get(r, 0.0) for r in _score_ramps)
+                    link_ramp_queue = sum(max(0.0, ramp_q.get(r, 0.0)) for r in _score_ramps)
+                    link_offramp_storage = sum(occ.get(o, 0.0) for o in _score_offramps)
                     cost += (
                         link_vehicles + link_ramp_queue + link_offramp_storage + link_blocked_queue
                     ) * dt_h
@@ -565,6 +601,7 @@ class F1WuFaithfulFollower(WuFaithfulFollower):
                         max(0.0, float(r) - effective_rho_crit(
                             net, first_vec[i] if i < len(first_vec) else net.v_free))
                         for i, r in enumerate(rhos)
+                        if seg_range is None or (_sr_lo <= i < _sr_hi)
                     )
                     if excess > 0.0:
                         cost += w_rho * excess * seg_veh * dt_h

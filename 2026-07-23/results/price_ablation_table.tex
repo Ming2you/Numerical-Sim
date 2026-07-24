@@ -1,0 +1,22 @@
+% 가격(4채널) 기여 ablation 표 — 논문 TABLE 4 (2026-07-23)
+% ON = 제안 컨트롤러(가격+budget), OFF = 4개 가격채널 전부 끔(budget-only)
+% dTTT = OFF - ON (veh.h), 양수 = 가격 끄면 나빠짐 = 가격 기여
+% Contribution(%) = dTTT / ON (full-pricing 대비)
+% 분석구간 900-14,400s, warm-up 제외. 단위 veh.h.
+\begin{table}[t]
+\caption{Contribution of Marginal-Externality Pricing to Network TTT}
+\label{tab:price_ablation}
+\centering
+\begin{tabular}{lrrrr}
+\toprule
+Scenario & Proposed & Pricing removed & $\Delta$TTT & Contribution \\
+         & (veh$\cdot$h) & (veh$\cdot$h) & (veh$\cdot$h) & (\%) \\
+\midrule
+Low            & 2990 & 2974 & $-16$  & $-0.5$ \\
+Medium         & 3810 & 4146 & $+337$ & $+8.8$ \\
+Medium-skew    & 3990 & 4156 & $+166$ & $+4.2$ \\
+Medium-incident& 5546 & 5547 & $+1$   & $+0.0$ \\
+High           & 5735 & 6303 & $+568$ & $+9.9$ \\
+\bottomrule
+\end{tabular}
+\end{table}

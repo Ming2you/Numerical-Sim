@@ -2037,6 +2037,7 @@ class WuFaithfulFollower:
         demand: DemandStep,
         previous: ControlAction,
         vsl_override: Optional[Sequence[float]] = None,
+        seg_range: Optional[tuple[int, int]] = None,
     ) -> tuple[Dict[str, float], float, int]:
         """`_solve_freeway_agent`의 per-link 국소판 — 후보 채점이 **이 link 본선만** 전진한다.
 
@@ -2056,6 +2057,21 @@ class WuFaithfulFollower:
         smooth_w = ff.vsl_smoothness_weight
         n_seg = model.n_seg
         prev_vec = [segment_vsl(previous, link, i, self.cfg) for i in range(n_seg)]
+        # PFO_SPLIT(2026-07-24): seg_range=(lo,hi)면 이 지역 agent가 [lo,hi) 구간만 담당한다 —
+        # own-TTS 채점을 그 구간의 세그먼트·ramp·off-ramp로 제한한다(VSL 후보 동결은 아래).
+        # None이면 전 구간(_score_*=model.owned_* 동일 객체)이라 기존 거동과 비트동일.
+        if seg_range is None:
+            _sr_lo, _sr_hi = 0, n_seg
+            _score_ramps = model.owned_ramps
+            _score_offramps = model.owned_offramps
+        else:
+            _sr_lo, _sr_hi = int(seg_range[0]), int(seg_range[1])
+            _score_ramps = [
+                r for r in model.owned_ramps if _sr_lo <= model.ramp_merge_idx[r] < _sr_hi
+            ]
+            _score_offramps = [
+                o for o in model.owned_offramps if _sr_lo <= model.offramp_seg_idx[o] < _sr_hi
+            ]
 
         candidates = (
             self._wu._relaxed_freeway_segment_candidates(link, n_seg, state, coupling, previous, demand)
@@ -2088,6 +2104,21 @@ class WuFaithfulFollower:
                     kept.append(seq)
             if kept:
                 vsl_sequences = kept
+
+        # PFO_SPLIT: seg_range 밖 세그먼트는 previous(prev_vec)로 동결 — 후보는 [lo,hi)만 변한다.
+        # (release/plant 전진은 full owned_ramps로 그대로 — 아래 rollout 미변경.)
+        if seg_range is not None:
+            _frozen_sequences = []
+            for _seq in vsl_sequences:
+                _new_seq = []
+                for _vec in _seq:
+                    _nv = list(_vec)
+                    for _i in range(len(_nv)):
+                        if not (_sr_lo <= _i < _sr_hi) and _i < len(prev_vec):
+                            _nv[_i] = float(prev_vec[_i])
+                    _new_seq.append(_nv)
+                _frozen_sequences.append(_new_seq)
+            vsl_sequences = _frozen_sequences
 
         # 후보 무관 초기 스냅샷(이 link 권역만).
         rhos0 = list(state.freeway_density.get(link, []))
@@ -2234,10 +2265,14 @@ class WuFaithfulFollower:
                         first_substep = False
                     # Wu own-TTS: 이 link segment 차량 + 이 link ramp queue + off-ramp storage 점유
                     # + (P1) reservoir가 수용 못 한 가상 blocked 큐(urban 상류 externality).
-                    link_vehicles = sum(veh_count)
-                    link_ramp_queue = sum(max(0.0, ramp_q.get(r, 0.0)) for r in model.owned_ramps)
-                    link_offramp_storage = sum(occ.get(o, 0.0) for o in model.owned_offramps)
-                    link_blocked_queue = sum(blocked_q.values())
+                    if seg_range is None:
+                        link_vehicles = sum(veh_count)
+                        link_blocked_queue = sum(blocked_q.values())
+                    else:
+                        link_vehicles = sum(veh_count[_sr_lo:_sr_hi])
+                        link_blocked_queue = sum(blocked_q.get(r, 0.0) for r in _score_ramps)
+                    link_ramp_queue = sum(max(0.0, ramp_q.get(r, 0.0)) for r in _score_ramps)
+                    link_offramp_storage = sum(occ.get(o, 0.0) for o in _score_offramps)
                     cost += (
                         link_vehicles + link_ramp_queue + link_offramp_storage + link_blocked_queue
                     ) * dt_h
@@ -2248,7 +2283,7 @@ class WuFaithfulFollower:
             if getattr(self.cfg.mpc, "follower_terminal_cost_enabled", False):
                 _rho_crit_tc = float(net.rho_crit)
                 _rho_max_tc = float(net.rho_max)
-                for _ramp_tc in model.owned_ramps:
+                for _ramp_tc in _score_ramps:
                     _q_end = max(0.0, ramp_q.get(_ramp_tc, 0.0)) + max(0.0, blocked_q.get(_ramp_tc, 0.0))
                     if _q_end <= 0.0:
                         continue
@@ -2264,7 +2299,7 @@ class WuFaithfulFollower:
             if _pq_mv_f and _pq_w_f > 0.0:
                 _pq_spec_f = self.cfg.network.urban_movements.get(_pq_mv_f, {})
                 _pq_ramp_f = str(_pq_spec_f.get("ramp", "") or "")
-                if _pq_ramp_f in model.owned_ramps:
+                if _pq_ramp_f in _score_ramps:
                     _pq_max_f = float(getattr(self.cfg.mpc, "protected_queue_max_veh", 50.0))
                     _pq_now_f = max(0.0, float(state.urban_movement_queue.get(_pq_mv_f, 0.0)))
                     _pq_exc_f = max(0.0, _pq_now_f - _pq_max_f)
@@ -2913,6 +2948,7 @@ class WuFaithfulFollower:
         snapshot: ControlAction,
         leader: Optional[object] = None,
         previous: Optional[ControlAction] = None,
+        seg_range: Optional[tuple[int, int]] = None,
     ) -> tuple[Dict[str, float], Dict[str, float], int]:
         """freeway agent의 VSL + ramp_metering 결합 탐색 — 반환 (vsl_dict, metering_dict, evals).
 
@@ -2934,6 +2970,14 @@ class WuFaithfulFollower:
         """
         net = self.cfg.network
         owned_ramps = [r for r in net.ramps if net.ramp_to_freeway.get(r) == link]
+        # PFO_SPLIT(2026-07-24): seg_range=(lo,hi)면 metering 탐색을 그 구간에 merge하는
+        # ramp로만 제한한다(R_D→seg3, R_F→seg5). None이면 링크 전체(기존 거동 비트동일).
+        if seg_range is not None:
+            _sr_lo_m, _sr_hi_m = int(seg_range[0]), int(seg_range[1])
+            owned_ramps = [
+                r for r in owned_ramps
+                if _sr_lo_m <= int(net.ramp_merge_segment_index.get(r, -1)) < _sr_hi_m
+            ]
         caps = {r: float(net.ramp_capacity_veh_h[r]) for r in owned_ramps}
         # BASELINE-BOX(2026-07-17, 사용자 지시): PFO 경로 metering 이동 한계 — walk-MVG의
         # METER-BOX와 동일 규약(prev commit 앵커 ±300). 실측: 무제한 PFO는 per-step 최대
@@ -2973,7 +3017,7 @@ class WuFaithfulFollower:
             )
             probe_prev.ramp_metering.update({r: float(v) for r, v in meter.items()})
             vsl_dict, cost, e = self._solve_freeway_agent_local(
-                link, state, coupling, demand, probe_prev,
+                link, state, coupling, demand, probe_prev, seg_range=seg_range,
             )
             return vsl_dict, cost, e
 
@@ -3885,7 +3929,9 @@ class WuFaithfulFollower:
         # λ_next = clip(λ + gain·(Σnin − projected_target), 0, cap)은 수렴 후 계산해 diagnostics로만
         # 내보내고, 선택된 후보의 λ만 컨트롤러가 commit한다(아래 post-loop 참고).
 
-        s_max = max(1, min(self.cfg.mpc.max_nash_iter, 5))
+        import os as _os_nash  # NASH_SMAX(2026-07-23): S_max 하드캡(5) env로 뚫기 — 수렴 A/B용
+        _nash_smax_env = _os_nash.environ.get("NASH_SMAX")
+        s_max = max(1, int(_nash_smax_env)) if _nash_smax_env else max(1, min(self.cfg.mpc.max_nash_iter, 5))
         alpha = 0.5
         residual = float("inf")
         converged = False
@@ -3930,18 +3976,34 @@ class WuFaithfulFollower:
                 # 13-player(segment_agents): segment agent 8개가 (VSL, meter)를 루프 안에서
                 # best-response + 예산 사영 — meter 합의가 iteration을 필요로 하므로 in-loop.
                 new_meter: Dict[str, float] = {}
+                _pfo_split = bool(_os_nash.environ.get("PFO_SPLIT"))
                 for link in net.freeway_links:
                     if self.segment_agents and self.metering_enabled:
                         vsl_dict, meter_dict, e = self._solve_freeway_segment_agents(
                             link, state, coupling, demand, snapshot, leader, previous,
                         )
                         new_meter.update(meter_dict)
+                        new_vsl.update(vsl_dict)
+                        evals += e
+                    elif _pfo_split:
+                        # PFO_SPLIT(2026-07-24): link을 2개 지역 agent(seg [0,n/2),[n/2,n))로
+                        # 분해 — 각 agent는 자기 구간 VSL만 갱신한다(구간 외 세그먼트는 미변경).
+                        _nseg_l = self._local_freeway_models[link].n_seg
+                        for _lo, _hi in ((0, _nseg_l // 2), (_nseg_l // 2, _nseg_l)):
+                            vsl_dict, _, e = self._solve_freeway_agent_local(
+                                link, state, coupling, demand, snapshot, seg_range=(_lo, _hi),
+                            )
+                            for _i in range(_lo, _hi):
+                                _sk = f"{link}__seg{_i}"
+                                if _sk in vsl_dict:
+                                    new_vsl[_sk] = float(vsl_dict[_sk])
+                            evals += e
                     else:
                         vsl_dict, _, e = self._solve_freeway_agent_local(
                             link, state, coupling, demand, snapshot,
                         )
-                    new_vsl.update(vsl_dict)
-                    evals += e
+                        new_vsl.update(vsl_dict)
+                        evals += e
                 control.green_times.update(new_green)
                 control.vsl.update(new_vsl)
                 if new_meter:
@@ -3960,6 +4022,26 @@ class WuFaithfulFollower:
                     default=0.0,
                 )
                 coupling = relaxed
+                # RESIDUAL_LOG(2026-07-23, 알고리즘검증 (c)패널): 반복별 residual을 남겨
+                # "iteration↑ 따라 residual↓해 ε 아래로 수렴"을 그린다. env-gated. K-loop면 스텝당
+                # 여러 시퀀스(iteration이 1로 리셋) — 분석서 마지막/대표 시퀀스 선택.
+                _rlog = _os_nash.environ.get("RESIDUAL_LOG")
+                if _rlog:
+                    try:
+                        import csv as _csv_r
+                        from pathlib import Path as _Path_r
+                        _rp = _Path_r(_rlog).with_suffix(".resid.csv")
+                        _rnew = not _rp.exists()
+                        with _rp.open("a", newline="", encoding="utf-8") as _rfh:
+                            _rw = _csv_r.writer(_rfh)
+                            if _rnew:
+                                _rw.writerow(["step", "iteration", "residual", "tol"])
+                            _rw.writerow([
+                                _os_nash.environ.get("NUMSIM_STACKELBERG_PROGRESS_STEP", ""),
+                                iteration, residual, self.cfg.mpc.distributed_coupling_tol,
+                            ])
+                    except OSError:
+                        pass
                 if residual < self.cfg.mpc.distributed_coupling_tol:
                     converged = True
                     break
@@ -4164,10 +4246,27 @@ class WuFaithfulFollower:
             offsets=dict(control.offsets),
             inflow_outflow_allocation={},
         )
+        _pfo_split_post = bool(_os_nash.environ.get("PFO_SPLIT"))
         for link in net.freeway_links:
             if self.segment_agents and self.metering_enabled:
                 # 13-player: VSL·metering은 Jacobi 합의 안에서 segment agent들이 이미
                 # commit(예산 사영 포함) — post-loop 좌표하강 생략.
+                continue
+            if self.metering_enabled and _pfo_split_post:
+                # PFO_SPLIT(2026-07-24): link을 2개 지역 agent(seg [0,n/2),[n/2,n))로 분해 —
+                # 각 agent는 자기 구간에 merge하는 ramp metering·구간 VSL만 결정한다.
+                _nseg_l = self._local_freeway_models[link].n_seg
+                for _lo, _hi in ((0, _nseg_l // 2), (_nseg_l // 2, _nseg_l)):
+                    vsl_dict, meter_dict, e = self._solve_freeway_agent_metered(
+                        link, state, coupling, demand, meter_snapshot, leader, previous,
+                        seg_range=(_lo, _hi),
+                    )
+                    control.ramp_metering.update(meter_dict)
+                    for _i in range(_lo, _hi):
+                        _sk = f"{link}__seg{_i}"
+                        if _sk in vsl_dict:
+                            control.vsl[_sk] = float(vsl_dict[_sk])
+                    evals += e
                 continue
             if self.metering_enabled:
                 vsl_dict, meter_dict, e = self._solve_freeway_agent_metered(

@@ -373,6 +373,9 @@ class MPCConfig:
     # 병목의 배수율도 실제 유량(ρ·v·λ)으로 cap. 기본 False=기존 FD 유도(비트동일).
     leader_mfd_far_real_speed: bool = False
     leader_mfd_far_weight: float = 1.0
+    # 분리 가중(2026-07-24): urban/freeway reservoir far 개별 스케일. 기본 1.0=기존과 비트동일.
+    leader_mfd_far_urban_weight: float = 1.0
+    leader_mfd_far_freeway_weight: float = 1.0
     # FAR-D0(2026-07-09): depth=0에서도 rollout TTT + far로 후보 채점(역사적 d0는
     # follower 응답 proxy 랭킹 — 채점 형태 고정한 "얕은 leader" 검정용). 기본 False.
     leader_mfd_far_at_d0: bool = False
