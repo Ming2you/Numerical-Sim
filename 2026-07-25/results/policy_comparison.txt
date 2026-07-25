@@ -1,0 +1,158 @@
+====================================================================================================
+### INCIDENT (170inc) ###
+====================================================================================================
+windowed TTT (warm5~14400): total / freeway / urban / (urban_share%)
+  PS4    : total=   5826  fw=   2584  urban=   3242  (55.6% urban)
+  G-CLF  : total=   5818  fw=   2596  urban=   3223  (55.4% urban)
+  PFO    : total=   5497  fw=   3995  urban=   1503  (27.3% urban)
+  PCENT  : total=   5498  fw=   2874  urban=   2625  (47.7% urban)
+
+per-step (Δ=구간증분 veh·h): fw_ttt Δ | urb_ttt Δ | urban_accum | boundary_q | metering_flow
+  --- PS4 ---
+    s  0: fwΔ=    16 urbΔ=     9 | uAcc=  161 bndQ=    23 meter=   1682
+    s  5: fwΔ=    64 urbΔ=    42 | uAcc=  134 bndQ=    15 meter=   1883
+    s 10: fwΔ=    65 urbΔ=    41 | uAcc=  141 bndQ=    23 meter=   1862
+    s 15: fwΔ=    66 urbΔ=    41 | uAcc=  135 bndQ=    15 meter=   1883
+    s 20: fwΔ=    66 urbΔ=    41 | uAcc=  141 bndQ=    23 meter=   1862
+    s 25: fwΔ=   191 urbΔ=   120 | uAcc=  421 bndQ=    50 meter=   2400
+    s 30: fwΔ=   315 urbΔ=   207 | uAcc=  434 bndQ=   158 meter=   3450
+    s 35: fwΔ=   363 urbΔ=   371 | uAcc=  567 bndQ=   350 meter=   5417
+    s 40: fwΔ=   424 urbΔ=   532 | uAcc=  922 bndQ=   599 meter=   5100
+    s 45: fwΔ=   388 urbΔ=   650 | uAcc=  887 bndQ=   650 meter=   5056
+    s 50: fwΔ=   201 urbΔ=   457 | uAcc=  373 bndQ=   692 meter=   4029
+    s 55: fwΔ=   139 urbΔ=   325 | uAcc=  349 bndQ=   592 meter=   4179
+    s 60: fwΔ=    89 urbΔ=   215 | uAcc=  198 bndQ=   329 meter=   3122
+    s 65: fwΔ=    78 urbΔ=   105 | uAcc=  172 bndQ=   122 meter=   2287
+    s 70: fwΔ=    70 urbΔ=    54 | uAcc=  147 bndQ=    20 meter=   1756
+    s 75: fwΔ=    65 urbΔ=    42 | uAcc=  138 bndQ=    13 meter=   1991
+  --- G-CLF ---
+    s  0: fwΔ=    16 urbΔ=     9 | uAcc=  161 bndQ=    23 meter=   1682
+    s  5: fwΔ=    64 urbΔ=    42 | uAcc=  134 bndQ=    15 meter=   1883
+    s 10: fwΔ=    65 urbΔ=    41 | uAcc=  141 bndQ=    23 meter=   1862
+    s 15: fwΔ=    66 urbΔ=    41 | uAcc=  135 bndQ=    15 meter=   1883
+    s 20: fwΔ=    66 urbΔ=    41 | uAcc=  141 bndQ=    23 meter=   1862
+    s 25: fwΔ=   191 urbΔ=   120 | uAcc=  425 bndQ=    51 meter=   5162
+    s 30: fwΔ=   333 urbΔ=   195 | uAcc=  436 bndQ=   123 meter=   2533
+    s 35: fwΔ=   349 urbΔ=   391 | uAcc=  483 bndQ=   475 meter=   5858
+    s 40: fwΔ=   411 urbΔ=   558 | uAcc=  737 bndQ=   792 meter=   4108
+    s 45: fwΔ=   353 urbΔ=   687 | uAcc=  629 bndQ=   995 meter=   4044
+    s 50: fwΔ=   199 urbΔ=   535 | uAcc=  542 bndQ=   786 meter=   4714
+    s 55: fwΔ=   167 urbΔ=   323 | uAcc=  239 bndQ=   313 meter=   4490
+    s 60: fwΔ=   127 urbΔ=   123 | uAcc=  183 bndQ=    33 meter=   3315
+    s 65: fwΔ=    73 urbΔ=    44 | uAcc=  138 bndQ=    12 meter=   1898
+    s 70: fwΔ=    65 urbΔ=    42 | uAcc=  145 bndQ=    23 meter=   1772
+    s 75: fwΔ=    65 urbΔ=    41 | uAcc=  138 bndQ=    12 meter=   1972
+  --- PFO ---
+    s  0: fwΔ=    16 urbΔ=     9 | uAcc=  161 bndQ=    23 meter=   1682
+    s  5: fwΔ=    64 urbΔ=    42 | uAcc=  134 bndQ=    15 meter=   1883
+    s 10: fwΔ=    65 urbΔ=    41 | uAcc=  141 bndQ=    23 meter=   1862
+    s 15: fwΔ=    66 urbΔ=    41 | uAcc=  135 bndQ=    15 meter=   1883
+    s 20: fwΔ=    66 urbΔ=    41 | uAcc=  141 bndQ=    23 meter=   1862
+    s 25: fwΔ=   192 urbΔ=   119 | uAcc=  429 bndQ=    55 meter=   5792
+    s 30: fwΔ=   367 urbΔ=   172 | uAcc=  409 bndQ=   112 meter=   5046
+    s 35: fwΔ=   563 urbΔ=   212 | uAcc=  409 bndQ=   103 meter=   4895
+    s 40: fwΔ=   693 urbΔ=   269 | uAcc=  428 bndQ=   159 meter=   5784
+    s 45: fwΔ=   745 urbΔ=   244 | uAcc=  221 bndQ=    15 meter=   4260
+    s 50: fwΔ=   536 urbΔ=    97 | uAcc=  186 bndQ=    23 meter=   2590
+    s 55: fwΔ=   323 urbΔ=    56 | uAcc=  179 bndQ=    15 meter=   2539
+    s 60: fwΔ=   118 urbΔ=    48 | uAcc=  141 bndQ=    23 meter=   1860
+    s 65: fwΔ=    65 urbΔ=    41 | uAcc=  137 bndQ=    15 meter=   1901
+    s 70: fwΔ=    65 urbΔ=    41 | uAcc=  140 bndQ=    23 meter=   1842
+    s 75: fwΔ=    65 urbΔ=    41 | uAcc=  137 bndQ=    15 meter=   1901
+  --- PCENT ---
+    s  0: fwΔ=    16 urbΔ=     9 | uAcc=  161 bndQ=    23 meter=   1682
+    s  5: fwΔ=    64 urbΔ=    42 | uAcc=  141 bndQ=    12 meter=   1917
+    s 10: fwΔ=    63 urbΔ=    40 | uAcc=  144 bndQ=    10 meter=   1889
+    s 15: fwΔ=    63 urbΔ=    40 | uAcc=  137 bndQ=     9 meter=   1861
+    s 20: fwΔ=    63 urbΔ=    40 | uAcc=  142 bndQ=    10 meter=   1851
+    s 25: fwΔ=   190 urbΔ=   117 | uAcc=  446 bndQ=    47 meter=   4706
+    s 30: fwΔ=   351 urbΔ=   176 | uAcc=  414 bndQ=    49 meter=   3969
+    s 35: fwΔ=   487 urbΔ=   280 | uAcc=  432 bndQ=   283 meter=   4442
+    s 40: fwΔ=   514 urbΔ=   465 | uAcc=  666 bndQ=   645 meter=   4314
+    s 45: fwΔ=   397 urbΔ=   605 | uAcc=  548 bndQ=   828 meter=   5186
+    s 50: fwΔ=   209 urbΔ=   434 | uAcc=  384 bndQ=   384 meter=   4778
+    s 55: fwΔ=   165 urbΔ=   202 | uAcc=  182 bndQ=   116 meter=   4163
+    s 60: fwΔ=   121 urbΔ=    64 | uAcc=  146 bndQ=    14 meter=   2252
+    s 65: fwΔ=    63 urbΔ=    41 | uAcc=  138 bndQ=     7 meter=   1897
+    s 70: fwΔ=    63 urbΔ=    40 | uAcc=  144 bndQ=    14 meter=   1846
+    s 75: fwΔ=    63 urbΔ=    40 | uAcc=  138 bndQ=     7 meter=   1897
+
+====================================================================================================
+### HIGH (190) ###
+====================================================================================================
+windowed TTT (warm5~14400): total / freeway / urban / (urban_share%)
+  PS4    : total=   6131  fw=   2584  urban=   3547  (57.8% urban)
+  G-CLF  : total=   6138  fw=   2585  urban=   3553  (57.9% urban)
+  PFO    : total=   5970  fw=   2622  urban=   3348  (56.1% urban)
+  PCENT  : total=   5599  fw=   2768  urban=   2831  (50.6% urban)
+
+per-step (Δ=구간증분 veh·h): fw_ttt Δ | urb_ttt Δ | urban_accum | boundary_q | metering_flow
+  --- PS4 ---
+    s  0: fwΔ=    16 urbΔ=     9 | uAcc=  161 bndQ=    23 meter=   1682
+    s  5: fwΔ=    64 urbΔ=    42 | uAcc=  134 bndQ=    15 meter=   1883
+    s 10: fwΔ=    65 urbΔ=    41 | uAcc=  141 bndQ=    23 meter=   1862
+    s 15: fwΔ=    66 urbΔ=    41 | uAcc=  135 bndQ=    15 meter=   1883
+    s 20: fwΔ=    66 urbΔ=    41 | uAcc=  141 bndQ=    23 meter=   1862
+    s 25: fwΔ=   210 urbΔ=   141 | uAcc=  474 bndQ=    68 meter=   4894
+    s 30: fwΔ=   338 urbΔ=   255 | uAcc=  491 bndQ=   205 meter=   4650
+    s 35: fwΔ=   376 urbΔ=   395 | uAcc=  582 bndQ=   472 meter=   4630
+    s 40: fwΔ=   384 urbΔ=   603 | uAcc=  944 bndQ=   809 meter=   5100
+    s 45: fwΔ=   389 urbΔ=   688 | uAcc=  636 bndQ=   745 meter=   6000
+    s 50: fwΔ=   224 urbΔ=   460 | uAcc=  442 bndQ=   790 meter=   4436
+    s 55: fwΔ=   102 urbΔ=   374 | uAcc=  443 bndQ=   664 meter=   3395
+    s 60: fwΔ=    87 urbΔ=   220 | uAcc=  194 bndQ=   407 meter=   3031
+    s 65: fwΔ=    72 urbΔ=   126 | uAcc=  168 bndQ=   238 meter=   2253
+    s 70: fwΔ=    72 urbΔ=    79 | uAcc=  182 bndQ=    19 meter=   2350
+    s 75: fwΔ=    67 urbΔ=    43 | uAcc=  139 bndQ=    12 meter=   2000
+  --- G-CLF ---
+    s  0: fwΔ=    16 urbΔ=     9 | uAcc=  161 bndQ=    23 meter=   1682
+    s  5: fwΔ=    64 urbΔ=    42 | uAcc=  134 bndQ=    15 meter=   1883
+    s 10: fwΔ=    65 urbΔ=    41 | uAcc=  141 bndQ=    23 meter=   1862
+    s 15: fwΔ=    66 urbΔ=    41 | uAcc=  135 bndQ=    15 meter=   1883
+    s 20: fwΔ=    66 urbΔ=    41 | uAcc=  141 bndQ=    23 meter=   1862
+    s 25: fwΔ=   210 urbΔ=   141 | uAcc=  474 bndQ=    68 meter=   4894
+    s 30: fwΔ=   338 urbΔ=   255 | uAcc=  491 bndQ=   205 meter=   4650
+    s 35: fwΔ=   376 urbΔ=   395 | uAcc=  582 bndQ=   472 meter=   4630
+    s 40: fwΔ=   384 urbΔ=   603 | uAcc=  944 bndQ=   809 meter=   5100
+    s 45: fwΔ=   382 urbΔ=   695 | uAcc=  652 bndQ=   750 meter=   6000
+    s 50: fwΔ=   222 urbΔ=   464 | uAcc=  443 bndQ=   790 meter=   4554
+    s 55: fwΔ=   112 urbΔ=   376 | uAcc=  454 bndQ=   666 meter=   3478
+    s 60: fwΔ=    87 urbΔ=   222 | uAcc=  198 bndQ=   407 meter=   2998
+    s 65: fwΔ=    73 urbΔ=   126 | uAcc=  177 bndQ=   217 meter=   2421
+    s 70: fwΔ=    72 urbΔ=    73 | uAcc=  165 bndQ=    19 meter=   2108
+    s 75: fwΔ=    66 urbΔ=    42 | uAcc=  140 bndQ=    15 meter=   2053
+  --- PFO ---
+    s  0: fwΔ=    16 urbΔ=     9 | uAcc=  161 bndQ=    23 meter=   1682
+    s  5: fwΔ=    64 urbΔ=    42 | uAcc=  134 bndQ=    15 meter=   1883
+    s 10: fwΔ=    65 urbΔ=    41 | uAcc=  141 bndQ=    23 meter=   1862
+    s 15: fwΔ=    66 urbΔ=    41 | uAcc=  135 bndQ=    15 meter=   1883
+    s 20: fwΔ=    66 urbΔ=    41 | uAcc=  141 bndQ=    23 meter=   1862
+    s 25: fwΔ=   213 urbΔ=   139 | uAcc=  465 bndQ=    89 meter=   5209
+    s 30: fwΔ=   350 urbΔ=   249 | uAcc=  513 bndQ=   201 meter=   4650
+    s 35: fwΔ=   397 urbΔ=   377 | uAcc=  556 bndQ=   429 meter=   4650
+    s 40: fwΔ=   403 urbΔ=   565 | uAcc=  878 bndQ=   765 meter=   4650
+    s 45: fwΔ=   359 urbΔ=   700 | uAcc=  950 bndQ=   790 meter=   5681
+    s 50: fwΔ=   213 urbΔ=   494 | uAcc=  608 bndQ=   701 meter=   4663
+    s 55: fwΔ=   130 urbΔ=   300 | uAcc=  302 bndQ=   473 meter=   3229
+    s 60: fwΔ=    86 urbΔ=   176 | uAcc=  170 bndQ=   262 meter=   2695
+    s 65: fwΔ=    75 urbΔ=    94 | uAcc=  173 bndQ=    88 meter=   2261
+    s 70: fwΔ=    69 urbΔ=    49 | uAcc=  144 bndQ=    20 meter=   1783
+    s 75: fwΔ=    65 urbΔ=    42 | uAcc=  139 bndQ=    12 meter=   1969
+  --- PCENT ---
+    s  0: fwΔ=    16 urbΔ=     9 | uAcc=  161 bndQ=    23 meter=   1682
+    s  5: fwΔ=    64 urbΔ=    42 | uAcc=  141 bndQ=    12 meter=   1917
+    s 10: fwΔ=    63 urbΔ=    40 | uAcc=  144 bndQ=    10 meter=   1889
+    s 15: fwΔ=    63 urbΔ=    40 | uAcc=  137 bndQ=     9 meter=   1861
+    s 20: fwΔ=    63 urbΔ=    40 | uAcc=  143 bndQ=    10 meter=   1924
+    s 25: fwΔ=   211 urbΔ=   137 | uAcc=  495 bndQ=    74 meter=   4725
+    s 30: fwΔ=   354 urbΔ=   241 | uAcc=  479 bndQ=   166 meter=   4700
+    s 35: fwΔ=   431 urbΔ=   343 | uAcc=  494 bndQ=   479 meter=   4759
+    s 40: fwΔ=   460 urbΔ=   516 | uAcc=  642 bndQ=   800 meter=   4690
+    s 45: fwΔ=   415 urbΔ=   613 | uAcc=  485 bndQ=   962 meter=   6000
+    s 50: fwΔ=   239 urbΔ=   428 | uAcc=  468 bndQ=   583 meter=   6000
+    s 55: fwΔ=   142 urbΔ=   196 | uAcc=  195 bndQ=   189 meter=   4068
+    s 60: fwΔ=    77 urbΔ=    70 | uAcc=  158 bndQ=    14 meter=   2197
+    s 65: fwΔ=    63 urbΔ=    42 | uAcc=  139 bndQ=     5 meter=   1853
+    s 70: fwΔ=    62 urbΔ=    41 | uAcc=  148 bndQ=    14 meter=   1891
+    s 75: fwΔ=    62 urbΔ=    41 | uAcc=  139 bndQ=     5 meter=   1853
+
