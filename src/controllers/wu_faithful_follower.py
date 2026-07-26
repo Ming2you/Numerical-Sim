@@ -337,6 +337,7 @@ class WuFaithfulFollower:
         # 비용에서 N_P 항(dual λ_P·nin 또는 legacy w_P 패널티)을 완전히 뺀다 — g_ext(B2
         # green 가격)만 남겨 "N_P가 g_ext와 이중계상돼 잉여/충돌인가"를 판정. 기본 True.
         self.np_price_enabled: bool = True
+        self.np_price_scale: float = 1.0
         # subgradient 스텝 정규화 상수(차원무관 O(1); 시나리오 비의존). 실제 스텝 α는
         # 매 step 측정한 듀얼 gain G=|dΣnin/dλ|로 α = dual_step_c·cost_norm/max(G,G_floor)
         # 로 자기보정한다(스케일 인지·과적합 방지). 아래 _solve_followers 참고.
@@ -3797,6 +3798,10 @@ class WuFaithfulFollower:
         # 대신 후보별 (λ, green) 안장점 반복으로 대체(np_cand_flag가 마스터 스위치).
         np_pd_iters = int(getattr(self.cfg.mpc, "np_primal_dual_iters", 0))
         np_pd_active = dual_active and np_cand_flag and np_pd_iters > 0
+        np_price_scale = min(max(float(getattr(self, "np_price_scale", 1.0)), 0.0), 1.0)
+
+        def _np_effective_lambda(lam: float) -> float:
+            return np_price_scale * float(lam)
         # ---- (51) corrector(원고 정식화): λ_{k+1} = Π[λ_k + γ_c(Q^real − Ñ_{c*})] ----
         # 커밋 시점이 아니라 다음 step 시작 시(실현 유입 관측 후) standing λ를 1회 교정.
         # Q^real은 보호구역 accumulation 차분(구간)을 horizon 배수로 환산해 측정한다
@@ -4084,7 +4089,7 @@ class WuFaithfulFollower:
             np_pd_exit = 0.0  # 0=K소진(미수렴). break에서 1/2로 덮어씀.
             lam_last_sweep: Optional[float] = None
             for _kappa in range(1, np_pd_iters + 1):
-                _jacobi_consensus(lam_curr)
+                _jacobi_consensus(_np_effective_lambda(lam_curr))
                 lam_last_sweep = lam_curr
                 np_pd_iters_used = float(_kappa)
                 np_pd_residual = float(sum_nin - pd_target)
@@ -4106,12 +4111,12 @@ class WuFaithfulFollower:
             # 최종 λ로 1회 재수렴 — commit되는 green이 최종 λ의 균형이 되게
             # (off-equilibrium commit 금지). 마지막 sweep이 이미 그 λ였으면 생략.
             if lam_last_sweep is None or abs(lam_curr - lam_last_sweep) > 1.0e-6:
-                _jacobi_consensus(lam_curr)
+                _jacobi_consensus(_np_effective_lambda(lam_curr))
                 np_pd_residual = float(sum_nin - pd_target)
             lambda_p = lam_curr
             np_cand_lambda_applied = 1.0
         else:
-            _jacobi_consensus(lambda_p)
+            _jacobi_consensus(_np_effective_lambda(lambda_p))
         # ---- 듀얼 분해 λ step 간 적분 갱신(A1+A2 — 이분법·commit sweep 폐지, 2026-07-02) ----
         # green은 Jacobi가 수렴시킨 값 그대로 커밋된다(A2: off-equilibrium commit 소멸). λ_next는
         # 마지막 합의 sweep의 Σnin과 투영 target으로 적분 갱신하되, 여기서 self._lambda_P에 쓰지
@@ -4370,13 +4375,13 @@ class WuFaithfulFollower:
                 _, j_br, _, _ = self._solve_urban_agent_local(
                     signal, state, coupling, arr_probe, s_eff_frozen,
                     reservoir_drain, freeway_congestion, probe_snapshot, leader,
-                    lambda_p, forecast_arrivals, horizon_h, demand,
+                    _np_effective_lambda(lambda_p), forecast_arrivals, horizon_h, demand,
                 )
                 p1_com = float(control.green_times.get(f"{signal}_p1", 0.0))
                 _, j_com, _, _ = self._solve_urban_agent_local(
                     signal, state, coupling, arr_probe, s_eff_frozen,
                     reservoir_drain, freeway_congestion, probe_snapshot, leader,
-                    lambda_p, forecast_arrivals, horizon_h, demand,
+                    _np_effective_lambda(lambda_p), forecast_arrivals, horizon_h, demand,
                     candidates_override=[p1_com],
                 )
                 gap = max(0.0, float(j_com) - float(j_br))
@@ -4415,6 +4420,8 @@ class WuFaithfulFollower:
         control.diagnostics["wu_faithful_np_sum_nin"] = float(sum_nin)
         control.diagnostics["wu_faithful_np_cand_lambda_applied"] = float(np_cand_lambda_applied)
         control.diagnostics["wu_faithful_np_cand_lambda"] = float(lambda_p)
+        control.diagnostics["wu_faithful_np_price_scale"] = float(np_price_scale)
+        control.diagnostics["wu_faithful_np_effective_lambda"] = float(_np_effective_lambda(lambda_p))
         # 방법 A 진단: K-loop 실사용 횟수·최종 계획-공간 잔차(OFF면 0/0).
         control.diagnostics["wu_faithful_np_pd_iters"] = float(np_pd_iters_used)
         control.diagnostics["wu_faithful_np_pd_residual"] = float(np_pd_residual)

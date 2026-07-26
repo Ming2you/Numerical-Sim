@@ -48,6 +48,11 @@ Hard constraints followed:
   - `NP_DUAL_ADAPT_MIN_W` controls the activation threshold; final validation used `0.10`.
   - This is not scenario-specific; it keys off the same forecast-demand/state-stress metering authority signal.
 
+- Added continuous adaptive N_P dual authority.
+  - `NP_DUAL_ADAPT_MODE=scale` changes the gate from binary on/off to `lambda_eff = alpha * lambda_P`.
+  - `NP_DUAL_ADAPT_LO_W` and `NP_DUAL_ADAPT_HI_W` define the smoothstep ramp for `alpha`.
+  - `wu_faithful_np_price_scale` and `wu_faithful_np_effective_lambda` are exported for diagnostics.
+
 ## Important validation results
 
 Baseline full-five candidates:
@@ -148,7 +153,7 @@ Status:
 - It is not solved yet because Skew still loses by `+32.541`.
 - The full-five run confirms that Low, Medium, Incident, and High remain safe under the demand-gated adaptive metering candidate.
 
-## Final verified candidate
+## First verified 5/5 candidate
 
 The next diagnostic screen showed that fully removing the N_P dual path fixes Skew but breaks High:
 
@@ -214,6 +219,63 @@ Status:
   - `sweet_170_incident_w`: `21/80` active steps
   - `sweet_190_w`: `34/80` active steps
 
+## Continuous dual authority validation
+
+The binary gate was generalized to a continuous authority scale:
+
+```text
+lambda_eff = alpha * lambda_P
+alpha = smoothstep(NP_DUAL_ADAPT_LO_W, NP_DUAL_ADAPT_HI_W, adaptive_metering_weight)
+```
+
+Representative continuous candidate:
+
+```text
+NP_DUAL_ADAPT_GATE=1
+NP_DUAL_ADAPT_MODE=scale
+NP_DUAL_ADAPT_LO_W=0.05
+NP_DUAL_ADAPT_HI_W=0.20
+```
+
+Full-five validation output:
+
+```text
+outputs/_full14400_np_dual_scale005_020_candidate
+```
+
+Final `T=14400` result for the continuous candidate:
+
+| Scenario | PFO TTT | P-Stack TTT | Gap | P-Stack freeway TTT | P-Stack urban TTT |
+|---|---:|---:|---:|---:|---:|
+| `sweet_155_w` | 3070.813 | 3064.265 | -6.548 | 1920.342 | 1143.923 |
+| `sweet_170_w` | 3972.043 | 3871.780 | -100.263 | 2311.578 | 1560.202 |
+| `sweet_170_skew15_w` | 3944.430 | 3937.031 | -7.399 | 2295.678 | 1641.353 |
+| `sweet_170_incident_w` | 5606.992 | 5408.535 | -198.457 | 3782.846 | 1625.688 |
+| `sweet_190_w` | 6079.287 | 5926.607 | -152.680 | 3478.431 | 2448.177 |
+
+Scale diagnostics:
+
+- `sweet_155_w`: active `0/80`, partial `0`, mean scale `0.000`
+- `sweet_170_w`: active `0/80`, partial `0`, mean scale `0.000`
+- `sweet_170_skew15_w`: active `1/80`, partial `1`, max scale `0.003`
+- `sweet_170_incident_w`: active `21/80`, partial `1`, mean scale `0.257`
+- `sweet_190_w`: active `34/80`, partial `0`, mean scale `0.425`
+
+Additional Skew/High screens with wider continuous ramps also preserved the same two-scenario result:
+
+| Candidate | Skew gap | High gap |
+|---|---:|---:|
+| `scale000_050` | -7.399 | -152.680 |
+| `scale000_080` | -7.399 | -152.680 |
+| `scale000_125` | -7.399 | -152.680 |
+
+Interpretation:
+
+- The controller no longer requires a binary implementation; the N_P dual price can be represented as a smooth authority scale.
+- In the original five scenarios, the control choice lies on a plateau: continuous scale and switch gate produce the same TTT.
+- The D/F over-binding failure is still avoided because Skew's adaptive metering pressure is near zero, so `lambda_eff` remains near zero there.
+- High and Incident still receive strong N_P dual authority in high-pressure intervals.
+
 ## Current pushed work summary
 
 Pushed implementation and tooling:
@@ -223,7 +285,7 @@ Pushed implementation and tooling:
 - Env-gated diagnostic objective terms in `src/controllers/stackelberg_mpc.py` and `src/models/state.py`.
 - Price authority controls in `work/run_claude_style_five_controller.py`.
 - Adaptive metering price authority in `src/controllers/stackelberg_wu_metered.py`.
-- Adaptive N_P dual gate in `src/controllers/stackelberg_wu_metered.py` and `work/run_claude_style_five_controller.py`.
+- Adaptive N_P dual gate and continuous scale mode in `src/controllers/stackelberg_wu_metered.py`, `src/controllers/wu_faithful_follower.py`, and `work/run_claude_style_five_controller.py`.
 - This progress document with the search path, rejected branches, final candidate, and validation evidence.
 
 Validation completed:
@@ -232,4 +294,6 @@ Validation completed:
 - Skew/High N_P dual screen completed.
 - Adaptive N_P dual gate threshold screen completed.
 - Full-five `T=14400` validation completed for the final candidate.
+- Continuous adaptive dual scale screen completed.
+- Full-five `T=14400` validation completed for `scale005_020`.
 - Final candidate beats PFO on all five original scenarios.

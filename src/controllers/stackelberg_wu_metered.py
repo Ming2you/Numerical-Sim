@@ -84,7 +84,10 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         self.metering_price_adaptive_demand_low_veh_h: float = 24000.0
         self.metering_price_adaptive_demand_high_veh_h: float = 26000.0
         self.np_dual_adaptive_gate_enabled: bool = False
+        self.np_dual_adaptive_gate_mode: str = "switch"
         self.np_dual_adaptive_gate_min_weight: float = 0.10
+        self.np_dual_adaptive_gate_low_weight: float = 0.0
+        self.np_dual_adaptive_gate_high_weight: float = 0.10
         self._np_dual_adaptive_gate_base_enabled: Optional[bool] = None
         # B3TR(2026-07-05): metering 가격의 trust region — cap 분율 반경. green과 달리
         # 후보 격자(0.1~0.3·cap)가 δ(60veh/h)보다 커서, 반경과 **측정폭을 격자에 맞춘다**
@@ -614,15 +617,28 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         if self._np_dual_adaptive_gate_base_enabled is None:
             self._np_dual_adaptive_gate_base_enabled = bool(follower.np_price_enabled)
         metric = float(adaptive_meter_meta.get("wu_b3_meter_price_adapt_weight", 0.0))
+        mode = str(getattr(self, "np_dual_adaptive_gate_mode", "switch")).lower()
         threshold = max(0.0, float(self.np_dual_adaptive_gate_min_weight))
-        active = bool(self._np_dual_adaptive_gate_base_enabled) and metric >= threshold
+        scale = 1.0 if metric >= threshold else 0.0
+        if mode in {"scale", "continuous"}:
+            lo = max(0.0, float(self.np_dual_adaptive_gate_low_weight))
+            hi = max(lo, float(self.np_dual_adaptive_gate_high_weight))
+            if hi <= lo:
+                scale = 1.0 if metric >= hi else 0.0
+            else:
+                x = min(max((metric - lo) / (hi - lo), 0.0), 1.0)
+                scale = x * x * (3.0 - 2.0 * x)
+        active = bool(self._np_dual_adaptive_gate_base_enabled) and scale > 1.0e-9
         follower.np_price_enabled = bool(active)
+        follower.np_price_scale = float(scale if active else 0.0)
         if not active:
             follower._lambda_P = 0.0
             follower._np_corrector_pending = None
         return {
             "wu_faithful_np_adapt_gate_enabled": 1.0,
             "wu_faithful_np_adapt_gate_active": float(active),
+            "wu_faithful_np_adapt_gate_mode_scale": float(mode in {"scale", "continuous"}),
+            "wu_faithful_np_adapt_gate_scale": float(scale if active else 0.0),
             "wu_faithful_np_adapt_gate_metric": float(metric),
             "wu_faithful_np_adapt_gate_min_weight": float(threshold),
         }
