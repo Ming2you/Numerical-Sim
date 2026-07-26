@@ -111,52 +111,88 @@ High needed demand-gated metering price authority:
 - Pure state gate activates too late.
 - Forecast demand gate is the useful general signal so far.
 
-## Next task
+## Latest full-five validation
 
-1. Run the current best candidate on all five scenarios at `T=14400`:
+The current best candidate was run on all five original scenarios at `T=14400` with five parallel workers.
 
-```powershell
-$env:WARMUP_NC_STEPS='5'
-$env:FW_BUFFER='8'
-$env:TERM_ZG='1'
-$env:VFREE='115'
-$env:RHO_CRIT='31.5'
-$env:TAU_H='0.0056111'
-$env:NU_BASE='22.5'
-$env:KAPPA='10'
-$env:MERGE_DELTA='0.9'
-$env:BOX_WALK='1'
-$env:BOX_WALK_VG='1'
-$env:NP_PD_ITER='4'
-$env:NP_BIAS='1'
-$env:CROSS_OFF='1'
-$env:FAR_STATE_AWARE='1'
-$env:FAR_REAL_V='1'
-$env:FAR_GATE='3'
-$env:BASELINE_BOX='1'
-$env:BIAS_SAMPLE='1'
-$env:BIAS_POW='0.4'
-$env:NASH_SMAX='10'
-$env:PFO_SPLIT='2'
-$env:CAND='15'
-$env:PSTACK_STANDALONE='1'
-$env:BUDGET_OFF='1'
-$env:GREEN_TRUST_SEC='1.5'
-$env:VSL_PRICE='0'
-$env:METER_PRICE_ADAPT='1'
-$env:METER_ADAPT_DEMAND='1'
-$env:METER_ADAPT_LO='0.55'
-$env:METER_ADAPT_HI='0.70'
-python work/run_parallel_scenarios.py --T-total 14400 --workers 5 --controllers P-STACK-WU-FAITHFUL-ALLPRICE-JOINT --output outputs\_full14400_demand_gate_t15_candidate
+Output root:
+
+```text
+outputs/_full14400_demand_gate_t15_candidate
 ```
 
-2. If Low/Medium/Incident remain winners, focus only on reducing Skew's remaining `+32.5` without losing High.
+Comparison baseline:
 
-3. Most promising next controller direction:
+```text
+outputs/_full14400_budgetoff_trust2_5scen
+```
+
+Result:
+
+| Scenario | PFO TTT | P-Stack TTT | Gap | P-Stack freeway TTT | P-Stack urban TTT |
+|---|---:|---:|---:|---:|---:|
+| `sweet_155_w` | 3070.813 | 3064.265 | -6.548 | 1920.342 | 1143.923 |
+| `sweet_170_w` | 3972.043 | 3870.918 | -101.125 | 2313.344 | 1557.575 |
+| `sweet_170_skew15_w` | 3944.430 | 3976.971 | +32.541 | 2314.270 | 1662.701 |
+| `sweet_170_incident_w` | 5606.992 | 5408.098 | -198.894 | 3783.608 | 1624.490 |
+| `sweet_190_w` | 6079.287 | 5926.607 | -152.680 | 3478.431 | 2448.177 |
+
+Status:
+
+- Current best is `4/5` wins at `T=14400`.
+- It is not solved yet because Skew still loses by `+32.541`.
+- The full-five run confirms that Low, Medium, Incident, and High remain safe under the demand-gated adaptive metering candidate.
+
+## Current pushed work summary
+
+Pushed implementation and tooling:
+
+- Parallel scenario runner: `work/run_parallel_scenarios.py`.
+- Parallel candidate matrix runner: `work/run_parallel_candidate_matrix.py`.
+- Env-gated diagnostic objective terms in `src/controllers/stackelberg_mpc.py` and `src/models/state.py`.
+- Price authority controls in `work/run_claude_style_five_controller.py`.
+- Adaptive metering price authority in `src/controllers/stackelberg_wu_metered.py`.
+- This progress document with the search path, rejected branches, current best, and next search direction.
+
+Validation completed:
+
+- Syntax compile passed for the changed Python files.
+- Full-five `T=14400` validation completed for the current best candidate.
+- Current best is robust on four scenarios but still misses the all-scenario goal.
+
+## Next task
+
+The next search should focus on Skew while protecting the four existing wins.
+
+Most promising next controller direction:
 
 - Keep `BUDGET_OFF=1`.
+- Keep `PSTACK_STANDALONE=1`.
 - Keep `VSL_PRICE=0`.
-- Keep forecast-demand-gated metering.
-- Add a general ramp-aware green service rule or objective that lets D/F move like PFO when urban protected accumulation/skew pressure warrants it.
-- Avoid signal-name or scenario-name special cases; use ramp-aware local pressure, urban queue imbalance, or protected accumulation gradients.
+- Keep forecast-demand-gated adaptive metering.
+- Do not change depth/horizon.
+- Investigate whether the N_P dual/price path is constraining D/F ramp-aware green movement on Skew:
+  - `NP_OFF=1`
+  - `NP_CAND_LAMBDA=0`
+  - `NP_PD_ITER=0/1/2`
+  - `NP_BIAS=0`
+- If that is not enough, add only general pressure-based logic/objective terms, not scenario-specific or signal-name-specific hacks.
 
+Suggested next screen:
+
+```powershell
+python work/run_parallel_candidate_matrix.py `
+  --scenarios sweet_170_skew15_w,sweet_190_w `
+  --T-total 14400 `
+  --workers 10 `
+  --controllers P-STACK-WU-FAITHFUL-ALLPRICE-JOINT `
+  --output outputs\_skew_high14400_np_dual_screen `
+  --pfo-root outputs/_full14400_budgetoff_trust2_5scen `
+  --candidate 'base:' `
+  --candidate 'np_off:NP_OFF=1' `
+  --candidate 'np_candlambda0:NP_CAND_LAMBDA=0' `
+  --candidate 'np_pd0:NP_PD_ITER=0' `
+  --candidate 'np_pd1:NP_PD_ITER=1' `
+  --candidate 'np_pd2:NP_PD_ITER=2' `
+  --candidate 'np_bias0:NP_BIAS=0'
+```
