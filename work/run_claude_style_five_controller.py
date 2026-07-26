@@ -718,6 +718,38 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
     if _os.environ.get("MFD_FAR_W_FREEWAY"):
         # 분리 가중(2026-07-24): freeway reservoir(본선밀도+램프큐) far 개별 스케일. 기본 1.0.
         cfg.mpc.leader_mfd_far_freeway_weight = float(_os.environ["MFD_FAR_W_FREEWAY"])
+    if _os.environ.get("LEADER_URBAN_BARRIER") == "1":
+        cfg.mpc.leader_urban_barrier_enabled = True
+    if _os.environ.get("LEADER_URBAN_BARRIER_W"):
+        cfg.mpc.leader_urban_barrier_weight = float(_os.environ["LEADER_URBAN_BARRIER_W"])
+    if _os.environ.get("LEADER_URBAN_BARRIER_THR"):
+        cfg.mpc.leader_urban_barrier_threshold = float(_os.environ["LEADER_URBAN_BARRIER_THR"])
+    if _os.environ.get("LEADER_URBAN_BARRIER_BOUNDARY_W"):
+        cfg.mpc.leader_urban_barrier_boundary_weight = float(_os.environ["LEADER_URBAN_BARRIER_BOUNDARY_W"])
+    if _os.environ.get("LEADER_URBAN_BARRIER_RAMP_W"):
+        cfg.mpc.leader_urban_barrier_ramp_weight = float(_os.environ["LEADER_URBAN_BARRIER_RAMP_W"])
+    if _os.environ.get("LEADER_RES_BALANCE") == "1":
+        cfg.mpc.leader_reservoir_balance_enabled = True
+    if _os.environ.get("LEADER_RES_BALANCE_W"):
+        cfg.mpc.leader_reservoir_balance_weight = float(_os.environ["LEADER_RES_BALANCE_W"])
+    if _os.environ.get("LEADER_RES_BALANCE_BAND"):
+        cfg.mpc.leader_reservoir_balance_band = float(_os.environ["LEADER_RES_BALANCE_BAND"])
+    if _os.environ.get("LEADER_GREEN_GUARD") == "1":
+        cfg.mpc.leader_green_service_guard_enabled = True
+    if _os.environ.get("LEADER_GREEN_GUARD_W"):
+        cfg.mpc.leader_green_service_guard_weight = float(_os.environ["LEADER_GREEN_GUARD_W"])
+    if _os.environ.get("LEADER_GREEN_GUARD_DB"):
+        cfg.mpc.leader_green_service_guard_deadband_sec = float(_os.environ["LEADER_GREEN_GUARD_DB"])
+    if _os.environ.get("LEADER_METER_CAP") == "1":
+        cfg.mpc.leader_metering_commit_cap_enabled = True
+    if _os.environ.get("LEADER_METER_CAP_UPPER"):
+        cfg.mpc.leader_metering_commit_cap_upper = float(_os.environ["LEADER_METER_CAP_UPPER"])
+    if _os.environ.get("LEADER_METER_CAP_URBAN_THR"):
+        cfg.mpc.leader_metering_commit_cap_urban_threshold = float(_os.environ["LEADER_METER_CAP_URBAN_THR"])
+    if _os.environ.get("LEADER_NP_AUTH_REG") == "1":
+        cfg.mpc.leader_np_authority_regularization_enabled = True
+    if _os.environ.get("LEADER_NP_AUTH_REG_W"):
+        cfg.mpc.leader_np_authority_regularization_weight = float(_os.environ["LEADER_NP_AUTH_REG_W"])
     if _os.environ.get("FAR_D0") == "1":
         cfg.mpc.leader_mfd_far_at_d0 = True  # depth=0에서도 rollout+far 채점(얕은 leader 검정)
     if _os.environ.get("EARLY_STOP") == "1":
@@ -757,6 +789,14 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
                 setattr(controller, _pa, False)
         if hasattr(getattr(controller, "nash_solver", None), "metering_marginal_price_weight"):
             controller.nash_solver.metering_marginal_price_weight = 0.0
+    if _os.environ.get("METER_PRICE") == "0" and hasattr(controller, "metering_price_enabled"):
+        # Freeway metering price-channel authority control; autonomous metering remains active.
+        controller.metering_price_enabled = False
+        if hasattr(getattr(controller, "nash_solver", None), "metering_marginal_price_weight"):
+            controller.nash_solver.metering_marginal_price_weight = 0.0
+    if _os.environ.get("VSL_PRICE") == "0" and hasattr(controller, "vsl_price_enabled"):
+        # VSL price-channel authority control; horizon/depth and plant are untouched.
+        controller.vsl_price_enabled = False
     if _os.environ.get("LINK_SHARE") and hasattr(controller, "nuf_link_share_mode"):
         controller.nuf_link_share_mode = str(_os.environ["LINK_SHARE"])  # {density, search, off}
     if _os.environ.get("VSL_TRUST") and hasattr(controller, "vsl_price_trust_kmh"):
@@ -868,6 +908,24 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
         # 내부 최적 가능. w→0 = 분해 손실 복귀(PFO metering)이므로 스윕으로 균형점 탐색.
         controller.nash_solver.metering_marginal_price_weight = float(
             _os.environ["METER_PRICE_W"])
+    if _os.environ.get("METER_PRICE_ADAPT") == "1" and hasattr(controller, "metering_price_adaptive_weight_enabled"):
+        controller.metering_price_adaptive_weight_enabled = True
+        if _os.environ.get("METER_ADAPT_LOW_W"):
+            controller.metering_price_adaptive_low_weight = float(_os.environ["METER_ADAPT_LOW_W"])
+        if _os.environ.get("METER_ADAPT_HIGH_W"):
+            controller.metering_price_adaptive_high_weight = float(_os.environ["METER_ADAPT_HIGH_W"])
+        if _os.environ.get("METER_ADAPT_LO"):
+            controller.metering_price_adaptive_low_stress = float(_os.environ["METER_ADAPT_LO"])
+        if _os.environ.get("METER_ADAPT_HI"):
+            controller.metering_price_adaptive_high_stress = float(_os.environ["METER_ADAPT_HI"])
+        if _os.environ.get("METER_ADAPT_DENSITY_MIX"):
+            controller.metering_price_adaptive_density_mix = float(_os.environ["METER_ADAPT_DENSITY_MIX"])
+        if _os.environ.get("METER_ADAPT_DEMAND") == "1":
+            controller.metering_price_adaptive_demand_gate_enabled = True
+        if _os.environ.get("METER_ADAPT_DEMAND_LO"):
+            controller.metering_price_adaptive_demand_low_veh_h = float(_os.environ["METER_ADAPT_DEMAND_LO"])
+        if _os.environ.get("METER_ADAPT_DEMAND_HI"):
+            controller.metering_price_adaptive_demand_high_veh_h = float(_os.environ["METER_ADAPT_DEMAND_HI"])
     if _os.environ.get("NP_OFF") == "1" and hasattr(controller, "nash_solver"):
         # D-green 진단 probe: N_P dual(λ_P) 차단 — 8-seg 경부하 λ 폭주 인과 확인용.
         controller.nash_solver.np_price_enabled = False
@@ -909,6 +967,11 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
     if _os.environ.get("FB_OFF") == "1":
         # fallback guard 해제 — N_P-active leader 기각 억압 제거(잠금해제 A/B용).
         cfg.mpc.stackelberg_enable_fallback = False
+    if _os.environ.get("PFO_INCUMBENT_OFF") == "1":
+        cfg.mpc.stackelberg_enable_pfo_incumbent = False
+    if _os.environ.get("PSTACK_STANDALONE") == "1":
+        cfg.mpc.stackelberg_enable_fallback = False
+        cfg.mpc.stackelberg_enable_pfo_incumbent = False
     if _os.environ.get("EPS_GAP") == "1":
         # ε-best-response gap probe(리뷰 2.2/2.8): 고정점 단독 재최적화 진단, 행동 불변.
         cfg.mpc.eps_gap_probe = True

@@ -376,6 +376,24 @@ class MPCConfig:
     # 분리 가중(2026-07-24): urban/freeway reservoir far 개별 스케일. 기본 1.0=기존과 비트동일.
     leader_mfd_far_urban_weight: float = 1.0
     leader_mfd_far_freeway_weight: float = 1.0
+    # Fixed-depth endpoint objective probes(2026-07-25): do not change horizon/depth.
+    # These terms only sharpen how the existing H-step rollout terminal trajectory is scored.
+    leader_urban_barrier_enabled: bool = False
+    leader_urban_barrier_weight: float = 1.0
+    leader_urban_barrier_threshold: float = 0.80
+    leader_urban_barrier_boundary_weight: float = 1.0
+    leader_urban_barrier_ramp_weight: float = 1.0
+    leader_reservoir_balance_enabled: bool = False
+    leader_reservoir_balance_weight: float = 1.0
+    leader_reservoir_balance_band: float = 0.10
+    leader_green_service_guard_enabled: bool = False
+    leader_green_service_guard_weight: float = 1.0
+    leader_green_service_guard_deadband_sec: float = 6.0
+    leader_metering_commit_cap_enabled: bool = False
+    leader_metering_commit_cap_upper: float = 6000.0
+    leader_metering_commit_cap_urban_threshold: float = 0.0
+    leader_np_authority_regularization_enabled: bool = False
+    leader_np_authority_regularization_weight: float = 1.0
     # FAR-D0(2026-07-09): depth=0에서도 rollout TTT + far로 후보 채점(역사적 d0는
     # follower 응답 proxy 랭킹 — 채점 형태 고정한 "얕은 leader" 검정용). 기본 False.
     leader_mfd_far_at_d0: bool = False

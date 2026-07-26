@@ -209,6 +209,158 @@ def mfd_far_cost_to_go(cfg: "ExperimentConfig", state: "TrafficState") -> float:
     return w * (w_urban * far_urban + w_fw * far_fw)
 
 
+def leader_fixed_depth_endpoint_cost(
+    cfg: "ExperimentConfig",
+    states: list["TrafficState"],
+) -> tuple[float, Dict[str, float]]:
+    """Env-gated endpoint/barrier terms that keep the prediction depth unchanged."""
+    if not states:
+        return 0.0, {
+            "leader_urban_barrier_cost": 0.0,
+            "leader_reservoir_balance_cost": 0.0,
+        }
+    urban_on = bool(getattr(cfg.mpc, "leader_urban_barrier_enabled", False))
+    balance_on = bool(getattr(cfg.mpc, "leader_reservoir_balance_enabled", False))
+    if not urban_on and not balance_on:
+        return 0.0, {
+            "leader_urban_barrier_cost": 0.0,
+            "leader_reservoir_balance_cost": 0.0,
+        }
+
+    from src.models.metanet import effective_rho_crit
+    from src.models.urban_queue_model import movement_storage_capacity
+
+    net = cfg.network
+    tc_h = float(cfg.simulation.T_c_h)
+    theta = float(getattr(cfg.mpc, "leader_urban_barrier_threshold", 0.80))
+    theta = max(0.0, min(theta, 0.99))
+    off_ramp_storage_links = set(net.off_ramp_storage_link.values())
+    ramp_cap_total = max(float(len(net.ramps)) * float(net.ramp_queue_max_veh), 1.0)
+    fcrit = 0.0
+    rho_crit = float(effective_rho_crit(net, None))
+    seg_len = float(net.freeway_segment_length_km)
+    for link in net.freeway_links:
+        lanes = states[-1].freeway_effective_lanes.get(link, [])
+        n_seg = len(states[-1].freeway_density.get(link, []))
+        for i in range(n_seg):
+            lane = float(lanes[i]) if i < len(lanes) else float(net.freeway_lanes)
+            fcrit += rho_crit * seg_len * max(lane, 1.0e-9)
+    fcrit = max(fcrit + ramp_cap_total, 1.0)
+
+    urban_barrier = 0.0
+    balance_cost = 0.0
+    max_link_ratio = 0.0
+    max_move_ratio = 0.0
+    final_u_norm = 0.0
+    final_f_norm = 0.0
+    for s in states:
+        link_barrier = 0.0
+        for link, cap in net.urban_link_storage_veh.items():
+            if link in off_ramp_storage_links:
+                continue
+            cap_f = max(float(cap), 1.0e-9)
+            occ = max(0.0, cap_f - float(s.urban_link_storage.get(link, cap_f)))
+            ratio = occ / cap_f
+            max_link_ratio = max(max_link_ratio, ratio)
+            link_barrier += cap_f * max(0.0, ratio - theta) ** 2
+
+        move_barrier = 0.0
+        boundary_q = 0.0
+        for movement, spec in net.urban_movements.items():
+            q = max(0.0, float(s.urban_movement_queue.get(movement, 0.0)))
+            cap_m = max(float(movement_storage_capacity(cfg, movement, spec)), 1.0e-9)
+            ratio = q / cap_m
+            max_move_ratio = max(max_move_ratio, ratio)
+            term = cap_m * max(0.0, ratio - theta) ** 2
+            if str(spec.get("kind", "")) == "boundary_in":
+                boundary_q += q
+                term *= float(getattr(cfg.mpc, "leader_urban_barrier_boundary_weight", 1.0))
+            move_barrier += term
+
+        ramp_q = sum(max(0.0, float(s.ramp_queue.get(ramp, 0.0))) for ramp in net.ramps)
+        ramp_ratio = ramp_q / ramp_cap_total
+        ramp_barrier = (
+            ramp_cap_total
+            * max(0.0, ramp_ratio - theta) ** 2
+            * float(getattr(cfg.mpc, "leader_urban_barrier_ramp_weight", 1.0))
+        )
+        if urban_on:
+            urban_barrier += (link_barrier + move_barrier + ramp_barrier) * tc_h
+
+        if balance_on:
+            protected = float(s.protected_accumulation_veh(net))
+            u_norm = (protected + boundary_q + ramp_q) / max(float(getattr(cfg.leader, "N_P_crit_veh", 1.0)), 1.0)
+            f_norm = float(s.total_freeway_vehicles(net)) / fcrit
+            final_u_norm, final_f_norm = u_norm, f_norm
+            band = float(getattr(cfg.mpc, "leader_reservoir_balance_band", 0.10))
+            balance_cost += max(0.0, u_norm - f_norm - band) ** 2 * tc_h
+
+    urban_barrier *= float(getattr(cfg.mpc, "leader_urban_barrier_weight", 1.0))
+    balance_cost *= float(getattr(cfg.mpc, "leader_reservoir_balance_weight", 1.0))
+    total = urban_barrier + balance_cost
+    return total, {
+        "leader_urban_barrier_cost": float(urban_barrier),
+        "leader_reservoir_balance_cost": float(balance_cost),
+        "leader_endpoint_cost": float(total),
+        "leader_endpoint_max_link_ratio": float(max_link_ratio),
+        "leader_endpoint_max_movement_ratio": float(max_move_ratio),
+        "leader_endpoint_final_u_norm": float(final_u_norm),
+        "leader_endpoint_final_f_norm": float(final_f_norm),
+    }
+
+
+def leader_green_service_guard_cost(
+    cfg: "ExperimentConfig",
+    control: "ControlAction",
+) -> tuple[float, Dict[str, float]]:
+    """Env-gated signal service guard; does not alter prediction depth."""
+    if not bool(getattr(cfg.mpc, "leader_green_service_guard_enabled", False)):
+        return 0.0, {
+            "leader_green_service_guard_cost": 0.0,
+            "leader_green_service_guard_max_dev_sec": 0.0,
+        }
+    net = cfg.network
+    neutral = float(net.effective_green_total) / 2.0
+    deadband = max(0.0, float(getattr(cfg.mpc, "leader_green_service_guard_deadband_sec", 6.0)))
+    excess_sq = 0.0
+    max_dev = 0.0
+    for signal in net.signals:
+        p1 = float(control.green_times.get(f"{signal}_p1", neutral))
+        dev = abs(p1 - neutral)
+        max_dev = max(max_dev, dev)
+        excess_sq += max(0.0, dev - deadband) ** 2
+    cost = (
+        float(getattr(cfg.mpc, "leader_green_service_guard_weight", 1.0))
+        * excess_sq
+        * float(cfg.simulation.T_c_h)
+    )
+    return float(cost), {
+        "leader_green_service_guard_cost": float(cost),
+        "leader_green_service_guard_max_dev_sec": float(max_dev),
+    }
+
+
+def leader_np_authority_regularization_cost(
+    cfg: "ExperimentConfig",
+    action: "LeaderAction",
+) -> tuple[float, Dict[str, float]]:
+    """General leader control-effort regularizer for perimeter net-inflow authority."""
+    if not bool(getattr(cfg.mpc, "leader_np_authority_regularization_enabled", False)):
+        return 0.0, {"leader_np_authority_regularization_cost": 0.0}
+    scale = max(float(getattr(cfg.leader, "N_P_crit_veh", 1.0)), 1.0)
+    ratio = float(action.N_P_star) / scale
+    cost = (
+        float(getattr(cfg.mpc, "leader_np_authority_regularization_weight", 1.0))
+        * ratio
+        * ratio
+        * float(cfg.simulation.T_c_h)
+    )
+    return float(cost), {
+        "leader_np_authority_regularization_cost": float(cost),
+        "leader_np_authority_regularization_ratio": float(ratio),
+    }
+
+
 @dataclass
 class DecisionResult:
     control: ControlAction
@@ -639,6 +791,11 @@ class StackelbergMPCController:
                 "objective": float(item.objective),
                 "base": float(item.objective_terms["leader_objective_base"]),
                 "follower_ttt": float(item.objective_terms["leader_follower_ttt_base"]),
+                "endpoint": float(item.objective_terms.get("leader_endpoint_cost", 0.0)),
+                "urban_barrier": float(item.objective_terms.get("leader_urban_barrier_cost", 0.0)),
+                "res_balance": float(item.objective_terms.get("leader_reservoir_balance_cost", 0.0)),
+                "green_guard": float(item.objective_terms.get("leader_green_service_guard_cost", 0.0)),
+                "np_authority": float(item.objective_terms.get("leader_np_authority_regularization_cost", 0.0)),
                 "stage": item.stage,
             }
             for item in all_evaluations
@@ -656,13 +813,27 @@ class StackelbergMPCController:
                     _w = csv.writer(_fh)
                     if _new:
                         _w.writerow(["step", "index", "N_P_star", "N_UF_star",
-                                     "objective", "base", "follower_ttt", "stage"])
+                                     "objective", "base", "follower_ttt",
+                                     "endpoint", "urban_barrier", "res_balance",
+                                     "green_guard", "green_max_dev", "np_authority",
+                                     "max_link_ratio", "max_move_ratio", "u_norm", "f_norm",
+                                     "stage"])
                     for _it in all_evaluations:
                         _w.writerow([
                             _step, _it.index, _it.action.N_P_star, _it.action.N_UF_star,
                             _it.objective,
                             _it.objective_terms.get("leader_objective_base", ""),
                             _it.objective_terms.get("leader_follower_ttt_base", ""),
+                            _it.objective_terms.get("leader_endpoint_cost", ""),
+                            _it.objective_terms.get("leader_urban_barrier_cost", ""),
+                            _it.objective_terms.get("leader_reservoir_balance_cost", ""),
+                            _it.objective_terms.get("leader_green_service_guard_cost", ""),
+                            _it.objective_terms.get("leader_green_service_guard_max_dev_sec", ""),
+                            _it.objective_terms.get("leader_np_authority_regularization_cost", ""),
+                            _it.objective_terms.get("leader_endpoint_max_link_ratio", ""),
+                            _it.objective_terms.get("leader_endpoint_max_movement_ratio", ""),
+                            _it.objective_terms.get("leader_endpoint_final_u_norm", ""),
+                            _it.objective_terms.get("leader_endpoint_final_f_norm", ""),
                             _it.stage,
                         ])
             except OSError:
@@ -761,10 +932,39 @@ class StackelbergMPCController:
         best.metadata.update(self._candidate_evaluation_metadata(evaluations, best.control, best_eval))
         best.control.diagnostics.update(best.metadata)
         best.control.diagnostics["leader_objective"] = best.leader_objective
+        self._apply_metering_commit_cap(best.control, state)
         self._apply_output_closure(best, state, forecast)
         self.previous_control = best.control.copy()
         self.last_decision = best
         return best
+
+    def _apply_metering_commit_cap(self, control: ControlAction, state: TrafficState) -> None:
+        if not bool(getattr(self.cfg.mpc, "leader_metering_commit_cap_enabled", False)):
+            return
+        net = self.cfg.network
+        urban_threshold = float(getattr(self.cfg.mpc, "leader_metering_commit_cap_urban_threshold", 0.0))
+        urban_vehicles = float(state.total_urban_vehicles(net))
+        if urban_threshold > 0.0 and urban_vehicles < urban_threshold:
+            return
+        current = sum(max(0.0, float(control.ramp_metering.get(ramp, 0.0))) for ramp in net.ramps)
+        cap = min(
+            max(0.0, float(getattr(self.cfg.mpc, "leader_metering_commit_cap_upper", current))),
+            float(net.total_ramp_capacity),
+        )
+        if current <= cap + 1.0e-9 or current <= 1.0e-9:
+            return
+        scale = cap / current
+        for ramp in net.ramps:
+            if ramp in control.ramp_metering:
+                control.ramp_metering[ramp] = max(0.0, float(control.ramp_metering[ramp]) * scale)
+        new_total = sum(max(0.0, float(control.ramp_metering.get(ramp, 0.0))) for ramp in net.ramps)
+        control.diagnostics.update({
+            "leader_metering_commit_cap_active": 1.0,
+            "leader_metering_commit_cap_upper": float(cap),
+            "leader_metering_commit_cap_before": float(current),
+            "leader_metering_commit_cap_after": float(new_total),
+            "leader_metering_commit_cap_urban_vehicles": float(urban_vehicles),
+        })
 
     def _realized_net_inflow_veh(
         self,
@@ -1565,6 +1765,42 @@ class StackelbergMPCController:
             nash.residual_objective,
             nash.residual_control,
         )
+        endpoint_cost, endpoint_terms = leader_fixed_depth_endpoint_cost(
+            self.cfg,
+            predicted_states,
+        )
+        if endpoint_cost:
+            objective_terms["leader_total_objective"] = float(
+                objective_terms["leader_total_objective"] + endpoint_cost
+            )
+            objective_terms["leader_objective_base"] = float(
+                objective_terms["leader_objective_base"] + endpoint_cost
+            )
+        objective_terms.update(endpoint_terms)
+        green_guard_cost, green_guard_terms = leader_green_service_guard_cost(
+            self.cfg,
+            nash.control,
+        )
+        if green_guard_cost:
+            objective_terms["leader_total_objective"] = float(
+                objective_terms["leader_total_objective"] + green_guard_cost
+            )
+            objective_terms["leader_objective_base"] = float(
+                objective_terms["leader_objective_base"] + green_guard_cost
+            )
+        objective_terms.update(green_guard_terms)
+        np_authority_cost, np_authority_terms = leader_np_authority_regularization_cost(
+            self.cfg,
+            evaluated_action,
+        )
+        if np_authority_cost:
+            objective_terms["leader_total_objective"] = float(
+                objective_terms["leader_total_objective"] + np_authority_cost
+            )
+            objective_terms["leader_objective_base"] = float(
+                objective_terms["leader_objective_base"] + np_authority_cost
+            )
+        objective_terms.update(np_authority_terms)
         metadata = {
             "leader_response_proxy_state_count": float(len(predicted_states)),
             "leader_candidate_raw_N_P_star": float(raw_action.N_P_star),
@@ -1846,15 +2082,64 @@ class StackelbergMPCController:
     ) -> _LeaderCandidateEvaluation:
         action = LeaderAction(float(nash.control.N_P_star), float(nash.control.N_UF_star))
         horizon = max(1, len(forecast[: self.cfg.mpc.horizon_steps]))
+        predicted_states = [state.copy() for _ in range(horizon)]
+        follower_ttt = float(nash.objective_value)
+        rollout_used = False
+        if (
+            bool(getattr(self.cfg.mpc, "leader_urban_barrier_enabled", False))
+            or bool(getattr(self.cfg.mpc, "leader_reservoir_balance_enabled", False))
+        ):
+            predicted_states, follower_ttt, rollout_used = self._leader_evaluation_base(
+                state,
+                nash,
+                forecast,
+                previous=previous,
+            )
         objective_terms = self.leader.objective_terms(
-            [state.copy() for _ in range(horizon)],
+            predicted_states,
             nash.control,
             previous,
-            float(nash.objective_value),
+            follower_ttt,
             nash.converged,
             nash.residual_objective,
             nash.residual_control,
         )
+        endpoint_cost, endpoint_terms = leader_fixed_depth_endpoint_cost(
+            self.cfg,
+            predicted_states,
+        )
+        if endpoint_cost:
+            objective_terms["leader_total_objective"] = float(
+                objective_terms["leader_total_objective"] + endpoint_cost
+            )
+            objective_terms["leader_objective_base"] = float(
+                objective_terms["leader_objective_base"] + endpoint_cost
+            )
+        objective_terms.update(endpoint_terms)
+        green_guard_cost, green_guard_terms = leader_green_service_guard_cost(
+            self.cfg,
+            nash.control,
+        )
+        if green_guard_cost:
+            objective_terms["leader_total_objective"] = float(
+                objective_terms["leader_total_objective"] + green_guard_cost
+            )
+            objective_terms["leader_objective_base"] = float(
+                objective_terms["leader_objective_base"] + green_guard_cost
+            )
+        objective_terms.update(green_guard_terms)
+        np_authority_cost, np_authority_terms = leader_np_authority_regularization_cost(
+            self.cfg,
+            action,
+        )
+        if np_authority_cost:
+            objective_terms["leader_total_objective"] = float(
+                objective_terms["leader_total_objective"] + np_authority_cost
+            )
+            objective_terms["leader_objective_base"] = float(
+                objective_terms["leader_objective_base"] + np_authority_cost
+            )
+        objective_terms.update(np_authority_terms)
         return _LeaderCandidateEvaluation(
             index=index,
             action=action,
@@ -1876,6 +2161,29 @@ class StackelbergMPCController:
                 "leader_mfd_link_excess_veh": float(objective_terms.get("leader_mfd_link_excess_veh", 0.0)),
                 "leader_mfd_storage_penalty": float(objective_terms.get("leader_mfd_storage_penalty", 0.0)),
                 "leader_boundary_in_queue_penalty": float(objective_terms.get("leader_boundary_in_queue_penalty", 0.0)),
+                "leader_urban_barrier_cost": float(objective_terms.get("leader_urban_barrier_cost", 0.0)),
+                "leader_reservoir_balance_cost": float(objective_terms.get("leader_reservoir_balance_cost", 0.0)),
+                "leader_endpoint_cost": float(objective_terms.get("leader_endpoint_cost", 0.0)),
+                "leader_endpoint_max_link_ratio": float(
+                    objective_terms.get("leader_endpoint_max_link_ratio", 0.0)
+                ),
+                "leader_endpoint_max_movement_ratio": float(
+                    objective_terms.get("leader_endpoint_max_movement_ratio", 0.0)
+                ),
+                "leader_endpoint_final_u_norm": float(objective_terms.get("leader_endpoint_final_u_norm", 0.0)),
+                "leader_endpoint_final_f_norm": float(objective_terms.get("leader_endpoint_final_f_norm", 0.0)),
+                "leader_green_service_guard_cost": float(
+                    objective_terms.get("leader_green_service_guard_cost", 0.0)
+                ),
+                "leader_green_service_guard_max_dev_sec": float(
+                    objective_terms.get("leader_green_service_guard_max_dev_sec", 0.0)
+                ),
+                "leader_np_authority_regularization_cost": float(
+                    objective_terms.get("leader_np_authority_regularization_cost", 0.0)
+                ),
+                "leader_np_authority_regularization_ratio": float(
+                    objective_terms.get("leader_np_authority_regularization_ratio", 0.0)
+                ),
                 "leader_density_excess": float(objective_terms.get("leader_density_excess", 0.0)),
                 "leader_density_penalty": float(objective_terms.get("leader_density_penalty", 0.0)),
                 "leader_density_effective_lane_weight_count": float(
@@ -1896,7 +2204,7 @@ class StackelbergMPCController:
                 "leader_fallback_candidate": 1.0,
                 **(extra_metadata or {}),
             },
-            rollout_used=False,
+            rollout_used=rollout_used,
             stage=stage,
         )
 

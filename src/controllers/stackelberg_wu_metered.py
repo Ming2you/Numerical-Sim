@@ -74,6 +74,15 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         self.metering_price_enabled: bool = False
         self.metering_price_delta_veh_h: float = 60.0  # Codex f18e920과 동일 δ
         self.metering_price_refresh_threshold_veh_h: float = 30.0
+        self.metering_price_adaptive_weight_enabled: bool = False
+        self.metering_price_adaptive_low_weight: float = 0.0
+        self.metering_price_adaptive_high_weight: float = 1.25
+        self.metering_price_adaptive_low_stress: float = 0.50
+        self.metering_price_adaptive_high_stress: float = 0.65
+        self.metering_price_adaptive_density_mix: float = 0.35
+        self.metering_price_adaptive_demand_gate_enabled: bool = False
+        self.metering_price_adaptive_demand_low_veh_h: float = 24000.0
+        self.metering_price_adaptive_demand_high_veh_h: float = 26000.0
         # B3TR(2026-07-05): metering 가격의 trust region — cap 분율 반경. green과 달리
         # 후보 격자(0.1~0.3·cap)가 δ(60veh/h)보다 커서, 반경과 **측정폭을 격자에 맞춘다**
         # (허용 이동폭만큼 측정: δ_r = trust·cap_r). None=무제한(-B3 재현, 과소방류 나선).
@@ -523,6 +532,71 @@ class StackelbergWuMeteredController(StackelbergMPCController):
             result.metadata.update(l2_meta)
             result.control.diagnostics.update(l2_meta)
         return result
+
+    def _apply_adaptive_metering_price_weight(
+        self,
+        state: TrafficState,
+        forecast: Optional[List[DemandStep]] = None,
+    ) -> Dict[str, float]:
+        follower = self.nash_solver
+        if (
+            not bool(getattr(self, "metering_price_adaptive_weight_enabled", False))
+            or not isinstance(follower, WuFaithfulFollower)
+        ):
+            return {}
+        net = self.cfg.network
+        crit = max(float(getattr(self.cfg.leader, "N_P_crit_veh", 1.0)), 1.0)
+        protected_ratio = float(state.protected_accumulation_veh(net)) / crit
+        rho_crit = max(float(net.rho_crit), 1.0e-9)
+        max_link_density_ratio = 0.0
+        for link in net.freeway_links:
+            values = [float(v) for v in state.freeway_density.get(link, [])]
+            if values:
+                max_link_density_ratio = max(
+                    max_link_density_ratio,
+                    sum(values) / float(len(values)) / rho_crit,
+                )
+        density_mix = min(max(float(self.metering_price_adaptive_density_mix), 0.0), 1.0)
+        stress = (1.0 - density_mix) * protected_ratio + density_mix * max_link_density_ratio
+        demand_peak = 0.0
+        demand_frac = 0.0
+        if bool(getattr(self, "metering_price_adaptive_demand_gate_enabled", False)):
+            steps = list(forecast or [])
+            for step in steps:
+                demand_peak = max(
+                    demand_peak,
+                    sum(float(v) for v in step.freeway_mainline.values())
+                    + sum(float(v) for v in step.urban_boundary.values())
+                    + sum(float(v) for v in step.ramp_arrival.values()),
+                )
+            d_lo = float(self.metering_price_adaptive_demand_low_veh_h)
+            d_hi = float(self.metering_price_adaptive_demand_high_veh_h)
+            if d_hi <= d_lo:
+                demand_frac = 1.0 if demand_peak >= d_hi else 0.0
+            else:
+                x_d = min(max((demand_peak - d_lo) / (d_hi - d_lo), 0.0), 1.0)
+                demand_frac = x_d * x_d * (3.0 - 2.0 * x_d)
+            stress = max(stress, demand_frac)
+        lo = float(self.metering_price_adaptive_low_stress)
+        hi = float(self.metering_price_adaptive_high_stress)
+        if hi <= lo:
+            frac = 1.0 if stress >= hi else 0.0
+        else:
+            x = min(max((stress - lo) / (hi - lo), 0.0), 1.0)
+            frac = x * x * (3.0 - 2.0 * x)
+        low_w = float(self.metering_price_adaptive_low_weight)
+        high_w = float(self.metering_price_adaptive_high_weight)
+        weight = low_w + frac * (high_w - low_w)
+        follower.metering_marginal_price_weight = float(weight)
+        return {
+            "wu_b3_meter_price_adapt_enabled": 1.0,
+            "wu_b3_meter_price_adapt_weight": float(weight),
+            "wu_b3_meter_price_adapt_stress": float(stress),
+            "wu_b3_meter_price_adapt_protected_ratio": float(protected_ratio),
+            "wu_b3_meter_price_adapt_density_ratio": float(max_link_density_ratio),
+            "wu_b3_meter_price_adapt_demand_peak": float(demand_peak),
+            "wu_b3_meter_price_adapt_demand_frac": float(demand_frac),
+        }
 
     def _link_share_omega(self, state: TrafficState) -> Dict[str, float]:
         """본선 headroom 비례 link budget 분할 — ω_l ∝ Σ_seg max(0, ρ_crit−ρ)·L·λ_eff.
@@ -1107,9 +1181,24 @@ class StackelbergWuMeteredController(StackelbergMPCController):
             follower.green_offset_cross_price = None
         if not self.vsl_meter_cross_price_enabled:
             follower.vsl_meter_cross_price = None
+        adaptive_meter_meta = (
+            self._apply_adaptive_metering_price_weight(state, forecast)
+            if self.metering_price_enabled else {}
+        )
+        metering_price_active = bool(self.metering_price_enabled)
+        if bool(getattr(self, "metering_price_adaptive_weight_enabled", False)):
+            metering_price_active = (
+                metering_price_active
+                and float(adaptive_meter_meta.get("wu_b3_meter_price_adapt_weight", 0.0)) > 1.0e-9
+            )
+            adaptive_meter_meta["wu_b3_meter_price_adapt_active"] = float(metering_price_active)
+            if not metering_price_active:
+                follower.metering_marginal_price = None
+                follower.metering_release_certified = None
+                follower.metering_marginal_price_trust_frac = None
         if not (
             self.signal_price_enabled
-            or self.metering_price_enabled
+            or metering_price_active
             or self.vsl_price_enabled
             or self.offset_price_enabled
             or self.offset_joint_enabled
@@ -1121,6 +1210,7 @@ class StackelbergWuMeteredController(StackelbergMPCController):
                 "wu_b2_price_enabled": 0.0,
                 "wu_b2_price_refreshed": 0.0,
             }
+            self._signal_price_meta.update(adaptive_meter_meta)
             return
         net = self.cfg.network
         total = float(net.effective_green_total)
@@ -1146,7 +1236,7 @@ class StackelbergWuMeteredController(StackelbergMPCController):
                 r: min(max(float(previous.ramp_metering.get(r, ramp_caps[r])), 0.0), ramp_caps[r])
                 for r in net.ramps
             }
-            if self.metering_price_enabled else {}
+            if metering_price_active else {}
         )
         ff = self.cfg.freeway_follower
         vsl_values = [float(v) for v in ff.vsl_set]
@@ -1176,7 +1266,7 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         # ---- refresh 판정: 강제(ADMM iteration) ∨ 가격 부재 ∨ cadence ∨ event-trigger(운영점 이동) ----
         refresh = force or (
             (self.signal_price_enabled and follower.signal_marginal_price is None)
-            or (self.metering_price_enabled and follower.metering_marginal_price is None)
+            or (metering_price_active and follower.metering_marginal_price is None)
             or (self.vsl_price_enabled and follower.vsl_marginal_price is None)
             or (self.offset_price_enabled and follower.offset_marginal_price is None)
             or (self.offset_joint_enabled and follower.offset_directive is None)
@@ -1213,7 +1303,7 @@ class StackelbergWuMeteredController(StackelbergMPCController):
                     refresh = True
                     break
         release_trigger = False
-        if not refresh and self.metering_price_enabled:
+        if not refresh and metering_price_active:
             # release-트리거 재선형화(2026-07-14): 커밋된 직전 control의 실현
             # Σmeter/budget(wu_b3_release_ratio_*)이 회랑 하한 α 근방(<α+0.05)까지
             # 떨어지면(과소방류 나선 조짐) 가격 강제 재선형화 — 지연 불안정 완화.
@@ -1228,9 +1318,11 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         if not refresh:
             self._signal_price_meta = dict(self._signal_price_meta)
             self._signal_price_meta["wu_b2_price_refreshed"] = 0.0
+            self._signal_price_meta.update(adaptive_meter_meta)
             return
 
         meta: Dict[str, float] = {"wu_b2_price_enabled": float(self.signal_price_enabled)}
+        meta.update(adaptive_meter_meta)
         meta["wu_b3_release_refresh"] = float(release_trigger)
         self._price_rollout_count = 0
 
@@ -1262,7 +1354,7 @@ class StackelbergWuMeteredController(StackelbergMPCController):
                 for signal, p1_0 in op_green.items():
                     lo_v, hi_v = clamp(p1_0 - d_g), clamp(p1_0 + d_g)
                     spsa_levers.append(("green", signal, lo_v, hi_v, hi_v - lo_v))
-            if self.metering_price_enabled:
+            if metering_price_active:
                 d_m0 = float(self.metering_price_delta_veh_h)
                 for ramp, x0 in op_meter.items():
                     cap = ramp_caps[ramp]
@@ -1349,7 +1441,7 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         # ---- metering 채널(B3, B4 barrier 합산 가능) ----
         # g_ext = d(전역TTT)/dx − d(own-TTS)/dx (+ d(barrier)/dx). 세 미분 모두 같은
         # 동결 운영점에서 — Codex 원안의 "g_i는 commit점·d_local은 snapshot점" 혼합을 제거.
-        if self.metering_price_enabled:
+        if metering_price_active:
             meta["wu_b3_meter_price_enabled"] = 1.0
             meta["wu_b4_barrier_enabled"] = float(self.barrier_price_enabled)
             delta_m = float(self.metering_price_delta_veh_h)
