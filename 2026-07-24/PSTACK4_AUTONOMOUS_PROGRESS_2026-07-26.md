@@ -43,6 +43,11 @@ Hard constraints followed:
   - Optional forecast demand gate uses forecast peak total demand.
   - If adaptive weight is zero, the metering price channel is fully inactive for that step, including trust/cert side effects.
 
+- Added env-gated adaptive N_P dual authority in `src/controllers/stackelberg_wu_metered.py`.
+  - `NP_DUAL_ADAPT_GATE=1` lets the N_P dual price act only when adaptive metering pressure is materially active.
+  - `NP_DUAL_ADAPT_MIN_W` controls the activation threshold; final validation used `0.10`.
+  - This is not scenario-specific; it keys off the same forecast-demand/state-stress metering authority signal.
+
 ## Important validation results
 
 Baseline full-five candidates:
@@ -111,7 +116,7 @@ High needed demand-gated metering price authority:
 - Pure state gate activates too late.
 - Forecast demand gate is the useful general signal so far.
 
-## Latest full-five validation
+## Previous full-five validation
 
 The current best candidate was run on all five original scenarios at `T=14400` with five parallel workers.
 
@@ -143,6 +148,72 @@ Status:
 - It is not solved yet because Skew still loses by `+32.541`.
 - The full-five run confirms that Low, Medium, Incident, and High remain safe under the demand-gated adaptive metering candidate.
 
+## Final verified candidate
+
+The next diagnostic screen showed that fully removing the N_P dual path fixes Skew but breaks High:
+
+| Candidate | Skew gap | High gap |
+|---|---:|---:|
+| `NP_PD_ITER=0` | -7.399 | +142.756 |
+| `NP_OFF=1` | -7.399 | +143.238 |
+| `NP_CAND_LAMBDA=0` | -7.399 | +142.756 |
+
+The robust fix is to keep the N_P dual path only when adaptive metering authority is materially active:
+
+```text
+NP_DUAL_ADAPT_GATE=1
+NP_DUAL_ADAPT_MIN_W=0.10
+```
+
+Final candidate env, relative to the common P-Stack settings:
+
+```text
+BUDGET_OFF=1
+PSTACK_STANDALONE=1
+GREEN_TRUST_SEC=1.5
+VSL_PRICE=0
+METER_PRICE_ADAPT=1
+METER_ADAPT_DEMAND=1
+METER_ADAPT_LO=0.55
+METER_ADAPT_HI=0.70
+NP_DUAL_ADAPT_GATE=1
+NP_DUAL_ADAPT_MIN_W=0.10
+```
+
+Full-five validation output:
+
+```text
+outputs/_full14400_np_adapt_gate_candidate
+```
+
+Comparison baseline:
+
+```text
+outputs/_full14400_budgetoff_trust2_5scen
+```
+
+Final `T=14400` result:
+
+| Scenario | PFO TTT | P-Stack TTT | Gap | P-Stack freeway TTT | P-Stack urban TTT |
+|---|---:|---:|---:|---:|---:|
+| `sweet_155_w` | 3070.813 | 3064.265 | -6.548 | 1920.342 | 1143.923 |
+| `sweet_170_w` | 3972.043 | 3871.780 | -100.263 | 2311.578 | 1560.202 |
+| `sweet_170_skew15_w` | 3944.430 | 3937.031 | -7.399 | 2295.678 | 1641.353 |
+| `sweet_170_incident_w` | 5606.992 | 5408.535 | -198.457 | 3782.846 | 1625.688 |
+| `sweet_190_w` | 6079.287 | 5926.607 | -152.680 | 3478.431 | 2448.177 |
+
+Status:
+
+- Final candidate is `5/5` wins at `T=14400`.
+- No depth/horizon override was used.
+- P-Stack remained standalone with `PSTACK_STANDALONE=1`.
+- The gate was active only in materially high-pressure cases:
+  - `sweet_155_w`: `0/80` active steps
+  - `sweet_170_w`: `0/80` active steps
+  - `sweet_170_skew15_w`: `0/80` active steps
+  - `sweet_170_incident_w`: `21/80` active steps
+  - `sweet_190_w`: `34/80` active steps
+
 ## Current pushed work summary
 
 Pushed implementation and tooling:
@@ -152,47 +223,13 @@ Pushed implementation and tooling:
 - Env-gated diagnostic objective terms in `src/controllers/stackelberg_mpc.py` and `src/models/state.py`.
 - Price authority controls in `work/run_claude_style_five_controller.py`.
 - Adaptive metering price authority in `src/controllers/stackelberg_wu_metered.py`.
-- This progress document with the search path, rejected branches, current best, and next search direction.
+- Adaptive N_P dual gate in `src/controllers/stackelberg_wu_metered.py` and `work/run_claude_style_five_controller.py`.
+- This progress document with the search path, rejected branches, final candidate, and validation evidence.
 
 Validation completed:
 
 - Syntax compile passed for the changed Python files.
-- Full-five `T=14400` validation completed for the current best candidate.
-- Current best is robust on four scenarios but still misses the all-scenario goal.
-
-## Next task
-
-The next search should focus on Skew while protecting the four existing wins.
-
-Most promising next controller direction:
-
-- Keep `BUDGET_OFF=1`.
-- Keep `PSTACK_STANDALONE=1`.
-- Keep `VSL_PRICE=0`.
-- Keep forecast-demand-gated adaptive metering.
-- Do not change depth/horizon.
-- Investigate whether the N_P dual/price path is constraining D/F ramp-aware green movement on Skew:
-  - `NP_OFF=1`
-  - `NP_CAND_LAMBDA=0`
-  - `NP_PD_ITER=0/1/2`
-  - `NP_BIAS=0`
-- If that is not enough, add only general pressure-based logic/objective terms, not scenario-specific or signal-name-specific hacks.
-
-Suggested next screen:
-
-```powershell
-python work/run_parallel_candidate_matrix.py `
-  --scenarios sweet_170_skew15_w,sweet_190_w `
-  --T-total 14400 `
-  --workers 10 `
-  --controllers P-STACK-WU-FAITHFUL-ALLPRICE-JOINT `
-  --output outputs\_skew_high14400_np_dual_screen `
-  --pfo-root outputs/_full14400_budgetoff_trust2_5scen `
-  --candidate 'base:' `
-  --candidate 'np_off:NP_OFF=1' `
-  --candidate 'np_candlambda0:NP_CAND_LAMBDA=0' `
-  --candidate 'np_pd0:NP_PD_ITER=0' `
-  --candidate 'np_pd1:NP_PD_ITER=1' `
-  --candidate 'np_pd2:NP_PD_ITER=2' `
-  --candidate 'np_bias0:NP_BIAS=0'
-```
+- Skew/High N_P dual screen completed.
+- Adaptive N_P dual gate threshold screen completed.
+- Full-five `T=14400` validation completed for the final candidate.
+- Final candidate beats PFO on all five original scenarios.

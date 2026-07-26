@@ -926,6 +926,10 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
             controller.metering_price_adaptive_demand_low_veh_h = float(_os.environ["METER_ADAPT_DEMAND_LO"])
         if _os.environ.get("METER_ADAPT_DEMAND_HI"):
             controller.metering_price_adaptive_demand_high_veh_h = float(_os.environ["METER_ADAPT_DEMAND_HI"])
+    if _os.environ.get("NP_DUAL_ADAPT_GATE") == "1" and hasattr(controller, "np_dual_adaptive_gate_enabled"):
+        controller.np_dual_adaptive_gate_enabled = True
+        if _os.environ.get("NP_DUAL_ADAPT_MIN_W"):
+            controller.np_dual_adaptive_gate_min_weight = float(_os.environ["NP_DUAL_ADAPT_MIN_W"])
     if _os.environ.get("NP_OFF") == "1" and hasattr(controller, "nash_solver"):
         # D-green 진단 probe: N_P dual(λ_P) 차단 — 8-seg 경부하 λ 폭주 인과 확인용.
         controller.nash_solver.np_price_enabled = False

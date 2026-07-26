@@ -83,6 +83,9 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         self.metering_price_adaptive_demand_gate_enabled: bool = False
         self.metering_price_adaptive_demand_low_veh_h: float = 24000.0
         self.metering_price_adaptive_demand_high_veh_h: float = 26000.0
+        self.np_dual_adaptive_gate_enabled: bool = False
+        self.np_dual_adaptive_gate_min_weight: float = 0.10
+        self._np_dual_adaptive_gate_base_enabled: Optional[bool] = None
         # B3TR(2026-07-05): metering 가격의 trust region — cap 분율 반경. green과 달리
         # 후보 격자(0.1~0.3·cap)가 δ(60veh/h)보다 커서, 반경과 **측정폭을 격자에 맞춘다**
         # (허용 이동폭만큼 측정: δ_r = trust·cap_r). None=무제한(-B3 재현, 과소방류 나선).
@@ -596,6 +599,32 @@ class StackelbergWuMeteredController(StackelbergMPCController):
             "wu_b3_meter_price_adapt_density_ratio": float(max_link_density_ratio),
             "wu_b3_meter_price_adapt_demand_peak": float(demand_peak),
             "wu_b3_meter_price_adapt_demand_frac": float(demand_frac),
+        }
+
+    def _apply_adaptive_np_dual_gate(
+        self,
+        adaptive_meter_meta: Dict[str, float],
+    ) -> Dict[str, float]:
+        follower = self.nash_solver
+        if (
+            not bool(getattr(self, "np_dual_adaptive_gate_enabled", False))
+            or not isinstance(follower, WuFaithfulFollower)
+        ):
+            return {}
+        if self._np_dual_adaptive_gate_base_enabled is None:
+            self._np_dual_adaptive_gate_base_enabled = bool(follower.np_price_enabled)
+        metric = float(adaptive_meter_meta.get("wu_b3_meter_price_adapt_weight", 0.0))
+        threshold = max(0.0, float(self.np_dual_adaptive_gate_min_weight))
+        active = bool(self._np_dual_adaptive_gate_base_enabled) and metric >= threshold
+        follower.np_price_enabled = bool(active)
+        if not active:
+            follower._lambda_P = 0.0
+            follower._np_corrector_pending = None
+        return {
+            "wu_faithful_np_adapt_gate_enabled": 1.0,
+            "wu_faithful_np_adapt_gate_active": float(active),
+            "wu_faithful_np_adapt_gate_metric": float(metric),
+            "wu_faithful_np_adapt_gate_min_weight": float(threshold),
         }
 
     def _link_share_omega(self, state: TrafficState) -> Dict[str, float]:
@@ -1185,6 +1214,7 @@ class StackelbergWuMeteredController(StackelbergMPCController):
             self._apply_adaptive_metering_price_weight(state, forecast)
             if self.metering_price_enabled else {}
         )
+        adaptive_meter_meta.update(self._apply_adaptive_np_dual_gate(adaptive_meter_meta))
         metering_price_active = bool(self.metering_price_enabled)
         if bool(getattr(self, "metering_price_adaptive_weight_enabled", False)):
             metering_price_active = (
