@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# R17 — High 마무리 미세 스윕 (2026-07-26). bothsbwf(=가격채널 off + spillback WF=0.25)가 +2.
+# freeway 가중이 효과 축(+21 → +2)이므로 WF 미세 + spillback 파라미터 주변 탐색.
+set -u
+cd /c/Users/alsrj/Desktop/Numerical-Sim-offiter
+PY="C:/Users/alsrj/.cache/codex-runtimes/codex-primary-runtime/dependencies/python/python.exe"
+PS=P-STACK-WU-FAITHFUL-ALLPRICE-JOINT
+BASE_ENV=(WARMUP_NC_STEPS=5 FW_BUFFER=8 TERM_ZG=1 VFREE=115 RHO_CRIT=31.5 TAU_H=0.0056111
+  NU_BASE=22.5 KAPPA=10 MERGE_DELTA=0.9 BOX_WALK=1 BOX_WALK_VG=1 NP_PD_ITER=4 NP_BIAS=1
+  CROSS_OFF=1 FAR_STATE_AWARE=1 FAR_REAL_V=1 FAR_GATE=3 BASELINE_BOX=1 BIAS_SAMPLE=1
+  BIAS_POW=0.4 NASH_SMAX=10 PFO_SPLIT=2 PYTHONIOENCODING=utf-8
+  OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1)
+run() { local tag="$1"; shift
+  local out="outputs/_diag/pr_${tag}_190"; mkdir -p "$out"
+  env -u SEG13 -u METER_BOX -u VSL_BOX -u SUP_PFO -u SUP_GATE -u SPILLBACK "${BASE_ENV[@]}" \
+    METER_PRICE=0 VSL_PRICE=0 SPILLBACK=1 SPILLBACK_LEAD=0.5 "$@" \
+    "$PY" -u work/run_claude_style_five_controller.py \
+      --scenario sweet_190_w --T-total 14400 --controllers "$PS" --output "$out" \
+      > "$out.log" 2>&1 & }
+run wf010     SPILLBACK_WF=0.10 SPILLBACK_WU=2 SPILLBACK_NREF_U=800
+run wf015     SPILLBACK_WF=0.15 SPILLBACK_WU=2 SPILLBACK_NREF_U=800
+run wf035     SPILLBACK_WF=0.35 SPILLBACK_WU=2 SPILLBACK_NREF_U=800
+run wf050     SPILLBACK_WF=0.50 SPILLBACK_WU=2 SPILLBACK_NREF_U=800
+run wf025sup  SPILLBACK_WF=0.25 SPILLBACK_WU=2 SPILLBACK_NREF_U=800 SUP_PFO=1
+run wf025n500 SPILLBACK_WF=0.25 SPILLBACK_WU=2 SPILLBACK_NREF_U=500
+run wf025n1k  SPILLBACK_WF=0.25 SPILLBACK_WU=2 SPILLBACK_NREF_U=1000
+run wf025wu15 SPILLBACK_WF=0.25 SPILLBACK_WU=1.5 SPILLBACK_NREF_U=800
+run wf025wu3  SPILLBACK_WF=0.25 SPILLBACK_WU=3 SPILLBACK_NREF_U=800
+run wf025gt3  SPILLBACK_WF=0.25 SPILLBACK_WU=2 SPILLBACK_NREF_U=800 GREEN_TRUST_SEC=3
+wait
+echo "===== R17 DONE ====="
