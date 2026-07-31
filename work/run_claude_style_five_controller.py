@@ -687,11 +687,12 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
         # VSL 앵커를 previous로 + 반폭[km/h]. 기존 snapshot 앵커는 스텝당 최대 50 관측.
         cfg.mpc.seg13_vsl_box_kmh = float(_os.environ["VSL_BOX"])
     if _os.environ.get("VSL_SMOOTH") is not None:
-        # VSL_SMOOTH(2026-07-24): vsl_smoothness_weight sweep용 env. 기본(default.yaml)=0.0이라
-        # VSL이 90↔100을 왕복(방향전환 11회). 0.005~0.02 사이가 "115 회복 유지 + 진동 억제"
-        # 후보 구간(2026-07-23 사용자 스윕: 0.02↑는 100 고착, 0.005·0은 회복).
-        cfg = cfg.with_updates({"freeway_follower": {
-            "vsl_smoothness_weight": float(_os.environ["VSL_SMOOTH"])}})
+        # VSL_SMOOTH(2026-07-24): vsl_smoothness_weight sweep용. 기본(default.yaml)=0.0.
+        # 실측: 0.002~0.008 전 구간 TTT 악화(skew +159~204) → 0 유지가 옳다. sweep 재현용으로만.
+        cfg.freeway_follower.vsl_smoothness_weight = float(_os.environ["VSL_SMOOTH"])
+    if _os.environ.get("METER_SMOOTH") is not None:
+        # segment agent metering 마찰 고정값 sweep용. MS_ADAPT가 켜져 있으면 per-step으로 덮어쓴다.
+        cfg.freeway_follower.segment_metering_smoothness_weight = float(_os.environ["METER_SMOOTH"])
     if _os.environ.get("BOX_WALK") == "1":
         # 리더 rollout에 박스 다중스텝 도달 모델링(METER_BOX 필요). 200_w 회복 시야 복원.
         cfg.mpc.leader_rollout_box_walk = True
@@ -1014,6 +1015,16 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
     _fargate_links: set = set()
     _fargate_stress = False
 
+    # MS_ADAPT(2026-07-27): metering 마찰을 상태 의존으로. FAR_GATE와 동일 구조 —
+    # env는 루프 밖에서 1회만 파싱하고 latch는 run_one 지역 상태로 둔다(arm 간 누수 방지).
+    _ms_on = _os.environ.get("MS_ADAPT") == "1"
+    _ms_thr = float(_os.environ.get("MS_THR", "10"))
+    _ms_hold = int(_os.environ.get("MS_HOLD", "3"))
+    _ms_w = float(_os.environ.get("MS_W", "0.013"))
+    _ms_prev_rho: dict = {}
+    _ms_latch = 0
+    _warmup_steps = int(_os.environ.get("WARMUP_NC_STEPS", "0"))
+
     _ckpt_on = _os.environ.get("CHECKPOINT", "1") == "1"
     _pg_core = ["step", "time_sec", "step_total_ttt", "step_urban_ttt", "step_freeway_ttt",
                 "cumulative_total_ttt", "cumulative_urban_ttt", "cumulative_freeway_ttt",
@@ -1024,10 +1035,12 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
         t = step * cfg.simulation.control_interval
         # 리더 후보 곡면 로깅(2026-07-22, price 곡률 진단용). LEADER_CAND_LOG=<path> 지정 시
         # 스텝별 (N_P,N_UF,objective) 후보 평가를 그대로 남긴다(추가 계산 없음, env-gated).
-        if _os.environ.get("LEADER_CAND_LOG") or _os.environ.get("LEADER_GRID_SWEEP"):
-            if _os.environ.get("LEADER_CAND_LOG"):
-                _os.environ["NUMSIM_STACKELBERG_PROGRESS_FILE"] = _os.environ["LEADER_CAND_LOG"]
-            _os.environ["NUMSIM_STACKELBERG_PROGRESS_STEP"] = str(step)  # grid probe도 스텝 라벨 필요
+        # 스텝 라벨은 무조건 갱신한다(읽는 쪽이 전부 자기 env 게이트 안이라 미사용 시 무해).
+        # grid probe·RESIDUAL_LOG도 같은 라벨을 쓴다.
+        _cand_log = _os.environ.get("LEADER_CAND_LOG")
+        if _cand_log:
+            _os.environ["NUMSIM_STACKELBERG_PROGRESS_FILE"] = _cand_log
+        _os.environ["NUMSIM_STACKELBERG_PROGRESS_STEP"] = str(step)
         forecast = profile.horizon(t, cfg.mpc.horizon_steps + max(0, cfg.mpc.leader_value_depth))
         t0 = time.perf_counter()
         # WARMUP_NC_STEPS: 웜업 구간은 전 arm 공통 no-control(분석창 진입 상태 동일화 +
@@ -1090,32 +1103,18 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
         # 늦춰 캐스케이드를 부르고, 정상 혼잡엔 마찰이 ±METER_BOX 진동을 잡는다.
         # 트리거 = |Δρ|(스텝간 링크평균 밀도 변화) > MS_THR. 실측 분리: 임계 10에서 정상 4셀
         # 발동 0회 / incident만 9회. 래치(MS_HOLD)로 교란 국면을 덮는다.
-        if _os.environ.get("MS_ADAPT") == "1":
-            _ms_thr = float(_os.environ.get("MS_THR", "10"))
-            _ms_hold = int(_os.environ.get("MS_HOLD", "3"))
-            _ms_w = _os.environ.get("MS_W", "0.013")
-            _rho_now = {}
-            for _lk, _v in (sim.state.freeway_density or {}).items():
-                if _v is not None and len(_v):
-                    _rho_now[_lk] = float(sum(_v)) / len(_v)
-            _prev_rho = globals().get("_MS_PREV_RHO")
-            _dmax = 0.0
-            if _prev_rho:
-                for _lk, _v in _rho_now.items():
-                    if _lk in _prev_rho:
-                        _dmax = max(_dmax, abs(_v - _prev_rho[_lk]))
-            globals()["_MS_PREV_RHO"] = _rho_now
-            _latch = int(globals().get("_MS_LATCH", 0))
-            if _dmax > _ms_thr:
-                _latch = _ms_hold
-            elif _latch > 0:
-                _latch -= 1
-            globals()["_MS_LATCH"] = _latch
-            _os.environ["METER_SMOOTH"] = "0" if _latch > 0 else _ms_w
-            if step == int(_os.environ.get("WARMUP_NC_STEPS", "0")) or _dmax > _ms_thr:
-                print(f"[MS_ADAPT] step {step}: |Δρ|={_dmax:.1f} latch={_latch} "
-                      f"friction={_os.environ['METER_SMOOTH']}", flush=True)
-        if step < int(_os.environ.get("WARMUP_NC_STEPS", "0")):
+        if _ms_on:
+            _rho_now = {lk: float(sum(v)) / len(v)
+                        for lk, v in (sim.state.freeway_density or {}).items() if v}
+            _dmax = max((abs(v - _ms_prev_rho[lk]) for lk, v in _rho_now.items()
+                         if lk in _ms_prev_rho), default=0.0)
+            _ms_prev_rho = _rho_now
+            _ms_latch = _ms_hold if _dmax > _ms_thr else max(0, _ms_latch - 1)
+            cfg.freeway_follower.segment_metering_smoothness_weight = 0.0 if _ms_latch else _ms_w
+            if step == _warmup_steps or _dmax > _ms_thr:
+                print(f"[MS_ADAPT] step {step}: |Δρ|={_dmax:.1f} latch={_ms_latch} "
+                      f"friction={cfg.freeway_follower.segment_metering_smoothness_weight}", flush=True)
+        if step < _warmup_steps:
             control = baseline_control("no_control", cfg, sim.state, forecast[0])
         else:
             control = decide(controller_id, controller, sim, forecast, previous, cfg, step)

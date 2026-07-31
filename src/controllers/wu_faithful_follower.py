@@ -16,7 +16,10 @@ leader는 None(PFO 모드)부터 구현한다.
 """
 from __future__ import annotations
 
+import csv
+import os
 import time
+from pathlib import Path
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence
 
 import numpy as np
@@ -2383,9 +2386,9 @@ class WuFaithfulFollower:
         dt_h = sim.T_f_h
         vsl_max = max(ff.vsl_set)
         smooth_w = ff.vsl_smoothness_weight
-        # METER_SMOOTH: segment agent metering 마찰 가중치(env sweep용). 0=기존 비트동일.
-        import os as _os_ms
-        _meter_smooth_w = float(_os_ms.environ.get("METER_SMOOTH", "0") or 0.0)
+        # segment agent metering 마찰 가중치. 0.0 = 기존 거동(마찰 없음). 러너가 per-step으로
+        # 설정한다(MS_ADAPT: 교란 시 0, 아니면 0.013) — vsl_smoothness_weight와 동일 경로.
+        _meter_smooth_w = float(getattr(ff, "segment_metering_smoothness_weight", 0.0) or 0.0)
 
         # ---- 동결 y(hold-constant): 본선 상태·이웃 방류·storage 점유(urban 소유)·유출 cap ----
         rhos0 = list(state.freeway_density.get(link, [0.0] * n_seg))
@@ -2476,6 +2479,13 @@ class WuFaithfulFollower:
                     if abs(float(v) - prev_v) <= ff.max_vsl_step + 1.0e-9
                 ] or [prev_v]
             own_ramp = agent.owned_ramps[0] if agent.owned_ramps else None
+            # metering 마찰 기준값: own_ramp·previous에만 의존하므로 후보 루프 밖에서 1회 계산.
+            # None이면 마찰항 자체를 건너뛴다(직전 값이 없으면 |Δ|=0이라 기여도 0).
+            _prev_m = None
+            if _meter_smooth_w > 0.0 and own_ramp is not None and previous is not None:
+                _pm = getattr(previous, "ramp_metering", None)
+                if _pm is not None and own_ramp in _pm:
+                    _prev_m = float(_pm[own_ramp])
             if own_ramp is not None and self.metering_enabled:
                 cap_r = float(net.ramp_capacity_veh_h[own_ramp])
                 # METER-BOX(2026-07-17, 사용자 설계): 고정 격자 {cap·f} 대신 직전 step
@@ -2646,14 +2656,12 @@ class WuFaithfulFollower:
                     # 마찰(암묵적 신호검정) — 7p와 동일 규약(PRICE-TR 시 0).
                     if not (self.price_smoothness_disabled and self.vsl_marginal_price):
                         cost += smooth_w * abs(float(v_cand) - prev_v)
-                    # METER_SMOOTH(2026-07-24): segment agent 경로엔 metering 마찰이 없어
+                    # metering 마찰(2026-07-24): segment agent 경로엔 원래 metering 마찰이 없어
                     # (freeway_follower/distributed_coordinator에만 존재) metering이 매 스텝
                     # ±METER_BOX를 왕복한다. 실측 skew t=72~102분: PFO는 255~263 평탄·ρ_E 24.5
                     # 유지인데 P-Stack은 245↔297 진동하며 ρ_E 27→37로 임계 돌파, freeway TTT +86.
-                    # VSL 마찰과 동일 형태(|Δ|)로 추가. env 미설정이면 0 = 기존과 비트동일.
-                    if own_ramp is not None and m_cand is not None and _meter_smooth_w > 0.0:
-                        _prev_m = float(previous.ramp_metering.get(own_ramp, float(m_cand))) \
-                            if previous is not None and getattr(previous, "ramp_metering", None) else float(m_cand)
+                    # VSL 마찰과 동일 형태(|Δ|). weight 0이면 기존과 비트동일.
+                    if _prev_m is not None and m_cand is not None:
                         cost += _meter_smooth_w * abs(float(m_cand) - _prev_m)
                     # 가격항: g_vsl(전 seg), 소유 ramp의 g_meter + h cross(leader present).
                     if self.vsl_marginal_price:
@@ -3897,9 +3905,13 @@ class WuFaithfulFollower:
         # λ_next = clip(λ + gain·(Σnin − projected_target), 0, cap)은 수렴 후 계산해 diagnostics로만
         # 내보내고, 선택된 후보의 λ만 컨트롤러가 commit한다(아래 post-loop 참고).
 
-        import os as _os_nash  # NASH_SMAX(2026-07-23): S_max 하드캡(5) env로 뚫기 — 수렴 A/B용
-        _nash_smax_env = _os_nash.environ.get("NASH_SMAX")
+        # NASH_SMAX(2026-07-23): S_max 하드캡(5)을 env로 뚫는다 — 수렴 A/B용.
+        # ※ 이 하드캡 때문에 cfg.mpc.max_nash_iter(기본 10)가 실효 5로 잘린다(AutoTuner 조정도 무력).
+        #    S_max=10이면 수렴율 54.5%→100%·TTT 불변이라 플래그십은 NASH_SMAX=10을 쓴다.
+        _nash_smax_env = os.environ.get("NASH_SMAX")
         s_max = max(1, int(_nash_smax_env)) if _nash_smax_env else max(1, min(self.cfg.mpc.max_nash_iter, 5))
+        _resid_log = os.environ.get("RESIDUAL_LOG")
+        _resid_rows: Optional[list] = [] if _resid_log else None
         alpha = 0.5
         residual = float("inf")
         converged = False
@@ -3974,25 +3986,13 @@ class WuFaithfulFollower:
                     default=0.0,
                 )
                 coupling = relaxed
-                # RESIDUAL_LOG(2026-07-23, 알고리즘검증 (c)패널): 반복별 residual을 남겨
-                # "iteration↑ 따라 residual↓해 ε 아래로 수렴"을 그린다. env-gated.
-                _rlog = _os_nash.environ.get("RESIDUAL_LOG")
-                if _rlog:
-                    try:
-                        import csv as _csv_r
-                        from pathlib import Path as _Path_r
-                        _rp = _Path_r(_rlog).with_suffix(".resid.csv")
-                        _rnew = not _rp.exists()
-                        with _rp.open("a", newline="", encoding="utf-8") as _rfh:
-                            _rw = _csv_r.writer(_rfh)
-                            if _rnew:
-                                _rw.writerow(["step", "iteration", "residual", "tol"])
-                            _rw.writerow([
-                                _os_nash.environ.get("NUMSIM_STACKELBERG_PROGRESS_STEP", ""),
-                                iteration, residual, self.cfg.mpc.distributed_coupling_tol,
-                            ])
-                    except OSError:
-                        pass
+                # RESIDUAL_LOG(2026-07-23, 알고리즘검증 (c)패널): 반복별 residual 수집.
+                # 파일 I/O는 루프 밖에서 1회(과거엔 반복마다 열고 닫아 스텝당 수십 회 open).
+                if _resid_rows is not None:
+                    _resid_rows.append([
+                        os.environ.get("NUMSIM_STACKELBERG_PROGRESS_STEP", ""),
+                        iteration, residual, self.cfg.mpc.distributed_coupling_tol,
+                    ])
                 if residual < self.cfg.mpc.distributed_coupling_tol:
                     converged = True
                     break
@@ -4063,6 +4063,17 @@ class WuFaithfulFollower:
             np_cand_lambda_applied = 1.0
         else:
             _jacobi_consensus(lambda_p)
+        if _resid_rows:  # RESIDUAL_LOG: 모든 합의 sweep이 끝난 뒤 1회만 기록
+            try:
+                _rp = Path(_resid_log).with_suffix(".resid.csv")
+                _rnew = not _rp.exists()
+                with _rp.open("a", newline="", encoding="utf-8") as _rfh:
+                    _rw = csv.writer(_rfh)
+                    if _rnew:
+                        _rw.writerow(["step", "iteration", "residual", "tol"])
+                    _rw.writerows(_resid_rows)
+            except OSError:
+                pass
         # ---- 듀얼 분해 λ step 간 적분 갱신(A1+A2 — 이분법·commit sweep 폐지, 2026-07-02) ----
         # green은 Jacobi가 수렴시킨 값 그대로 커밋된다(A2: off-equilibrium commit 소멸). λ_next는
         # 마지막 합의 sweep의 Σnin과 투영 target으로 적분 갱신하되, 여기서 self._lambda_P에 쓰지

@@ -679,9 +679,11 @@ class StackelbergMPCController:
         _gsweep = os.environ.get("LEADER_GRID_SWEEP")
         if _gsweep:
             _cur_step = os.environ.get("NUMSIM_STACKELBERG_PROGRESS_STEP", "")
+            # 스텝 목록은 필수(fail-closed). 미지정 시 전 스텝 폭주 방지 —
+            # GRID_N=9면 스텝당 81회 full candidate eval(≈+490s)이라 런 전체가 망가진다.
             _gstep = os.environ.get("LEADER_GRID_STEP")  # 쉼표 목록 허용(multi-step)
-            _gsteps = [s.strip() for s in _gstep.split(",")] if _gstep else None
-            if _gsteps is None or _cur_step in _gsteps:
+            _gsteps = [s.strip() for s in _gstep.split(",")] if _gstep else []
+            if _cur_step in _gsteps:
                 _npc = float(best_eval.action.N_P_star)
                 _nufc = float(best_eval.action.N_UF_star)
                 _np_span = float(os.environ.get("GRID_NP_SPAN", "500"))
@@ -1988,82 +1990,7 @@ class StackelbergMPCController:
         }
         for key, value in diag.items():
             meta[f"leader_{key}"] = float(value)
-        # NUF_PROJ(2026-07-24): N_UF도 follower 도달가능 집합으로 사영한다. N_P는 위에서
-        # 사영되는데 N_UF만 raw로 남아, 리더가 도달 불가한 예산을 요청·보고해 왔다
-        # (실측: 요청 1800인데 실현 4800 — 이동제한 하한에 걸림). 도달가능 집합은 교집합:
-        #   (1) 링크별 용량 clamp  Σ_l clip(ω_l·N_UF, 0, cap_l)
-        #   (2) 스텝당 이동제한   |Σmeter − prev| ≤ R·n_ramps   (R=METER_BOX)
-        # env 게이트: 미설정이면 기존과 비트동일.
-        projected_nuf = float(action.N_UF_star)
-        if os.environ.get("NUF_PROJ") == "1":
-            lo_uf, hi_uf, uf_diag = self._nuf_feasible_range(state, previous)
-            if lo_uf is not None:
-                raw_uf = float(action.N_UF_star)
-                projected_nuf = float(min(max(raw_uf, lo_uf), hi_uf))
-                meta.update({
-                    "leader_nuf_projection_active": 1.0,
-                    "leader_nuf_feasible_min": float(lo_uf),
-                    "leader_nuf_feasible_max": float(hi_uf),
-                    "leader_nuf_raw_N_UF_star": raw_uf,
-                    "leader_nuf_projected_N_UF_star": projected_nuf,
-                    "leader_nuf_projection_residual": float(raw_uf - projected_nuf),
-                    "leader_nuf_projection_applied": float(abs(raw_uf - projected_nuf) > 1.0e-9),
-                })
-                meta.update({f"leader_{k}": float(v) for k, v in uf_diag.items()})
-            else:
-                meta["leader_nuf_projection_active"] = 0.0
-        return LeaderAction(projected_np, projected_nuf), meta
-
-    def _nuf_feasible_range(self, state, previous):
-        """follower가 이번 스텝에 실제로 실현 가능한 Σmeter(=N_UF) 구간 [lo, hi].
-
-        (1) 링크 용량: 링크 l의 몫은 clip(ω_l·N_UF, 0, cap_l)이므로 ω가 쏠리면 Σcap보다
-            낮은 값에서 포화한다(포화점 = max_l cap_l/ω_l).
-        (2) 이동제한: |Σmeter − Σprev| ≤ R·n_ramps  (R = seg13_meter_box_veh_h).
-        둘의 교집합을 반환. 필요한 정보가 없으면 (None, None, {})."""
-        try:
-            net = self.cfg.network
-            ramps = list(getattr(net, "ramps", []) or [])
-            if not ramps:
-                return None, None, {}
-            caps = {r: float(net.ramp_capacity_veh_h[r]) for r in ramps}
-            cap_total = sum(caps.values())
-            omega = {}
-            _wu = getattr(getattr(self, "nash_solver", None), "_wu", None)
-            if _wu is not None:
-                omega = dict(getattr(_wu, "_omega_f", {}) or {})
-            cap_link: Dict[str, float] = {}
-            for r in ramps:
-                lk = net.ramp_to_freeway.get(r)
-                if lk is not None:
-                    cap_link[lk] = cap_link.get(lk, 0.0) + caps[r]
-            if omega and cap_link:
-                sat = max(
-                    (cap_link[lk] / w for lk, w in omega.items() if w > 1.0e-9 and lk in cap_link),
-                    default=cap_total,
-                )
-                hi_cap = float(min(cap_total, sat))
-            else:
-                hi_cap = float(cap_total)
-            R = getattr(self.cfg.mpc, "seg13_meter_box_veh_h", None)
-            prev_sum = None
-            if previous is not None and getattr(previous, "ramp_metering", None):
-                prev_sum = float(sum(float(v) for v in previous.ramp_metering.values()))
-            if R is not None and prev_sum is not None:
-                band = float(R) * len(ramps)
-                lo = max(0.0, prev_sum - band)
-                hi = min(hi_cap, prev_sum + band)
-            else:
-                lo, hi = 0.0, hi_cap
-            if hi < lo:
-                hi = lo
-            return lo, hi, {
-                "nuf_feasible_cap_total": cap_total,
-                "nuf_feasible_sat_point": hi_cap,
-                "nuf_feasible_prev_sum": prev_sum if prev_sum is not None else -1.0,
-            }
-        except Exception:
-            return None, None, {}
+        return LeaderAction(projected_np, float(action.N_UF_star)), meta
 
     def _prefilter_leader_candidates(
         self,

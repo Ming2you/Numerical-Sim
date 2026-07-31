@@ -601,6 +601,11 @@ class FreewayFollowerConfig:
     ramp_queue_penalty: float = 10.0
     density_penalty: float = 10.0
     metering_smoothness_weight: float = 0.1
+    # segment agent(SEG13/P-Stack) 경로 전용 metering 마찰. 위 metering_smoothness_weight는
+    # freeway_follower/distributed_coordinator(PFO·분산) 경로에만 걸리고 segment agent엔
+    # 미적용이라 별도 필드를 둔다. 0.0 = 기존 거동(마찰 없음).
+    # 2026-07-27 MS_ADAPT 플래그십: |Δρ|>10 교란 시 0, 아니면 0.013으로 per-step 설정.
+    segment_metering_smoothness_weight: float = 0.0
     vsl_smoothness_weight: float = 0.0  # 2026-07-23: cooldown VSL 115 회복 위해 0(green은 0.1 유지). 근거·분해는 default.yaml 주석 참조.
     # WU-CD-F freeway agent의 VSL multi-step 예측 horizon(Wu Np=10). storage-aware probe가
     # "VSL↓→off-ramp 유입↓→storage 회복→λ_eff 회복→본선 차량수↓"의 multi-step 이득을
