@@ -686,6 +686,12 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
     if _os.environ.get("VSL_BOX"):
         # VSL 앵커를 previous로 + 반폭[km/h]. 기존 snapshot 앵커는 스텝당 최대 50 관측.
         cfg.mpc.seg13_vsl_box_kmh = float(_os.environ["VSL_BOX"])
+    if _os.environ.get("VSL_SMOOTH") is not None:
+        # VSL_SMOOTH(2026-07-24): vsl_smoothness_weight sweep용 env. 기본(default.yaml)=0.0이라
+        # VSL이 90↔100을 왕복(방향전환 11회). 0.005~0.02 사이가 "115 회복 유지 + 진동 억제"
+        # 후보 구간(2026-07-23 사용자 스윕: 0.02↑는 100 고착, 0.005·0은 회복).
+        cfg = cfg.with_updates({"freeway_follower": {
+            "vsl_smoothness_weight": float(_os.environ["VSL_SMOOTH"])}})
     if _os.environ.get("BOX_WALK") == "1":
         # 리더 rollout에 박스 다중스텝 도달 모델링(METER_BOX 필요). 200_w 회복 시야 복원.
         cfg.mpc.leader_rollout_box_walk = True
@@ -1018,9 +1024,10 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
         t = step * cfg.simulation.control_interval
         # 리더 후보 곡면 로깅(2026-07-22, price 곡률 진단용). LEADER_CAND_LOG=<path> 지정 시
         # 스텝별 (N_P,N_UF,objective) 후보 평가를 그대로 남긴다(추가 계산 없음, env-gated).
-        if _os.environ.get("LEADER_CAND_LOG"):
-            _os.environ["NUMSIM_STACKELBERG_PROGRESS_FILE"] = _os.environ["LEADER_CAND_LOG"]
-            _os.environ["NUMSIM_STACKELBERG_PROGRESS_STEP"] = str(step)
+        if _os.environ.get("LEADER_CAND_LOG") or _os.environ.get("LEADER_GRID_SWEEP"):
+            if _os.environ.get("LEADER_CAND_LOG"):
+                _os.environ["NUMSIM_STACKELBERG_PROGRESS_FILE"] = _os.environ["LEADER_CAND_LOG"]
+            _os.environ["NUMSIM_STACKELBERG_PROGRESS_STEP"] = str(step)  # grid probe도 스텝 라벨 필요
         forecast = profile.horizon(t, cfg.mpc.horizon_steps + max(0, cfg.mpc.leader_value_depth))
         t0 = time.perf_counter()
         # WARMUP_NC_STEPS: 웜업 구간은 전 arm 공통 no-control(분석창 진입 상태 동일화 +
@@ -1077,6 +1084,37 @@ def run_one(controller_id: str, scenario_name: str, t_total: float, output_root:
             if _fg_new != bool(cfg.mpc.leader_mfd_far_enabled):
                 print(f"[FAR_GATE m{_fargate_mode}] step {step}: far {'ON' if _fg_new else 'OFF'}", flush=True)
             cfg.mpc.leader_mfd_far_enabled = _fg_new
+        # MS_ADAPT(2026-07-24): metering 마찰을 **상태 의존**으로. 균일 상수는 5셀 전승 불가가
+        # 실증됐다 — Medium은 w≥0.013을 요구하고 incident는 w≤0.010을 요구해 창이 안 겹친다
+        # (0.011부터 incident가 −90→+157로 계단 붕괴). 물리: 급변(사고 온셋)엔 마찰이 반응을
+        # 늦춰 캐스케이드를 부르고, 정상 혼잡엔 마찰이 ±METER_BOX 진동을 잡는다.
+        # 트리거 = |Δρ|(스텝간 링크평균 밀도 변화) > MS_THR. 실측 분리: 임계 10에서 정상 4셀
+        # 발동 0회 / incident만 9회. 래치(MS_HOLD)로 교란 국면을 덮는다.
+        if _os.environ.get("MS_ADAPT") == "1":
+            _ms_thr = float(_os.environ.get("MS_THR", "10"))
+            _ms_hold = int(_os.environ.get("MS_HOLD", "3"))
+            _ms_w = _os.environ.get("MS_W", "0.013")
+            _rho_now = {}
+            for _lk, _v in (sim.state.freeway_density or {}).items():
+                if _v is not None and len(_v):
+                    _rho_now[_lk] = float(sum(_v)) / len(_v)
+            _prev_rho = globals().get("_MS_PREV_RHO")
+            _dmax = 0.0
+            if _prev_rho:
+                for _lk, _v in _rho_now.items():
+                    if _lk in _prev_rho:
+                        _dmax = max(_dmax, abs(_v - _prev_rho[_lk]))
+            globals()["_MS_PREV_RHO"] = _rho_now
+            _latch = int(globals().get("_MS_LATCH", 0))
+            if _dmax > _ms_thr:
+                _latch = _ms_hold
+            elif _latch > 0:
+                _latch -= 1
+            globals()["_MS_LATCH"] = _latch
+            _os.environ["METER_SMOOTH"] = "0" if _latch > 0 else _ms_w
+            if step == int(_os.environ.get("WARMUP_NC_STEPS", "0")) or _dmax > _ms_thr:
+                print(f"[MS_ADAPT] step {step}: |Δρ|={_dmax:.1f} latch={_latch} "
+                      f"friction={_os.environ['METER_SMOOTH']}", flush=True)
         if step < int(_os.environ.get("WARMUP_NC_STEPS", "0")):
             control = baseline_control("no_control", cfg, sim.state, forecast[0])
         else:
