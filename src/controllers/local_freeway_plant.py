@@ -301,7 +301,12 @@ def freeway_substep_local(
         v_new = metanet_speed_update_kmh(
             speeds[i], upstream_speed, rho, downstream_rho, v_eff, dt_h,
             net.freeway_segment_length_km, net.metanet_tau_h,
-            select_anticipation_nu(rho, net), net.metanet_kappa_veh_km_lane, net.v_min,
+            # 예측-플랜트 정합(2026-08-01, 진단 §6 P2): 플랜트 metanet.py:615는 이미
+            # vsl_i를 넘긴다. 예측모델만 안 넘기면 two_branch+capacity_drop을 켜는 순간
+            # follower만 ν 전환 회피 이득을 못 본다. 현행 capacity_drop_anticipation=False
+            # 에서는 effective_rho_crit이 vsl을 무시하므로 정의상 no-op(비트 동일).
+            select_anticipation_nu(rho, net, vsl_i),
+            net.metanet_kappa_veh_km_lane, net.v_min,
         )
         _delta_m = float(getattr(net, "metanet_delta_merge", 0.0) or 0.0)
         if _delta_m > 0.0 and ramp_in_by_segment[i] > 0.0:

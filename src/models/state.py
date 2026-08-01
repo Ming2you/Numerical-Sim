@@ -408,6 +408,28 @@ class MPCConfig:
     # commit(previous)으로 + 반폭 R[km/h]. 기존은 sweep마다 재앵커돼 스텝당 실측 50
     # (명목 max_vsl_step 20의 2.5배, ③ 10셀 위반 112/7020). None=기존(비트동일).
     seg13_vsl_box_kmh: Optional[float] = None
+    # ZONE-4(2026-08-01): freeway follower를 세그먼트당 1 에이전트가 아니라 IC 구역(zone)당
+    # 1 에이전트로 묶는다. {link: [[seg,...], ...]} 또는 {link: [{"id":..., "segments":[...]}]}.
+    # zone은 **연속** 세그먼트 구간이어야 하고(이웃 정의·궤적 교환 의미), 링크 세그먼트를
+    # 빠짐없이·중복없이 덮어야 한다 — 위반 시 build_segment_agent_models가 RuntimeError.
+    # zone 내부는 균일 VSL 1차원 탐색(후보 |vsl_set|^k 폭발 회피). None=세그먼트당 1
+    # 에이전트 = 기존 SEG13 거동 비트 동일(기본). SEG13(segment_agents) 경로 전용.
+    freeway_agent_groups: Optional[Dict[str, Any]] = None
+    # ZONE-4 v2(2026-08-01): zone 내부 VSL은 균일이 아니라 **세그먼트별**로 정하고, 후보
+    # 폭발(|vsl_set|^k)은 좌표하강으로 회피한다. 이 값은 하강 sweep 상한이다(수렴하면
+    # 조기 종료). 세그먼트가 1개인 zone은 좌표하강에 진입하지 않는다(기존 경로 비트 동일).
+    freeway_zone_vsl_max_sweeps: int = 3
+    # VSL-TIE(2026-08-01, 진단 §6 P1): freeway follower의 VSL 후보 갱신을 tie-aware로.
+    # 기존 strict '<' + vsl_set 오름차순 열거는 비용 동률이면 **최저 VSL**을 고르고,
+    # VSL-BOX 때문에 스텝당 한 칸씩 내려가 메뉴 하단에 고착한다(실측 래칫
+    # ρ=35: 120→100→80→80→80). 모델이 무차별이라 판단한 구간에서도 VISSIM은 DSD를
+    # 실제 집행하므로 근거 없는 감속은 실플랜트에서만 비용이 된다. True면 동률 시
+    # **무제어 쪽(VSL이 큰 후보)** 을 유지한다 — metering이 이미 쓰는 규약
+    # (wu_faithful_follower.py m_list 내림차순 주석: "근사-무차별인 레짐이 흔해서
+    # tie-break가 결정적 … 오름차순이면 최소 방류로 쏠려 전면 질식")을 VSL에 맞춘 것이다.
+    # 단일 세그먼트 열거 경로와 zone 좌표하강 경로 **양쪽**에 동일 적용.
+    # 기본 False = 현행 동작 비트 동일. real-world tuning에서만 True.
+    vsl_tie_prefer_no_control: bool = False
     # BOX-WALK(2026-07-17 3차): 리더 rollout(_predict)에서 2번째 interval부터 metering을
     # 후보 intent(N_UF*) 방향으로 스텝당 램프별 ±R 전진 — 박스의 다중스텝 도달을 채점에
     # 반영("박스 끝 너머가 안 보임" 200_w −29.78% 수선 겸 가설 검증). 기본 False=비트동일.

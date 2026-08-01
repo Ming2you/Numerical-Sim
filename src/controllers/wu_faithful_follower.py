@@ -17,6 +17,7 @@ leader는 None(PFO 모드)부터 구현한다.
 from __future__ import annotations
 
 import csv
+import itertools
 import os
 import time
 from pathlib import Path
@@ -30,9 +31,10 @@ from src.controllers.local_freeway_plant import (
 )
 from src.controllers.segment_local_plant import (
     FrozenLinkTrajectory,
+    SegmentAgentModel,
     SegmentLocalState,
     build_segment_agent_models,
-    segment_substep_local,
+    segment_zone_substep_local,
 )
 from src.controllers.local_signal_plant import (
     build_local_model,
@@ -68,6 +70,74 @@ _NP_PREDICTOR_MODE_CODES = {
     "current_interval": 2.0,
     "phase_substep": 3.0,
 }
+
+# ---------------------------------------------------------------------------
+# VSL-TIE(2026-08-01, 진단 §6 P1): VSL 후보 갱신의 동률 처리 규약.
+#
+# 왜 필요한가 — VSL의 상태식 진입 경로는 V_eff = min(V(ρ), VSL) 하나뿐이라
+# VSL ≥ V(ρ)이면 VSL이 항등적으로 사라진다(metanet.py:96). 임계밀도 근처부터는
+# 메뉴의 모든 rung이 비구속이라 후보 간 비용이 **정확히 같은 부동소수 값**이 되고,
+# 기존 strict '<' + vsl_set 오름차순 열거는 첫 후보(=최저 VSL)만 채택한다.
+# VSL-BOX(스텝당 1 rung)와 결합하면 스텝마다 한 칸씩 내려가 메뉴 하단에 고착한다
+# (실측 ρ=35: 120→100→80→80→80→80). 모델이 무차별이라고 본 구간에서도 VISSIM은
+# DSD를 실제 집행하므로 이 감속은 실플랜트에서만 비용을 낸다.
+#
+# 규약 자체는 새것이 아니다 — metering은 이미 같은 이유로 무개입 우선을 쓴다.
+# `_solve_freeway_segment_agents`의 m_list 구성 주석 참고: "내림차순(전량 방류 우선)
+# … own-TTS는 보존식 때문에 방류에 근사-무차별인 레짐이 흔해서 tie-break가 결정적:
+# 오름차순이면 최소 방류로 쏠려 전면 질식(PFO 13p 실측 병리)". P1은 그 규약을
+# VSL 축에 누락 없이 적용하는 것이다.
+#
+# ε 선택 근거 — 비구속 레짐의 동률은 **비트 동일**(같은 v_eff → 같은 궤적 → 같은 합)
+# 이라 원리상 ε=0으로 충분하다. 다만 궤적 합산 순서가 후보에 따라 미세하게 달라질
+# 여지를 남겨 마지막 자리 반올림만 흡수하도록 상대 1e-12 + 절대 1e-12를 쓴다.
+# 상한 근거: 진단이 측정한 **진짜** spread 중 가장 작은 것이 ρ=45의
+# (96.4786−96.4737)/96.47 ≈ 5e-5 상대(§1-1 표)이므로 1e-12는 그보다 7자리 아래다
+# — 실재하는 물리 감도를 삼킬 수 없다. 절대항은 cost가 0 근처(가격항 상쇄)일 때의
+# 상대 허용오차 붕괴 방어용이며, own-TTS 단위(veh·h)에서 무의미한 크기다.
+_VSL_TIE_RTOL = 1.0e-12
+_VSL_TIE_ATOL = 1.0e-12
+# 무제어 근접도 비교의 최소 유의차 [km/h] — vsl_set 간격(10~20)보다 훨씬 작아
+# 서로 다른 rung은 항상 구분되고, 같은 rung의 부동소수 표현차는 무시된다.
+_VSL_TIE_KEY_TOL = 1.0e-9
+
+
+def _vsl_no_control_key(v_by_seg: Mapping[int, float]) -> float:
+    """무제어 근접도 — 클수록 무개입(=vsl_set 최대값)에 가깝다.
+
+    소유 세그먼트 VSL의 단순 합이다. 좌표하강은 한 번에 한 세그먼트만 바꾸므로
+    합 비교가 "그 좌표에서 더 높은 VSL"과 정확히 일치하고, 단일 세그먼트
+    경로에서는 정의상 VSL 값 자체와 같다 — 두 경로가 같은 규약을 쓰게 된다."""
+    return sum(float(v) for v in v_by_seg.values())
+
+
+def _vsl_candidate_better(
+    cost: float,
+    best_cost: float,
+    v_by_seg: Mapping[int, float],
+    best_v_by_seg: Mapping[int, float],
+    tie_prefer_no_control: bool,
+) -> bool:
+    """후보가 incumbent를 대체해야 하는가.
+
+    tie_prefer_no_control=False면 기존 strict '<' 그대로(비트 동일).
+    True면 (1) ε 밖에서 더 싸면 채택, (2) ε 안 동률이면 무제어에 더 가까울 때만 채택,
+    (3) ε 밖에서 비싸면 기각. 동률이면서 무제어 근접도도 같으면 **기각**이므로
+    먼저 열거된 후보가 남는다 — metering 후보가 내림차순(전량 방류 우선)이라
+    그 축의 무개입 우선 규약도 함께 보존된다."""
+    if not tie_prefer_no_control:
+        return cost < best_cost
+    if best_cost == float("inf"):
+        return True
+    eps = _VSL_TIE_ATOL + _VSL_TIE_RTOL * max(abs(cost), abs(best_cost))
+    if cost < best_cost - eps:
+        return True
+    if cost > best_cost + eps:
+        return False
+    return (
+        _vsl_no_control_key(v_by_seg)
+        > _vsl_no_control_key(best_v_by_seg) + _VSL_TIE_KEY_TOL
+    )
 
 
 class WuFaithfulFollower:
@@ -2443,6 +2513,27 @@ class WuFaithfulFollower:
         preferred_meter: Dict[str, float] = {}
         best_offramp_flow: Dict[str, float] = {}
         agent_best_traj: Dict[int, tuple] = {}
+        agent_best_release: Dict[str, List[float]] = {}
+        # ZONE-4(2026-08-01): 세그먼트→소유 에이전트 매핑. 기본 구성(세그먼트당 1 에이전트)
+        # 에서는 agent_by_seg[j] is agents[j]라 이웃 조회가 비트 동일하다.
+        agent_by_seg: Dict[int, SegmentAgentModel] = {
+            s: a for a in agents for s in a.segs
+        }
+        # zone 판정은 빌더가 명시적으로 채운 플래그다 — len(segs)>1 휴리스틱을 쓰면
+        # "전부 단일 세그먼트인 zone 지정"에서 영수증·안전망이 통째로 꺼진다(false-negative).
+        zone_mode = any(bool(getattr(a, "zone_mode", False)) for a in agents)
+        # 좌표하강 상한 sweep 수(zone 경로 전용). 기본 3 — 실측상 2 sweep이면 대개 수렴.
+        _cd_max_sweeps = max(1, int(
+            getattr(self.cfg.mpc, "freeway_zone_vsl_max_sweeps", 3) or 3
+        ))
+        # VSL-TIE(2026-08-01, §6 P1): 동률 시 무제어 우선. 기본 False = 기존 strict '<'
+        # 비트 동일. 단일 세그먼트 경로와 zone 좌표하강 경로에 **같은** 규약을 건다 —
+        # 두 경로의 동률 처리가 달랐던 것이 zone4 A/B를 무효화한 원인이다.
+        _vsl_tie_pref = bool(
+            getattr(self.cfg.mpc, "vsl_tie_prefer_no_control", False)
+        )
+        # 후보 격자 앵커 플래그는 agent에 무관 — 루프 밖에서 1회 조회(진단 블록도 공용).
+        _box_r = getattr(self.cfg.mpc, "seg13_meter_box_veh_h", None)
         leader_present = (
             leader is not None and float(getattr(leader, "N_UF_star", 0.0)) > 0.0
         )
@@ -2458,266 +2549,456 @@ class WuFaithfulFollower:
         _meter_box_edge = 0
 
         for agent in agents:
-            seg = agent.seg
-            key = f"{link}__seg{seg}"
-            prev_v = float(segment_vsl(snapshot, link, seg, cfg))
+            # ZONE-4: 소유 세그먼트 집합(기본 구성은 1개). 결정은 zone 균일 VSL 1개 +
+            # 소유 ramp별 metering이고, 결과는 소유 세그먼트 전부에 전개한다.
+            segs = list(agent.segs)
+            keys = {s: f"{link}__seg{s}" for s in segs}
+            prev_v_by_seg = {
+                s: float(segment_vsl(snapshot, link, s, cfg)) for s in segs
+            }
+            # ZONE-4 v2(2026-08-01, 사용자 결정): zone은 에이전트 단위로 유지하되 VSL은
+            # **소유 세그먼트별로 따로** 정한다(균일 VSL이 병목 세그먼트를 무제어 쪽으로
+            # 뒤집던 문제). 따라서 후보 격자·마찰 기준·앵커도 전부 세그먼트별이다.
+            # 단일 세그먼트(기본 구성)에서는 아래 값들이 기존 스칼라와 완전히 같다.
+            prev_v = prev_v_by_seg[segs[0]]
             # VSL-BOX(2026-07-17, 사용자 지시): 기존 필터는 앵커가 Jacobi 반복 내부
             # snapshot이라 sweep마다 ±max_vsl_step 재앵커 → 스텝당 20×sweep수
             # (실측: ③ 10셀에서 max|Δ| 50 = 명목 20의 2.5배, 위반 112/7020).
             # 박스 ON이면 앵커를 직전 step commit(previous)으로 고정 — METER-BOX와 동일
             # 규약. vsl_set 간격 10이라 ±10이면 {prev-10, prev, prev+10}, 흡수 불가.
             _vbox = getattr(self.cfg.mpc, "seg13_vsl_box_kmh", None)
-            if _vbox is not None and previous is not None:
-                _v_anchor = float(segment_vsl(previous, link, seg, cfg))
-                v_cands = [
-                    float(v) for v in ff.vsl_set
-                    if abs(float(v) - _v_anchor) <= float(_vbox) + 1.0e-9
-                ] or [_v_anchor]
-            else:
-                v_cands = [
-                    float(v) for v in ff.vsl_set
-                    if abs(float(v) - prev_v) <= ff.max_vsl_step + 1.0e-9
-                ] or [prev_v]
-            own_ramp = agent.owned_ramps[0] if agent.owned_ramps else None
-            # metering 마찰 기준값: own_ramp·previous에만 의존하므로 후보 루프 밖에서 1회 계산.
-            # None이면 마찰항 자체를 건너뛴다(직전 값이 없으면 |Δ|=0이라 기여도 0).
-            _prev_m = None
-            if _meter_smooth_w > 0.0 and own_ramp is not None and previous is not None:
-                _pm = getattr(previous, "ramp_metering", None)
-                if _pm is not None and own_ramp in _pm:
-                    _prev_m = float(_pm[own_ramp])
-            if own_ramp is not None and self.metering_enabled:
-                cap_r = float(net.ramp_capacity_veh_h[own_ramp])
-                # METER-BOX(2026-07-17, 사용자 설계): 고정 격자 {cap·f} 대신 직전 step
-                # commit(m_prev) 중심 ±R 박스 안에 등간격 5점을 찍는다.
-                #   근거 1(실측): 선형 가격 × 이산 격자 → 내부 rung 선택 0/160, 끝점 60~62%,
-                #     '부호→끝점' 적중 80~85%. 끝점이 진짜 최적이면 머물러야 하는데 왕복한다
-                #     = 진짜 최적은 내부이고 선형 외삽(±300 측정을 1125까지 연장)이 지나친다.
-                #   근거 2: R=300이면 박스=가격 FD 측정폭(d_r=0.20×1500) — 가격이 측정된
-                #     구간 안에서만 쓰여 외삽이 소멸("허용 이동폭만큼 측정" 규약 충족).
-                #   흡수 없음: 격자 필터(워크플로 설계)와 달리 점을 새로 찍으므로 m_prev
-                #     자신이 항상 후보 → cap 동결 불가. 5점 유지로 평가수 동일(계산 중립).
-                # 기준점은 previous(직전 step commit)다 — snapshot.ramp_metering은 Jacobi
-                # iteration 1에서 uncontrolled=cap(state.py:1090)이라 기준이 될 수 없다.
-                _box_r = getattr(self.cfg.mpc, "seg13_meter_box_veh_h", None)
-                if _box_r is not None and previous is not None:
-                    _R = float(_box_r)
-                    # 비대칭 박스(2026-07-17, 사용자 설계 2차): 내림은 R(큐 생성 방향이라
-                    # 보수적), 올림은 R_up(회복/방류 방향). 파국 2셀(170_w/200_w)이 전부
-                    # '낮은 곳에 갇혀 못 올라옴'이어서 올림만 넓힌다. 미설정=R(대칭, 기존).
-                    _bu = getattr(self.cfg.mpc, "seg13_meter_box_up_veh_h", None)
-                    _R_up = float(_bu) if _bu is not None else _R
-                    m_prev_r = min(max(float(
-                        previous.ramp_metering.get(own_ramp, cap_r)), 0.0), cap_r)
-                    m_cands = sorted(
-                        {round(min(max(m_prev_r + off, 0.0), cap_r), 6)
-                         for off in (-_R, -_R / 2.0, 0.0, _R_up / 2.0, _R_up)},
-                        reverse=True,
-                    )
+            v_anchor_by_seg: Dict[int, float] = {}
+            v_cands_by_seg: Dict[int, List[float]] = {}
+            for s in segs:
+                if _vbox is not None and previous is not None:
+                    _a_s = float(segment_vsl(previous, link, s, cfg))
+                    _c_s = [
+                        float(v) for v in ff.vsl_set
+                        if abs(float(v) - _a_s) <= float(_vbox) + 1.0e-9
+                    ] or [_a_s]
                 else:
-                    # 내림차순(전량 방류 우선) — 7p 분율 순서(1.0, 0.7, …)와 동일 규약.
-                    # own-TTS는 보존식 때문에 방류에 근사-무차별인 레짐이 흔해서 tie-break가
-                    # 결정적: 오름차순이면 최소 방류로 쏠려 전면 질식(PFO 13p 실측 병리).
-                    m_cands = sorted(
-                        {round(cap_r * f, 6) for f in self.ramp_metering_fractions},
-                        reverse=True,
+                    _a_s = prev_v_by_seg[s]
+                    _c_s = [
+                        float(v) for v in ff.vsl_set
+                        if abs(float(v) - _a_s) <= ff.max_vsl_step + 1.0e-9
+                    ] or [_a_s]
+                v_anchor_by_seg[s] = _a_s
+                v_cands_by_seg[s] = _c_s
+            v_cands = v_cands_by_seg[segs[0]]
+            # 소유 ramp: 다중 ramp 일반화는 **zone 경로 전용**이다. 기본 경로(groups
+            # 미지정)에서 전부 쓰면 "한 세그먼트에 ramp 2개가 merge"하는 구성
+            # (NetworkConfig 기본 ramp_merge_segment_index가 정확히 그것)에서 거동이
+            # 바뀐다 — 기본 경로는 기존 owned_ramps[0] 절삭을 그대로 유지한다.
+            own_ramps = (
+                list(agent.owned_ramps) if zone_mode else agent.owned_ramps[:1]
+            )
+            cap_by_ramp = {r: float(net.ramp_capacity_veh_h[r]) for r in own_ramps}
+            # metering 마찰 기준값: ramp·previous에만 의존하므로 후보 루프 밖에서 1회 계산.
+            # 비어 있으면 마찰항 자체를 건너뛴다(직전 값이 없으면 |Δ|=0이라 기여도 0).
+            _prev_m_by_ramp: Dict[str, float] = {}
+            if _meter_smooth_w > 0.0 and previous is not None:
+                _pm = getattr(previous, "ramp_metering", None)
+                if _pm is not None:
+                    for r in own_ramps:
+                        if r in _pm:
+                            _prev_m_by_ramp[r] = float(_pm[r])
+            m_cands_by_ramp: Dict[str, List[float]] = {}
+            if own_ramps and self.metering_enabled:
+                for r in own_ramps:
+                    cap_r = cap_by_ramp[r]
+                    # METER-BOX(2026-07-17, 사용자 설계): 고정 격자 {cap·f} 대신 직전 step
+                    # commit(m_prev) 중심 ±R 박스 안에 등간격 5점을 찍는다.
+                    #   근거 1(실측): 선형 가격 × 이산 격자 → 내부 rung 선택 0/160, 끝점 60~62%,
+                    #     '부호→끝점' 적중 80~85%. 끝점이 진짜 최적이면 머물러야 하는데 왕복한다
+                    #     = 진짜 최적은 내부이고 선형 외삽(±300 측정을 1125까지 연장)이 지나친다.
+                    #   근거 2: R=300이면 박스=가격 FD 측정폭(d_r=0.20×1500) — 가격이 측정된
+                    #     구간 안에서만 쓰여 외삽이 소멸("허용 이동폭만큼 측정" 규약 충족).
+                    #   흡수 없음: 격자 필터(워크플로 설계)와 달리 점을 새로 찍으므로 m_prev
+                    #     자신이 항상 후보 → cap 동결 불가. 5점 유지로 평가수 동일(계산 중립).
+                    # 기준점은 previous(직전 step commit)다 — snapshot.ramp_metering은 Jacobi
+                    # iteration 1에서 uncontrolled=cap(state.py:1090)이라 기준이 될 수 없다.
+                    if _box_r is not None and previous is not None:
+                        _R = float(_box_r)
+                        # 비대칭 박스(2026-07-17, 사용자 설계 2차): 내림은 R(큐 생성 방향이라
+                        # 보수적), 올림은 R_up(회복/방류 방향). 파국 2셀(170_w/200_w)이 전부
+                        # '낮은 곳에 갇혀 못 올라옴'이어서 올림만 넓힌다. 미설정=R(대칭, 기존).
+                        _bu = getattr(self.cfg.mpc, "seg13_meter_box_up_veh_h", None)
+                        _R_up = float(_bu) if _bu is not None else _R
+                        m_prev_r = min(max(float(
+                            previous.ramp_metering.get(r, cap_r)), 0.0), cap_r)
+                        m_list = sorted(
+                            {round(min(max(m_prev_r + off, 0.0), cap_r), 6)
+                             for off in (-_R, -_R / 2.0, 0.0, _R_up / 2.0, _R_up)},
+                            reverse=True,
+                        )
+                    else:
+                        # 내림차순(전량 방류 우선) — 7p 분율 순서(1.0, 0.7, …)와 동일 규약.
+                        # own-TTS는 보존식 때문에 방류에 근사-무차별인 레짐이 흔해서 tie-break가
+                        # 결정적: 오름차순이면 최소 방류로 쏠려 전면 질식(PFO 13p 실측 병리).
+                        m_list = sorted(
+                            {round(cap_r * f, 6) for f in self.ramp_metering_fractions},
+                            reverse=True,
+                        )
+                    # 내재화(2026-07-19): spillback-방지 하한을 후보 격자에 적용 — 하한 아래
+                    # 후보는 하한으로 끌어올려(중복 제거) rollout 채점이 실제 집행값을 본다.
+                    _m_floor = self._meter_spillback_floor(r, state, coupling, cap_r)
+                    if _m_floor > 0.0:
+                        m_list = sorted(
+                            {round(max(float(m), _m_floor), 6) for m in m_list},
+                            reverse=True,
+                        )
+                    m_cands_by_ramp[r] = m_list
+            if m_cands_by_ramp:
+                # zone이 ramp를 여럿 소유하면 곱집합(|m|^k). 4-zone 배치는 zone당 1개라
+                # 발생하지 않는다. 단일 ramp면 열거 순서가 기존 m_cands와 동일 → tie-break 보존.
+                m_combos: List[Optional[Dict[str, float]]] = [
+                    dict(zip(own_ramps, combo))
+                    for combo in itertools.product(
+                        *(m_cands_by_ramp[r] for r in own_ramps)
                     )
+                ]
             else:
-                m_cands = [None]
-            # 내재화(2026-07-19): spillback-방지 하한을 후보 격자에 적용 — 하한 아래
-            # 후보는 하한으로 끌어올려(중복 제거) rollout 채점이 실제 집행값을 본다.
-            if own_ramp is not None and m_cands and m_cands[0] is not None:
-                _m_floor = self._meter_spillback_floor(own_ramp, state, coupling, cap_r)
-                if _m_floor > 0.0:
-                    m_cands = sorted(
-                        {round(max(float(m), _m_floor), 6) for m in m_cands},
-                        reverse=True,
-                    )
-            best_cost, best_v, best_m = float("inf"), prev_v, None
+                m_combos = [None]
+            best_cost = float("inf")
+            best_v_by_seg: Dict[int, float] = dict(prev_v_by_seg)
+            best_m: Optional[Dict[str, float]] = None
             best_flow_local: Dict[str, float] = {}
             best_traj: Optional[tuple] = None  # (rho[t], v[t], lane[t], rel[t]) — 입력시점 기록
-            for v_cand in v_cands:
-                for m_cand in m_cands:
-                    cand = ControlAction(
-                        ramp_metering=dict(snapshot.ramp_metering),
-                        vsl=dict(snapshot.vsl),
-                        green_times=dict(snapshot.green_times),
-                        offsets=dict(snapshot.offsets),
-                        inflow_outflow_allocation={},
+
+            def _score(v_by_seg: Mapping[int, float], m_map):
+                """후보 (세그먼트별 VSL, ramp별 metering) 1개 채점 — (cost, 첫 유출, 궤적).
+
+                본문은 기존 균일-VSL 열거의 본문 그대로다. v_by_seg가 전 세그먼트 같은
+                값이면 연산이 한 개씩 대응하고, 단일 세그먼트면 정의상 항상 그렇다.
+                """
+                cand = ControlAction(
+                    ramp_metering=dict(snapshot.ramp_metering),
+                    vsl=dict(snapshot.vsl),
+                    green_times=dict(snapshot.green_times),
+                    offsets=dict(snapshot.offsets),
+                    inflow_outflow_allocation={},
+                )
+                for s in segs:
+                    cand.vsl[keys[s]] = float(v_by_seg[s])
+                if m_map is not None:
+                    for r in own_ramps:
+                        cand.ramp_metering[r] = float(m_map[r])
+                own = {
+                    s: SegmentLocalState(
+                        rho=float(rhos0[s]), speed=float(speeds0[s]),
+                        prev_lane=float(lanes0[s]),
+                        origin_queue=(
+                            origin_q0 if (agent.owns_origin_queue and s == 0) else 0.0
+                        ),
                     )
-                    cand.vsl[key] = float(v_cand)
-                    if own_ramp is not None and m_cand is not None:
-                        cand.ramp_metering[own_ramp] = float(m_cand)
-                    own = SegmentLocalState(
-                        rho=float(rhos0[seg]), speed=float(speeds0[seg]),
-                        prev_lane=float(lanes0[seg]),
-                        origin_queue=origin_q0 if agent.owns_origin_queue else 0.0,
-                    )
-                    ramp_q = float(ramp_q0.get(own_ramp, 0.0)) if own_ramp else 0.0
-                    blocked = 0.0
-                    first_flow: Dict[str, float] = {}
-                    # radius-1 이웃 상태(활성 시): ±1 seg를 함께 전진(2차 이웃은 동결 y).
-                    nbr_states: Dict[int, SegmentLocalState] = {}
-                    if self.seg13_neighbor_weight > 0.0:
-                        for j in (seg - 1, seg + 1):
-                            if 0 <= j < n_seg:
-                                nbr_states[j] = SegmentLocalState(
-                                    rho=float(rhos0[j]), speed=float(speeds0[j]),
-                                    prev_lane=float(lanes0[j]),
-                                    origin_queue=origin_q0 if j == 0 else 0.0,
-                                )
-                    cost = 0.0
-                    tr_rho: List[float] = []
-                    tr_v: List[float] = []
-                    tr_lane: List[float] = []
-                    tr_rel: List[float] = []
-                    for t in range(substeps):
-                        # 궤적 교환용 입력시점 기록(substep t 시작 상태) — frozen.at(t) 의미와 정렬.
-                        tr_rho.append(float(own.rho))
-                        tr_v.append(float(own.speed))
-                        tr_lane.append(float(own.prev_lane))
-                        own_release: Dict[str, float] = {}
-                        if own_ramp is not None:
-                            # release는 T_f 시작 reservoir만 본다(spec 3.4.3) — 계산 후 적재.
-                            rhos_asm = list(rhos0)
-                            rhos_asm[seg] = float(own.rho)
-                            rel = self._local_ramp_release(
-                                link, rhos_asm, {own_ramp: ramp_q}, cand, demand,
+                    for s in segs
+                }
+                ramp_q = {r: float(ramp_q0.get(r, 0.0)) for r in own_ramps}
+                blocked = {r: 0.0 for r in own_ramps}
+                first_flow: Dict[str, float] = {}
+                # radius-1 이웃 상태(활성 시): zone 경계 **바깥** 인접 seg를 함께 전진
+                # (2차 이웃은 동결 y). zone 내부 세그먼트를 이웃으로 잡으면 own-TTS가
+                # 가중치 1.0과 w_nbr로 이중계상된다 — 반드시 경계 밖으로만.
+                nbr_states: Dict[int, SegmentLocalState] = {}
+                if self.seg13_neighbor_weight > 0.0:
+                    for j in (segs[0] - 1, segs[-1] + 1):
+                        if 0 <= j < n_seg and j not in keys:
+                            nbr_states[j] = SegmentLocalState(
+                                rho=float(rhos0[j]), speed=float(speeds0[j]),
+                                prev_lane=float(lanes0[j]),
+                                origin_queue=origin_q0 if j == 0 else 0.0,
                             )
-                            r_own = max(0.0, float(rel.get(own_ramp, 0.0)))
-                            ramp_q = max(0.0, ramp_q - r_own * dt_h)
+                cost = 0.0
+                tr_rho: Dict[int, List[float]] = {s: [] for s in segs}
+                tr_v: Dict[int, List[float]] = {s: [] for s in segs}
+                tr_lane: Dict[int, List[float]] = {s: [] for s in segs}
+                tr_rel: Dict[str, List[float]] = {r: [] for r in own_ramps}
+                for t in range(substeps):
+                    # 궤적 교환용 입력시점 기록(substep t 시작 상태) — frozen.at(t) 의미와 정렬.
+                    for s in segs:
+                        tr_rho[s].append(float(own[s].rho))
+                        tr_v[s].append(float(own[s].speed))
+                        tr_lane[s].append(float(own[s].prev_lane))
+                    own_release: Dict[str, float] = {}
+                    r_own_by_ramp: Dict[str, float] = {}
+                    if own_ramps:
+                        # release는 T_f 시작 reservoir만 본다(spec 3.4.3) — 계산 후 적재.
+                        # 비-own 칸을 rhos0로 두는 기존 규약 유지(동결 궤적과의 불일치는
+                        # 알려진 것 — 손대면 비트 동일이 깨진다).
+                        rhos_asm = list(rhos0)
+                        for s in segs:
+                            rhos_asm[s] = float(own[s].rho)
+                        rel = self._local_ramp_release(
+                            link, rhos_asm, dict(ramp_q), cand, demand,
+                        )
+                        for r in own_ramps:
+                            r_own = max(0.0, float(rel.get(r, 0.0)))
+                            ramp_q[r] = max(0.0, ramp_q[r] - r_own * dt_h)
                             approach = max(
-                                0.0, float(coupling.get(f"u_on_{own_ramp}", 0.0))
+                                0.0, float(coupling.get(f"u_on_{r}", 0.0))
                             )
                             if self.count_blocked_ramp_inflow:
-                                space = max(0.0, net.ramp_queue_max_veh - ramp_q)
+                                space = max(0.0, net.ramp_queue_max_veh - ramp_q[r])
                                 arrival = approach * dt_h
-                                adm1 = min(blocked, space)
+                                adm1 = min(blocked[r], space)
                                 adm2 = min(arrival, space - adm1)
-                                ramp_q = min(net.ramp_queue_max_veh, ramp_q + adm1 + adm2)
-                                blocked = blocked - adm1 + (arrival - adm2)
+                                ramp_q[r] = min(
+                                    net.ramp_queue_max_veh, ramp_q[r] + adm1 + adm2,
+                                )
+                                blocked[r] = blocked[r] - adm1 + (arrival - adm2)
                             else:
-                                ramp_q = min(
-                                    net.ramp_queue_max_veh, ramp_q + approach * dt_h,
+                                ramp_q[r] = min(
+                                    net.ramp_queue_max_veh,
+                                    ramp_q[r] + approach * dt_h,
                                 )
-                            own_release[own_ramp] = r_own
-                        tr_rel.append(float(own_release.get(own_ramp, 0.0)) if own_ramp else 0.0)
-                        # radius-1: 이웃을 time-t 상태 기준으로 동시(자코비) 전진 —
-                        # 이웃 방류는 동결 스케줄, 이웃 차량수는 w_nbr 가중 비용.
-                        new_nbr: Dict[int, SegmentLocalState] = {}
-                        if nbr_states:
-                            frz_rel = frozen.ramp_release[
-                                min(t, len(frozen.ramp_release) - 1)
-                            ]
-                            cur_all: Dict[int, SegmentLocalState] = dict(nbr_states)
-                            cur_all[seg] = own
-                            for j, st_j in nbr_states.items():
-                                agent_j = agents[j]
-                                rel_j = {
-                                    r: max(0.0, float(frz_rel.get(r, 0.0)))
-                                    for r in agent_j.owned_ramps
-                                }
-                                ov = {k: v for k, v in cur_all.items() if k != j}
-                                nst, _, veh_j = segment_substep_local(
-                                    agent_j, frozen, t, st_j, rel_j, cand, demand,
-                                    extra_overrides=ov,
-                                )
-                                new_nbr[j] = nst
-                                cost += self.seg13_neighbor_weight * float(veh_j) * dt_h
-                        own, off_flow, veh = segment_substep_local(
-                            agent, frozen, t, own, own_release, cand, demand,
-                            extra_overrides=nbr_states or None,
-                        )
-                        if nbr_states:
-                            nbr_states = new_nbr
-                        if t == 0:
-                            first_flow = dict(off_flow)
-                        cost += (
-                            float(veh) + ramp_q + blocked
-                            + (own.origin_queue if agent.owns_origin_queue else 0.0)
-                        ) * dt_h
-                        # VdB4 보호큐 벌점 — seg13 metering 배선(2026-07-19 3차, 기본 OFF).
-                        # 2차(blocked 투영)는 후보 불변항 지배로 기울기 0(비트동일 실측) —
-                        # 방류-결합형으로 교체: 보호 큐가 한계 초과인 동안 "방류 안 한 몫"
-                        # (1 − release/cap)에 초과분×w를 부과 → release↑가 직접 벌점을 줄인다.
-                        if own_ramp is not None:
-                            _pq_w_s = float(getattr(self.cfg.mpc, "protected_queue_weight", 0.0))
-                            if _pq_w_s > 0.0:
-                                _pq_mv_s = str(getattr(self.cfg.mpc, "protected_queue_movement", "") or "")
-                                if _pq_mv_s:
-                                    _pq_ramp_s = str(self.cfg.network.urban_movements.get(_pq_mv_s, {}).get("ramp", "") or "")
-                                    if _pq_ramp_s == own_ramp:
-                                        _pq_max_s = float(getattr(self.cfg.mpc, "protected_queue_max_veh", 50.0))
-                                        _pq_now_s = max(0.0, float(state.urban_movement_queue.get(_pq_mv_s, 0.0)))
-                                        _pq_exc_s = max(0.0, _pq_now_s - _pq_max_s)
-                                        if _pq_exc_s > 0.0:
-                                            _idle_s = 1.0 - min(1.0, r_own / max(cap_r, 1.0e-9))
-                                            cost += _pq_w_s * _pq_exc_s * _idle_s * dt_h
-                    # 마찰(암묵적 신호검정) — 7p와 동일 규약(PRICE-TR 시 0).
-                    if not (self.price_smoothness_disabled and self.vsl_marginal_price):
-                        cost += smooth_w * abs(float(v_cand) - prev_v)
-                    # metering 마찰(2026-07-24): segment agent 경로엔 원래 metering 마찰이 없어
-                    # (freeway_follower/distributed_coordinator에만 존재) metering이 매 스텝
-                    # ±METER_BOX를 왕복한다. 실측 skew t=72~102분: PFO는 255~263 평탄·ρ_E 24.5
-                    # 유지인데 P-Stack은 245↔297 진동하며 ρ_E 27→37로 임계 돌파, freeway TTT +86.
-                    # VSL 마찰과 동일 형태(|Δ|). weight 0이면 기존과 비트동일.
-                    if _prev_m is not None and m_cand is not None:
-                        cost += _meter_smooth_w * abs(float(m_cand) - _prev_m)
-                    # 가격항: g_vsl(전 seg), 소유 ramp의 g_meter + h cross(leader present).
-                    if self.vsl_marginal_price:
-                        g_vsl = self.vsl_marginal_price.get(key)
-                        if g_vsl is not None:
-                            ref_v = float(self.vsl_marginal_price_ref.get(key, prev_v))
-                            cost += self.vsl_marginal_price_weight * float(g_vsl) * (
-                                float(v_cand) - ref_v
+                            own_release[r] = r_own
+                            r_own_by_ramp[r] = r_own
+                    for r in own_ramps:
+                        tr_rel[r].append(float(own_release.get(r, 0.0)))
+                    # radius-1: 이웃을 time-t 상태 기준으로 동시(자코비) 전진 —
+                    # 이웃 방류는 동결 스케줄, 이웃 차량수는 w_nbr 가중 비용.
+                    new_nbr: Dict[int, SegmentLocalState] = {}
+                    if nbr_states:
+                        frz_rel = frozen.ramp_release[
+                            min(t, len(frozen.ramp_release) - 1)
+                        ]
+                        cur_all: Dict[int, SegmentLocalState] = dict(nbr_states)
+                        cur_all.update(own)
+                        for j, st_j in nbr_states.items():
+                            agent_j = agent_by_seg[j]
+                            rel_j = {
+                                r: max(0.0, float(frz_rel.get(r, 0.0)))
+                                for r in agent_j.owned_ramps
+                            }
+                            ov = {k: v for k, v in cur_all.items() if k != j}
+                            nst, _, veh_j = segment_zone_substep_local(
+                                agent_j, frozen, t, {j: st_j}, rel_j, cand, demand,
+                                extra_overrides=ov,
                             )
-                    if own_ramp is not None and m_cand is not None and (
-                        leader_present or self.seg13_meter_price_standing
-                    ):
+                            new_nbr[j] = nst[j]
+                            cost += self.seg13_neighbor_weight * float(veh_j[j]) * dt_h
+                    own, off_flow, veh = segment_zone_substep_local(
+                        agent, frozen, t, own, own_release, cand, demand,
+                        extra_overrides=nbr_states or None,
+                    )
+                    if nbr_states:
+                        nbr_states = new_nbr
+                    if t == 0:
+                        first_flow = dict(off_flow)
+                    # own-TTS = 소유 세그먼트 차량수 합 + 소유 ramp queue(+blocked) 합
+                    # + (seg0 소유 시) origin queue. **한 번의 곱셈·한 번의 +=** 유지 —
+                    # 세그먼트별로 쪼개면 부동소수 결합순서가 바뀐다.
+                    cost += (
+                        sum(veh[s] for s in segs)
+                        + sum(ramp_q[r] for r in own_ramps)
+                        + sum(blocked[r] for r in own_ramps)
+                        + (own[0].origin_queue if agent.owns_origin_queue else 0.0)
+                    ) * dt_h
+                    # VdB4 보호큐 벌점 — seg13 metering 배선(2026-07-19 3차, 기본 OFF).
+                    # 2차(blocked 투영)는 후보 불변항 지배로 기울기 0(비트동일 실측) —
+                    # 방류-결합형으로 교체: 보호 큐가 한계 초과인 동안 "방류 안 한 몫"
+                    # (1 − release/cap)에 초과분×w를 부과 → release↑가 직접 벌점을 줄인다.
+                    if own_ramps:
+                        _pq_w_s = float(getattr(self.cfg.mpc, "protected_queue_weight", 0.0))
+                        if _pq_w_s > 0.0:
+                            _pq_mv_s = str(getattr(self.cfg.mpc, "protected_queue_movement", "") or "")
+                            if _pq_mv_s:
+                                _pq_ramp_s = str(self.cfg.network.urban_movements.get(_pq_mv_s, {}).get("ramp", "") or "")
+                                for r in own_ramps:
+                                    if _pq_ramp_s != r:
+                                        continue
+                                    _pq_max_s = float(getattr(self.cfg.mpc, "protected_queue_max_veh", 50.0))
+                                    _pq_now_s = max(0.0, float(state.urban_movement_queue.get(_pq_mv_s, 0.0)))
+                                    _pq_exc_s = max(0.0, _pq_now_s - _pq_max_s)
+                                    if _pq_exc_s > 0.0:
+                                        _idle_s = 1.0 - min(
+                                            1.0,
+                                            r_own_by_ramp.get(r, 0.0)
+                                            / max(cap_by_ramp[r], 1.0e-9),
+                                        )
+                                        cost += _pq_w_s * _pq_exc_s * _idle_s * dt_h
+                # 마찰(암묵적 신호검정) — 7p와 동일 규약(PRICE-TR 시 0).
+                # zone은 소유 세그먼트 |Δv|의 **합**을 부과해야 링크 총 마찰 스케일이
+                # zone 경계 재지정과 무관하게 보존된다(단일 세그먼트면 기존 식과 동일).
+                if not (self.price_smoothness_disabled and self.vsl_marginal_price):
+                    cost += smooth_w * sum(
+                        abs(float(v_by_seg[s]) - prev_v_by_seg[s]) for s in segs
+                    )
+                # metering 마찰(2026-07-24): segment agent 경로엔 원래 metering 마찰이 없어
+                # (freeway_follower/distributed_coordinator에만 존재) metering이 매 스텝
+                # ±METER_BOX를 왕복한다. 실측 skew t=72~102분: PFO는 255~263 평탄·ρ_E 24.5
+                # 유지인데 P-Stack은 245↔297 진동하며 ρ_E 27→37로 임계 돌파, freeway TTT +86.
+                # VSL 마찰과 동일 형태(|Δ|). weight 0이면 기존과 비트동일.
+                if _prev_m_by_ramp and m_map is not None:
+                    cost += _meter_smooth_w * sum(
+                        abs(float(m_map[r]) - _prev_m_by_ramp[r])
+                        for r in own_ramps if r in _prev_m_by_ramp
+                    )
+                # 가격항: g_vsl(소유 seg **전부** 합산 — 가격 키는 세그먼트 해상도라
+                # 대표 1개만 읽으면 나머지 leader 신호가 통째로 유실된다),
+                # 소유 ramp의 g_meter + h cross(leader present).
+                if self.vsl_marginal_price:
+                    for s in segs:
+                        g_vsl = self.vsl_marginal_price.get(keys[s])
+                        if g_vsl is not None:
+                            ref_v = float(self.vsl_marginal_price_ref.get(
+                                keys[s], prev_v_by_seg[s],
+                            ))
+                            cost += self.vsl_marginal_price_weight * float(g_vsl) * (
+                                float(v_by_seg[s]) - ref_v
+                            )
+                if own_ramps and m_map is not None and (
+                    leader_present or self.seg13_meter_price_standing
+                ):
+                    for r in own_ramps:
+                        m_r = float(m_map[r])
                         if self.metering_marginal_price:
-                            g_m = self.metering_marginal_price.get(own_ramp)
+                            g_m = self.metering_marginal_price.get(r)
                             if g_m is not None:
                                 m_ref = float(self.metering_marginal_price_ref.get(
-                                    own_ramp, float(m_cand),
+                                    r, m_r,
                                 ))
                                 cost += (
                                     self.metering_marginal_price_weight
-                                    * float(g_m) * (float(m_cand) - m_ref)
+                                    * float(g_m) * (m_r - m_ref)
                                 )
                         if self.vsl_meter_cross_price:
-                            h_c = self.vsl_meter_cross_price.get(own_ramp)
+                            h_c = self.vsl_meter_cross_price.get(r)
                             if h_c is not None:
+                                # v_ref는 그 ramp가 붙은 merge 세그먼트 기준으로 선형화된
+                                # 값이다 — 그 merge 세그먼트의 VSL을 쓴다. 빌더가 zone의
+                                # merge 세그먼트 소유를 보장한다(단일 세그먼트면 자기 자신).
                                 m_ref2, v_ref2 = self.vsl_meter_cross_ref.get(
-                                    own_ramp, (0.0, vsl_max),
+                                    r, (0.0, vsl_max),
+                                )
+                                _v_mg = float(
+                                    v_by_seg[link_model.ramp_merge_idx[r]]
                                 )
                                 cost += self.vsl_meter_cross_weight * float(h_c) * (
-                                    (float(m_cand) - float(m_ref2))
-                                    * (float(v_cand) - float(v_ref2))
+                                    (m_r - float(m_ref2))
+                                    * (_v_mg - float(v_ref2))
                                 )
-                    if own_ramp is not None and m_cand is not None and dual_price_active:
-                        cost += lambda_uf * float(m_cand)
+                if own_ramps and m_map is not None and dual_price_active:
+                    cost += lambda_uf * sum(float(m_map[r]) for r in own_ramps)
+                return cost, first_flow, (tr_rho, tr_v, tr_lane, tr_rel)
+
+            def _accept(cost: float, v_map: Mapping[int, float]) -> bool:
+                """후보 채택 판정 + best_cost 앵커 갱신(양 경로 공용 규약).
+
+                tie-pref ON이면 앵커를 **지금까지 본 최소 비용**으로 유지한다. 채택된
+                후보의 비용을 그대로 쓰면 ε 동률 채택이 연쇄될 때 앵커가 계속 위로
+                밀려(순서 의존) 진짜 감도를 삼킬 수 있다. OFF면 best_cost=cost로
+                기존 동작 그대로."""
+                nonlocal best_cost
+                if not _vsl_candidate_better(
+                    cost, best_cost, v_map, best_v_by_seg, _vsl_tie_pref,
+                ):
+                    return False
+                best_cost = min(best_cost, cost) if _vsl_tie_pref else cost
+                return True
+
+            # 단일 세그먼트(기본 구성·단일 세그먼트 zone)는 **기존 경로 그대로** —
+            # v 바깥 · m 안쪽 열거, tie-pref OFF면 strict < tie-break 보존.
+            # 좌표하강 진입 금지.
+            _cd_sweeps = 0
+            _cd_converged = True
+            if len(segs) == 1:
+                for v_cand in v_cands:
+                    for m_map in m_combos:
+                        _vmap = {s: float(v_cand) for s in segs}
+                        cost, first_flow, traj = _score(_vmap, m_map)
+                        evals += 1
+                        if _accept(cost, _vmap):
+                            best_m = m_map
+                            best_v_by_seg = _vmap
+                            best_flow_local = dict(first_flow)
+                            best_traj = traj
+            else:
+                # 좌표하강(2026-08-01 사용자 결정): 후보 폭발(|vsl_set|^k) 없이 세그먼트별
+                # VSL을 정한다. 초기값은 기존 앵커(VSL-BOX면 previous, 아니면 snapshot),
+                # 이후 세그먼트를 오름차순으로 돌며 나머지를 고정한 채 그 세그먼트만
+                # 최적화한다. metering은 기존 (v,m) 공동 열거 규약을 보존해 좌표 스텝마다
+                # m_combos를 함께 훑는다(regime 전환이 v와 m을 동시에 요구하는 경우 대응).
+                _cur_v = {}
+                for s in segs:
+                    _a = float(v_anchor_by_seg[s])
+                    _hit = [c for c in v_cands_by_seg[s] if abs(c - _a) <= 1.0e-9]
+                    _cur_v[s] = float(_hit[0]) if _hit else float(v_cands_by_seg[s][0])
+                for m_map in m_combos:
+                    cost, first_flow, traj = _score(_cur_v, m_map)
                     evals += 1
-                    if cost < best_cost:
-                        best_cost, best_v, best_m = cost, float(v_cand), m_cand
+                    if _accept(cost, _cur_v):
+                        best_m = m_map
+                        best_v_by_seg = dict(_cur_v)
                         best_flow_local = dict(first_flow)
-                        best_traj = (tr_rho, tr_v, tr_lane, tr_rel)
+                        best_traj = traj
+                _cd_converged = False
+                for _sweep in range(_cd_max_sweeps):
+                    _cd_sweeps += 1
+                    _changed = False
+                    for s in segs:
+                        for v_cand in v_cands_by_seg[s]:
+                            for m_map in m_combos:
+                                if (
+                                    abs(float(v_cand) - best_v_by_seg[s]) <= 1.0e-9
+                                    and m_map == best_m
+                                ):
+                                    continue  # 현재 incumbent — 이미 채점했다.
+                                _trial_v = dict(best_v_by_seg)
+                                _trial_v[s] = float(v_cand)
+                                cost, first_flow, traj = _score(_trial_v, m_map)
+                                evals += 1
+                                if _accept(cost, _trial_v):
+                                    best_m = m_map
+                                    best_v_by_seg = _trial_v
+                                    best_flow_local = dict(first_flow)
+                                    best_traj = traj
+                                    _changed = True
+                    if not _changed:
+                        _cd_converged = True
+                        break
             if best_traj is not None:
-                agent_best_traj[seg] = best_traj
-            vsl_out[key] = float(best_v)
-            if own_ramp is not None and best_m is not None:
-                preferred_meter[own_ramp] = float(best_m)
-                # METER-BOX 판별 진단: 박스 끝(±R)을 골랐나, 내부에 정착했나.
-                # 끝점 비율이 계속 높으면 '진짜 최적이 박스 밖' — 사용자 가설 반증 쪽.
-                if _box_r is not None and previous is not None:
-                    _bu0 = getattr(self.cfg.mpc, "seg13_meter_box_up_veh_h", None)
-                    _rup0 = float(_bu0) if _bu0 is not None else float(_box_r)
-                    _mp0 = min(max(float(
-                        previous.ramp_metering.get(own_ramp, cap_r)), 0.0), cap_r)
-                    _blo = max(0.0, _mp0 - float(_box_r))
-                    _bhi = min(cap_r, _mp0 + _rup0)
-                    _meter_box_total += 1
-                    if abs(float(best_m) - _blo) < 0.5 or abs(float(best_m) - _bhi) < 0.5:
-                        _meter_box_edge += 1
+                for s in segs:
+                    agent_best_traj[s] = (
+                        best_traj[0][s], best_traj[1][s], best_traj[2][s],
+                    )
+                for r in own_ramps:
+                    agent_best_release[r] = best_traj[3][r]
+            for s in segs:
+                vsl_out[keys[s]] = float(best_v_by_seg[s])
+            if own_ramps and best_m is not None:
+                for r in own_ramps:
+                    cap_r = cap_by_ramp[r]
+                    preferred_meter[r] = float(best_m[r])
+                    # METER-BOX 판별 진단: 박스 끝(±R)을 골랐나, 내부에 정착했나.
+                    # 끝점 비율이 계속 높으면 '진짜 최적이 박스 밖' — 사용자 가설 반증 쪽.
+                    if _box_r is not None and previous is not None:
+                        _bu0 = getattr(self.cfg.mpc, "seg13_meter_box_up_veh_h", None)
+                        _rup0 = float(_bu0) if _bu0 is not None else float(_box_r)
+                        _mp0 = min(max(float(
+                            previous.ramp_metering.get(r, cap_r)), 0.0), cap_r)
+                        _blo = max(0.0, _mp0 - float(_box_r))
+                        _bhi = min(cap_r, _mp0 + _rup0)
+                        _meter_box_total += 1
+                        if abs(float(best_m[r]) - _blo) < 0.5 or abs(float(best_m[r]) - _bhi) < 0.5:
+                            _meter_box_edge += 1
+            # zone 진단(groups 설정 시에만) — 세그먼트별 VSL 분산과 좌표하강 수렴을
+            # 사후 판정한다. 진단 키는 link 네임스페이스(zone_id가 링크 간 겹쳐도 안전).
+            # 기본 경로(groups 미설정)에서는 키가 하나도 추가되지 않는다(CSV 헤더 불변).
+            if zone_mode:
+                _zid = agent.zone_id or f"z{segs[0]}"
+                _dk = f"{link}_{_zid}"
+                _zvals = [float(best_v_by_seg[s]) for s in segs]
+                self._seg13_diag[f"wu_zone_vsl_{_dk}"] = float(min(_zvals))
+                self._seg13_diag[f"wu_zone_vsl_max_{_dk}"] = float(max(_zvals))
+                # 좌표하강 영수증: sweep 수와 수렴 여부(상한 도달 시 0).
+                self._seg13_diag[f"wu_zone_cd_sweeps_{_dk}"] = float(_cd_sweeps)
+                self._seg13_diag[f"wu_zone_cd_converged_{_dk}"] = float(_cd_converged)
+                _rho_crit_z = float(net.rho_crit)
+                if _rho_crit_z > 0.0:
+                    self._seg13_diag[f"wu_zone_cong_{_dk}"] = float(
+                        max(float(rhos0[s]) for s in segs) / _rho_crit_z
+                    )
             for o, fl in best_flow_local.items():
                 best_offramp_flow[o] = float(fl)
 
@@ -2740,9 +3021,10 @@ class WuFaithfulFollower:
             new_release: List[Dict[str, float]] = []
             for t in range(substeps):
                 rel_t = dict(release0)
-                for a in agents:
-                    if a.owned_ramps and a.seg in agent_best_traj:
-                        rel_t[a.owned_ramps[0]] = float(agent_best_traj[a.seg][3][t])
+                # 소유 ramp **전부**를 반영(기존 owned_ramps[0] 절삭 제거) — 빠진 ramp는
+                # 동결값(release0)에 머물러 이웃 agent가 틀린 y를 본다.
+                for _r_tr, _rel_seq in agent_best_release.items():
+                    rel_t[_r_tr] = float(_rel_seq[t])
                 new_release.append(rel_t)
             prev_stored = self._seg_traj.get(link)
             if prev_stored is not None and len(prev_stored.get("rhos", [])) == substeps:
@@ -2778,6 +3060,14 @@ class WuFaithfulFollower:
         # (L2886)만 막혀 있어서 SEG13=1인 플래그십에선 BUDGET_OFF가 무효였고, 2026-07-16
         # wave2 20런이 통째로 ③ 재실행이 됐다(30/30 bit-identical). 여기서도 막는다.
         meter_out: Dict[str, float] = dict(preferred_meter)
+        # ZONE-4 안전망: 사영 스코프는 링크이고 대상은 preferred_meter의 키다. zone이
+        # 소유 ramp를 하나라도 빠뜨리면 그 ramp만 사영을 우회해 Σmeter가 예산을 조용히
+        # 넘는다 — zone 모드에서만 검사(기본 경로 거동·진단 키 불변).
+        if zone_mode and preferred_meter and set(preferred_meter) != set(link_model.owned_ramps):
+            raise RuntimeError(
+                f"zone 에이전트가 {link}의 소유 ramp를 전부 기입하지 않았다: "
+                f"{sorted(preferred_meter)} vs {sorted(link_model.owned_ramps)}"
+            )
         _budget_off_seg13 = bool(getattr(self.cfg.mpc, "leader_budget_off", False))
         if leader_present and not _budget_off_seg13 and nuf_mode == "equality" and preferred_meter:
             caps = {r: float(net.ramp_capacity_veh_h[r]) for r in preferred_meter}
@@ -2895,6 +3185,9 @@ class WuFaithfulFollower:
                 sum(meter_out.values()) / max(budget, 1.0e-9)
             )
         self._seg13_diag[f"wu_seg13_evals_{link}"] = float(evals)
+        if zone_mode:
+            # zone 영수증 — 이 컬럼 존재 = freeway_agent_groups가 SEG13 경로에 도달했다.
+            self._seg13_diag[f"wu_zone_count_{link}"] = float(len(agents))
         # METER-BOX 진단 — 플래그 ON일 때만 기록(OFF 런의 CSV 헤더 불변 유지).
         # box_r 존재 = 플래그가 SEG13 경로에 실제로 도달했다는 영수증(BUDGET_OFF 재발 방지).
         if getattr(self.cfg.mpc, "seg13_meter_box_veh_h", None) is not None:
@@ -3719,6 +4012,14 @@ class WuFaithfulFollower:
         if getattr(self.cfg.mpc, "seg13_vsl_box_kmh", None) is not None and not self.segment_agents:
             raise RuntimeError(
                 "VSL_BOX는 SEG13 segment agent 경로 전용인데 segment_agents가 꺼져 있다."
+            )
+        # ZONE-4도 같은 규약 — groups가 꽂혔는데 SEG13 경로가 꺼져 있으면 즉사시킨다.
+        if getattr(self.cfg.mpc, "freeway_agent_groups", None) and not (
+            self.segment_agents and self.metering_enabled
+        ):
+            raise RuntimeError(
+                "freeway_agent_groups는 SEG13(segment_agents+metering) 전용인데 해당 "
+                "경로가 꺼져 있다 — link 모드 follower는 zone 구조를 쓰지 않는다."
             )
         self._wu._repair_diagnostics = {}
         self._seg13_diag = {}
