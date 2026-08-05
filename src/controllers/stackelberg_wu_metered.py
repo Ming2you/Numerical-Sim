@@ -23,6 +23,41 @@ from __future__ import annotations
 from collections import deque
 from typing import Dict, List, Optional
 
+
+# --- 가격 롤아웃 병렬 실행용 워커 (2026-08-05) ------------------------------------
+#
+# 왜. `_maybe_refresh_signal_prices` 의 **98.4%** 가 전역 롤아웃이다(프로파일: `_predict`
+# 125회 208.4s / 총 211.7s). 그리고 `_global_rollout_metrics_with_green` 은 previous 를
+# 복사해 green 만 바꾸고 예측하는 **순수 함수**라 신호별로 독립이다.
+# 따라서 신호 단위로 프로세스에 나눠도 결과가 동일하다.
+#
+# SPSA(동시섭동)로 줄이는 길은 실측으로 기각했다 — k 를 16 -> 32 로 올려도 FD 대비
+# Spearman 이 +0.875 -> +0.882 에서 멈추고, |FD| 가 큰 성분에서도 0.38~4.54배로 어긋난다.
+# 신호 15개를 동시에 흔들면 작동점에서 멀어져 교차항이 안 지워지는 **편향**이지 노이즈가
+# 아니다. 그래서 정확한 FD 를 유지하고 병렬로만 줄인다(정확도 손실 0).
+#
+# Windows 는 fork 가 없어 워커가 재임포트한다. 실측 비용은 import 0.03s + build 0.22s 이고
+# 컨트롤러 피클이 610 KB / 왕복 수 ms 라, 롤아웃 1회 0.44s 대비 무시할 수준이다.
+_PRICE_WORKER_CTX: Dict[str, object] = {}
+
+
+def _price_worker_init(ctrl, state, previous, forecast) -> None:
+    """워커 프로세스당 한 번. 컨트롤러와 작동점을 고정한다."""
+    _PRICE_WORKER_CTX["ctrl"] = ctrl
+    _PRICE_WORKER_CTX["state"] = state
+    _PRICE_WORKER_CTX["previous"] = previous
+    _PRICE_WORKER_CTX["forecast"] = forecast
+
+
+def _price_worker_green(task):
+    """(signal, which, p1) -> (signal, which, ttt, barrier). 직렬 호출과 인자가 동일하다."""
+    signal, which, value = task
+    ctx = _PRICE_WORKER_CTX
+    ttt, bar = ctx["ctrl"]._global_rollout_metrics_with_green(  # noqa: SLF001
+        ctx["state"], ctx["previous"], ctx["forecast"], signal, value,
+    )
+    return signal, which, float(ttt), float(bar)
+
 from src.controllers.stackelberg_mpc import (
     DecisionResult,
     StackelbergMPCController,
@@ -115,6 +150,9 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         # per-lever 유한차분은 lever수(O(n))×전역 rollout(O(n)) = refresh당 O(n²). SPSA(Spall
         # 1992)는 전 lever를 동시에 ±δ 섭동한 rollout 쌍 k개로 전 lever gradient를 한꺼번에
         # 추정(교차항은 독립 부호로 기대 0) → rollout 2k회 고정 = O(n). adjoint의 실용 대체.
+        # 가격 롤아웃 병렬 워커 수. 0/1 = 직렬(기존과 비트 동일).
+        # 롤아웃이 가격 갱신의 98.4% 이고 신호별로 독립이라 정확도 손실 없이 줄인다.
+        self.price_parallel_workers: int = 0
         self.price_spsa_enabled: bool = False
         self.price_spsa_pairs: int = 4
         # ---------- JOINT(2026-07-09): bilinear cross-term 가격 ----------
@@ -693,6 +731,56 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         control.green_times[f"{signal}_p1"] = float(p1)
         control.green_times[f"{signal}_p2"] = float(total - p1)
         return self._predict_ttt_and_barrier(state, control, forecast)
+
+    def _green_price_rollouts(
+        self,
+        state: TrafficState,
+        previous: ControlAction,
+        forecast: List[DemandStep],
+        pts: Dict[str, tuple],
+    ) -> Dict[tuple, tuple]:
+        """신호별 green ±δ 전역 롤아웃을 일괄 평가한다 — (signal, 'lo'|'hi') -> (TTT, barrier).
+
+        `price_parallel_workers <= 1` 이면 직렬이고 기존 코드와 **비트 동일**하다.
+        병렬이어도 각 롤아웃 인자가 같고 순수 함수이므로 결과가 같다(수집 순서만 다르다).
+        """
+        tasks = []
+        for signal, (_p1_0, p_lo, p_hi) in pts.items():
+            tasks.append((signal, "lo", float(p_lo)))
+            tasks.append((signal, "hi", float(p_hi)))
+
+        workers = int(getattr(self, "price_parallel_workers", 0) or 0)
+        if workers <= 1 or len(tasks) <= 1:
+            return {
+                (sig, which): self._global_rollout_metrics_with_green(
+                    state, previous, forecast, sig, value,
+                )
+                for sig, which, value in tasks
+            }
+
+        from concurrent.futures import ProcessPoolExecutor
+
+        out: Dict[tuple, tuple] = {}
+        try:
+            with ProcessPoolExecutor(
+                max_workers=min(workers, len(tasks)),
+                initializer=_price_worker_init,
+                initargs=(self, state, previous, forecast),
+            ) as pool:
+                for sig, which, ttt, bar in pool.map(_price_worker_green, tasks):
+                    out[(sig, which)] = (ttt, bar)
+        except Exception:
+            # 병렬 실패는 조용히 넘기지 않되, 가격을 잃는 것보다 직렬 재시도가 낫다.
+            out = {
+                (sig, which): self._global_rollout_metrics_with_green(
+                    state, previous, forecast, sig, value,
+                )
+                for sig, which, value in tasks
+            }
+            return out
+        # 워커에서 증가한 롤아웃 카운터는 부모에 안 돌아온다 — 직렬과 같게 보정한다.
+        self._price_rollout_count += len(tasks)
+        return out
 
     def _global_rollout_metrics_with_metering(
         self,
@@ -1305,6 +1393,11 @@ class StackelbergWuMeteredController(StackelbergMPCController):
                 pts[signal] = (p1_0, p_lo, p_hi)
                 requests[signal] = [p_lo, p_hi]
             local_costs = follower.local_green_costs(requests, state, previous, forecast[0])
+            # 전역 롤아웃을 먼저 일괄 평가한다(직렬/병렬 결과 동일). SPSA 경로는 롤아웃이 없다.
+            green_rollouts = (
+                {} if spsa_g is not None
+                else self._green_price_rollouts(state, previous, forecast, pts)
+            )
             prices: Dict[str, float] = {}
             refs: Dict[str, float] = {}
             for signal, (p1_0, p_lo, p_hi) in pts.items():
@@ -1316,12 +1409,8 @@ class StackelbergWuMeteredController(StackelbergMPCController):
                         g_i = float(spsa_g.get(("green", signal), 0.0))
                         bar_hi = bar_lo = 0.0
                     else:
-                        ttt_hi, bar_hi = self._global_rollout_metrics_with_green(
-                            state, previous, forecast, signal, p_hi,
-                        )
-                        ttt_lo, bar_lo = self._global_rollout_metrics_with_green(
-                            state, previous, forecast, signal, p_lo,
-                        )
+                        ttt_hi, bar_hi = green_rollouts[(signal, "hi")]
+                        ttt_lo, bar_lo = green_rollouts[(signal, "lo")]
                         g_i = (ttt_hi - ttt_lo) / two_delta
                     cost_lo, cost_hi = local_costs[signal]
                     g_ext = g_i - (cost_hi - cost_lo) / two_delta
