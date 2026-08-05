@@ -90,7 +90,7 @@ class ClassicalHierarchicalController:
         reference = max(float(self.cfg.leader.N_P_crit_veh), 1.0e-9)
         signed = float(np.clip((protected - reference) / reference, -1.0, 2.0))
         ramp_ratios = [
-            max(0.0, state.ramp_queue.get(ramp, 0.0)) / max(net.ramp_queue_max_veh, 1.0e-9)
+            max(0.0, state.ramp_queue.get(ramp, 0.0)) / max(net.ramp_queue_cap(ramp), 1.0e-9)
             for ramp in net.ramps
         ]
         return _PressureSummary(
@@ -193,7 +193,7 @@ class ClassicalHierarchicalController:
             link = net.ramp_to_freeway.get(ramp, "")
             queue_ratio = float(np.clip(
                 self._onramp_queue_veh(state=state, ramp=ramp, movement=movement)
-                / max(net.ramp_queue_max_veh, 1.0e-9),
+                / max(net.ramp_queue_cap(ramp), 1.0e-9),
                 0.0,
                 1.5,
             ))
@@ -345,7 +345,7 @@ class ClassicalHierarchicalController:
             available_rate = arrival_rate + onramp_queue / dt_h
             link = net.ramp_to_freeway.get(ramp, "")
             density = link_density_pressure.get(link, pressure.freeway_density_pressure)
-            queue_ratio = float(np.clip(onramp_queue / max(net.ramp_queue_max_veh, 1.0e-9), 0.0, 1.5))
+            queue_ratio = float(np.clip(onramp_queue / max(net.ramp_queue_cap(ramp), 1.0e-9), 0.0, 1.5))
             ramp_upper = min(cap, max(0.0, available_rate))
             upper.append(ramp_upper)
             arrival_norm = arrival_rate / max(cap, 1.0e-9)

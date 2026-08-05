@@ -418,7 +418,8 @@ class FreewayFollower:
             }
             available_x_on = sum(x_on_by_movement.values())
             ramp_before = max(0.0, state.ramp_queue.get(ramp, 0.0))
-            ramp_space = max(0.0, net.ramp_queue_max_veh - ramp_before)
+            # 램프별 상한(2026-08-05). 매핑이 비면 스칼라 폴백이라 기존 비트 동일.
+            ramp_space = max(0.0, net.ramp_queue_cap(ramp) - ramp_before)
             desired_green_veh = min(
                 max(0.0, green_flow.get(ramp, 0.0)) * dt_h,
                 available_x_on,
@@ -429,7 +430,7 @@ class FreewayFollower:
             scale = green_veh / available_x_on if available_x_on > 1.0e-9 else 0.0
             for movement, x_on in x_on_by_movement.items():
                 state.urban_movement_queue[movement] = max(0.0, x_on * (1.0 - scale))
-            state.ramp_queue[ramp] = min(net.ramp_queue_max_veh, ramp_before + green_veh)
+            state.ramp_queue[ramp] = min(net.ramp_queue_cap(ramp), ramp_before + green_veh)
         return green_flow, float(spillback_tts)
 
     def _actual_metering_release(
@@ -562,7 +563,8 @@ class FreewayFollower:
         probe.time_sec += self.cfg.simulation.control_interval
         metering_error = float(diag.get("total_metering_error", 0.0))
         receiving = float(diag.get("mean_ramp_receiving_factor", 1.0))
-        queue_overflow = sum(max(0.0, q - net.ramp_queue_max_veh) for q in probe.ramp_queue.values())
+        queue_overflow = sum(max(0.0, q - net.ramp_queue_cap(r))
+                             for r, q in probe.ramp_queue.items())
         density_excess = sum(
             max(0.0, rho - net.rho_crit)
             for values in probe.freeway_density.values()

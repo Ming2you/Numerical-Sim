@@ -776,7 +776,8 @@ class DistributedCoordinator:
         for ramp, raw_total in raw_onramp_by_ramp.items():
             if raw_total <= 1.0e-9:
                 continue
-            ramp_space = max(0.0, float(net.ramp_queue_max_veh) - max(0.0, state.ramp_queue.get(ramp, 0.0)))
+            # 램프별 상한(2026-08-05). 매핑이 비면 스칼라 폴백이라 기존 비트 동일.
+            ramp_space = max(0.0, net.ramp_queue_cap(ramp) - max(0.0, state.ramp_queue.get(ramp, 0.0)))
             scale = min(1.0, ramp_space / raw_total)
             for movement in net.on_ramp_to_movement.get(ramp, []):
                 if movement in service:
@@ -2105,7 +2106,9 @@ class DistributedCoordinator:
         ramp_start = sum(max(0.0, state.ramp_queue.get(ramp, 0.0)) for ramp in agent.ramps)
         incoming = sum(max(0.0, float(coupling.get(f"u_on_{ramp}", 0.0))) * horizon_h for ramp in agent.ramps)
         release = sum(max(0.0, ramp_metering.get(ramp, 0.0)) * horizon_h for ramp in agent.ramps)
-        capacity = net.ramp_queue_max_veh * max(len(agent.ramps), 1)
+        # 램프별 상한 합(2026-08-05). 매핑이 비면 스칼라 x 램프수 = 기존 값과 비트 동일.
+        capacity = (sum(net.ramp_queue_cap(r) for r in agent.ramps)
+                    if agent.ramps else float(net.ramp_queue_max_veh))
         ramp_terminal_unclipped = max(0.0, ramp_start + incoming - release)
         ramp_terminal = min(capacity, ramp_terminal_unclipped)
         blocked_to_urban = max(0.0, ramp_terminal_unclipped - capacity)
@@ -2578,7 +2581,9 @@ class DistributedCoordinator:
         # 방출, fraction=1.0)을 보호 baseline 후보로 명시 — 국소 density만으로 과도하게
         # metering해 TTT가 악화되지 않게 한다.
         existing_ramp_queue = sum(max(0.0, state.ramp_queue.get(r, 0.0)) for r in agent.ramps)
-        ramp_queue_max = max(net.ramp_queue_max_veh * max(len(agent.ramps), 1), 1.0e-9)
+        ramp_queue_max = max(
+            (sum(net.ramp_queue_cap(r) for r in agent.ramps)
+             if agent.ramps else float(net.ramp_queue_max_veh)), 1.0e-9)
         queue_saturation = min(1.0, existing_ramp_queue / ramp_queue_max)
         best_target, best_cost = total_upper, float("inf")  # baseline = no-metering(용량 방출).
         for fraction in (1.0, 0.85, 0.7, 0.5):
@@ -3585,7 +3590,8 @@ class DistributedCoordinator:
             "distributed_response_onramp_green_shortfall_veh": 0.0,
             "distributed_response_ramp_release_shortfall_veh": 0.0,
             "distributed_response_ramp_queue_overflow_count": float(
-                sum(1 for value in state.ramp_queue.values() if value > net.ramp_queue_max_veh)
+                sum(1 for ramp, value in state.ramp_queue.items()
+                    if value > net.ramp_queue_cap(ramp))
             ),
             "distributed_response_movement_queue_projection_veh": float(
                 sum(max(0.0, value) for value in state.urban_movement_queue.values())

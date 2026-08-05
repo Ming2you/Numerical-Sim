@@ -209,6 +209,14 @@ class NetworkConfig:
         "R_D_W": 2, "R_F_W": 2, "R_D_E": 2, "R_F_E": 2
     })
     ramp_queue_max_veh: float = 180.0
+    # 램프별 대기행렬 상한[veh]. 비어 있으면 위 스칼라를 쓴다(기존 동작과 비트 동일).
+    #
+    # 2026-08-05: 스칼라 180 은 근거 없는 상수였다. 램프미터 커넥터 기하에서 유도하면
+    # 93.0~145.9 다(scripts/derive_ramp_queue_capacity.py). 이 값은 리더의 압력 정규화만이
+    # 아니라 **팔로워의 큐 상한 자체**를 지배한다(f1_wu_faithful_follower:517 의
+    # min(cap, q+adm)). 램프별로 나누지 않으면 리더는 93 에서 꽉 찼다고 보는데 팔로워는
+    # 180 까지 채우는 불일치가 생긴다.
+    ramp_queue_max_veh_by_ramp: Dict[str, float] = field(default_factory=dict)
     signals: List[str] = field(default_factory=lambda: ["A", "B", "C", "D", "F"])
     uncontrolled_nodes: List[str] = field(default_factory=lambda: ["E"])
     urban_links: List[str] = field(default_factory=lambda: [
@@ -334,6 +342,11 @@ class NetworkConfig:
     @property
     def total_ramp_capacity(self) -> float:
         return float(sum(self.ramp_capacity_veh_h[r] for r in self.ramps))
+
+    def ramp_queue_cap(self, ramp: str) -> float:
+        """램프 하나의 대기행렬 상한[veh]. 매핑이 없으면 스칼라 폴백(기존 거동 비트 동일)."""
+        value = self.ramp_queue_max_veh_by_ramp.get(str(ramp))
+        return float(value) if value is not None else float(self.ramp_queue_max_veh)
 
     @property
     def effective_green_total(self) -> float:

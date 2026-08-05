@@ -508,17 +508,19 @@ class F1WuFaithfulFollower(WuFaithfulFollower):
                         ramp_q[ramp] = max(0.0, ramp_q.get(ramp, 0.0) - max(0.0, rel) * dt_h)
                     for ramp in model.owned_ramps:
                         approach = max(0.0, float(coupling.get(f"u_on_{ramp}", 0.0)))
+                        # 램프별 상한(2026-08-05). 매핑이 비면 스칼라 폴백이라 기존 비트 동일.
+                        ramp_cap = net.ramp_queue_cap(ramp)
                         if self.count_blocked_ramp_inflow:
                             q = max(0.0, ramp_q.get(ramp, 0.0))
-                            space = max(0.0, net.ramp_queue_max_veh - q)
+                            space = max(0.0, ramp_cap - q)
                             arrival = approach * dt_h
                             adm1 = min(blocked_q[ramp], space)
                             adm2 = min(arrival, space - adm1)
-                            ramp_q[ramp] = min(net.ramp_queue_max_veh, q + adm1 + adm2)
+                            ramp_q[ramp] = min(ramp_cap, q + adm1 + adm2)
                             blocked_q[ramp] = blocked_q[ramp] - adm1 + (arrival - adm2)
                         else:
                             ramp_q[ramp] = min(
-                                net.ramp_queue_max_veh,
+                                ramp_cap,
                                 max(0.0, ramp_q.get(ramp, 0.0)) + approach * dt_h,
                             )
                     storage_avail = {

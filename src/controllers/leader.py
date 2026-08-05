@@ -757,9 +757,12 @@ class Leader:
     def _ramp_queue_pressure(self, state: TrafficState) -> float:
         if not state.ramp_queue:
             return 0.0
+        # 램프별 상한으로 정규화한다(2026-08-05). 전에는 스칼라 하나로 나눠서, 실측 93 대인
+        # 램프를 180 기준으로 봐 압력을 최대 1.9배 과소평가했다. 매핑이 비면 스칼라 폴백.
+        net = self.cfg.network
         return float(np.mean([
-            min(1.0, q / max(self.cfg.network.ramp_queue_max_veh, 1.0e-9))
-            for q in state.ramp_queue.values()
+            min(1.0, q / max(net.ramp_queue_cap(ramp), 1.0e-9))
+            for ramp, q in state.ramp_queue.items()
         ]))
 
     def _state_accumulation_base(self, states: Iterable[TrafficState]) -> tuple[float, float]:
