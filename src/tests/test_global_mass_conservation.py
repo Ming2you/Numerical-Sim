@@ -87,6 +87,51 @@ class GlobalMassConservationTests(unittest.TestCase):
         # 초기 428 veh 대비 10배 이상 쌓여야 저장용량 경로를 밟았다고 본다(실측 4677 veh).
         self.assertGreater(sim.state.total_physical_vehicles(self.net), 4000.0)
 
+    def test_offramp_rejection_stays_unreachable_under_forced_saturation(self) -> None:
+        """off-ramp 수용 거부가 일어나면 그 차량은 증발한다. 일어나지 않음을 고정한다.
+
+        `schedule_offramp_arrivals` 는 `(accepted, rejected)` 를 돌려주는데
+        (urban_queue_model.py:379-407), 거부된 차량은 이미 `freeway_substep` 에서 본선을
+        떠난 뒤다. 호출부(coupling.py:225-227)는 그 값을 진단으로 더할 뿐 **어느 stock 에도
+        되돌리지 않는다.** 즉 거부가 한 번이라도 발생하면 그만큼 질량이 사라진다.
+
+        지금은 도달 불가다. `off_ramp_capacity_by_freeway_link` 가 off-ramp **별로**
+        `cap[off_ramp]` 를 주고(:425), 그 스냅샷과 수용 사이에 storage 를 줄이는 코드가
+        없기 때문이다. 그러나 같은 함수가 legacy 호환으로 링크 합산 `cap[link]` 도 계속
+        내보낸다(:426). 게이트가 그쪽으로 회귀하면 — 한 링크에 off-ramp 가 둘씩 있고
+        분할비가 0.2/0.2 로 같으므로 — 한쪽만 포화된 순간 거부가 발생한다.
+
+        그래서 비대칭 포화를 매 스텝 강제한다. 이 테스트가 깨지면 질량이 새고 있다.
+        """
+        storage_links = sorted(set(self.net.off_ramp_storage_link.values()))
+        # 링크당 하나씩만 채운다 — 둘 다 채우면 링크 합산 cap 도 0 이 되어 유량 자체가 끊긴다.
+        by_freeway: dict[str, str] = {}
+        for off_ramp, freeway_link in self.net.off_ramp_from_freeway.items():
+            by_freeway.setdefault(freeway_link, self.net.off_ramp_storage_link[off_ramp])
+        filled = sorted(by_freeway.values())
+        self.assertTrue(filled and len(filled) < len(storage_links))
+
+        profile = DemandProfile(self.cfg, self.scenarios["sweet_220"])
+        sim = MixedTrafficSimulator(self.cfg)
+        control = ControlAction.uncontrolled(self.cfg)
+        rejected_total = 0.0
+        for step in range(12):
+            for link in filled:
+                sim.state.urban_link_storage[link] = 0.0
+            opening = sim.state.total_physical_vehicles(self.net)
+            demand = profile.at(step)
+            diagnostics = sim.step(control, demand, step).diagnostics
+            closing = sim.state.total_physical_vehicles(self.net)
+
+            rejected_total += diagnostics.get(
+                "coupling_offramp_arrivals_rejected_veh", 0.0
+            )
+            # 강제로 storage 를 0 으로 만든 만큼은 외부 유입/유출이 아니므로 전역 항등식이
+            # 성립하지 않는다. 여기서 보는 것은 거부량 하나다.
+            del opening, closing
+
+        self.assertEqual(rejected_total, 0.0)
+
     def test_pre_fix_measure_breaks_the_identity(self) -> None:
         """되돌림 증명 — 수정 전 정의로는 이 항등식이 반드시 깨져야 한다.
 
