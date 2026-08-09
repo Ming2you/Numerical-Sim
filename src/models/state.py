@@ -291,6 +291,11 @@ class NetworkConfig:
     urban_Q_sat_veh_h: float = 1000.0
     urban_avg_vehicle_length_m: float = 6.0
     urban_avg_speed_km_h: float = 50.0
+    # 경계 유입 링크(게이트 in링크·on-ramp 접근부) 길이[m] — 개포동 실망 실측 448~488 m의
+    # 중앙값. 유입 차량이 정지선에 닿기까지의 주행지연(W6)을 이 길이/urban_avg_speed_km_h로
+    # 계산한다. 링크별 대응이 아니라 전역 상수로 둔다(실측 폭이 좁아 substep 해상도에서
+    # 같은 지연 스텝으로 떨어진다).
+    urban_boundary_link_length_m: float = 468.0
     green_min_fraction: float = 0.2
     green_max_fraction: float = 0.8
 
@@ -910,6 +915,14 @@ class TrafficState:
     urban_link_storage: Dict[str, float] = field(default_factory=dict)
     urban_arrival_buffer: Dict[str, Dict[int, float]] = field(default_factory=dict)
     urban_storage_release_buffer: Dict[str, Dict[int, float]] = field(default_factory=dict)
+    # 경계 유입 주행지연 버퍼[veh] — key(`gate:{in링크}` / `ramp:{ramp}`)→{도착 substep: 대수}.
+    # 게이트를 넘은 차량은 이미 네트워크 안(외부 유입으로 계상됨)이지만 정지선/램프 저수지에는
+    # 아직 닿지 않았다. **stock 이므로 `total_physical_vehicles` 가 반드시 세야 한다**(W6).
+    urban_inflow_transit_buffer: Dict[str, Dict[int, float]] = field(default_factory=dict)
+    # off-ramp storage 링크 안에서 아직 하류 정지선에 닿지 않은 차량[veh] — storage_link→{도착 substep: 대수}.
+    # 점유는 적재 즉시 `urban_link_storage` 에 반영되므로 질량 회계에는 **더하지 않는다**(이중계상).
+    # 이 버퍼는 "그 점유 중 아직 방출 불가한 몫" 이라는 view 일 뿐이다(W6).
+    offramp_transit_buffer: Dict[str, Dict[int, float]] = field(default_factory=dict)
     time_sec: float = 0.0
 
     @classmethod
@@ -955,6 +968,8 @@ class TrafficState:
             urban_link_storage=dict(net.urban_link_storage_veh),
             urban_arrival_buffer={},
             urban_storage_release_buffer={link: {} for link in net.urban_link_storage_veh},
+            urban_inflow_transit_buffer={},
+            offramp_transit_buffer={},
         )
 
     def copy(self) -> "TrafficState":
@@ -1018,12 +1033,26 @@ class TrafficState:
         stock 이 아니라 일정표다 — 링크 진입 차량은 storage 점유로 한 번 계상되고 같은
         양이 두 버퍼에 예약된다(`urban_queue_model.py:1001-1011`). 내부 링크에서 점유와
         release buffer 가 소수점까지 일치함을 실측했다(각 251.0444 veh).
+        `offramp_transit_buffer` 도 같은 이유로 빼는데, 그쪽은 적재 즉시 off-ramp storage
+        점유로 잡히기 때문이다(W6).
+
+        **`urban_inflow_transit_buffer` 는 더한다.** 게이트/램프 수요는 주입 substep 에
+        `accepted_external` 로 계상되지만(W6 지연 주입) 정지선 큐에는 주행지연 뒤에야
+        닿는다. 그 사이 이 버퍼가 유일한 거처라 빼면 지연 스텝만큼 질량이 샌다.
         """
         return float(
             self.total_urban_vehicles(net)
             + self.total_freeway_vehicles(net)
             + self.off_ramp_storage_occupancy_veh(net)
+            + self.urban_inflow_transit_veh()
         )
+
+    def urban_inflow_transit_veh(self) -> float:
+        """경계 유입 주행지연 버퍼에 떠 있는 차량 수[veh]."""
+        return float(sum(
+            sum(by_step.values())
+            for by_step in self.urban_inflow_transit_buffer.values()
+        ))
 
     def total_freeway_vehicles(self, net: NetworkConfig) -> float:
         return float(

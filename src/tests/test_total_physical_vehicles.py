@@ -78,6 +78,12 @@ class TotalPhysicalVehiclesTests(unittest.TestCase):
         둘은 stock 이 아니라 일정표다 — 링크에 진입한 차량은 storage 점유로 한 번 계상되고
         같은 양이 두 버퍼에 예약된다(urban_queue_model.py:1001-1011). 실측으로 내부 링크에서
         점유와 release buffer 가 소수점까지 일치함을 확인했다(각 251.0444 veh).
+        `offramp_transit_buffer`(W6) 도 같은 이유로 뺀다 — off-ramp storage 점유의 부분집합이다
+        (4 스텝 후 실측 20.0192 veh, 이미 점유에 포함).
+
+        `urban_inflow_transit_buffer`(W6) 는 **더한다.** 게이트/램프 수요는 주행지연 동안
+        어느 큐에도 없고 이 버퍼가 유일한 거처라, 빼면 그만큼 질량이 샌다(4 스텝 후 실측
+        77.8167 veh — 정확히 이 값만큼 분해가 어긋났다).
         """
         from src.models.demand import DemandProfile, load_scenarios
         from src.models.state import ControlAction
@@ -101,9 +107,15 @@ class TotalPhysicalVehiclesTests(unittest.TestCase):
             + sum(state.mainline_origin_queue.values())
             + sum(state.urban_movement_queue.values())
             + occupancy
+            + state.urban_inflow_transit_veh()
         )
 
         self.assertGreater(occupancy, 0.0, "전진 후에도 점유가 0 이면 시나리오가 잘못됐다")
+        self.assertGreater(
+            state.urban_inflow_transit_veh(),
+            0.0,
+            "주행지연 버퍼가 비었으면 이 항은 아무것도 증명하지 않는다",
+        )
         self.assertAlmostEqual(
             state.total_physical_vehicles(self.net), expected, places=6
         )

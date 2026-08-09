@@ -24,7 +24,14 @@ def urban_total_vehicles(state: TrafficState, cfg: ExperimentConfig) -> float:
         max(0.0, cap - state.urban_link_storage.get(link, cap))
         for link, cap in cfg.network.urban_link_storage_veh.items()
     )
-    return float(sum(state.urban_movement_queue.values()) + occupancy)
+    # 경계 유입 주행지연 버퍼(W6)도 urban stock 이다. 게이트/램프 수요는 통과 시점에
+    # `urban_demand_arrivals_veh`/`onramp_arrivals_veh` 로 계상되지만 정지선 큐에는 주행지연
+    # 뒤에 닿으므로, 이 항이 없으면 보존 항등식이 지연 스텝만큼 어긋난다.
+    return float(
+        sum(state.urban_movement_queue.values())
+        + occupancy
+        + state.urban_inflow_transit_veh()
+    )
 
 
 class TurningRatioTests(unittest.TestCase):

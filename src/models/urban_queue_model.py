@@ -404,6 +404,15 @@ def schedule_offramp_arrivals(
     if accepted <= 0.0:
         return 0.0, rejected
     state.urban_link_storage[storage_link] = max(0.0, available - accepted)
+    # W6: 램프 주행시간만큼은 하류 정지선에 닿지 않았으므로 방출 후보가 아니다. 점유는 위에서
+    # 이미 잡았고(질량 회계 불변) 여기서는 "언제부터 뺄 수 있는지" 만 예약한다 —
+    # `urban_step_index` 를 시그니처로만 받고 쓰지 않던 것이 같은 substep 방출의 원인이었다.
+    _schedule(
+        state.offramp_transit_buffer,
+        storage_link,
+        int(urban_step_index) + _inflow_delay_steps(cfg),
+        accepted,
+    )
     return accepted, rejected
 
 
@@ -443,6 +452,16 @@ def _pop_buffer(buffer: Dict[str, Dict[int, float]], key: str, step: int) -> flo
     return float(values.pop(step, 0.0))
 
 
+def _mature_offramp_transit(state: TrafficState, storage_link: str, step: int) -> float:
+    """도착 substep 이 지난 예약을 지우고 **아직 이동 중인** 대수[veh]를 돌려준다(W6)."""
+    pending = state.offramp_transit_buffer.get(storage_link)
+    if not pending:
+        return 0.0
+    for arrival_step in [s for s in pending if s <= step]:
+        pending.pop(arrival_step)
+    return float(sum(pending.values()))
+
+
 def _drain_offramp_storage(
     state: TrafficState,
     control: ControlAction,
@@ -473,6 +492,9 @@ def _drain_offramp_storage(
             continue
         capacity = float(net.urban_link_storage_veh.get(storage_link, 0.0))
         occupancy = max(0.0, capacity - state.urban_link_storage.get(storage_link, capacity))
+        # W6: 점유 중 아직 램프를 통과 중인 몫은 방출 후보에서 뺀다. 도착 substep 이 지난
+        # 예약은 지워 자연히 방출 후보로 편입된다(점유 자체는 건드리지 않아 질량 불변).
+        occupancy = max(0.0, occupancy - _mature_offramp_transit(state, storage_link, step_idx))
         if occupancy <= 0.0:
             continue
         movements = [m for m in net.off_ramp_to_movement.get(off_ramp, []) if m in specs]
@@ -513,6 +535,26 @@ def _drain_offramp_storage(
             )
         departures[off_ramp] = released_total
     return departures
+
+
+def _inflow_delay_steps(cfg: ExperimentConfig) -> int:
+    """경계 유입 주행지연[substep] — spec W6.
+
+    게이트 수요·외생 on-ramp 수요·off-ramp 유입은 링크에 들어선 substep 에 곧바로 정지선
+    큐/방출 후보가 됐다(순간이동). 실제로는 경계 링크 길이(개포동 실측 448~488 m)를
+    자유류로 통과할 시간이 걸린다 — 468 m / 50 km/h = 33.7 s, T_u=5 s 기준 7 substep.
+
+    `_link_delay_steps` 의 S 기반(큐 꼬리까지 거리) 규칙을 쓰지 않는 이유는 이 셋이 링크
+    **입구** 진입이라 꼬리 위치와 무관하게 링크를 통과해야 하기 때문이다. 상태 비의존
+    전역 상수이므로 링크별 길이 대응(W3) 없이도 성립한다. 최소 1 substep.
+
+    off-ramp 램프 길이는 따로 실측한 값이 없어 같은 상수를 쓴다 — 세 경로를 한 상수로
+    묶은 것은 근사이고, 램프별 길이가 확보되면 여기만 갈아끼우면 된다.
+    """
+    net = cfg.network
+    distance_km = max(0.0, float(net.urban_boundary_link_length_m)) / 1000.0
+    travel_time_h = distance_km / max(net.urban_avg_speed_km_h, 1.0e-9)
+    return max(1, int(math.ceil(travel_time_h / max(cfg.simulation.T_u_h, 1.0e-9))))
 
 
 def _link_delay_steps(state: TrafficState, cfg: ExperimentConfig, storage_link: str) -> int:
@@ -880,24 +922,48 @@ def urban_substep(
         for movement, beta in targets:
             state.urban_movement_queue[movement] += beta * arrived
 
-    # 게이트 수요는 그 교차로에 "해당 방향에서 도착"으로 주입 후 동일 β분할.
+    # 게이트 수요는 그 교차로에 "해당 방향에서 도착"으로 주입 후 동일 β분할. 단 게이트를
+    # 넘은 차량은 in링크를 통과해야 정지선에 닿으므로 _inflow_delay_steps 만큼 지연한다(W6).
+    # 주입 substep 에 바로 큐에 넣던 것이 순간이동이었다.
+    inflow_delay = _inflow_delay_steps(cfg)
     for origin in net.boundary_in_links:
+        landed = _pop_buffer(state.urban_inflow_transit_buffer, f"gate:{origin}", step_idx)
+        if landed > 0.0:
+            for movement, beta in routing.get(origin, []):
+                state.urban_movement_queue[movement] += beta * landed
         arrival = demand.urban_boundary.get(origin, 0.0) * sim.T_u_h
         targets = routing.get(origin, [])
         if arrival <= 0.0 or not targets:
             continue
+        # 외부 유입 계상은 게이트 통과 시점이다(질량 장부의 accepted_external). 그 사이
+        # 차량은 urban_inflow_transit_buffer 에 있고 total_physical_vehicles 가 센다.
         urban_demand_arrivals_veh += arrival
-        for movement, beta in targets:
-            state.urban_movement_queue[movement] += beta * arrival
+        _schedule(
+            state.urban_inflow_transit_buffer,
+            f"gate:{origin}",
+            step_idx + inflow_delay,
+            arrival,
+        )
 
     # 외생 on-ramp 수요는 먼저 urban 접근부 저수지 x_on(해당 ramp의 on_ramp movement들)에 쌓인다.
+    # 접근부 링크 주행지연은 게이트 수요와 동일하게 적용한다(W6).
     for ramp, movements in net.on_ramp_to_movement.items():
+        landed = _pop_buffer(state.urban_inflow_transit_buffer, f"ramp:{ramp}", step_idx)
+        if landed > 0.0 and movements:
+            landed_share = landed / len(movements)
+            for movement in movements:
+                state.urban_movement_queue[movement] = (
+                    state.urban_movement_queue.get(movement, 0.0) + landed_share
+                )
         arrival = max(0.0, demand.ramp_arrival.get(ramp, 0.0)) * sim.T_u_h
         if arrival <= 0.0 or not movements:
             continue
-        share = arrival / len(movements)
-        for movement in movements:
-            state.urban_movement_queue[movement] = state.urban_movement_queue.get(movement, 0.0) + share
+        _schedule(
+            state.urban_inflow_transit_buffer,
+            f"ramp:{ramp}",
+            step_idx + inflow_delay,
+            arrival,
+        )
         onramp_arrivals_veh += arrival
 
     # ramp metering은 freeway ramp 저수지 w_r에서 freeway로 빠져나가는 흐름이다.
