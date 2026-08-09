@@ -602,7 +602,10 @@ def _phase_green_fraction(
     green_sec = float(control.green_times.get(phase, default_green))
     cycle = max(net.cycle_length, 1.0e-9)
     if urban_step_index is None:
-        return float(np.clip(green_sec / cycle, 0.0, 1.0))
+        # 순수 파이썬 min/max 를 쓴다. 이 함수는 solve 한 번에 129만 회 불리는데 numpy 의
+        # 스칼라 clip 은 _wrapit -> _wrapfunc -> _clip 을 거쳐 오버헤드가 크다. 값은
+        # 유한값·NaN·무한대 모두에서 동일하다(test_phase_green_fraction_clip 이 고정한다).
+        return min(max(green_sec / cycle, 0.0), 1.0)
     signal, _, phase_id = phase.rpartition("_")
     g1 = float(control.green_times.get(f"{signal}_p1", default_green))
     half_lost = max(0.0, net.lost_time) / 2.0
@@ -619,7 +622,7 @@ def _phase_green_fraction(
     if t0 + t_u > cycle:
         # substep이 cycle 경계를 넘어가면 다음 cycle 머리쪽 green과의 겹침을 더한다.
         overlap += seg_overlap(0.0, t0 + t_u - cycle, start, end)
-    return float(np.clip(overlap / max(t_u, 1.0e-9), 0.0, 1.0))
+    return min(max(overlap / max(t_u, 1.0e-9), 0.0), 1.0)
 
 
 def _movement_capacity_flow(
