@@ -1005,8 +1005,25 @@ class TrafficState:
         urban 은 movement 큐와 링크 in-transit 점유를, freeway 는 segment 내부와
         ramp/mainline-origin 큐를 포함한다. 램프와 원점 큐도 물리 차량이므로 빠지면
         항등식이 성립하지 않는다.
+
+        **off-ramp 램프 storage 는 세 번째 항으로 따로 더한다.** `total_urban_vehicles` 는
+        "freeway 로 재귀속" 을 이유로 `OR_*_storage` 점유를 빼지만(:1032-1038)
+        `total_freeway_vehicles` 는 그것을 더하지 않는다. 두 함수의 합만 쓰면 그 차량이
+        어느 계정에도 없다 — 실측으로 4 스텝 전진 후 35.46 veh 가 사라졌다.
+        여기서 메우는 이유는 `total_freeway_vehicles` 를 고치면 그 값으로 보정된
+        leader objective 와 metric 전부의 의미가 바뀌기 때문이다. 질량 회계의 단일
+        정의는 이 함수이므로 보정도 여기서 끝낸다.
+
+        `urban_arrival_buffer` 와 `urban_storage_release_buffer` 는 더하지 않는다. 둘은
+        stock 이 아니라 일정표다 — 링크 진입 차량은 storage 점유로 한 번 계상되고 같은
+        양이 두 버퍼에 예약된다(`urban_queue_model.py:1001-1011`). 내부 링크에서 점유와
+        release buffer 가 소수점까지 일치함을 실측했다(각 251.0444 veh).
         """
-        return float(self.total_urban_vehicles(net) + self.total_freeway_vehicles(net))
+        return float(
+            self.total_urban_vehicles(net)
+            + self.total_freeway_vehicles(net)
+            + self.off_ramp_storage_occupancy_veh(net)
+        )
 
     def total_freeway_vehicles(self, net: NetworkConfig) -> float:
         return float(
