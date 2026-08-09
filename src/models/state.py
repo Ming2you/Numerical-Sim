@@ -994,6 +994,20 @@ class TrafficState:
             for link in net.freeway_links
         }
 
+    def total_physical_vehicles(self, net: NetworkConfig) -> float:
+        """네트워크 전체 물리 차량 수[veh]. 질량 회계의 단일 정의다(v3 N2).
+
+        지금까지 총량은 `total_urban_vehicles` 와 `total_freeway_vehicles` 로 갈라져
+        있었고 호출자가 둘을 어떻게 합치는지에 따라 결과가 달랐다. substep 질량 장부의
+        전역 항등식 `N_close = N_open + accepted_external - sink_out` 은 `N` 이 단일
+        정의일 때만 의미를 가지므로 여기 한 곳에서만 센다.
+
+        urban 은 movement 큐와 링크 in-transit 점유를, freeway 는 segment 내부와
+        ramp/mainline-origin 큐를 포함한다. 램프와 원점 큐도 물리 차량이므로 빠지면
+        항등식이 성립하지 않는다.
+        """
+        return float(self.total_urban_vehicles(net) + self.total_freeway_vehicles(net))
+
     def total_freeway_vehicles(self, net: NetworkConfig) -> float:
         return float(
             self.freeway_segment_vehicles(net)
