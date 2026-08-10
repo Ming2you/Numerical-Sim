@@ -478,14 +478,23 @@ def _pop_buffer(buffer: Dict[str, Dict[int, float]], key: str, step: int) -> flo
     return float(values.pop(step, 0.0))
 
 
-def _mature_offramp_transit(state: TrafficState, storage_link: str, step: int) -> float:
+def _pending_in_transit(
+    buffer: Mapping[str, Dict[int, float]],
+    key: str,
+    step: int,
+) -> float:
     """도착 substep 이 지난 예약을 지우고 **아직 이동 중인** 대수[veh]를 돌려준다(W6)."""
-    pending = state.offramp_transit_buffer.get(storage_link)
+    pending = buffer.get(key)
     if not pending:
         return 0.0
     for arrival_step in [s for s in pending if s <= step]:
         pending.pop(arrival_step)
     return float(sum(pending.values()))
+
+
+def _mature_offramp_transit(state: TrafficState, storage_link: str, step: int) -> float:
+    """off-ramp 램프를 아직 주행 중인 대수[veh](W6)."""
+    return _pending_in_transit(state.offramp_transit_buffer, storage_link, step)
 
 
 def _drain_offramp_storage(
@@ -940,8 +949,17 @@ def urban_substep(
     for link in sink_links:
         cap = net.urban_link_storage_veh.get(link, net.boundary_queue_max_veh)
         occupancy = max(0.0, cap - state.urban_link_storage.get(link, cap))
-        # 유한용량이면 min(점유, exit_cap·dt), 0 이하이면 자유 sink(점유 전량 이탈, 하위호환).
-        departed = min(occupancy, exit_capacity_veh) if finite_exit else occupancy
+        # N3-2: 점유에는 **방금 out 링크에 진입해 아직 링크 끝에 못 간 차량**이 섞여 있다.
+        # 그 몫(= release buffer 에 남은 미래 도착 예약)을 빼야 게이트가 도착한 차량만
+        # 내보낸다. 빼기 전에는 진입 substep 에 곧바로 이탈해 out 링크 통행시간이 0 이었다
+        # (실런 core15n41 · 120 substep 실측: 빼기 전 26,311.59 veh 이탈 → 뺀 뒤 22,620.52,
+        # 차이 3,691.07 veh 가 링크를 다 못 가고 나가던 몫이다). 점유 자체는 건드리지
+        # 않으므로 질량 회계는 불변이고, W6 의 off-ramp 처리와 같은 구조다.
+        arrived = max(0.0, occupancy - _pending_in_transit(
+            state.urban_storage_release_buffer, link, step_idx
+        ))
+        # 유한용량이면 min(도착분, exit_cap·dt), 0 이하이면 자유 sink(도착분 전량 이탈, 하위호환).
+        departed = min(arrived, exit_capacity_veh) if finite_exit else arrived
         if departed <= 0.0:
             continue
         state.urban_link_storage[link] = min(cap, state.urban_link_storage.get(link, cap) + departed)
