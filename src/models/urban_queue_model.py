@@ -35,8 +35,34 @@ def boundary_indices(values: Iterable[float], queue_max: float, eps: float = 1.0
     }
 
 
+# movement_specs 전용 캐시 — network 객체 참조 동일성으로 재사용을 판정한다
+# (_legacy_sync_index 와 같은 전제다). 두 개를 들고 교대 호출에도 안전하게 한다.
+_SPECS_CACHE: list = []
+_SPECS_CACHE_LIMIT = 2
+
+
 def movement_specs(cfg: ExperimentConfig) -> Dict[str, Dict[str, object]]:
-    return {key: dict(value) for key, value in cfg.network.urban_movements.items()}
+    """movement 별 spec. **호출자는 반환값을 변형하면 안 된다.**
+
+    예전에는 호출마다 `{key: dict(value)}` 로 전체를 복사했다. 호출부가 14 곳이고 그중
+    여럿이 후보 평가 안쪽이라, 실런 결선(movement 1,414 개)에서는 평가마다 dict 1,414 개를
+    새로 만드는 셈이었다.
+
+    복사를 없앨 수 있는 근거는 변형하는 호출자가 없다는 것이다 — 저장소 전체에서
+    `spec[...] = ` 쓰기는 network 를 만드는 `grid_topology.py`(config 생성 이전)와
+    이름만 같은 `rl/agents.py` 의 다른 `specs` 뿐이다. 이 전제가 깨지면 여기로 돌아와야 한다.
+
+    삽입 순서는 `urban_movements` 그대로 보존한다 — 합산 순서가 바뀌면 부동소수 결과가 달라진다.
+    """
+    net = cfg.network
+    for cached_net, cached in _SPECS_CACHE:
+        if cached_net is net:
+            return cached
+    specs = {key: dict(value) for key, value in net.urban_movements.items()}
+    _SPECS_CACHE.append((net, specs))
+    if len(_SPECS_CACHE) > _SPECS_CACHE_LIMIT:
+        _SPECS_CACHE.pop(0)
+    return specs
 
 
 # _sync_legacy_queues/ensure_urban_state 전용 정적 캐시 — link↔movement 토폴로지
