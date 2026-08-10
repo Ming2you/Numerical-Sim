@@ -63,6 +63,11 @@ from src.controllers.stackelberg_mpc import (
     StackelbergMPCController,
     _LeaderCandidateEvaluation,
 )
+from src.controllers.rollout_endpoint import (
+    LeverMove,
+    ObjectiveSpec,
+    evaluate_price_point,
+)
 from src.controllers.wu_faithful_follower import WuFaithfulFollower
 from src.models.demand import DemandStep
 from src.models.state import ControlAction, ExperimentConfig, TrafficState, segment_vsl
@@ -311,6 +316,23 @@ class StackelbergWuMeteredController(StackelbergMPCController):
 
     def _make_follower_solver(self, cfg: ExperimentConfig):
         return WuFaithfulFollower(cfg)
+
+    def _rollout_spec(self, **overrides) -> ObjectiveSpec:
+        """가격 채점(score_mode="price") 기본값을 이 controller 의 가격 플래그로 채운다(N7).
+
+        구 `_price_ttt`/`_barrier_from_states` 의 게이트를 그대로 spec 으로 옮긴 것이다 —
+        far(E1), price-hinge, 보호큐 벌점, B4 barrier 가 전부 여기서 한 번에 동결된다.
+        """
+        if overrides.get("score_mode") == "price":
+            overrides.setdefault("far_enabled", bool(self.price_far_enabled))
+            overrides.setdefault("price_hinge", bool(self.price_hinge_enabled))
+            overrides.setdefault("price_hinge_weight", float(self.price_hinge_weight))
+            overrides.setdefault("protected_queue", True)
+        if overrides.get("barrier"):
+            overrides["barrier"] = bool(self.barrier_price_enabled)
+            overrides.setdefault("barrier_weight", float(self.barrier_weight))
+            overrides.setdefault("barrier_spillback_frac", float(self.barrier_spillback_frac))
+        return super()._rollout_spec(**overrides)
 
     # ---------- 층2(2026-07-14): β̂ 추정 + trailing-regret — 스텝 시작/커밋 훅 ----------
 
@@ -637,13 +659,12 @@ class StackelbergWuMeteredController(StackelbergMPCController):
 
         B1 probe의 truth_horizon_ttt와 같은 구조지만, 미래 legacy trace 대신 현재
         committed control을 horizon 동안 hold한다(closed-loop에서 미래 제어는 미지)."""
-        total = float(self.cfg.network.effective_green_total)
-        control = previous.copy()
-        control.green_times[f"{signal}_p1"] = float(p1)
-        control.green_times[f"{signal}_p2"] = float(total - p1)
         self._price_rollout_count += 1
-        states, ttt = self._predict(state, control, forecast, depth_override=depth_override)
-        return self._price_ttt(states, ttt)
+        return float(evaluate_price_point(
+            state, previous, forecast,
+            (LeverMove("green", signal, float(p1)),),
+            self._rollout_spec(score_mode="price", depth_override=depth_override),
+        ).objective)
 
     def _predict_ttt_and_barrier(
         self,
@@ -660,62 +681,14 @@ class StackelbergWuMeteredController(StackelbergMPCController):
                                + Σ_link max(0, frac·cap − S_eff(link)) ] · T_c_h  (spillback 부족분)
         단위가 veh·h로 TTT와 동일 — w=1이 1차 정확값. TTT를 뽑는 같은 rollout의 상태에서
         계산하므로 추가 rollout 0회(green·metering 유한차분이 두 gradient를 동시에 얻음)."""
-        from src.models.urban_queue_model import _effective_available_space
-
         self._price_rollout_count += 1
-        states, ttt = self._predict(state, control, forecast, depth_override=depth_override)
-        return self._price_ttt(states, ttt), self._barrier_from_states(states)
-
-    def _barrier_from_states(self, states: List[TrafficState]) -> float:
-        """예측 상태 목록에서 barrier 합산(B4 활성 시에만, 아니면 0)."""
-        from src.models.urban_queue_model import _effective_available_space
-
-        if not self.barrier_price_enabled:
-            return 0.0
-        net = self.cfg.network
-        t_c_h = float(self.cfg.simulation.T_c_h)
-        seg_veh = float(net.freeway_segment_length_km) * float(net.freeway_lanes)
-        rho_crit = float(net.rho_crit)
-        spill_frac = float(self.barrier_spillback_frac)
-        barrier = 0.0
-        for s in states:
-            for link in net.freeway_links:
-                for rho in s.freeway_density.get(link, []):
-                    excess = max(0.0, float(rho) - rho_crit) * seg_veh
-                    barrier += self.barrier_weight * excess * t_c_h
-            for u_link, cap in net.urban_link_storage_veh.items():
-                space = float(_effective_available_space(s, self.cfg, u_link))
-                deficit = max(0.0, spill_frac * float(cap) - space)
-                barrier += self.barrier_weight * deficit * t_c_h
-        return float(barrier)
-
-    def _price_ttt(self, states: List[TrafficState], ttt: float, forecast=None) -> float:
-        """가격 FD용 rollout 채점 — E1 활성 시 TTT + far(terminal state의 MFD tail).
-
-        leader 후보 채점(_leader_evaluation_base)과 같은 V=near+far 형태로 가격을 정렬한다.
-        far는 leader 전용 목적항이라 d_local 차감 없음(B4 barrier와 동일 규약). 기본 OFF."""
-        if self.price_far_enabled and states:
-            ttt += self._mfd_far_cost_to_go(states[-1])
-        # PRICE-HINGE(2026-07-23): rho_crit 문턱 hinge를 가격 목적에 합산 → metering 한계가격이
-        # capacity-drop 비선형(∂문턱초과/∂meter)을 잡는다. forecast는 폐쇄세그 면제용(skew=무관).
-        if self.price_hinge_enabled and states:
-            from src.controllers.stackelberg_mpc import leader_hinge_cost
-            ttt += self.price_hinge_weight * leader_hinge_cost(
-                self.cfg, states, forecast, force=True)
-        # VdB4 보호큐 벌점 — 리더 가격 편입(2026-07-19 4차, 기본 OFF): 전역 rollout 상태의
-        # 보호 movement 큐 초과분을 가격 목적에 가산 → 모든 리더 한계가격(green/metering/VSL)이
-        # 제약-인지. 소거 실측: follower 벌점은 리더 B2 가격이 상쇄(가격OFF 시 green 30→89s,
-        # 큐 459→150) — 제약은 가격 계산 지점(여기)에 있어야 계층이 한 방향을 가리킨다.
-        _pq_mv = str(getattr(self.cfg.mpc, "protected_queue_movement", "") or "")
-        if _pq_mv and states:
-            _pq_w = float(getattr(self.cfg.mpc, "protected_queue_weight", 0.0))
-            if _pq_w > 0.0:
-                _pq_max = float(getattr(self.cfg.mpc, "protected_queue_max_veh", 50.0))
-                _tc_h = float(self.cfg.simulation.T_c_h)
-                for _s in states:
-                    _q = max(0.0, float(_s.urban_movement_queue.get(_pq_mv, 0.0)))
-                    ttt += _pq_w * max(0.0, _q - _pq_max) * _tc_h
-        return float(ttt)
+        point = evaluate_price_point(
+            state, control, forecast, (),
+            self._rollout_spec(
+                score_mode="price", depth_override=depth_override, barrier=True,
+            ),
+        )
+        return float(point.objective), float(point.barrier)
 
     def _global_rollout_metrics_with_green(
         self,
@@ -726,11 +699,13 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         p1: float,
     ) -> tuple[float, float]:
         """ego 신호만 green을 p1로 바꾸고 나머지는 previous hold, (TTT, barrier)."""
-        total = float(self.cfg.network.effective_green_total)
-        control = previous.copy()
-        control.green_times[f"{signal}_p1"] = float(p1)
-        control.green_times[f"{signal}_p2"] = float(total - p1)
-        return self._predict_ttt_and_barrier(state, control, forecast)
+        self._price_rollout_count += 1
+        point = evaluate_price_point(
+            state, previous, forecast,
+            (LeverMove("green", signal, float(p1)),),
+            self._rollout_spec(score_mode="price", barrier=True),
+        )
+        return float(point.objective), float(point.barrier)
 
     def _green_price_rollouts(
         self,
@@ -795,19 +770,19 @@ class StackelbergWuMeteredController(StackelbergMPCController):
 
         max_rho = 이 ramp가 합류하는 본선 링크의 예측 밀도 최대(전 세그먼트·전 horizon).
         B3CERT 안전 증명서의 재료: 가격 계산에 이미 쓰는 rollout에서 공짜로 얻는다."""
-        control = previous.copy()
-        control.ramp_metering = dict(previous.ramp_metering)
-        control.ramp_metering[ramp] = float(value)
         self._price_rollout_count += 1
-        states, ttt = self._predict(state, control, forecast, depth_override=depth_override)
-        barrier = self._barrier_from_states(states)
-        link = self.cfg.network.ramp_to_freeway.get(ramp)
-        max_rho = 0.0
-        if link is not None:
-            for s in states:
-                for rho in s.freeway_density.get(link, []):
-                    max_rho = max(max_rho, float(rho))
-        return self._price_ttt(states, ttt, forecast), float(barrier), float(max_rho)
+        point = evaluate_price_point(
+            state, previous, forecast,
+            (LeverMove("meter", ramp, float(value)),),
+            self._rollout_spec(
+                score_mode="price",
+                depth_override=depth_override,
+                hinge_forecast=True,
+                barrier=True,
+                max_rho_link=self.cfg.network.ramp_to_freeway.get(ramp),
+            ),
+        )
+        return float(point.objective), float(point.barrier), float(point.max_rho)
 
     def _global_rollout_ttt_with_vsl(
         self,
@@ -821,13 +796,12 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         depth_override: Optional[int] = None,
     ) -> float:
         """해당 segment만 VSL을 value로 바꾸고(link fallback 키 동기화) horizon TTT."""
-        control = previous.copy()
-        control.vsl = dict(previous.vsl)
-        control.vsl[seg_key] = float(value)
-        control.vsl[link] = min(float(control.vsl.get(link, vsl_upper)), float(value))
         self._price_rollout_count += 1
-        states, ttt = self._predict(state, control, forecast, depth_override=depth_override)
-        return self._price_ttt(states, ttt)
+        return float(evaluate_price_point(
+            state, previous, forecast,
+            (LeverMove("vsl", seg_key, float(value)),),
+            self._rollout_spec(score_mode="price", depth_override=depth_override),
+        ).objective)
 
     def _global_rollout_ttt_with_offset(
         self,
@@ -839,12 +813,12 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         depth_override: Optional[int] = None,
     ) -> float:
         """ego 신호만 offset을 바꾸고 나머지는 previous hold, horizon 전역 rollout TTT."""
-        control = previous.copy()
-        control.offsets = dict(previous.offsets)
-        control.offsets[signal] = float(offset)
         self._price_rollout_count += 1
-        states, ttt = self._predict(state, control, forecast, depth_override=depth_override)
-        return self._price_ttt(states, ttt)
+        return float(evaluate_price_point(
+            state, previous, forecast,
+            (LeverMove("offset", signal, float(offset)),),
+            self._rollout_spec(score_mode="price", depth_override=depth_override),
+        ).objective)
 
     def _offset_price_relinearize_walk(
         self,
@@ -933,16 +907,16 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         """ego 신호의 green(p1)·offset을 동시에 바꾸고 나머지 hold — horizon 전역 rollout TTT.
 
         JOINT green×offset cross-term 4-corner 스텐실용(h_global). green price와 동일하게
-        `_predict`(leader_value_depth로 3+d 깊이) TTT + E1 활성 시 far를 쓴다."""
-        total = float(self.cfg.network.effective_green_total)
-        control = previous.copy()
-        control.green_times[f"{signal}_p1"] = float(p1)
-        control.green_times[f"{signal}_p2"] = float(total - p1)
-        control.offsets = dict(previous.offsets)
-        control.offsets[signal] = float(offset)
+        endpoint(leader_value_depth로 3+d 깊이) TTT + E1 활성 시 far를 쓴다."""
         self._price_rollout_count += 1
-        states, ttt = self._predict(state, control, forecast, depth_override=depth_override)
-        return self._price_ttt(states, ttt)
+        return float(evaluate_price_point(
+            state, previous, forecast,
+            (
+                LeverMove("green", signal, float(p1)),
+                LeverMove("offset", signal, float(offset)),
+            ),
+            self._rollout_spec(score_mode="price", depth_override=depth_override),
+        ).objective)
 
     def _global_rollout_ttt_with_vsl_meter(
         self,
@@ -961,16 +935,16 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         JOINT vsl×metering cross-term 4-corner 스텐실용(h_global). link-binding VSL 규약과
         일치하도록 전 segment 키 + link fallback 키를 vsl로 설정한다."""
         net = self.cfg.network
-        control = previous.copy()
-        control.ramp_metering = dict(previous.ramp_metering)
-        control.ramp_metering[ramp] = float(meter)
-        control.vsl = dict(previous.vsl)
+        schedule = [LeverMove("meter", ramp, float(meter))]
         for index in range(int(net.freeway_segments_per_link)):
-            control.vsl[f"{link}__seg{index}"] = float(vsl)
-        control.vsl[link] = float(vsl)
+            schedule.append(LeverMove("vsl", f"{link}__seg{index}", float(vsl)))
+        # link fallback 키는 min 동기화가 아니라 지정값(구 코드 규약) — vsl_link 로 덮는다.
+        schedule.append(LeverMove("vsl_link", link, float(vsl)))
         self._price_rollout_count += 1
-        states, ttt = self._predict(state, control, forecast, depth_override=depth_override)
-        return self._price_ttt(states, ttt)
+        return float(evaluate_price_point(
+            state, previous, forecast, tuple(schedule),
+            self._rollout_spec(score_mode="price", depth_override=depth_override),
+        ).objective)
 
     def _spsa_global_price_gradients(
         self,
@@ -993,29 +967,19 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         cycle = float(net.cycle_length)
         k = max(1, int(self.price_spsa_pairs))
 
-        def build(sign_map: Dict[tuple, float]) -> ControlAction:
-            c = previous.copy()
-            c.green_times = dict(previous.green_times)
-            c.ramp_metering = dict(previous.ramp_metering)
-            c.vsl = dict(previous.vsl)
-            c.offsets = dict(previous.offsets)
-            touched_links: Dict[str, float] = {}
+        # SPSA 도 per-lever FD 와 **같은 endpoint·같은 spec** 을 쓴다(N7) — 두 추정기의
+        # 목적함수 성분이 갈라지면 N8-1 자격심사 비교가 성립하지 않는다.
+        price_spec = self._rollout_spec(score_mode="price")
+
+        def schedule(sign_map: Dict[tuple, float]) -> tuple:
+            moves = []
             for kind, key, v_minus, v_plus, _span in levers:
-                v = v_plus if sign_map[(kind, key)] > 0 else v_minus
-                if kind == "green":
-                    c.green_times[f"{key}_p1"] = float(v)
-                    c.green_times[f"{key}_p2"] = float(total_green - v)
-                elif kind == "meter":
-                    c.ramp_metering[key] = float(v)
-                elif kind == "vsl":
-                    c.vsl[key] = float(v)
-                    link = key.split("__seg")[0]
-                    touched_links[link] = min(touched_links.get(link, float("inf")), float(v))
-                elif kind == "offset":
-                    c.offsets[key] = float(v) % cycle
-            for link, vmin in touched_links.items():
-                c.vsl[link] = min(float(c.vsl.get(link, vmin)), vmin)
-            return c
+                v = float(v_plus if sign_map[(kind, key)] > 0 else v_minus)
+                if kind == "offset":
+                    moves.append(LeverMove("offset", key, v % cycle))
+                else:
+                    moves.append(LeverMove(kind, key, v))
+            return tuple(moves)
 
         g_acc: Dict[tuple, float] = {(kd, ky): 0.0 for kd, ky, _, _, _ in levers}
         for s_idx in range(k):
@@ -1024,24 +988,26 @@ class StackelbergWuMeteredController(StackelbergMPCController):
                 (kd, ky): (1.0 if rng.random() >= 0.5 else -1.0)
                 for kd, ky, _, _, _ in levers
             }
-            states_hi, t_hi_raw = self._predict(state, build(signs), forecast)
-            states_lo, t_lo_raw = self._predict(
-                state, build({q: -s for q, s in signs.items()}), forecast
-            )
-            t_hi = self._price_ttt(states_hi, t_hi_raw)
-            t_lo = self._price_ttt(states_lo, t_lo_raw)
+            t_hi = float(evaluate_price_point(
+                state, previous, forecast, schedule(signs), price_spec,
+            ).objective)
+            t_lo = float(evaluate_price_point(
+                state, previous, forecast,
+                schedule({q: -s for q, s in signs.items()}), price_spec,
+            ).objective)
             for kd, ky, _vm, _vp, span in levers:
                 if span > 1.0e-9:
                     g_acc[(kd, ky)] += (t_hi - t_lo) * signs[(kd, ky)] / span
         g = {q: v / float(k) for q, v in g_acc.items()}
         rho_joint = 0.0
         if meter_cert_probe:
-            c = previous.copy()
-            c.ramp_metering = dict(previous.ramp_metering)
-            for ramp, m_hi in meter_cert_probe.items():
-                c.ramp_metering[ramp] = float(m_hi)
-            probe_states, _ = self._predict(state, c, forecast)
-            for s in probe_states:
+            probe = evaluate_price_point(
+                state, previous, forecast,
+                tuple(LeverMove("meter", ramp, float(m_hi))
+                      for ramp, m_hi in meter_cert_probe.items()),
+                self._rollout_spec(score_mode="raw"),
+            )
+            for s in probe.states:
                 for _link, dens in s.freeway_density.items():
                     if dens:
                         rho_joint = max(rho_joint, float(max(dens)))
@@ -1090,18 +1056,17 @@ class StackelbergWuMeteredController(StackelbergMPCController):
             k = (key(pat), round(float(green_shift), 3))
             if k in memo:
                 return memo[k]
-            control = previous.copy()
-            control.offsets = dict(previous.offsets)
-            for s in signals:
-                control.offsets[s] = float(pat.get(s, 0.0)) % cycle
+            moves = [
+                LeverMove("offset", s, float(pat.get(s, 0.0)) % cycle) for s in signals
+            ]
             if abs(green_shift) > 1.0e-9:
-                control.green_times = dict(previous.green_times)
                 for s in signals:
                     p1 = float(previous.green_times.get(f"{s}_p1", total / 2.0))
-                    p1n = clamp(p1 + green_shift)
-                    control.green_times[f"{s}_p1"] = p1n
-                    control.green_times[f"{s}_p2"] = total - p1n
-            _, ttt = self._predict(state, control, forecast)
+                    moves.append(LeverMove("green", s, clamp(p1 + green_shift)))
+            ttt = evaluate_price_point(
+                state, previous, forecast, tuple(moves),
+                self._rollout_spec(score_mode="raw"),
+            ).ttt
             memo[k] = float(ttt)
             return float(ttt)
 
@@ -1644,19 +1609,15 @@ class StackelbergWuMeteredController(StackelbergMPCController):
                 s: float(previous.offsets.get(s, 0.0)) % cycle for s in joint_signals
             })
             def _pattern_ttt(pat: Dict[str, float], green_shift: float = 0.0) -> float:
-                control_p = previous.copy()
-                control_p.offsets = dict(previous.offsets)
-                for s, off in pat.items():
-                    control_p.offsets[s] = float(off)
+                moves = [LeverMove("offset", s, float(off)) for s, off in pat.items()]
                 if abs(green_shift) > 1.0e-9:
-                    control_p.green_times = dict(previous.green_times)
                     for s in joint_signals:
                         p1 = float(previous.green_times.get(f"{s}_p1", total / 2.0))
-                        p1n = clamp(p1 + green_shift)
-                        control_p.green_times[f"{s}_p1"] = p1n
-                        control_p.green_times[f"{s}_p2"] = total - p1n
-                _, ttt_p = self._predict(state, control_p, forecast)
-                return float(ttt_p)
+                        moves.append(LeverMove("green", s, clamp(p1 + green_shift)))
+                return float(evaluate_price_point(
+                    state, previous, forecast, tuple(moves),
+                    self._rollout_spec(score_mode="raw"),
+                ).ttt)
 
             scored = []
             zero_ttt = float("inf")
@@ -1950,10 +1911,10 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         depth_p = int(self.cfg.mpc.horizon_steps) + 1
         # ---- 공용 baseline J0 ----
         self._price_rollout_count += 1
-        base_states, base_raw = self._predict(
-            state, previous, forecast, depth_override=depth_p,
-        )
-        j0 = self._price_ttt(base_states, base_raw)
+        j0 = float(evaluate_price_point(
+            state, previous, forecast, (),
+            self._rollout_spec(score_mode="price", depth_override=depth_p),
+        ).objective)
 
         # ---- green (one-sided) ----
         green_pt: Dict[str, tuple] = {}

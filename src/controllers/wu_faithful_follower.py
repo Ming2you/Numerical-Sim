@@ -4725,18 +4725,31 @@ class WuFaithfulFollower:
         반환 (total_ttt, freeway_ttt, urban_ttt)[veh·h]. leader가 후보들을 follower_ttt 기준으로
         구분하려면(StackelbergMPCController `_leader_evaluation_base`가 `nash.objective_value`를
         follower TTT로 읽음) follower가 실제 realized horizon TTT를 내야 한다. leader가 읽는
-        `_predict`와 동일한 `run_coupled_interval`을 써서 일관성을 맞춘다."""
-        from src.simulation.coupling import run_coupled_interval
+        것과 **같은 production endpoint**(N7)를 써서 일관성을 맞춘다 — offset 가드의
+        zero-offset replay 도 이 경로를 탄다.
 
-        s = state.copy()
-        freeway_ttt = 0.0
-        urban_ttt = 0.0
-        for demand in forecast[: max(1, self.cfg.mpc.horizon_steps)]:
-            result = run_coupled_interval(s, control, demand, self.cfg)
-            s.time_sec += self.cfg.simulation.control_interval
-            freeway_ttt += float(result.freeway_ttt)
-            urban_ttt += float(result.urban_ttt)
-        return float(freeway_ttt + urban_ttt), float(freeway_ttt), float(urban_ttt)
+        `box_walk=False`: 이 rollout 은 커밋된 계획을 horizon 동안 그대로 hold 한 실현값이라
+        leader 후보 채점의 다중스텝 레버 walk 를 쓰지 않는다(구 구현과 동일)."""
+        from src.controllers.rollout_endpoint import ObjectiveSpec, evaluate_price_point
+
+        point = evaluate_price_point(
+            state,
+            control,
+            forecast,
+            (),
+            ObjectiveSpec(
+                cfg=self.cfg,
+                depth_override=max(1, int(self.cfg.mpc.horizon_steps)),
+                box_walk=False,
+                score_mode="raw",
+                split_ttt=True,
+            ),
+        )
+        return (
+            float(point.freeway_ttt + point.urban_ttt),
+            float(point.freeway_ttt),
+            float(point.urban_ttt),
+        )
 
     def solve(
         self,

@@ -12,6 +12,7 @@ from typing import Dict, Iterable, Optional
 from src.controllers.distributed_coordinator import DistributedCoordinator
 from src.controllers.leader import Leader, LeaderAction, leader_metadata
 from src.controllers.nash_solver import NashResult, NashSolver
+from src.controllers.rollout_endpoint import ObjectiveSpec, evaluate_price_point
 from src.models.demand import DemandStep
 from src.models.state import ControlAction, ExperimentConfig, TrafficState
 
@@ -2353,8 +2354,27 @@ class StackelbergMPCController:
             and incumbent_obj != float("inf")
         ):
             abort_above = float(incumbent_obj)
-        states, rollout_ttt = self._predict(
-            state, nash.control, forecast, abort_above=abort_above, previous=previous)
+        # N7: 후보 채점도 production endpoint 를 통한다. 성분(far/hinge)은 endpoint 가 재고,
+        # "어느 base 를 쓸지"의 선택은 여기(MPC)가 소유한다.
+        far_mode = self.cfg.leader.objective_mode != "state_accumulation" and (
+            int(getattr(self.cfg.mpc, "leader_value_depth", 0)) > 0
+            or bool(getattr(self.cfg.mpc, "leader_mfd_far_at_d0", False))
+        )
+        point = evaluate_price_point(
+            state,
+            nash.control,
+            forecast,
+            (),
+            self._rollout_spec(
+                score_mode="leader" if far_mode else "raw",
+                abort_above=abort_above,
+                walk_previous=previous,
+                far_enabled=far_mode,
+                leader_hinge=far_mode,
+                hinge_forecast=True,
+            ),
+        )
+        states, rollout_ttt = point.states, point.ttt
         if self.cfg.leader.objective_mode == "state_accumulation":
             return states, rollout_ttt, True
         # leader_value_depth>0면 leader의 full (3+d) rollout TTT를 base로(=TTT_3+V). follower는
@@ -2368,13 +2388,8 @@ class StackelbergMPCController:
         ):
             # far(MFD tail): near rollout 끝(states[-1]) 잔여 accumulation의 배수 cost-to-go를
             # 해석적으로 가산(§3.2). far가 temporal tail을 싸게 담으면 near 깊이 d를 줄일 수 있다.
-            return (
-                states,
-                rollout_ttt
-                + self._mfd_far_cost_to_go(states[-1])
-                + leader_hinge_cost(self.cfg, states, forecast),
-                True,
-            )
+            # 성분은 endpoint 가 계산했다(point.far / point.leader_hinge) — 합만 여기서 쓴다.
+            return states, float(point.objective), True
         if float(nash.control.diagnostics.get("leader_response_closure_use_rollout_objective", 0.0)) >= 0.5:
             return states, rollout_ttt, True
         return states, float(nash.objective_value), True
@@ -2386,6 +2401,24 @@ class StackelbergMPCController:
         """far(MFD tail) — 모듈 함수 `mfd_far_cost_to_go`로 위임(P-CENT 천장 이식용 승격)."""
         return mfd_far_cost_to_go(self.cfg, state)
 
+    def _rollout_spec(self, **overrides) -> ObjectiveSpec:
+        """이 controller 의 동결 파라미터로 endpoint spec 을 만든다(N7).
+
+        FD·SPSA·no-control replay·후보 채점이 전부 여기서 나온 spec 을 쓴다 —
+        평가 파라미터가 호출처마다 갈라지면 비교 자체가 성립하지 않는다.
+        `signal_marginal_price_trust_sec` 는 follower 가 step 중에 갱신하므로 호출 시점에 읽는다.
+        """
+        params = {
+            "cfg": self.cfg,
+            "green_trust_sec": getattr(
+                getattr(self, "nash_solver", None),
+                "signal_marginal_price_trust_sec",
+                None,
+            ),
+        }
+        params.update(overrides)
+        return ObjectiveSpec(**params)
+
     def _predict(
         self,
         state: TrafficState,
@@ -2395,140 +2428,21 @@ class StackelbergMPCController:
         depth_override: Optional[int] = None,
         previous: Optional[ControlAction] = None,
     ) -> tuple[list[TrafficState], float]:
-        from src.simulation.coupling import run_coupled_interval
+        """전역 rollout — production endpoint 를 통한다(N7, 우회 호출 0).
 
-        s = state.copy()
-        states: list[TrafficState] = []
-        total_ttt = 0.0
-        # leader full rollout: horizon + leader_value_depth 만큼(V 포함). _predict은 leader 전용이라
-        # follower myopia에 영향 없음. depth=0이면 기존과 동일.
-        depth = self.cfg.mpc.horizon_steps + max(0, int(getattr(self.cfg.mpc, "leader_value_depth", 0)))
-        if depth_override is not None:
-            depth = max(1, int(depth_override))
-        # BOX-WALK(2026-07-17, 사용자 설계 3차): 기존 rollout은 solve된 control을 horizon에
-        # 고정 — METER-BOX 하에선 m_prev가 낮을 때 박스 밖 모든 후보(N_UF* 3300이든
-        # 6000이든)의 1스텝 실현값이 동일해 V가 구분 불가("박스 끝 너머가 안 보임").
-        # 실측(200_w): ③ 리더는 회복기에 6000 전량방류, box 리더는 intent 3190~3374 고정
-        # → 방류 3000 고착 → ramp 큐 2.4배 → −29.78%. walk ON이면 rollout의 2번째
-        # interval부터 metering을 후보 intent(N_UF*) 방향으로 스텝당 램프별 ±R씩 전진시켜
-        # 다중스텝 도달을 채점에 반영한다. 후보별로 목표가 달라 V가 다시 구분된다.
-        # 가드: incumbent/PFO probe(leader=None)는 N_UF_star=0(follower L4244)이라 walk하면
-        # 0으로 끌려가 오염 → N_UF_star>0일 때만. 기본 False=비트동일.
-        _walk_r = getattr(self.cfg.mpc, "seg13_meter_box_veh_h", None)
-        _do_walk = (
-            bool(getattr(self.cfg.mpc, "leader_rollout_box_walk", False))
-            and _walk_r is not None
-            and bool(control.ramp_metering)
-            and float(getattr(control, "N_UF_star", 0.0)) > 0.0
+        동역학(box-walk 포함)은 `rollout_endpoint._rollout` 로 옮겼다. 이 메서드는
+        기존 호출처 호환을 위한 얇은 어댑터다.
+        """
+        point = evaluate_price_point(
+            state,
+            control,
+            forecast,
+            (),
+            self._rollout_spec(
+                score_mode="raw",
+                depth_override=depth_override,
+                abort_above=abort_above,
+                walk_previous=previous,
+            ),
         )
-        if _do_walk:
-            _r_dn = float(_walk_r)
-            _bu_w = getattr(self.cfg.mpc, "seg13_meter_box_up_veh_h", None)
-            _r_up = float(_bu_w) if _bu_w is not None else _r_dn
-            _net = self.cfg.network
-            _caps = {r: float(_net.ramp_capacity_veh_h[r]) for r in control.ramp_metering}
-            _target_total = float(control.N_UF_star)
-        # BOX-WALK-VG(2026-07-17, 사용자 지적 "vsl도 green도 점진 탐색해야"): VSL·green도
-        # rollout에 다중스텝 이동을 모델링. metering과 달리 후보가 목표를 안 주므로
-        # **끝 지속(edge persistence)**: 이번 solve가 이동 한계 끝(VSL ±R_v, green ±trust)
-        # 까지 밀었으면 "더 가고 싶었다"로 보고 rollout에서 같은 방향·같은 속도로 전진
-        # (전역 한계에서 정지). 내부 정착(끝 미달)이면 수렴으로 보고 고정 유지.
-        _vg_moves: list = []
-        _gtot = 0.0
-        if bool(getattr(self.cfg.mpc, "leader_rollout_box_walk_vg", False)) and previous is not None:
-            _rv = getattr(self.cfg.mpc, "seg13_vsl_box_kmh", None)
-            if _rv is not None:
-                _rv = float(_rv)
-                _vmin = float(min(self.cfg.freeway_follower.vsl_set))
-                _vmax = float(max(self.cfg.freeway_follower.vsl_set))
-                for _key, _v in control.vsl.items():
-                    if "__seg" not in _key:
-                        continue
-                    _pv = previous.vsl.get(_key)
-                    if _pv is None:
-                        continue
-                    _d0 = float(_v) - float(_pv)
-                    if _d0 >= _rv - 1.0e-6:
-                        _vg_moves.append(("vsl", _key, _rv, _vmin, _vmax))
-                    elif _d0 <= -(_rv - 1.0e-6):
-                        _vg_moves.append(("vsl", _key, -_rv, _vmin, _vmax))
-            _gt = getattr(getattr(self, "nash_solver", None),
-                          "signal_marginal_price_trust_sec", None)
-            if _gt:
-                _gt = float(_gt)
-                _gtot = float(self.cfg.network.effective_green_total)
-                _gmin = float(getattr(self.cfg.network, "green_min", 20.0))
-                for _key, _g in control.green_times.items():
-                    if not _key.endswith("_p1"):
-                        continue
-                    _pg = previous.green_times.get(_key)
-                    if _pg is None:
-                        continue
-                    _d0 = float(_g) - float(_pg)
-                    if _d0 >= _gt - 1.0e-6:
-                        _vg_moves.append(("green", _key, _gt, _gmin, _gtot - _gmin))
-                    elif _d0 <= -(_gt - 1.0e-6):
-                        _vg_moves.append(("green", _key, -_gt, _gmin, _gtot - _gmin))
-        if _do_walk or _vg_moves:
-            import copy as _copy
-            # 얕은 사본 + 변형할 dict만 교체 — 원본(commit 후보 control)은 불변.
-            # 주의: ramp만 교체하고 vsl/green을 원본 dict째 만지면 커밋 후보가 오염된다.
-            _ctrl_w = _copy.copy(control)
-            if _do_walk:
-                _ctrl_w.ramp_metering = dict(control.ramp_metering)
-            if _vg_moves:
-                _ctrl_w.vsl = dict(control.vsl)
-                _ctrl_w.green_times = dict(control.green_times)
-            control = _ctrl_w
-        for _k, demand in enumerate(forecast[:depth]):
-            if _vg_moves and _k >= 1:
-                for _kind, _key, _rate, _lo, _hi in _vg_moves:
-                    if _kind == "vsl":
-                        control.vsl[_key] = min(max(
-                            float(control.vsl[_key]) + _rate, _lo), _hi)
-                    else:
-                        _np1 = min(max(
-                            float(control.green_times[_key]) + _rate, _lo), _hi)
-                        control.green_times[_key] = _np1
-                        _k2 = _key[:-3] + "_p2"
-                        if _k2 in control.green_times:
-                            # p1+p2 합 보존(사이클 예산 112 불변).
-                            control.green_times[_k2] = _gtot - _np1
-                # link 대표 VSL = min(seg) 재계산(plant fallback 정합).
-                for _lnk in self.cfg.network.freeway_links:
-                    _sv = [float(v) for k, v in control.vsl.items()
-                           if k.startswith(_lnk + "__seg")]
-                    if _sv:
-                        control.vsl[_lnk] = min(_sv)
-            if _do_walk and _k >= 1:
-                _m = control.ramp_metering
-                _gap = _target_total - sum(_m.values())
-                if _gap > 1.0e-9:
-                    # 여유 큰 램프부터 스텝당 ≤ R_up씩 올림(_scale_to deficit 루프와 동형).
-                    for _r in sorted(_m, key=lambda x: _caps[x] - _m[x], reverse=True):
-                        _step = min(_r_up, _caps[_r] - _m[_r], _gap)
-                        if _step <= 0.0:
-                            continue
-                        _m[_r] += _step
-                        _gap -= _step
-                        if _gap <= 1.0e-9:
-                            break
-                elif _gap < -1.0e-9:
-                    _need = -_gap
-                    for _r in sorted(_m, key=lambda x: _m[x], reverse=True):
-                        _step = min(_r_dn, _m[_r], _need)
-                        if _step <= 0.0:
-                            continue
-                        _m[_r] -= _step
-                        _need -= _step
-                        if _need <= 1.0e-9:
-                            break
-            result = run_coupled_interval(s, control, demand, self.cfg)
-            s.time_sec += self.cfg.simulation.control_interval
-            total_ttt += result.freeway_ttt + result.urban_ttt
-            states.append(s.copy())
-            # OPT2: TTT는 비음 누적 + 모든 penalty/far ≥0 → 부분합이 incumbent를 넘으면 이
-            # 후보의 최종 objective도 반드시 초과 = exact pruning(argmin 불변). inf로 즉시 기각.
-            if abort_above is not None and total_ttt > abort_above:
-                return states, float("inf")
-        return states, float(total_ttt)
+        return point.states, float(point.ttt)
