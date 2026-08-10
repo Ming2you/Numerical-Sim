@@ -624,15 +624,19 @@ def _phase_green_fraction(
     if not phase:
         return 1.0
     net = cfg.network
-    default_green = net.effective_green_total / 2.0
+    # 주기는 신호별이다(net.cycle_length_by_signal). 매핑이 비면 스칼라로 폴백해
+    # 기존 거동과 비트 동일하다(test_per_signal_cycle_length 가 고정한다).
+    # default_green 도 같은 주기에서 유도해야 g/C 가 한 신호 안에서 정합한다.
+    signal, _, phase_id = phase.rpartition("_")
+    signal_cycle = net.signal_cycle_length(signal)
+    default_green = max(0.0, signal_cycle - net.lost_time) / 2.0
     green_sec = float(control.green_times.get(phase, default_green))
-    cycle = max(net.cycle_length, 1.0e-9)
+    cycle = max(signal_cycle, 1.0e-9)
     if urban_step_index is None:
         # 순수 파이썬 min/max 를 쓴다. 이 함수는 solve 한 번에 129만 회 불리는데 numpy 의
         # 스칼라 clip 은 _wrapit -> _wrapfunc -> _clip 을 거쳐 오버헤드가 크다. 값은
         # 유한값·NaN·무한대 모두에서 동일하다(test_phase_green_fraction_clip 이 고정한다).
         return min(max(green_sec / cycle, 0.0), 1.0)
-    signal, _, phase_id = phase.rpartition("_")
     g1 = float(control.green_times.get(f"{signal}_p1", default_green))
     half_lost = max(0.0, net.lost_time) / 2.0
     start = 0.0 if phase_id == "p1" else g1 + half_lost

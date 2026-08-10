@@ -175,6 +175,21 @@ class SimulationConfig:
             raise ValueError("control_interval must be an integer multiple of T_f.")
 
 
+# `cycle_length_by_signal` 에 없어 스칼라로 떨어진 신호별 횟수. 진단 전용이라 config 가
+# 아닌 모듈 전역에 둔다 — NetworkConfig 필드로 넣으면 dataclass 동등성/deepcopy 에 섞인다.
+_CYCLE_LENGTH_FALLBACK_COUNTS: Dict[str, int] = {}
+
+
+def cycle_length_fallback_counts() -> Dict[str, int]:
+    """신호별 주기 폴백 횟수 스냅샷(사본). production 은 {} 여야 한다."""
+    return dict(_CYCLE_LENGTH_FALLBACK_COUNTS)
+
+
+def reset_cycle_length_fallback_counts() -> None:
+    """진단 카운터를 비운다. 런/테스트 시작 시 호출한다."""
+    _CYCLE_LENGTH_FALLBACK_COUNTS.clear()
+
+
 @dataclass
 class NetworkConfig:
     freeway_links: List[str] = field(default_factory=lambda: ["FW_W", "FW_E"])
@@ -223,6 +238,13 @@ class NetworkConfig:
         "A_B", "B_C", "A_D", "B_E", "C_F", "D_E", "E_F"
     ])
     cycle_length: float = 120.0
+    # 신호별 주기[s]. 비어 있으면 위 스칼라를 쓴다(기존 동작과 비트 동일).
+    #
+    # 2026-08-09: 스칼라 120 s 는 개포동 실망에 **하나도 없는** 값이다. 실측 native 주기는
+    # 100 / 140 / 150 / 160 / 170 s 이고 제어 15 SC 는 140/150/160/170 네 종이다
+    # (VISSIM/outputs/signal_group_timing_v3.json, 생산자 scripts/derive_signal_group_timing.py).
+    # 주기는 `_phase_green_fraction` 의 g/C 분모라 틀리면 green 분율이 통째로 틀어진다.
+    cycle_length_by_signal: Dict[str, float] = field(default_factory=dict)
     lost_time: float = 8.0
     green_min: float = 20.0
     green_max: float = 92.0
@@ -352,6 +374,27 @@ class NetworkConfig:
         """램프 하나의 대기행렬 상한[veh]. 매핑이 없으면 스칼라 폴백(기존 거동 비트 동일)."""
         value = self.ramp_queue_max_veh_by_ramp.get(str(ramp))
         return float(value) if value is not None else float(self.ramp_queue_max_veh)
+
+    def signal_cycle_length(self, signal: str) -> float:
+        """신호 하나의 주기[s]. 매핑이 없으면 스칼라 폴백(기존 거동 비트 동일).
+
+        매핑이 **비어 있지 않은데** 신호가 빠져 폴백하면 결선 실수이므로 진단 카운터에
+        남긴다(`cycle_length_fallback_counts`). production 은 fallback 0 이어야 하는데
+        세지 않으면 확인할 방법이 없다.
+
+        매핑이 통째로 비면 legacy 스칼라 모드라 세지 않는다 — 실 config 1 회 solve 에
+        `_phase_green_fraction` 이 129 만 번 불리므로 여기서 세면 진단이 노이즈로
+        묻히고 핫패스에 dict 쓰기가 들어간다.
+        """
+        by_signal = self.cycle_length_by_signal
+        if not by_signal:
+            return float(self.cycle_length)
+        key = str(signal)
+        value = by_signal.get(key)
+        if value is None:
+            _CYCLE_LENGTH_FALLBACK_COUNTS[key] = _CYCLE_LENGTH_FALLBACK_COUNTS.get(key, 0) + 1
+            return float(self.cycle_length)
+        return float(value)
 
     @property
     def effective_green_total(self) -> float:
