@@ -158,6 +158,10 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         # 가격 롤아웃 병렬 워커 수. 0/1 = 직렬(기존과 비트 동일).
         # 롤아웃이 가격 갱신의 98.4% 이고 신호별로 독립이라 정확도 손실 없이 줄인다.
         self.price_parallel_workers: int = 0
+        # N8-3: 병렬 실패 뒤 직렬 재실행은 값은 같지만 **조용하면 안 된다**(런타임 예산이
+        # 조용히 몇 배로 늘고, 병렬 경로가 한 번도 안 돈 채 "동일"로 읽힌다).
+        self.price_parallel_serial_rerun_count: int = 0
+        self.price_parallel_last_error: str = ""
         self.price_spsa_enabled: bool = False
         self.price_spsa_pairs: int = 4
         # ---------- JOINT(2026-07-09): bilinear cross-term 가격 ----------
@@ -744,8 +748,11 @@ class StackelbergWuMeteredController(StackelbergMPCController):
             ) as pool:
                 for sig, which, ttt, bar in pool.map(_price_worker_green, tasks):
                     out[(sig, which)] = (ttt, bar)
-        except Exception:
+        except Exception as exc:
             # 병렬 실패는 조용히 넘기지 않되, 가격을 잃는 것보다 직렬 재시도가 낫다.
+            # 진단에 남긴다(N8-3 "조용한 직렬 재실행 0") — meta 에는 호출처가 실어 보낸다.
+            self.price_parallel_serial_rerun_count += 1
+            self.price_parallel_last_error = f"{type(exc).__name__}: {exc}"
             out = {
                 (sig, which): self._global_rollout_metrics_with_green(
                     state, previous, forecast, sig, value,
@@ -1877,6 +1884,9 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         meta["wu_b2_price_refreshed"] = 1.0
         meta["wu_b2_price_refresh_count"] = float(self._signal_price_refresh_count)
         meta["wu_price_rollout_count"] = float(self._price_rollout_count)
+        meta["wu_price_parallel_serial_rerun_count"] = float(
+            self.price_parallel_serial_rerun_count
+        )
         self._signal_price_meta = meta
 
     def _compute_prices_lite(

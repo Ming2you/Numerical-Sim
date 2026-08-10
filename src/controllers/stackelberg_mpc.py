@@ -2213,6 +2213,11 @@ class StackelbergMPCController:
         }
         for result in results:
             result.metadata.update(diag)
+        # N8-3 결정적 축약: thread/process 는 `as_completed` 완료 순서로 쌓이므로 리스트 순서가
+        # 실행마다 달라진다. 선택은 `min(..., key=objective)` 이고 파이썬 min 은 **첫** 최소값을
+        # 고르므로, 동점 후보가 있으면 worker 수에 따라 선택 action 이 바뀐다. 직렬 경로가 이미
+        # 내는 인덱스 순서로 정렬해 backend 와 무관하게 같은 후보를 고르게 한다(직렬은 무영향).
+        results.sort(key=lambda item: item.index)
         return results
 
     def _forecast_demand_metadata(self, forecast: list[DemandStep]) -> Dict[str, float]:
