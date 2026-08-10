@@ -13,6 +13,20 @@ from .state import ControlAction, ExperimentConfig, TrafficState
 # movement는 green×saturation으로만 제어돼야 하므로 allocation을 cap으로 적용하지 않는다.
 PERIMETER_MOVEMENT_KINDS = {"boundary_in", "off_ramp", "boundary_out", "on_ramp"}
 
+# 관측 링크속도(state.urban_link_speed_kph)의 하한 배수 — v3 N3-1b.
+# 플랜트가 내보내는 링크 속도는 `speed_sum / count` 라 표본이 없는 링크에서 0 이다.
+# 그 0 을 그대로 `_link_delay_steps` 분모에 꽂으면 지연이 ~1e12 substep 이 되고,
+# `_pop_buffer` 가 정확일치 pop 이라 차량과 링크 저류 공간이 함께 영구 격리된다
+# ("0 속도는 0 지체가 아니다"). 하한을 자유류의 1/이 값으로 두면 지연 상한이
+# 자유류 지연의 이 배수로 유한하게 묶인다.
+#
+# 값 2.5(자유류 50 km/h 기준 하한 20 km/h)는 실측으로 정했다. 지연이 `available` 의
+# 함수라 속도가 낮을수록 substep 경계 추월(test_cross_substep_fifo_margin)이 쉬워진다 —
+# urban_gridlock 200 substep 실측 역전 건수는 20 km/h:0, 18:0, 15:1, 12:12, 10:25 다.
+# 하한을 더 낮추면 FIFO 가 실제로 깨진다. 정체 표현은 이미 `available`(큐 꼬리까지 거리)이
+# 대부분 담당하므로 속도는 보정 역할이고, 더 낮추면 정체를 이중계상하는 쪽에 가깝다.
+OBSERVED_SPEED_DELAY_CAP_RATIO = 2.5
+
 
 def safe_balance_index(values: Iterable[float], eps: float = 1.0e-9) -> float:
     arr = np.asarray(list(values), dtype=float)
@@ -597,12 +611,22 @@ def _link_delay_steps(state: TrafficState, cfg: ExperimentConfig, storage_link: 
 
     큐 꼬리까지의 이동거리 = 가용 여유공간 S(=available). 빈 링크일수록 꼬리가 멀어 통과시간↑ →
     차량이 체류(내부 누적 형성). 큐가 차면 꼬리가 입구에 있어 즉시 도달. (이전 구현은 S 대신
-    occupied=capacity−available를 써서 빈 링크 통과≈0 → 누적이 안 생기던 버그였다.)"""
+    occupied=capacity−available를 써서 빈 링크 통과≈0 → 누적이 안 생기던 버그였다.)
+
+    통과속도는 그 링크의 **관측 속도**가 있으면 그것을 쓴다(v3 N3-1b). 관측이 없으면
+    전역 상수 `urban_avg_speed_km_h` 라 관측 없는 실행은 기존과 비트 동일하다.
+    관측 0 은 하한(`OBSERVED_SPEED_DELAY_CAP_RATIO`)에 걸려 무한 지연이 되지 않는다."""
     net = cfg.network
     capacity = net.urban_link_storage_veh.get(storage_link, net.boundary_queue_max_veh)
     available = max(0.0, state.urban_link_storage.get(storage_link, capacity))
     distance_km = available * net.urban_avg_vehicle_length_m / 1000.0
-    travel_time_h = distance_km / max(net.urban_avg_speed_km_h, 1.0e-9)
+    nominal_kph = max(net.urban_avg_speed_km_h, 1.0e-9)
+    observed_kph = state.urban_link_speed_kph.get(storage_link)
+    if observed_kph is None:
+        speed_kph = nominal_kph
+    else:
+        speed_kph = max(float(observed_kph), nominal_kph / OBSERVED_SPEED_DELAY_CAP_RATIO)
+    travel_time_h = distance_km / speed_kph
     return max(1, int(math.ceil(travel_time_h / max(cfg.simulation.T_u_h, 1.0e-9))))
 
 

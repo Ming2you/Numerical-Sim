@@ -956,6 +956,11 @@ class TrafficState:
     freeway_buffer_down_speed: Dict[str, List[float]] = field(default_factory=dict)
     urban_movement_queue: Dict[str, float] = field(default_factory=dict)
     urban_link_storage: Dict[str, float] = field(default_factory=dict)
+    # 링크별 **관측** 평균속도[km/h] — storage 링크 키. 플랜트(VISSIM) 어댑터만 채운다(v3 N3-1b).
+    # 지금까지 속도 필드는 freeway 계열 3개뿐이라 도시부 지연은 전역 상수만 썼다.
+    # 비어 있으면 `_link_delay_steps` 가 `urban_avg_speed_km_h` 로 폴백해 기존과 비트 동일하다.
+    # **stock 이 아니라 관측치이므로 질량 회계(total_physical_vehicles)에 넣지 않는다.**
+    urban_link_speed_kph: Dict[str, float] = field(default_factory=dict)
     urban_arrival_buffer: Dict[str, Dict[int, float]] = field(default_factory=dict)
     urban_storage_release_buffer: Dict[str, Dict[int, float]] = field(default_factory=dict)
     # 경계 유입 주행지연 버퍼[veh] — key(`gate:{in링크}` / `ramp:{ramp}`)→{도착 substep: 대수}.
