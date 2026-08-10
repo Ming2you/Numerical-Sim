@@ -658,27 +658,33 @@ class DistributedCoordinator:
         incumbent_obj: float = np.inf,
         precheck_diag: Optional[Mapping[str, float]] = None,
     ) -> tuple[GridControlCandidate, float, ControlAction, Dict[str, float]]:
-        from src.simulation.coupling import run_coupled_interval
+        from src.controllers.rollout_endpoint import ObjectiveSpec, evaluate_price_point
 
         control = self._prepare_grid_control(candidate.control, leader)
-        s = state.copy()
-        total_ttt = 0.0
-        freeway_ttt = 0.0
-        urban_ttt = 0.0
         horizon = max(1, min(len(forecast), self.cfg.mpc.horizon_steps))
         horizon_h = self.cfg.simulation.T_c_h * horizon
-        early_terminated = False
-        completed_steps = 0
-        for demand in forecast[:horizon]:
-            result = run_coupled_interval(s, control, demand, self.cfg)
-            urban_ttt += float(result.urban_ttt)
-            freeway_ttt += float(result.freeway_ttt)
-            total_ttt += float(result.urban_ttt + result.freeway_ttt)
-            s.time_sec += self.cfg.simulation.control_interval
-            completed_steps += 1
-            if np.isfinite(incumbent_obj) and total_ttt > incumbent_obj + 1.0e-12:
-                early_terminated = True
-                break
+        point = evaluate_price_point(
+            state,
+            control,
+            forecast,
+            (),
+            ObjectiveSpec(
+                cfg=self.cfg,
+                depth_override=horizon,
+                box_walk=False,
+                split_ttt=True,
+                abort_above=(
+                    float(incumbent_obj) + 1.0e-12 if np.isfinite(incumbent_obj) else None
+                ),
+            ),
+        )
+        # 조기절단 후보도 부분합으로 채점한다(objective는 아래에서 incumbent 위로 clamp).
+        total_ttt = float(point.partial_ttt)
+        freeway_ttt = float(point.freeway_ttt)
+        urban_ttt = float(point.urban_ttt)
+        early_terminated = bool(point.aborted)
+        completed_steps = len(point.states)
+        s = point.states[-1] if point.states else state
 
         if precheck_diag is None:
             proxy_obj, proxy_diag = self._response_tts_objective(

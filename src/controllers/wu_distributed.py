@@ -824,7 +824,7 @@ class WuDistributedController:
         demand_forecast: Iterable[DemandStep],
         previous_control: Optional[ControlAction] = None,
     ) -> WuDecisionInfo:
-        from src.simulation.coupling import run_coupled_interval
+        from src.controllers.rollout_endpoint import ObjectiveSpec, evaluate_price_point
 
         start = time.perf_counter()
         forecast = list(demand_forecast)
@@ -856,12 +856,17 @@ class WuDistributedController:
                 state, forecast[0], previous, leader=action,
             )
             total_evals += evals
-            sim_state = state.copy()
-            states: List[TrafficState] = []
-            for demand in forecast[: self.cfg.mpc.horizon_steps]:
-                run_coupled_interval(sim_state, control, demand, self.cfg)
-                sim_state.time_sec += self.cfg.simulation.control_interval
-                states.append(sim_state.copy())
+            states: List[TrafficState] = evaluate_price_point(
+                state,
+                control,
+                forecast,
+                (),
+                ObjectiveSpec(
+                    cfg=self.cfg,
+                    depth_override=self.cfg.mpc.horizon_steps,
+                    box_walk=False,
+                ),
+            ).states
             obj = self._system_objective(states)
             total_evals += len(states)
             if best is None or obj < best[0]:

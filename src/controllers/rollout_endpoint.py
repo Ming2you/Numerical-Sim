@@ -97,6 +97,9 @@ class PricePointResult:
     freeway_ttt: float = 0.0
     urban_ttt: float = 0.0
     aborted: bool = False
+    # abort 시 `ttt` 는 inf 로 막지만(기존 규약 불변), 조기절단 후보의 목적함수를 부분합에서
+    # 이어 계산하는 호출처(centralized/distributed grid)를 위해 유한 누적값을 함께 낸다.
+    partial_ttt: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +162,11 @@ def _rollout(
     forecast: List[DemandStep],
     spec: ObjectiveSpec,
 ) -> Tuple[List[TrafficState], float, bool, float, float]:
-    """horizon(+leader_value_depth) rollout. (states, total_ttt, aborted, fw_ttt, ur_ttt)."""
+    """horizon(+leader_value_depth) rollout. (states, partial_ttt, aborted, fw_ttt, ur_ttt).
+
+    두번째 원소는 abort 여부와 무관하게 **유한 누적 TTT** 다. inf 로 막는 것은
+    `evaluate_price_point` 가 `PricePointResult.ttt` 에서만 한다.
+    """
     from src.simulation.coupling import run_coupled_interval
 
     global ROLLOUT_CALLS
@@ -295,7 +302,7 @@ def _rollout(
         # TTT는 비음 누적 + 모든 penalty/far ≥0 → 부분합이 incumbent를 넘으면 이 후보의
         # 최종 objective도 반드시 초과 = exact pruning(argmin 불변). inf로 즉시 기각.
         if abort_above is not None and total_ttt > abort_above:
-            return states, float("inf"), True, float(freeway_ttt), float(urban_ttt)
+            return states, float(total_ttt), True, float(freeway_ttt), float(urban_ttt)
     return states, float(total_ttt), False, float(freeway_ttt), float(urban_ttt)
 
 
@@ -377,9 +384,12 @@ def evaluate_price_point(
     _ACTIVE += 1
     try:
         control = apply_action_schedule(previous, action_schedule, spec)
-        states, ttt, aborted, fw_ttt, ur_ttt = _rollout(state, control, forecast, spec)
+        states, partial_ttt, aborted, fw_ttt, ur_ttt = _rollout(state, control, forecast, spec)
     finally:
         _ACTIVE -= 1
+
+    # abort 된 점은 기존대로 inf 로 막아 argmin 에서 확실히 밀어낸다.
+    ttt = float("inf") if aborted else float(partial_ttt)
 
     hinge_fc = forecast if spec.hinge_forecast else None
     objective = float(ttt)
@@ -419,4 +429,5 @@ def evaluate_price_point(
         freeway_ttt=float(fw_ttt),
         urban_ttt=float(ur_ttt),
         aborted=bool(aborted),
+        partial_ttt=float(partial_ttt),
     )

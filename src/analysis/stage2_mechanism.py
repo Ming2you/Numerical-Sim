@@ -117,10 +117,13 @@ def _replay(
 ) -> Dict[str, float]:
     """t0 상태에서 n_intervals 재생 — target=None이면 실제 control 재생(검증용),
     아니면 해당 control만 neutral로 고정한 counterfactual."""
-    from src.simulation.coupling import run_coupled_interval
+    from src.controllers.rollout_endpoint import ObjectiveSpec, evaluate_price_point
 
     profile = DemandProfile(cfg, scenario)
     state = traces[start_step].state_before.copy()
+    # interval마다 control이 바뀌므로 endpoint를 1스텝(depth 1)씩 호출해 상태를 잇는다.
+    # box_walk는 leader 후보 채점 전용이라 replay에서는 끈다(재생 = control 그대로 hold).
+    spec = ObjectiveSpec(cfg=cfg, depth_override=1, box_walk=False, split_ttt=True)
     total = urban = freeway = 0.0
     for offset in range(n_intervals):
         idx = start_step + offset
@@ -130,11 +133,11 @@ def _replay(
         if target is not None:
             control = _neutral_control(cfg, control, target)
         demand = profile.at(idx * cfg.simulation.control_interval)
-        result = run_coupled_interval(state, control, demand, cfg)
-        state.time_sec += cfg.simulation.control_interval
-        total += result.freeway_ttt + result.urban_ttt
-        urban += result.urban_ttt
-        freeway += result.freeway_ttt
+        point = evaluate_price_point(state, control, [demand], (), spec)
+        state = point.states[-1]
+        total += point.freeway_ttt + point.urban_ttt
+        urban += point.urban_ttt
+        freeway += point.freeway_ttt
     return {"total": total, "urban": urban, "freeway": freeway}
 
 

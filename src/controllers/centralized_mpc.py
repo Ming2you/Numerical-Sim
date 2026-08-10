@@ -290,21 +290,25 @@ class CentralizedMPC:
         control: ControlAction,
         forecast: List[DemandStep],
     ) -> tuple[List[TrafficState], float]:
-        from src.simulation.coupling import run_coupled_interval
+        from src.controllers.rollout_endpoint import ObjectiveSpec, evaluate_price_point
 
-        s = state.copy()
-        states: List[TrafficState] = []
-        total_ttt = 0.0
-        for demand in forecast[: self.cfg.mpc.horizon_steps]:
-            result = run_coupled_interval(s, control, demand, self.cfg)
-            total_ttt += result.urban_ttt + result.freeway_ttt
-            s.time_sec += self.cfg.simulation.control_interval
-            states.append(s.copy())
         # far(MFD tail, 2026-07-10): H 밖 잔여 accumulation 배수 비용 — 근시안 과잉 admission
         # 방지(새 망에서 legacy가 이 부재로 붕괴). leader_mfd_far_enabled=False면 0(비트동일).
-        from src.controllers.stackelberg_mpc import mfd_far_cost_to_go
-        total_ttt += mfd_far_cost_to_go(self.cfg, s)
-        return states, float(total_ttt)
+        # far 가산은 endpoint 의 far_enabled 성분이 그대로 수행한다.
+        point = evaluate_price_point(
+            state,
+            control,
+            forecast,
+            (),
+            ObjectiveSpec(
+                cfg=self.cfg,
+                depth_override=self.cfg.mpc.horizon_steps,
+                box_walk=False,
+                score_mode="price",
+                far_enabled=True,
+            ),
+        )
+        return point.states, float(point.objective)
 
     def _grid_authority(self) -> str:
         return "wu" if self.mode == "wu" else "proposed"
@@ -317,26 +321,31 @@ class CentralizedMPC:
         candidate: GridControlCandidate,
         incumbent_obj: float = np.inf,
     ) -> tuple[GridControlCandidate, float, ControlAction]:
-        from src.simulation.coupling import run_coupled_interval
+        from src.controllers.rollout_endpoint import ObjectiveSpec, evaluate_price_point
 
         control = candidate.control.copy()
-        s = state.copy()
-        states: List[TrafficState] = []
-        trajectory_ttt = 0.0
-        early_terminated = False
-        for demand in forecast[: self.cfg.mpc.horizon_steps]:
-            result = run_coupled_interval(s, control, demand, self.cfg)
-            trajectory_ttt += float(result.urban_ttt + result.freeway_ttt)
-            s.time_sec += self.cfg.simulation.control_interval
-            states.append(s.copy())
-            if np.isfinite(incumbent_obj) and trajectory_ttt > incumbent_obj + 1.0e-12:
-                early_terminated = True
-                break
+        point = evaluate_price_point(
+            state,
+            control,
+            forecast,
+            (),
+            ObjectiveSpec(
+                cfg=self.cfg,
+                depth_override=self.cfg.mpc.horizon_steps,
+                box_walk=False,
+                score_mode="price",
+                far_enabled=True,
+                abort_above=(
+                    float(incumbent_obj) + 1.0e-12 if np.isfinite(incumbent_obj) else None
+                ),
+            ),
+        )
+        early_terminated = bool(point.aborted)
+        states = point.states
         # far tail(2026-07-10): 완주 후보만 가산 — far ≥ 0이라 partial > incumbent 조기절단은
-        # 그대로 exact pruning(최종 obj는 반드시 더 큼).
-        if not early_terminated:
-            from src.controllers.stackelberg_mpc import mfd_far_cost_to_go
-            trajectory_ttt += mfd_far_cost_to_go(self.cfg, s)
+        # 그대로 exact pruning(최종 obj는 반드시 더 큼). 완주 시 objective = TTT + far 이고
+        # 절단 시에는 far 없는 부분합(partial_ttt)을 쓴다.
+        trajectory_ttt = point.partial_ttt if early_terminated else float(point.objective)
         obj = self._objective(states, control, previous, trajectory_ttt)
         if early_terminated:
             obj = float(max(obj, incumbent_obj + 1.0e-9))
