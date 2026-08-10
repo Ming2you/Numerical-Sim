@@ -82,7 +82,11 @@ class LeaderCandidateOrderTests(unittest.TestCase):
     # 완료 순서를 인덱스 순서와 어긋나게 만드는 지연(초). 뒤 인덱스가 먼저 끝난다.
     DELAYS = (0.30, 0.25, 0.20, 0.15, 0.10, 0.05, 0.0)
 
-    def _run(self, workers: int) -> List[_LeaderCandidateEvaluation]:
+    def _run(
+        self,
+        workers: int,
+        selected_indices: tuple[int, ...] | None = None,
+    ) -> List[_LeaderCandidateEvaluation]:
         cfg = _cfg(_backend_and_workers(workers))
         controller = smpc.StackelbergMPCController(cfg)
         candidates = [
@@ -111,7 +115,7 @@ class LeaderCandidateOrderTests(unittest.TestCase):
         try:
             results = controller._evaluate_candidate_set(
                 candidates,
-                list(range(len(candidates))),
+                list(selected_indices if selected_indices is not None else range(len(candidates))),
                 TrafficState.initial(cfg),
                 [],
                 ControlAction.fixed(cfg),
@@ -136,6 +140,42 @@ class LeaderCandidateOrderTests(unittest.TestCase):
                 results = self._run(workers)
                 best = min(results, key=lambda item: item.objective)
                 self.assertEqual(best.index, 2)
+
+
+class LeaderCandidatePrefilterOrderTests(LeaderCandidateOrderTests):
+    """prefilter 가 활성이면 `selected_indices` 는 인덱스 순서가 아니다.
+
+    `_prefilter_leader_candidates` 는 `selected` 를 proxy 랭킹 순서로 쌓는다
+    (`stackelberg_mpc.py:2020-2036`). flagship override 도 그 순서를 그대로 낸다
+    (`stackelberg_wu_metered.py:2782-2790`). 그러므로 정본 순서는 `selected_indices`
+    순서이고, 병렬화는 그것을 재현해야 한다.
+
+    위 `LeaderCandidateOrderTests` 는 `selected_indices` 로 `range(n)` 을 넘겨 prefilter
+    재정렬을 우회하므로, 인덱스 순서로 재정렬하는 구현도 통과한다. 실제 배선에서 prefilter 는
+    항상 활성이다(`default.yaml` top_k 4 / 후보 49, core15n41 top_k 3 / 후보 9).
+    """
+
+    # `_prefilter_leader_candidates` 가 실제로 내는 모양 - proxy 랭킹 순서.
+    PREFILTER_ORDER = (5, 2, 0, 4, 1, 3, 6)
+
+    def test_prefilter_order_is_preserved_for_every_worker_count(self):
+        expected = list(self.PREFILTER_ORDER)
+        for workers in WORKER_COUNTS:
+            with self.subTest(workers=workers):
+                results = self._run(workers, selected_indices=self.PREFILTER_ORDER)
+                self.assertEqual([item.index for item in results], expected)
+
+    def test_parallel_tie_break_matches_serial_instead_of_moving_it(self):
+        """동점(2 와 5)에서 직렬이 고르던 후보를 병렬도 골라야 한다.
+
+        직렬은 `selected_indices` 순서로 쌓으므로 랭킹이 앞선 5 를 고른다. 결과를 인덱스
+        순서로 재정렬하면 병렬을 직렬에 맞추는 대신 **직렬 쪽이** 2 로 바뀐다.
+        """
+        for workers in WORKER_COUNTS:
+            with self.subTest(workers=workers):
+                results = self._run(workers, selected_indices=self.PREFILTER_ORDER)
+                best = min(results, key=lambda item: item.objective)
+                self.assertEqual(best.index, 5)
 
 
 class GridParallelOrderTests(unittest.TestCase):
