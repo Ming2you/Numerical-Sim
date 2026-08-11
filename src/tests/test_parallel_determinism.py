@@ -275,6 +275,200 @@ class GreenPriceParallelTests(unittest.TestCase):
         )
 
 
+def _distributed_cfg(overrides: Dict[str, object] | None = None) -> ExperimentConfig:
+    """조기종료(early termination)가 실제로 발동하는 배선.
+
+    `_evaluate_full_candidate`는 `isinstance(self.nash_solver, DistributedCoordinator)`
+    일 때만 `leader_incumbent_obj`를 follower에 넘긴다(`stackelberg_mpc.py:1525-1532`).
+    기본 `follower_solver_mode: two_block`에서는 incumbent가 solver에 도달조차 하지
+    않으므로 아래 `DecideWorkerEquivalenceTests`는 조기종료에 대해 공허하다.
+    horizon_steps=2 는 조기종료가 마지막 스텝 이전에 끊길 여지를 만들기 위한 최소값이다.
+    """
+    mpc: Dict[str, object] = {
+        "horizon_steps": 2,
+        "follower_solver_mode": "distributed",
+        "leader_candidate_count": 9,
+        "leader_refinement_candidate_count": 5,
+    }
+    mpc.update(overrides or {})
+    return _cfg(mpc)
+
+
+def _distributed_fixture(workers: int):
+    cfg = _distributed_cfg(_backend_and_workers(workers))
+    controller = smpc.StackelbergMPCController(cfg)
+    profile = DemandProfile(
+        cfg, ScenarioConfig("peak_demand", urban_scale=1.0, freeway_scale=1.0, ramp_scale=1.0)
+    )
+    return cfg, controller, TrafficState.initial(cfg), ControlAction.fixed(cfg), profile.horizon(0.0, 4)
+
+
+class LeaderIncumbentWiringTests(unittest.TestCase):
+    """`_evaluate_candidate_set`의 incumbent 배선은 worker 수에 따라 비대칭이다.
+
+    `stackelberg_mpc.py:2114-2119` - seed 후보를 평가한 뒤
+      - 병렬(thread/process)은 payload 전부에 **seed 직후 값**을 박아 넣고 그대로 제출한다.
+      - 직렬은 루프 안에서 후보마다 `stage_incumbent`를 다시 써서 **점점 조인다**.
+    이 incumbent 는 `DistributedCoordinator.solve(leader_incumbent_obj=...)` 로 내려가
+    follower grid 의 `abort_above` 가 되고(`distributed_coordinator.py:676-709`),
+    조기절단된 후보는 **부분합**(`partial_ttt`)으로 채점된다.
+
+    즉 bound 가 달라지면 후보 목적함수가 달라질 수 있는 배선이다. 아래 두 검사는
+    (1) 병렬 bound 가 직렬보다 느슨한 쪽으로만 어긋난다는 것과
+    (2) 이 배선에서 그 어긋남이 목적함수를 바꾸지 않는 이유를 각각 못박는다.
+    """
+
+    OBJECTIVES = (30.0, 25.0, 20.0, 15.0, 10.0, 5.0, 1.0)
+
+    def _handed_incumbents(self, workers: int) -> List[float]:
+        """후보 순서대로 worker 에게 실제로 전달된 incumbent 값을 모은다."""
+        cfg = _cfg(_backend_and_workers(workers))
+        controller = smpc.StackelbergMPCController(cfg)
+        candidates = [
+            LeaderAction(float(100 + 10 * i), float(1000 + 100 * i))
+            for i in range(len(self.OBJECTIVES))
+        ]
+        objectives = self.OBJECTIVES
+        handed: Dict[int, float] = {}
+
+        def fake_worker(payload):
+            index = int(payload["index"])
+            handed[index] = float(payload["incumbent_obj"])
+            return _LeaderCandidateEvaluation(
+                index=index,
+                action=payload["action"],
+                nash=_dummy_nash(cfg),
+                objective=float(objectives[index]),
+                objective_terms={"leader_total_objective": float(objectives[index])},
+                metadata={},
+                rollout_used=False,
+                stage=payload.get("stage", "coarse"),
+            )
+
+        original = smpc._stackelberg_candidate_worker
+        smpc._stackelberg_candidate_worker = fake_worker
+        try:
+            controller._evaluate_candidate_set(
+                candidates,
+                list(range(len(candidates))),
+                TrafficState.initial(cfg),
+                [],
+                ControlAction.fixed(cfg),
+                stage="coarse",
+            )
+        finally:
+            smpc._stackelberg_candidate_worker = original
+            controller.close()
+        return [handed[i] for i in range(len(objectives))]
+
+    def test_incumbent_sequence_is_monotone_for_every_worker_count(self):
+        """incumbent 는 best-so-far 상한이므로 후보 순서를 따라 느슨해지면 안 된다."""
+        for workers in WORKER_COUNTS:
+            with self.subTest(workers=workers):
+                handed = self._handed_incumbents(workers)
+                for position in range(1, len(handed)):
+                    self.assertLessEqual(handed[position], handed[position - 1])
+
+    def test_pool_incumbent_is_never_tighter_than_serial(self):
+        """병렬 bound 는 직렬 bound 보다 느슨(≥)해야 한다.
+
+        느슨한 bound 는 가지치기를 덜 할 뿐이지만, 직렬보다 **조인** bound 는 직렬이
+        살려두던 follower 후보를 잘라 결과를 바꾼다. `as_completed` 순서로 조이는
+        구현을 넣으면 이 검사가 비결정적으로 터진다.
+        """
+        serial = self._handed_incumbents(0)
+        for workers in (2, 5):
+            with self.subTest(workers=workers):
+                pooled = self._handed_incumbents(workers)
+                self.assertEqual(len(pooled), len(serial))
+                for position, (pool_value, serial_value) in enumerate(zip(pooled, serial)):
+                    self.assertGreaterEqual(
+                        pool_value, serial_value, msg=f"position={position}"
+                    )
+
+
+class LeaderIncumbentObjectiveInsensitivityTests(unittest.TestCase):
+    """병렬/직렬 incumbent 비대칭이 무해한 **이유**를 못박는다.
+
+    조기절단은 `total_ttt`가 `abort_above`를 넘는 **첫 스텝에서** 끊고 그 부분합을
+    목적함수로 보고한다(`rollout_endpoint.py:295-306`, `distributed_coordinator.py:682-709`).
+    TTT 는 스텝마다 비슷한 크기로 쌓이므로, 마지막 스텝 이전에 끊기려면 bound 가
+    후보 목적함수의 약 (H-1)/H 아래로 내려가야 한다. 그 위에서는 절단이 **마지막 스텝**에서만
+    걸려 부분합 = 전체합이라 값이 그대로다.
+
+    실측(이 fixture, H=2, LeaderAction(480, 1260)) - incumbent 를 objective 대비 배율로 조여가며:
+        inf / 0.67x / 0.55x / 0.50x / 0.45x → objective 59.88057255580024 (절단 29 → 149개)
+        0.35x / 0.25x / 0.10x              → objective 23.41523081033207 (절단 151개)
+    0.45x 와 0.35x 사이가 경계다 - 그 위에서는 bound 를 33% 조여 절단 후보가 5배로 늘어도
+    목적함수가 비트 단위로 같고, 아래로 내려가면 첫 스텝에서 끊겨 값이 무너진다.
+
+    직렬/병렬 incumbent 격차는 leader 후보 목적함수의 분산을 넘을 수 없는데, leader action
+    전역(N_P 0~5000, N_UF 0~8000)을 훑어도 그 분산은 15% 남짓(133.41~156.41)이라
+    경계(H=3 실 배선에서 (H-1)/H = 33% 아래)에 닿지 못한다. 그래서 비대칭이 목적함수
+    차이로 재현되지 않는다.
+
+    이 검사가 깨지면 그 전제가 무너진 것이고, `_evaluate_candidate_set`의 병렬/직렬
+    incumbent 배선을 먼저 통일해야 한다.
+    """
+
+    ACTION = LeaderAction(480.0, 1260.0)
+
+    def _evaluate(self, controller, state, forecast, previous, incumbent: float):
+        evaluation = controller._evaluate_full_candidate(
+            0, self.ACTION, state, forecast, previous, "coarse", incumbent,
+        )
+        return (
+            float(evaluation.objective),
+            float(evaluation.metadata["leader_candidate_follower_early_terminated_candidates"]),
+        )
+
+    def test_tighter_incumbent_prunes_more_but_keeps_the_objective(self):
+        _cfg_unused, controller, state, previous, forecast = _distributed_fixture(0)
+        try:
+            loose_obj, loose_pruned = self._evaluate(
+                controller, state, forecast, previous, float("inf"),
+            )
+            # 실 배선의 horizon_steps 는 3 이므로 (H-1)/H = 0.67 이 절단 경계다.
+            tight_obj, tight_pruned = self._evaluate(
+                controller, state, forecast, previous, loose_obj * 0.67,
+            )
+        finally:
+            controller.close()
+        # 조기종료가 발동하지 않으면 이 검사는 공허하다 - 발동 자체를 먼저 못박는다.
+        self.assertGreater(loose_pruned, 0.0)
+        self.assertGreater(tight_pruned, loose_pruned)
+        self.assertEqual(loose_obj, tight_obj)
+
+
+class DistributedFollowerWorkerEquivalenceTests(unittest.TestCase):
+    """조기종료가 발동하는 배선에서 worker 수별 후보 목적함수가 같아야 한다(N8-3 PASS 조건)."""
+
+    def _objectives(self, workers: int) -> tuple[Dict[int, float], float]:
+        cfg, controller, state, previous, forecast = _distributed_fixture(workers)
+        candidates = [LeaderAction(float(300 + 60 * i), float(600 + 220 * i)) for i in range(3)]
+        try:
+            results = controller._evaluate_candidate_set(
+                candidates, list(range(len(candidates))), state, forecast, previous, stage="coarse",
+            )
+        finally:
+            controller.close()
+        pruned = float(
+            results[0].metadata["leader_candidate_follower_early_terminated_candidates"]
+        )
+        return {item.index: float(item.objective) for item in results}, pruned
+
+    def test_candidate_objectives_identical_for_every_worker_count(self):
+        base, base_pruned = self._objectives(0)
+        # 조기종료가 발동하지 않으면 이 검사는 배선을 재지 못한다.
+        self.assertGreater(base_pruned, 0.0)
+        for workers in (1, 2, 5):
+            with self.subTest(workers=workers):
+                other, _pruned = self._objectives(workers)
+                self.assertEqual(sorted(base), sorted(other))
+                for index in base:
+                    self.assertAlmostEqual(base[index], other[index], delta=1.0e-9)
+
+
 class DecideWorkerEquivalenceTests(unittest.TestCase):
     """end-to-end - worker 수가 선택 action 을 바꾸면 안 된다."""
 
