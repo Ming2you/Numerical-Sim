@@ -441,7 +441,31 @@ class LeaderIncumbentObjectiveInsensitivityTests(unittest.TestCase):
 
 
 class DistributedFollowerWorkerEquivalenceTests(unittest.TestCase):
-    """조기종료가 발동하는 배선에서 worker 수별 후보 목적함수가 같아야 한다(N8-3 PASS 조건)."""
+    """조기종료가 발동하는 배선에서 worker 수별 후보 목적함수가 같아야 한다(N8-3 PASS 조건).
+
+    **이 검사는 지금 공허하다 - 통과해도 아무것도 보장하지 않는다(2026-08-11 확인).**
+
+    아래 fixture 는 후보 3개인데 세 목적함수가 비트 단위로 같게 나온다.
+
+        workers=0  {0: 59.56902323410081, 1: 59.56902323410081, 2: 59.56902323410081}
+        workers=2  {0: 59.56902323410081, 1: 59.56902323410081, 2: 59.56902323410081}
+
+    전부 같으면 직렬의 `stage_incumbent = min(stage_incumbent, result.objective)` 가
+    seed 값 아래로 내려가지 못한다. 그러면 직렬도 병렬과 **같은 incumbent** 를 넘기므로
+    재려던 비대칭이 fixture 안에 존재하지 않는다. 가드로 넣은 `assertGreater(base_pruned, 0)`
+    는 조기절단이 발동한다는 것만 보지 두 경로의 bound 가 다른지는 보지 않는다.
+
+    실제로 `stackelberg_mpc.py:2116` 을 `stage_incumbent * 0.5` 로 개악해도 이 검사는
+    255 초 걸려 통과했다. 240 초를 쓰면서 통과할 수밖에 없는 검사다.
+
+    비대칭을 재려면 후보를 늘려 목적함수가 서로 달라야 한다(같은 fixture 를 후보 7개로
+    늘리면 인덱스 5부터 나타난다는 보고가 있으나 재측정하지 않았다).
+
+    **미루는 근거.** 실 런은 병렬 경로를 타지 않는다 - 어댑터가 세 겹으로 막는다
+    (`vissim_stackelberg_adapter.py:2291, 2753` 하드코딩, `default.yaml:244, 259`).
+    그 사실은 아래 `RealRunStaysSerialTests` 가 1 초에 못박는다. 병렬을 켜려는 순간
+    그 검사가 터지고, 그때 이 검사를 제대로 고치면 된다.
+    """
 
     def _objectives(self, workers: int) -> tuple[Dict[int, float], float]:
         cfg, controller, state, previous, forecast = _distributed_fixture(workers)
@@ -457,6 +481,11 @@ class DistributedFollowerWorkerEquivalenceTests(unittest.TestCase):
         )
         return {item.index: float(item.objective) for item in results}, pruned
 
+    @unittest.skip(
+        "fixture 의 후보 3개가 같은 목적함수를 내 직렬 incumbent 가 seed 아래로 안 내려간다. "
+        "비대칭을 못 재면서 240 초를 쓴다. 실 런은 serial 고정이라(RealRunStaysSerialTests) "
+        "병렬을 켤 때 후보 6개 이상 fixture 로 다시 만든다."
+    )
     def test_candidate_objectives_identical_for_every_worker_count(self):
         base, base_pruned = self._objectives(0)
         # 조기종료가 발동하지 않으면 이 검사는 배선을 재지 못한다.
