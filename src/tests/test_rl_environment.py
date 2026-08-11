@@ -78,12 +78,13 @@ class StackelbergRLEnvironmentTest(unittest.TestCase):
                         self.assertLessEqual(value, cfg.freeway_follower.ramp_metering_rate_max * cap)
                 else:
                     action = action_space.map_index(index)
-                    self.assertGreaterEqual(action.green_p1_sec, cfg.network.green_min)
-                    self.assertGreaterEqual(action.green_p2_sec, cfg.network.green_min)
-                    self.assertLessEqual(action.green_p1_sec, cfg.network.green_max)
-                    self.assertLessEqual(action.green_p2_sec, cfg.network.green_max)
+                    self.assertGreaterEqual(action.green_primary_sec, cfg.network.green_min)
+                    self.assertLessEqual(action.green_primary_sec, cfg.network.green_max)
+                    for key, green in action.green_times.items():
+                        self.assertGreaterEqual(green, cfg.network.green_min, key)
+                        self.assertLessEqual(green, cfg.network.green_max, key)
                     self.assertAlmostEqual(
-                        action.green_p1_sec + action.green_p2_sec,
+                        sum(action.green_times.values()),
                         cfg.network.effective_green_total,
                     )
                     self.assertTrue(all(0.0 <= value < cfg.network.cycle_length for value in action.offsets.values()))

@@ -10,7 +10,7 @@ from src.controllers.rollout_endpoint import (
 )
 from src.controllers.stackelberg_wu_metered import StackelbergWuMeteredController
 from src.models.demand import DemandProfile, ScenarioConfig
-from src.models.state import ControlAction, ExperimentConfig, TrafficState
+from src.models.state import MODEL_PHASES, ControlAction, ExperimentConfig, TrafficState
 
 
 def _cfg(horizon_steps: int = 1):
@@ -95,7 +95,10 @@ class ChannelCoverageTests(unittest.TestCase):
         control = apply_action_schedule(previous, schedule, spec)
         controller.close()
         self.assertAlmostEqual(control.green_times[f"{signal}_p1"], 40.0)
-        self.assertAlmostEqual(control.green_times[f"{signal}_p2"], total - 40.0)
+        # 나머지 현시는 예산에서 사영으로 나온다 - 합이 유효녹색이면 된다.
+        self.assertAlmostEqual(
+            sum(control.green_times[f"{signal}_{pid}"] for pid in MODEL_PHASES), total
+        )
         self.assertAlmostEqual(control.ramp_metering[ramp], 900.0)
         self.assertAlmostEqual(control.vsl[seg_key], 70.0)
         self.assertLessEqual(control.vsl[link], 70.0)

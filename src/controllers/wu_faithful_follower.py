@@ -1391,13 +1391,21 @@ class WuFaithfulFollower:
         x_max = 0.0
         for pid in MODEL_PHASES:
             g = float(control.green_times.get(phase_key(signal, pid), net.default_phase_green))
-            cap = sum(
-                float(model.cap_flow_of.get(m, 0.0))
-                for m in model.movements
+            queue_movements = [
+                m for m in model.movements
                 if model.phase_of[m] == pid and model.kind_of.get(m) != "off_ramp"
+            ]
+            if not queue_movements:
+                # 4현시로 갈리면서 off_ramp movement 밖에 없는 현시가 생긴다(D/F 의
+                # major 좌). 그 현시는 큐 서비스 대상이 아니라 분모도 분자도 0 이다 —
+                # 세면 x=inf 가 되어 band 게이트를 통째로 죽인다.
+                continue
+            cap = sum(
+                float(model.cap_flow_of.get(m, 0.0)) for m in queue_movements
             ) * max(g, 0.0) / max(total, 1.0e-9)
             demand_rate = (
-                q0_sum(q0, model, pid) / max(horizon_h, 1.0e-9)
+                sum(max(0.0, q0.get(m, 0.0)) for m in queue_movements)
+                / max(horizon_h, 1.0e-9)
                 + float(coupling.get(f"arr_{phase_key(signal, pid)}", 0.0))
             )
             if cap > 1.0e-9:

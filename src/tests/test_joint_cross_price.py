@@ -195,10 +195,16 @@ class TestJointCrossPrice(unittest.TestCase):
 
         moved = _solve(disabled=True)
         censored = _solve(disabled=False)
+        # 검열된 쪽은 "안 움직인다"가 아니라 "양자 격자에 붙는다"이다. 4현시 균등분배
+        # 34.5 s 는 1 s 양자 위에 없어서 후보 집합에 prev 자신이 없다 - 마찰이 아무리
+        # 커도 가장 가까운 격자점(0.5 s)까지는 옮겨간다. 판별력은 두 값의 차이가 준다.
+        quantum = float(cfg.mpc.relaxed_green_quantum_sec)
         self.assertGreater(abs(moved), 1e-9,
                            msg="마찰 무시(PRICE-TR)면 가격이 green을 움직여야 한다")
-        self.assertLess(abs(censored), 1e-9,
-                        msg="마찰 유지면 1e6 smoothness가 가격을 검열해야 한다")
+        self.assertLessEqual(abs(censored), quantum + 1e-9,
+                             msg="마찰 유지면 1e6 smoothness가 가격을 검열해야 한다")
+        self.assertGreater(abs(moved), abs(censored) + 1e-9,
+                           msg="가격이 움직인 폭이 검열된 폭보다 커야 한다")
 
     def test_vsl_trust_handed_down_and_bounds_moves(self):
         # PRICE-TR: 컨트롤러가 vsl trust(±10)를 하달하고, follower의 VSL 선택이
