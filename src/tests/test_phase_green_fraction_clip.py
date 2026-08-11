@@ -34,7 +34,7 @@ import unittest
 
 import numpy as np
 
-from src.models.state import ControlAction, ExperimentConfig
+from src.models.state import MODEL_PHASES, ControlAction, ExperimentConfig
 from src.models.urban_queue_model import _phase_green_fraction, movement_specs
 
 
@@ -71,15 +71,20 @@ class PhaseGreenFractionValueTests(unittest.TestCase):
         phase = str(spec.get("phase", ""))
         if not phase:
             return 1.0
-        default_green = net.effective_green_total / 2.0
+        default_green = net.effective_green_total / float(net.num_phases)
         green_sec = float(self.control.green_times.get(phase, default_green))
         cycle = max(net.cycle_length, 1.0e-9)
         if urban_step_index is None:
             return float(np.clip(green_sec / cycle, 0.0, 1.0))
         signal, _, phase_id = phase.rpartition("_")
-        g1 = float(self.control.green_times.get(f"{signal}_p1", default_green))
-        half_lost = max(0.0, net.lost_time) / 2.0
-        start = 0.0 if phase_id == "p1" else g1 + half_lost
+        clearance = max(0.0, net.lost_time) / float(net.num_phases)
+        start = 0.0
+        cursor = 0.0
+        for order, pid in enumerate(MODEL_PHASES):
+            if pid == phase_id:
+                start = cursor + order * clearance
+                break
+            cursor += float(self.control.green_times.get(f"{signal}_{pid}", default_green))
         end = min(start + green_sec, cycle)
         offset = float(self.control.offsets.get(signal, 0.0))
         t_u = self.cfg.simulation.T_u_sec

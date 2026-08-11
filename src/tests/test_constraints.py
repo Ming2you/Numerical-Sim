@@ -13,7 +13,7 @@ from src.controllers.freeway_follower import FreewayFollower, FreewayFollowerRes
 from src.controllers.leader import Leader, LeaderAction
 from src.controllers.inflow_outflow_allocation import InflowOutflowAllocationModule
 from src.controllers.nash_solver import NashResult
-from src.controllers.relaxed_quantization import repair_green_pair, repair_vsl_value
+from src.controllers.relaxed_quantization import repair_green_phases, repair_vsl_value
 from src.controllers.simplified_inflow_outflow_allocation import SimplifiedInflowOutflowAllocationModule
 from src.controllers.spillback_constraints import (
     assess_offramp_spillback,
@@ -30,7 +30,13 @@ from src.controllers.wu_faithful_follower import WuFaithfulFollower
 from src.evaluation.metrics import validate_controls
 from src.models.demand import DemandProfile, DemandStep, ScenarioConfig
 from src.models.metanet import effective_lane_profile
-from src.models.state import ControlAction, ExperimentConfig, TrafficState
+from src.models.state import (
+    MODEL_PHASES,
+    ControlAction,
+    ExperimentConfig,
+    TrafficState,
+    distribute_phase_green,
+)
 from src.models.urban_queue_model import (
     movement_storage_capacity,
     sync_onramp_queues_from_freeway,
@@ -190,15 +196,16 @@ class ConstraintTests(unittest.TestCase):
 
     def test_relaxed_green_repair_satisfies_cycle_and_bounds(self):
         cfg = short_config().with_updates({"mpc": {"relaxed_quantized_controls": True}})
-        repaired = repair_green_pair(cfg.network.green_max + 37.0, cfg)
+        repaired = repair_green_phases(cfg.network.green_max + 37.0, cfg)
+        self.assertEqual(set(repaired.phases), set(MODEL_PHASES))
         self.assertAlmostEqual(
-            repaired.p1 + repaired.p2 + cfg.network.lost_time,
+            sum(repaired.phases.values()) + cfg.network.lost_time,
             cfg.network.cycle_length,
         )
-        self.assertGreaterEqual(repaired.p1, cfg.network.green_min)
-        self.assertLessEqual(repaired.p1, cfg.network.green_max)
-        self.assertGreaterEqual(repaired.p2, cfg.network.green_min)
-        self.assertLessEqual(repaired.p2, cfg.network.green_max)
+        for pid, green in repaired.phases.items():
+            self.assertGreaterEqual(green, cfg.network.green_min, pid)
+            self.assertLessEqual(green, cfg.network.green_max, pid)
+        self.assertEqual(repaired.primary, repaired.phases[MODEL_PHASES[0]])
 
     def test_relaxed_vsl_repair_is_discrete_and_step_limited(self):
         cfg = short_config().with_updates({"mpc": {"relaxed_quantized_controls": True}})
@@ -215,13 +222,12 @@ class ConstraintTests(unittest.TestCase):
                 state.urban_movement_queue[movement] = 250.0
         demand = DemandProfile(cfg, ScenarioConfig("test")).at(0.0)
         result = UrbanFollower(cfg).solve(state, None, demand)
-        self.assertGreater(result.green_times["A_p1"], cfg.network.effective_green_total / 2.0)
+        self.assertGreater(result.green_times["A_p1"], cfg.network.default_phase_green)
         for signal in cfg.network.signals:
-            p1 = result.green_times[f"{signal}_p1"]
-            p2 = result.green_times[f"{signal}_p2"]
-            self.assertAlmostEqual(p1 + p2, cfg.network.effective_green_total)
-            self.assertGreaterEqual(p1, cfg.network.green_min)
-            self.assertGreaterEqual(p2, cfg.network.green_min)
+            greens = [result.green_times[f"{signal}_{pid}"] for pid in MODEL_PHASES]
+            self.assertAlmostEqual(sum(greens), cfg.network.effective_green_total)
+            for pid, green in zip(MODEL_PHASES, greens):
+                self.assertGreaterEqual(green, cfg.network.green_min, pid)
 
     def test_relaxed_wu_freeway_evaluates_fewer_vsl_candidates(self):
         full_cfg = short_config()
@@ -275,8 +281,8 @@ class ConstraintTests(unittest.TestCase):
         cfg = short_config().with_updates({"mpc": {"relaxed_quantized_controls": True}})
         state = TrafficState.initial(cfg)
         previous = ControlAction.uncontrolled(cfg)
-        previous.green_times["A_p1"] = cfg.network.green_min
-        previous.green_times["A_p2"] = cfg.network.effective_green_total - cfg.network.green_min
+        for pid, green in distribute_phase_green(cfg.network, cfg.network.green_min).items():
+            previous.green_times[f"A_{pid}"] = green
         previous.offsets["A"] = cfg.urban_follower.max_offset_step
         demand = DemandProfile(cfg, ScenarioConfig("test")).at(0.0)
 
@@ -285,9 +291,8 @@ class ConstraintTests(unittest.TestCase):
         self.assertEqual(result.metrics["urban_stage2_default_guard_evaluated"], 1.0)
         self.assertGreater(result.metrics["urban_stage2_candidate_evaluations"], len(cfg.network.signals))
         for signal in cfg.network.signals:
-            p1 = result.green_times[f"{signal}_p1"]
-            p2 = result.green_times[f"{signal}_p2"]
-            self.assertAlmostEqual(p1 + p2, cfg.network.effective_green_total)
+            greens = [result.green_times[f"{signal}_{pid}"] for pid in MODEL_PHASES]
+            self.assertAlmostEqual(sum(greens), cfg.network.effective_green_total)
             self.assertGreaterEqual(result.offsets[signal], 0.0)
             self.assertLess(result.offsets[signal], cfg.network.cycle_length)
 
@@ -1138,8 +1143,8 @@ class ConstraintTests(unittest.TestCase):
         )
         coordinator = DistributedCoordinator(cfg)
         previous = ControlAction.uncontrolled(cfg)
-        previous.green_times["A_p1"] = cfg.network.green_min
-        previous.green_times["A_p2"] = cfg.network.effective_green_total - cfg.network.green_min
+        for pid, green in distribute_phase_green(cfg.network, cfg.network.green_min).items():
+            previous.green_times[f"A_{pid}"] = green
         previous.offsets["A"] = 12.0
 
         guards = dict(coordinator._full_controller_guard_candidates(previous))
@@ -1277,11 +1282,10 @@ class ConstraintTests(unittest.TestCase):
             )
         for signal in cfg.network.signals:
             self.assertAlmostEqual(control.offsets[signal], 0.0)
-            p1 = control.green_times[f"{signal}_p1"]
-            p2 = control.green_times[f"{signal}_p2"]
-            self.assertAlmostEqual(p1 + p2, cfg.network.effective_green_total)
-            self.assertGreaterEqual(p1, cfg.network.green_min)
-            self.assertGreaterEqual(p2, cfg.network.green_min)
+            greens = [control.green_times[f"{signal}_{pid}"] for pid in MODEL_PHASES]
+            self.assertAlmostEqual(sum(greens), cfg.network.effective_green_total)
+            for pid, green in zip(MODEL_PHASES, greens):
+                self.assertGreaterEqual(green, cfg.network.green_min, pid)
         for link in cfg.network.freeway_links:
             self.assertIn(control.vsl[link], {float(v) for v in cfg.freeway_follower.vsl_set})
 
@@ -1716,7 +1720,9 @@ class ConstraintTests(unittest.TestCase):
         cfg = short_config()
         control = ControlAction.fixed(cfg)
         for signal in cfg.network.signals:
-            total = control.green_times[f"{signal}_p1"] + control.green_times[f"{signal}_p2"] + cfg.network.lost_time
+            total = sum(
+                control.green_times[f"{signal}_{pid}"] for pid in MODEL_PHASES
+            ) + cfg.network.lost_time
             self.assertAlmostEqual(total, cfg.network.cycle_length)
 
     def test_green_time_bounds(self):
@@ -2739,10 +2745,10 @@ class ConstraintTests(unittest.TestCase):
 
         low_control = ControlAction.fixed(cfg)
         high_control = ControlAction.fixed(cfg)
-        # on_ramp 행 movement는 incoming approach 축으로 phase가 갈린다 — 양 phase 모두 조인다.
-        for phase in ("D_p1", "D_p2"):
-            low_control.green_times[phase] = cfg.network.green_min
-            high_control.green_times[phase] = cfg.network.green_max
+        # on_ramp 행 movement는 (축 x 회전)으로 현시가 갈린다 — 네 현시 모두 조인다.
+        for pid in MODEL_PHASES:
+            low_control.green_times[f"D_{pid}"] = cfg.network.green_min
+            high_control.green_times[f"D_{pid}"] = cfg.network.green_max
         for movement in cfg.network.on_ramp_to_movement["R_D_W"]:
             low_control.inflow_outflow_allocation[movement] = cfg.network.movement_capacity_veh_h
             high_control.inflow_outflow_allocation[movement] = cfg.network.movement_capacity_veh_h
@@ -2950,8 +2956,8 @@ class ConstraintTests(unittest.TestCase):
         state = TrafficState.initial(cfg)
         demand = DemandProfile(cfg, ScenarioConfig("test")).horizon(0.0, 1)
         previous = ControlAction.fixed(cfg)
-        previous.green_times["A_p1"] = cfg.network.green_min
-        previous.green_times["A_p2"] = cfg.network.effective_green_total - cfg.network.green_min
+        for pid, green in distribute_phase_green(cfg.network, cfg.network.green_min).items():
+            previous.green_times[f"A_{pid}"] = green
         seen_green = []
 
         def fake_lightweight_transition(*args):

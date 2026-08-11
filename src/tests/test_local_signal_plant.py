@@ -56,6 +56,13 @@ def _build_model(cfg: ExperimentConfig) -> LocalSignalModel:
     )
 
 
+def _greens(p1: float, p2: float) -> dict:
+    """2현시 픽스처를 4현시 매핑으로 옮긴다 — 나머지 두 현시는 0(서비스 없음)."""
+    from src.models.state import MODEL_PHASES
+
+    values = [float(p1), float(p2)] + [0.0] * (len(MODEL_PHASES) - 2)
+    return dict(zip(MODEL_PHASES, values))
+
 class TestOffRampDrainSignConvention(unittest.TestCase):
     def test_offramp_drain_decreases_receiving_space(self):
         cfg = ExperimentConfig()
@@ -75,8 +82,7 @@ class TestOffRampDrainSignConvention(unittest.TestCase):
             reservoir_drain={},
             freeway_congestion={},
             ramp_metering_weight=0.0,
-            green_p1=120.0,
-            green_p2=0.0,
+            greens=_greens(120.0, 0.0),
             substeps=1,
             dt_h=1.0,
         )
@@ -144,13 +150,12 @@ class TestPhaseResolvedRampAware(unittest.TestCase):
             reservoir_drain={"R_Y": 500.0},
             freeway_congestion={"R_Y": 0.4},
             ramp_metering_weight=0.0,
-            green_p1=green_p1,
-            green_p2=green_p2,
+            greens=_greens(green_p1, green_p2),
             substeps=substeps,
             dt_h=dt_h,
         )
         legacy_cost = rollout_local_tts_ramp_aware(model, **common)
-        gf_const = {"p1": green_p1 / cycle, "p2": green_p2 / cycle}
+        gf_const = {pid: g / cycle for pid, g in _greens(green_p1, green_p2).items()}
         arr_by_substep = {m: [arr_movement.get(m, 0.0)] * substeps for m in q0}
         gf_by_substep = {
             m: [gf_const[model.phase_of[m]]] * substeps for m in model.movements
@@ -176,8 +181,7 @@ class TestPhaseResolvedRampAware(unittest.TestCase):
             reservoir_drain={"R_Y": 0.0},
             freeway_congestion={"R_Y": 0.0},
             ramp_metering_weight=0.0,
-            green_p1=56.0,
-            green_p2=56.0,
+            greens=_greens(56.0, 56.0),
             substeps=substeps,
             dt_h=dt_h,
         )
@@ -236,8 +240,7 @@ class TestSEffBySubstepInjection(unittest.TestCase):
             q0={"m1": 30.0, "m2": 0.0},
             arr_movement={},
             s_eff0={"own_link": 5.0, "sink_link": 1.0e9},
-            green_p1=120.0,
-            green_p2=0.0,
+            greens=_greens(120.0, 0.0),
             substeps=3,
             dt_h=1.0,
         )

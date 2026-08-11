@@ -2,6 +2,7 @@
 import unittest
 
 from src.models.demand import DemandProfile, ScenarioConfig
+from src.models.grid_topology import movement_turn
 from src.models.state import ControlAction, ExperimentConfig, TrafficState
 from src.models.urban_queue_model import (
     approach_routing,
@@ -69,7 +70,8 @@ class TurningRatioTests(unittest.TestCase):
         self.assertAlmostEqual(specs["E_N_to_E"]["beta"], 0.5)
         self.assertAlmostEqual(specs["E_N_to_W"]["beta"], 0.5)
 
-    def test_two_phase_assignment_by_incoming_axis(self):
+    def test_four_phase_assignment_by_axis_and_turn(self):
+        """현시 = (approach 축) x (회전). 축만으로 갈리던 구 2현시 배정의 후속."""
         cfg = grid_config()
         for movement, spec in cfg.network.urban_movements.items():
             node = str(spec["intersection"])
@@ -78,13 +80,21 @@ class TurningRatioTests(unittest.TestCase):
             if node not in cfg.network.signals:
                 self.assertEqual(phase, "", msg=f"E는 비통제 통과 노드: {movement}")
                 continue
-            axis_dir = "S" if approach.startswith("off") else approach
-            expected = f"{node}_p1" if axis_dir in {"N", "S"} else f"{node}_p2"
+            approach_leg = "S" if approach.startswith("off") else approach
+            exit_token = str(spec["exit"])
+            exit_leg = "S" if exit_token.startswith("on") else exit_token
+            major = approach_leg in {"N", "S"}
+            left = movement_turn(approach_leg, exit_leg) == "left"
+            expected = f"{node}_" + ("p2" if left else "p1") if major else                 f"{node}_" + ("p4" if left else "p3")
             self.assertEqual(phase, expected, msg=movement)
-        # 램프 movement 재배정 확인: off_ramp(S 유입)→p1, on_ramp행은 incoming 축.
-        self.assertEqual(cfg.network.urban_movements["D_offW_to_N"]["phase"], "D_p1")
-        self.assertEqual(cfg.network.urban_movements["D_N_to_onW"]["phase"], "D_p1")
-        self.assertEqual(cfg.network.urban_movements["D_E_to_onW"]["phase"], "D_p2")
+        # 램프 movement 재배정 확인: off_ramp(S 유입)은 major 축, 회전으로 현시가 갈린다.
+        moves = cfg.network.urban_movements
+        self.assertEqual(moves["D_offW_to_N"]["phase"], "D_p1")   # S->N 직진
+        self.assertEqual(moves["D_offW_to_E"]["phase"], "D_p1")   # S->E 우회전(직진 현시 동반)
+        self.assertEqual(moves["D_offW_to_W"]["phase"], "D_p2")   # S->W 좌회전
+        self.assertEqual(moves["D_N_to_onW"]["phase"], "D_p1")    # N->S 직진
+        self.assertEqual(moves["D_E_to_W"]["phase"], "D_p3")      # E->W 직진(minor)
+        self.assertEqual(moves["D_E_to_onW"]["phase"], "D_p4")    # E->S 좌회전
 
 
 class BetaSplitArrivalTests(unittest.TestCase):

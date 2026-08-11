@@ -26,6 +26,7 @@ from __future__ import annotations
 import unittest
 
 from src.models.state import (
+    MODEL_PHASES,
     ControlAction,
     ExperimentConfig,
     cycle_length_fallback_counts,
@@ -103,28 +104,27 @@ class PhaseGreenFractionUsesPerSignalCycleTests(unittest.TestCase):
         self.cfg = _config()
         reset_cycle_length_fallback_counts()
         self.control = ControlAction.fixed(self.cfg)
-        self.control.green_times["A_p1"] = 60.0
-        self.control.green_times["A_p2"] = 40.0
-        self.control.green_times["B_p1"] = 60.0
-        self.control.green_times["B_p2"] = 40.0
+        for signal in ("A", "B"):
+            for pid, green in zip(MODEL_PHASES, (60.0, 30.0, 28.0, 20.0)):
+                self.control.green_times[f"{signal}_{pid}"] = green
 
     def test_cycle_average_branch_divides_by_the_signals_own_cycle(self) -> None:
         net = self.cfg.network
-        self.assertEqual(net.cycle_length, 120.0)
-        net.cycle_length_by_signal = {"A": 240.0}
-        # A 는 240 s 주기 -> 60/240, 매핑에 없는 B 는 스칼라 120 s -> 60/120.
-        self.assertEqual(_phase_green_fraction(self.control, self.cfg, {"phase": "A_p1"}), 0.25)
-        self.assertEqual(_phase_green_fraction(self.control, self.cfg, {"phase": "B_p1"}), 0.5)
+        self.assertEqual(net.cycle_length, 150.0)
+        net.cycle_length_by_signal = {"A": 300.0}
+        # A 는 300 s 주기 -> 60/300, 매핑에 없는 B 는 스칼라 150 s -> 60/150.
+        self.assertEqual(_phase_green_fraction(self.control, self.cfg, {"phase": "A_p1"}), 0.2)
+        self.assertEqual(_phase_green_fraction(self.control, self.cfg, {"phase": "B_p1"}), 0.4)
 
     def test_offset_aware_branch_uses_the_signals_own_cycle(self) -> None:
         """substep 겹침 분율도 신호별 C 로 감긴다 — 주기가 길면 green window 위치가 다르다."""
         net = self.cfg.network
-        net.cycle_length_by_signal = {"A": 240.0}
+        net.cycle_length_by_signal = {"A": 300.0}
         self.control.offsets["A"] = 0.0
         t_u = self.cfg.simulation.T_u_sec
-        # C=240, p1 green = [0, 60). C=120 이었다면 p1 green 도 [0, 60) 로 같지만,
-        # 한 주기 뒤 substep 은 갈린다: t=120 s 는 C=120 에서 green, C=240 에서 red.
-        index = int(round(120.0 / t_u))
+        # C=300, p1 green = [0, 60). C=150 이었다면 p1 green 도 [0, 60) 로 같지만,
+        # 한 주기 뒤 substep 은 갈린다: t=150 s 는 C=150 에서 green, C=300 에서 red.
+        index = int(round(150.0 / t_u))
         self.assertEqual(
             _phase_green_fraction(self.control, self.cfg, {"phase": "A_p1"}, index), 0.0
         )
@@ -133,12 +133,12 @@ class PhaseGreenFractionUsesPerSignalCycleTests(unittest.TestCase):
         )
 
     def test_a_phase_whose_signal_is_missing_from_a_nonempty_mapping_is_counted(self) -> None:
-        self.cfg.network.cycle_length_by_signal = {"A": 240.0}
+        self.cfg.network.cycle_length_by_signal = {"A": 300.0}
         _phase_green_fraction(self.control, self.cfg, {"phase": "B_p1"})
         self.assertEqual(cycle_length_fallback_counts(), {"B": 1})
 
     def test_an_empty_phase_still_short_circuits_without_touching_the_counter(self) -> None:
-        self.cfg.network.cycle_length_by_signal = {"A": 240.0}
+        self.cfg.network.cycle_length_by_signal = {"A": 300.0}
         self.assertEqual(_phase_green_fraction(self.control, self.cfg, {"phase": ""}), 1.0)
         self.assertEqual(cycle_length_fallback_counts(), {})
 
@@ -158,15 +158,20 @@ class EmptyMappingIsBitIdenticalTests(unittest.TestCase):
         phase = str(spec.get("phase", ""))
         if not phase:
             return 1.0
-        default_green = net.effective_green_total / 2.0
+        default_green = net.effective_green_total / float(net.num_phases)
         green_sec = float(self.control.green_times.get(phase, default_green))
         cycle = max(net.cycle_length, 1.0e-9)
         if urban_step_index is None:
             return min(max(green_sec / cycle, 0.0), 1.0)
         signal, _, phase_id = phase.rpartition("_")
-        g1 = float(self.control.green_times.get(f"{signal}_p1", default_green))
-        half_lost = max(0.0, net.lost_time) / 2.0
-        start = 0.0 if phase_id == "p1" else g1 + half_lost
+        clearance = max(0.0, net.lost_time) / float(net.num_phases)
+        start = 0.0
+        cursor = 0.0
+        for order, pid in enumerate(MODEL_PHASES):
+            if pid == phase_id:
+                start = cursor + order * clearance
+                break
+            cursor += float(self.control.green_times.get(f"{signal}_{pid}", default_green))
         end = min(start + green_sec, cycle)
         offset = float(self.control.offsets.get(signal, 0.0))
         t_u = self.cfg.simulation.T_u_sec
@@ -198,7 +203,9 @@ class EmptyMappingIsBitIdenticalTests(unittest.TestCase):
             if not phase:
                 continue
             net = self.cfg.network
-            expected = min(max((net.effective_green_total / 2.0) / max(net.cycle_length, 1.0e-9), 0.0), 1.0)
+            expected = min(
+                max(net.default_phase_green / max(net.cycle_length, 1.0e-9), 0.0), 1.0
+            )
             self.assertEqual(_phase_green_fraction(bare, self.cfg, spec), expected)
 
 

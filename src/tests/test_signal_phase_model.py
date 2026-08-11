@@ -3,7 +3,13 @@ import unittest
 
 from src.controllers.urban_follower import UrbanFollower
 from src.models.demand import DemandStep
-from src.models.state import ControlAction, ExperimentConfig, TrafficState
+from src.models.state import (
+    MODEL_PHASES,
+    ControlAction,
+    ExperimentConfig,
+    TrafficState,
+    signal_green_reference,
+)
 from src.models.urban_queue_model import (
     _phase_green_fraction,
     ensure_urban_state,
@@ -24,38 +30,75 @@ def empty_demand(cfg, boundary=None):
 
 
 class GreenWindowTests(unittest.TestCase):
+    """4현시 창 배치 — [p1][c][p2][c][p3][c][p4][c], c = lost_time / 4."""
+
+    def _windows(self, cfg, control, signal):
+        """현시별 [start, end) 를 창 배치식으로 **따로** 계산한다(구현과 독립)."""
+        net = cfg.network
+        greens = signal_green_reference(control, net, signal)
+        clearance = net.lost_time / net.num_phases
+        out = {}
+        cursor = 0.0
+        for index, pid in enumerate(MODEL_PHASES):
+            start = cursor + index * clearance
+            out[pid] = (start, start + greens[pid])
+            cursor += greens[pid]
+        return out
+
     def test_phase_windows_follow_cycle_structure(self):
         cfg = cfg_default()
-        control = ControlAction.fixed(cfg)  # g1=g2=56, lost 8, offset 0
-        spec_p1 = {"phase": "A_p1"}
-        spec_p2 = {"phase": "A_p2"}
-        cycle_steps = int(cfg.network.cycle_length / cfg.simulation.T_u_sec)  # 24
-        p1 = [_phase_green_fraction(control, cfg, spec_p1, urban_step_index=k) for k in range(cycle_steps)]
-        p2 = [_phase_green_fraction(control, cfg, spec_p2, urban_step_index=k) for k in range(cycle_steps)]
-        # p1 green [0,56): step 0~10 풀, step 11은 [55,60) 중 1초 → 0.2.
-        self.assertTrue(all(abs(v - 1.0) < 1e-9 for v in p1[:11]))
-        self.assertAlmostEqual(p1[11], 0.2)
-        self.assertTrue(all(v == 0.0 for v in p1[12:]))
-        # p2 green [60,116): step 12~22 풀, step 23은 [115,120) 중 1초 → 0.2.
-        self.assertTrue(all(v == 0.0 for v in p2[:12]))
-        self.assertTrue(all(abs(v - 1.0) < 1e-9 for v in p2[12:23]))
-        self.assertAlmostEqual(p2[23], 0.2)
-        # cycle 평균 서비스량 보존: Σ겹침×T_u = green_sec.
+        net = cfg.network
+        control = ControlAction.fixed(cfg)
         t_u = cfg.simulation.T_u_sec
-        self.assertAlmostEqual(sum(p1) * t_u, 56.0)
-        self.assertAlmostEqual(sum(p2) * t_u, 56.0)
-        # offset은 패턴을 그대로 평행이동시킨다(30s = 6 substep).
-        control.offsets["A"] = 30.0
-        p1_shift = [_phase_green_fraction(control, cfg, spec_p1, urban_step_index=k) for k in range(cycle_steps)]
+        cycle_steps = int(net.cycle_length / t_u)
+        windows = self._windows(cfg, control, "A")
+        # 마지막 현시 끝 + clearance 가 정확히 주기다 — 암흑시간 0.
+        last = MODEL_PHASES[-1]
+        self.assertAlmostEqual(
+            windows[last][1] + net.lost_time / net.num_phases, net.cycle_length
+        )
+        for pid, (start, end) in windows.items():
+            fractions = [
+                _phase_green_fraction(
+                    control, cfg, {"phase": f"A_{pid}"}, urban_step_index=k
+                )
+                for k in range(cycle_steps)
+            ]
+            for k in range(cycle_steps):
+                overlap = max(0.0, min((k + 1) * t_u, end) - max(k * t_u, start))
+                self.assertAlmostEqual(fractions[k], overlap / t_u, msg=(pid, k))
+            # cycle 평균 서비스량 보존: Sum(겹침) x T_u = green_sec.
+            self.assertAlmostEqual(sum(fractions) * t_u, end - start, msg=pid)
+        # 창이 서로 겹치지 않는다 — 한 substep 에서 네 현시 분율 합 <= 1.
         for k in range(cycle_steps):
-            self.assertAlmostEqual(p1_shift[(k + 6) % cycle_steps], p1[k])
+            total = sum(
+                _phase_green_fraction(
+                    control, cfg, {"phase": f"A_{pid}"}, urban_step_index=k
+                )
+                for pid in MODEL_PHASES
+            )
+            self.assertLessEqual(total, 1.0 + 1.0e-9, k)
+        # offset은 패턴을 그대로 평행이동시킨다(30s = 6 substep).
+        base = [
+            _phase_green_fraction(control, cfg, {"phase": "A_p1"}, urban_step_index=k)
+            for k in range(cycle_steps)
+        ]
+        control.offsets["A"] = 30.0
+        shift = int(30.0 / t_u)
+        shifted = [
+            _phase_green_fraction(control, cfg, {"phase": "A_p1"}, urban_step_index=k)
+            for k in range(cycle_steps)
+        ]
+        for k in range(cycle_steps):
+            self.assertAlmostEqual(shifted[(k + shift) % cycle_steps], base[k])
 
     def test_average_mode_unchanged_without_step(self):
         cfg = cfg_default()
+        net = cfg.network
         control = ControlAction.fixed(cfg)
         self.assertAlmostEqual(
             _phase_green_fraction(control, cfg, {"phase": "A_p1"}),
-            56.0 / 120.0,
+            net.default_phase_green / net.cycle_length,
         )
         self.assertEqual(_phase_green_fraction(control, cfg, {"phase": ""}), 1.0)
 
