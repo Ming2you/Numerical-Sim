@@ -12,7 +12,7 @@ import numpy as np
 from src.controllers.grid_parallel import build_chunk_payloads, evaluate_grid_items
 from src.controllers.relaxed_quantization import (
     accumulate_repair_diagnostics,
-    repair_green_pair,
+    repair_green_phases,
     repair_vsl_value,
 )
 from src.controllers.structured_grid import (
@@ -23,7 +23,14 @@ from src.controllers.structured_grid import (
 )
 from src.controllers.spillback_constraints import assess_onramp_spillback, ramp_arrivals_over_horizon
 from src.models.demand import DemandStep
-from src.models.state import ControlAction, ExperimentConfig, TrafficState
+from src.models.state import (
+    ControlAction,
+    ExperimentConfig,
+    TrafficState,
+    phase_key,
+    primary_green,
+    set_signal_green,
+)
 from src.models.urban_queue_model import movement_specs
 
 
@@ -125,7 +132,7 @@ class CentralizedMPC:
         for name in names:
             kind, _, key = name.partition("_")
             if kind == "g":
-                values.append(float(control.green_times.get(f"{key}_p1", net.effective_green_total / 2.0)))
+                values.append(primary_green(control, net, key))
             elif kind == "v":
                 values.append(float(control.vsl.get(key, max(self.cfg.freeway_follower.vsl_set))))
             elif kind == "o":
@@ -162,22 +169,15 @@ class CentralizedMPC:
         for value, name in zip(vec, names):
             kind, _, key = name.partition("_")
             if kind == "g":
-                p1 = float(np.clip(value, net.green_min, net.green_max))
-                p2 = net.effective_green_total - p1
-                # cycle 합 제약: p2도 [min,max] 안으로 사영.
-                if p2 < net.green_min:
-                    p2 = net.green_min
-                    p1 = net.effective_green_total - p2
-                if p2 > net.green_max:
-                    p2 = net.green_max
-                    p1 = net.effective_green_total - p2
+                # 주 현시만 결정변수다. 나머지 현시는 예산에서 사영으로 나온다.
                 if self.cfg.mpc.relaxed_quantized_controls:
                     # Spec 17.5 centralized relaxed: decoded continuous green을 공통 repair로 재투영한다.
-                    repaired = repair_green_pair(float(value), self.cfg)
+                    repaired = repair_green_phases(float(value), self.cfg)
                     accumulate_repair_diagnostics(control.diagnostics, green=repaired)
-                    p1, p2 = repaired.p1, repaired.p2
-                control.green_times[f"{key}_p1"] = p1
-                control.green_times[f"{key}_p2"] = p2
+                    for pid, green_sec in repaired.phases.items():
+                        control.green_times[phase_key(key, pid)] = float(green_sec)
+                else:
+                    set_signal_green(control, net, key, float(value))
             elif kind == "v":
                 # 이산 VSL 집합으로 스냅(plant 검증 게이트와 동일 제약).
                 if self.cfg.mpc.relaxed_quantized_controls:
@@ -253,9 +253,9 @@ class CentralizedMPC:
         # 제어 변화 패널티(green/VSL — Wu 식24의 Δu항과 동형; proposed는 offset/metering 포함).
         green_variation = 0.0
         for signal in net.signals:
+            # 결정변수는 주 현시 하나다(나머지는 예산에서 유도) — 구 |dp1| 과 같은 척도.
             green_variation += abs(
-                control.green_times.get(f"{signal}_p1", 0.0)
-                - previous.green_times.get(f"{signal}_p1", 0.0)
+                primary_green(control, net, signal) - primary_green(previous, net, signal)
             )
         vsl_variation = 0.0
         for link in net.freeway_links:

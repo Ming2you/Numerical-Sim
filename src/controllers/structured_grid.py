@@ -5,7 +5,13 @@ from typing import List, Tuple
 
 import numpy as np
 
-from src.models.state import ControlAction, ExperimentConfig
+from src.models.state import (
+    ControlAction,
+    ExperimentConfig,
+    clamp_primary_green,
+    primary_green,
+    set_signal_green,
+)
 
 
 @dataclass(frozen=True)
@@ -23,24 +29,17 @@ def _offset_delta(cycle: float, anchor: float, target: float) -> float:
 
 
 def _bounded_green_values(cfg: ExperimentConfig, values: list[float]) -> list[float]:
-    net = cfg.network
+    """주 현시 후보를 실행가능 상자로 자르고 중복을 없앤다."""
     out: list[float] = []
     for value in values:
-        p1 = float(np.clip(value, net.green_min, net.green_max))
-        p2 = net.effective_green_total - p1
-        if p2 < net.green_min:
-            p1 = net.effective_green_total - net.green_min
-        if p2 > net.green_max:
-            p1 = net.effective_green_total - net.green_max
+        p1 = clamp_primary_green(cfg.network, value)
         if not any(abs(p1 - existing) <= 1.0e-9 for existing in out):
             out.append(float(p1))
     return out
 
 
 def _set_signal_green(control: ControlAction, cfg: ExperimentConfig, signal: str, p1_value: float) -> None:
-    p1 = _bounded_green_values(cfg, [p1_value])[0]
-    control.green_times[f"{signal}_p1"] = float(p1)
-    control.green_times[f"{signal}_p2"] = float(cfg.network.effective_green_total - p1)
+    set_signal_green(control, cfg.network, signal, p1_value)
 
 
 def _set_all_green(control: ControlAction, cfg: ExperimentConfig, p1_value: float) -> None:
@@ -127,7 +126,7 @@ def _control_key(control: ControlAction, cfg: ExperimentConfig) -> Tuple[float, 
         for v in (
             [control.ramp_metering.get(ramp, net.ramp_capacity_veh_h[ramp]) for ramp in net.ramps]
             + [control.vsl.get(link, max(cfg.freeway_follower.vsl_set)) for link in net.freeway_links]
-            + [control.green_times.get(f"{signal}_p1", net.effective_green_total / 2.0) for signal in net.signals]
+            + [primary_green(control, net, signal) for signal in net.signals]
             + [control.offsets.get(signal, 0.0) % max(net.cycle_length, 1.0e-9) for signal in net.signals]
         )
     )
@@ -187,16 +186,25 @@ def _local_metering_rates(cfg: ExperimentConfig, center: ControlAction) -> list[
 
 
 def _global_green_values(cfg: ExperimentConfig) -> list[float]:
+    """주 현시 격자 — 상자 [green_min, green_max] 를 훑는다.
+
+    구 코드는 20~92 를 리터럴로 박아 뒀는데 그건 구 상자(green_min 20 · green_max 92)
+    그 자체였다. 4현시로 상한이 78 로 내려가면 리터럴은 상자 밖을 가리키므로 상자에서
+    유도한다(레벨 수 7 유지 / dense 는 4 s 간격 유지).
+    """
+    net = cfg.network
+    low, high = float(net.green_min), float(net.green_max)
     if _dense(cfg):
-        # tightness: 20~92를 4 간격(19레벨)
-        return _bounded_green_values(cfg, [20.0 + 4.0 * i for i in range(19)])
-    return _bounded_green_values(cfg, [20.0, 32.0, 44.0, 56.0, 68.0, 80.0, 92.0])
+        step = 4.0
+        count = max(int((high - low) // step), 0)
+        return _bounded_green_values(cfg, [low + step * i for i in range(count + 1)] + [high])
+    return _bounded_green_values(cfg, [low + (high - low) * i / 6.0 for i in range(7)])
 
 
 def _local_green_values(cfg: ExperimentConfig, center: ControlAction) -> list[float]:
     net = cfg.network
     seed = float(np.mean([
-        center.green_times.get(f"{signal}_p1", net.effective_green_total / 2.0)
+        primary_green(center, net, signal)
         for signal in net.signals
     ]))
     values = [seed - 6.0, seed, seed + 6.0]
@@ -205,7 +213,7 @@ def _local_green_values(cfg: ExperimentConfig, center: ControlAction) -> list[fl
 
 def _local_signal_green_values(cfg: ExperimentConfig, center: ControlAction, signal: str) -> list[float]:
     net = cfg.network
-    seed = center.green_times.get(f"{signal}_p1", net.effective_green_total / 2.0)
+    seed = primary_green(center, net, signal)
     return _bounded_green_values(cfg, [seed - 6.0, seed, seed + 6.0])
 
 
@@ -240,14 +248,14 @@ def _apply_axis_delta(
         return
     if axis == "green_all":
         current = float(np.mean([
-            control.green_times.get(f"{signal}_p1", net.effective_green_total / 2.0)
+            primary_green(control, net, signal)
             for signal in net.signals
         ]))
         _set_all_green(control, cfg, current + delta)
         return
     if axis.startswith("green:"):
         signal = axis.split(":", 1)[1]
-        current = control.green_times.get(f"{signal}_p1", net.effective_green_total / 2.0)
+        current = primary_green(control, net, signal)
         _set_signal_green(control, cfg, signal, current + delta)
         return
     if axis == "vsl_all":
@@ -475,8 +483,8 @@ def structured_grid_candidates(
         d_values = green_values
         f_values = green_values
         if scope == "local" or stage == "fine":
-            d0 = center.green_times.get("D_p1", net.effective_green_total / 2.0)
-            f0 = center.green_times.get("F_p1", net.effective_green_total / 2.0)
+            d0 = primary_green(center, net, "D")
+            f0 = primary_green(center, net, "F")
             d_values = _bounded_green_values(cfg, [d0 - 6.0, d0, d0 + 6.0])
             f_values = _bounded_green_values(cfg, [f0 - 6.0, f0, f0 + 6.0])
         for d_p1 in d_values:
@@ -552,8 +560,8 @@ def structured_grid_candidates(
                 f_values = combo_green
                 rm_for_df = [rm_rates[0], rm_rates[3]]
             else:
-                d0 = center.green_times.get("D_p1", net.effective_green_total / 2.0)
-                f0 = center.green_times.get("F_p1", net.effective_green_total / 2.0)
+                d0 = primary_green(center, net, "D")
+                f0 = primary_green(center, net, "F")
                 d_values = _bounded_green_values(cfg, [d0 - 6.0, d0, d0 + 6.0])
                 f_values = _bounded_green_values(cfg, [f0 - 6.0, f0, f0 + 6.0])
                 center_rate = float(np.mean([

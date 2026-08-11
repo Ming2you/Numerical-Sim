@@ -18,7 +18,14 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from src.models.demand import DemandStep
-from src.models.state import ControlAction, ExperimentConfig, TrafficState
+from src.models.state import (
+    PRIMARY_PHASE,
+    ControlAction,
+    ExperimentConfig,
+    TrafficState,
+    clamp_primary_green,
+    set_signal_green,
+)
 
 # 가격 채널 4종. `apply_action_schedule` 이 이 전부를 다룬다(채널 커버리지 100%의 정의).
 LEVER_KINDS: Tuple[str, ...] = ("green", "meter", "vsl", "offset")
@@ -113,7 +120,7 @@ def apply_action_schedule(
     """`previous` 를 hold 한 채 schedule 의 레버만 절대값으로 덮는다(원본 불변).
 
     규약은 기존 per-channel rollout 헬퍼와 동일하다.
-      green    : p1 = value, p2 = effective_green_total − value (사이클 예산 보존)
+      green    : 주 현시 = value, 나머지 현시는 예산에서 사영(사이클 예산 보존)
       meter    : ramp_metering[key] = value
       vsl      : segment 키 설정 + link fallback 키를 min 으로 동기화(plant 정합)
       vsl_link : link fallback 키를 지정값으로 직접 설정(min 동기화보다 우선)
@@ -125,15 +132,13 @@ def apply_action_schedule(
         return previous
     net = spec.cfg.network
     control = previous.copy()
-    total_green = float(net.effective_green_total)
     touched_links: Dict[str, float] = {}
     link_overrides: Dict[str, float] = {}
     for move in action_schedule:
         kind = move.kind
         value = float(move.value)
         if kind == "green":
-            control.green_times[f"{move.key}_p1"] = value
-            control.green_times[f"{move.key}_p2"] = total_green - value
+            set_signal_green(control, net, move.key, value)
         elif kind == "meter":
             control.ramp_metering[move.key] = value
         elif kind == "vsl":
@@ -202,7 +207,6 @@ def _rollout(
         _target_total = float(control.N_UF_star)
     # BOX-WALK-VG: VSL·green 도 끝 지속(edge persistence)으로 다중스텝 이동을 모델링.
     _vg_moves: list = []
-    _gtot = 0.0
     if (
         spec.box_walk
         and bool(getattr(cfg.mpc, "leader_rollout_box_walk_vg", False))
@@ -227,19 +231,21 @@ def _rollout(
         _gt = spec.green_trust_sec
         if _gt:
             _gt = float(_gt)
-            _gtot = float(cfg.network.effective_green_total)
-            _gmin = float(getattr(cfg.network, "green_min", 20.0))
-            for _key, _g in control.green_times.items():
-                if not _key.endswith("_p1"):
+            # 주 현시 상자 양끝 — 나머지 현시가 green_min 을 지킬 수 있는 범위다.
+            _glo = clamp_primary_green(cfg.network, float("-inf"))
+            _ghi = clamp_primary_green(cfg.network, float("inf"))
+            _primary_suffix = "_" + PRIMARY_PHASE
+            for _key, _g in list(control.green_times.items()):
+                if not _key.endswith(_primary_suffix):
                     continue
                 _pg = previous.green_times.get(_key)
                 if _pg is None:
                     continue
                 _d0 = float(_g) - float(_pg)
                 if _d0 >= _gt - 1.0e-6:
-                    _vg_moves.append(("green", _key, _gt, _gmin, _gtot - _gmin))
+                    _vg_moves.append(("green", _key, _gt, _glo, _ghi))
                 elif _d0 <= -(_gt - 1.0e-6):
-                    _vg_moves.append(("green", _key, -_gt, _gmin, _gtot - _gmin))
+                    _vg_moves.append(("green", _key, -_gt, _glo, _ghi))
     if _do_walk or _vg_moves:
         # 얕은 사본 + 변형할 dict만 교체 — 원본(commit 후보 control)은 불변.
         _ctrl_w = _copy.copy(control)
@@ -258,11 +264,9 @@ def _rollout(
                 else:
                     _np1 = min(max(
                         float(control.green_times[_key]) + _rate, _lo), _hi)
-                    control.green_times[_key] = _np1
-                    _k2 = _key[:-3] + "_p2"
-                    if _k2 in control.green_times:
-                        # p1+p2 합 보존(사이클 예산 불변).
-                        control.green_times[_k2] = _gtot - _np1
+                    # 나머지 현시가 예산을 나눠 갖는다(사이클 예산 불변).
+                    _sig = _key[: -len("_" + PRIMARY_PHASE)]
+                    set_signal_green(control, cfg.network, _sig, _np1)
             # link 대표 VSL = min(seg) 재계산(plant fallback 정합).
             for _lnk in cfg.network.freeway_links:
                 _sv = [float(v) for k, v in control.vsl.items()

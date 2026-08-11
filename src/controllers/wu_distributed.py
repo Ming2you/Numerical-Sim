@@ -11,11 +11,23 @@ from src.models.demand import DemandStep
 from src.controllers.relaxed_quantization import (
     accumulate_repair_diagnostics,
     queue_pressure_green_target,
-    repair_green_pair,
+    repair_green_phases,
     repair_vsl_value,
 )
 from src.models.metanet import compute_ramp_release_flows, effective_lane_profile, freeway_substep
-from src.models.state import ControlAction, ExperimentConfig, TrafficState, segment_vsl
+from src.models.state import (
+    MODEL_PHASES,
+    PRIMARY_PHASE,
+    ControlAction,
+    ExperimentConfig,
+    TrafficState,
+    clamp_primary_green,
+    distribute_phase_green,
+    phase_key,
+    primary_green,
+    segment_vsl,
+    signal_green_reference,
+)
 from src.models.urban_queue_model import (
     _movement_capacity_flow,
     _phase_green_fraction,
@@ -103,8 +115,8 @@ class WuDistributedController:
         self._phase_movements: Dict[str, Dict[str, list[str]]] = {}
         for signal in net.signals:
             self._phase_movements[signal] = {
-                "p1": [m for m, s in self._specs.items() if s.get("phase") == f"{signal}_p1"],
-                "p2": [m for m, s in self._specs.items() if s.get("phase") == f"{signal}_p2"],
+                pid: [m for m, s in self._specs.items() if s.get("phase") == phase_key(signal, pid)]
+                for pid in MODEL_PHASES
             }
         # Leader conditioning 고정 가중 ω (spec 16.5: 평가 전에 고정, Σ=1).
         protected_kinds = {"internal", "boundary_out", "off_ramp"}
@@ -142,8 +154,8 @@ class WuDistributedController:
                 producers_by_link.setdefault(dest, []).append((up_signal, up_mv))
         self._upstream_leaving_map: Dict[str, list[tuple[str, str, float]]] = {}
         for signal in net.signals:
-            for phase_id in ("p1", "p2"):
-                key = f"{signal}_{phase_id}"
+            for phase_id in MODEL_PHASES:
+                key = phase_key(signal, phase_id)
                 entries: list[tuple[str, str, float]] = []
                 beta_by_origin: Dict[str, float] = {}
                 for movement in self._phase_movements[signal][phase_id]:
@@ -218,9 +230,9 @@ class WuDistributedController:
         # 신호·phase별 도착유량 추정: 게이트 수요(β분할) + off-ramp 후보 유입 + 상류
         # 신호의 후보 green leaving rate(+점유 방출 보조) — local solve 동안 고정.
         for signal in net.signals:
-            arr = {"p1": 0.0, "p2": 0.0}
-            for phase_id in ("p1", "p2"):
-                key = f"{signal}_{phase_id}"
+            arr = {pid: 0.0 for pid in MODEL_PHASES}
+            for phase_id in MODEL_PHASES:
+                key = phase_key(signal, phase_id)
                 for movement in self._phase_movements[signal][phase_id]:
                     spec = self._specs[movement]
                     kind = str(spec.get("kind", ""))
@@ -257,8 +269,8 @@ class WuDistributedController:
                         state,
                         demand,
                     )
-            y[f"arr_{signal}_p1"] = float(arr["p1"])
-            y[f"arr_{signal}_p2"] = float(arr["p2"])
+            for phase_id in MODEL_PHASES:
+                y[f"arr_{phase_key(signal, phase_id)}"] = float(arr[phase_id])
         # urban→freeway: ramp별 접근(x_on) no-metering 방출 추정 = min(대기+수요, green×포화).
         # Spec 3.3.1: movement별 queue/arrival와 실제 green 용량을 먼저 제한한 뒤 ramp별로 합친다.
         # queue와 phase 용량을 각각 합산한 뒤 min을 취하면 phase split 효과가 소거된다.
@@ -308,22 +320,28 @@ class WuDistributedController:
                 ),
                 1.0e-9,
             )
-            for pid in ("p1", "p2")
+            for pid in MODEL_PHASES
         }
         q0 = {
             pid: sum(
                 max(0.0, state.urban_movement_queue.get(m, 0.0))
                 for m in self._phase_movements[signal][pid]
             )
-            for pid in ("p1", "p2")
+            for pid in MODEL_PHASES
         }
-        arr = {pid: float(coupling.get(f"arr_{signal}_{pid}", 0.0)) for pid in ("p1", "p2")}
-        prev_p1 = float(previous.green_times.get(f"{signal}_p1", total / 2.0))
+        arr = {
+            pid: float(coupling.get(f"arr_{phase_key(signal, pid)}", 0.0))
+            for pid in MODEL_PHASES
+        }
+        prev_p1 = primary_green(previous, net, signal)
         smooth_w = self.cfg.urban_follower.green_smoothness_weight
-        p1_pressure = q0["p1"] + arr["p1"] * dt_h * horizon
-        p2_pressure = q0["p2"] + arr["p2"] * dt_h * horizon
-        pressure_center = queue_pressure_green_target(p1_pressure, p2_pressure, self.cfg)
-        raw_candidates = [total / 2.0, prev_p1, pressure_center]
+        pressure = {pid: q0[pid] + arr[pid] * dt_h * horizon for pid in MODEL_PHASES}
+        pressure_center = queue_pressure_green_target(
+            pressure[PRIMARY_PHASE],
+            sum(pressure[pid] for pid in MODEL_PHASES[1:]),
+            self.cfg,
+        )
+        raw_candidates = [net.default_phase_green, prev_p1, pressure_center]
         if self.cfg.mpc.relaxed_quantized_controls:
             # Spec 17.5/18.9: pressure split은 후보 중심일 뿐이며, 주변 후보를 같은 TTS 비용으로 평가한다.
             raw_candidates.extend([
@@ -339,38 +357,29 @@ class WuDistributedController:
         candidates: list[float] = []
         for raw in raw_candidates:
             if self.cfg.mpc.relaxed_quantized_controls:
-                repaired = repair_green_pair(float(raw), self.cfg)
+                repaired = repair_green_phases(float(raw), self.cfg)
                 accumulate_repair_diagnostics(self._repair_diagnostics, green=repaired)
-                p1_value = repaired.p1
+                p1_value = repaired.primary
             else:
-                p1_value = float(np.clip(raw, net.green_min, net.green_max))
-                p2_value = total - p1_value
-                if p2_value < net.green_min:
-                    p2_value = net.green_min
-                    p1_value = total - p2_value
-                if p2_value > net.green_max:
-                    p2_value = net.green_max
-                    p1_value = total - p2_value
+                p1_value = clamp_primary_green(net, float(raw))
             if not any(abs(p1_value - existing) <= 1.0e-9 for existing in candidates):
                 candidates.append(float(p1_value))
 
         best_p1, best_obj = prev_p1, float("inf")
         evals = 0
         for p1 in candidates:
-            p2 = total - p1
-            if p2 < net.green_min - 1.0e-9 or p2 > net.green_max + 1.0e-9:
-                continue
+            greens = distribute_phase_green(net, p1, pressure)
             q = dict(q0)
             cost = 0.0
             for _ in range(horizon):
-                for pid, g in (("p1", p1), ("p2", p2)):
-                    service = (g / max(net.cycle_length, 1e-9)) * sat[pid] * dt_h
+                for pid in MODEL_PHASES:
+                    service = (greens[pid] / max(net.cycle_length, 1e-9)) * sat[pid] * dt_h
                     q[pid] = max(0.0, q[pid] + arr[pid] * dt_h - service)
-                cost += (q["p1"] + q["p2"]) * dt_h
+                cost += sum(q[pid] for pid in MODEL_PHASES) * dt_h
             cost += smooth_w * abs(p1 - prev_p1)
             if leader is not None:
                 # spec 16.5 conditioning: 예측 국소 누적이 ω×N_P_star를 넘으면 패널티.
-                n_pred = q["p1"] + q["p2"]
+                n_pred = sum(q[pid] for pid in MODEL_PHASES)
                 cost += self.cfg.leader.w_P * max(0.0, n_pred - self._omega_p[signal] * leader.n_p_star)
             evals += 1
             if cost < best_obj:
@@ -738,8 +747,10 @@ class WuDistributedController:
             new_vsl: Dict[str, float] = {}
             for signal in net.signals:
                 p1, _, e = self._solve_urban_agent(signal, state, coupling, snapshot, leader)
-                new_green[f"{signal}_p1"] = p1
-                new_green[f"{signal}_p2"] = net.effective_green_total - p1
+                for pid, green_sec in distribute_phase_green(
+                    net, p1, signal_green_reference(snapshot, net, signal)
+                ).items():
+                    new_green[phase_key(signal, pid)] = float(green_sec)
                 evals += e
             for link in net.freeway_links:
                 vsl_dict, _, e = self._solve_freeway_agent(

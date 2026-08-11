@@ -45,13 +45,25 @@ from src.controllers.local_signal_plant import (
 from src.controllers.nash_solver import NashResult
 from src.controllers.relaxed_quantization import (
     queue_pressure_green_target,
-    repair_green_pair,
+    repair_green_phases,
     repair_vsl_value,
 )
 from src.controllers.wu_distributed import WuDistributedController, _split_link_offramp_flow
 from src.models.demand import DemandStep
 from src.models.metanet import compute_ramp_release_flows
-from src.models.state import ControlAction, ExperimentConfig, TrafficState, segment_vsl
+from src.models.state import (
+    MODEL_PHASES,
+    PRIMARY_PHASE,
+    ControlAction,
+    ExperimentConfig,
+    TrafficState,
+    clamp_primary_green,
+    distribute_phase_green,
+    phase_key,
+    primary_green,
+    segment_vsl,
+    signal_green_reference,
+)
 from src.models.urban_queue_model import (
     _effective_available_space,
     _link_delay_steps,
@@ -463,8 +475,8 @@ class WuFaithfulFollower:
         # 상류 신호가 먹이는 origin 링크별 총 유입유량[veh/h]을 한 번만 계산해 캐시.
         # _coupling과 동일하게 producer movement의 leaving rate를 합산한다.
         upstream_inflow_by_link: Dict[str, float] = {}
-        for phase_id in ("p1", "p2"):
-            key = f"{signal}_{phase_id}"
+        for phase_id in MODEL_PHASES:
+            key = phase_key(signal, phase_id)
             for up_signal, up_movement, _up_beta in wu._upstream_leaving_map.get(key, []):
                 origin_link = str(wu._specs[up_movement].get("destination", ""))
                 if not origin_link:
@@ -475,7 +487,7 @@ class WuFaithfulFollower:
                     up_signal, up_movement, control, state, demand,
                 )
 
-        for phase_id in ("p1", "p2"):
+        for phase_id in MODEL_PHASES:
             for movement in self._phase_movements[signal][phase_id]:
                 spec = self._specs[movement]
                 kind = str(spec.get("kind", ""))
@@ -629,7 +641,7 @@ class WuFaithfulFollower:
         model = self._local_models[signal]
         total = net.effective_green_total
         cycle = max(net.cycle_length, 1.0e-9)
-        green = {"p1": float(green_p1), "p2": float(total - green_p1)}
+        green = distribute_phase_green(net, float(green_p1))
 
         served: Dict[str, float] = {}
         raw_onramp_by_ramp: Dict[str, float] = {}
@@ -693,14 +705,20 @@ class WuFaithfulFollower:
         substeps = horizon * max(1, sim.K_cu)
         dt_h = sim.T_u_h
         q0 = {m: max(0.0, state.urban_movement_queue.get(m, 0.0)) for m in model.movements}
-        arr_phase = {pid: float(coupling.get(f"arr_{signal}_{pid}", 0.0)) for pid in ("p1", "p2")}
+        arr_phase = {pid: float(coupling.get(f"arr_{phase_key(signal, pid)}", 0.0)) for pid in MODEL_PHASES}
 
-        prev_p1 = float(snapshot.green_times.get(f"{signal}_p1", total / 2.0))
+        prev_p1 = primary_green(snapshot, net, signal)
         # pressure 중심 + 주변 후보(완화 양자화). 기존 _solve_urban_agent와 같은 후보 구성 철학.
-        p1_pressure = q0_sum(q0, model, "p1") + arr_phase["p1"] * dt_h * substeps
-        p2_pressure = q0_sum(q0, model, "p2") + arr_phase["p2"] * dt_h * substeps
-        pressure_center = queue_pressure_green_target(p1_pressure, p2_pressure, self.cfg)
-        raw_candidates = [total / 2.0, prev_p1, pressure_center]
+        phase_pressure = {
+            pid: q0_sum(q0, model, pid) + arr_phase[pid] * dt_h * substeps
+            for pid in MODEL_PHASES
+        }
+        pressure_center = queue_pressure_green_target(
+            phase_pressure[PRIMARY_PHASE],
+            sum(phase_pressure[pid] for pid in MODEL_PHASES[1:]),
+            self.cfg,
+        )
+        raw_candidates = [net.default_phase_green, prev_p1, pressure_center]
         if self.cfg.mpc.relaxed_quantized_controls:
             raw_candidates.extend([
                 pressure_center - 1.0, pressure_center + 1.0,
@@ -715,14 +733,9 @@ class WuFaithfulFollower:
         candidates: List[float] = []
         for raw in raw_candidates:
             if self.cfg.mpc.relaxed_quantized_controls:
-                p1_value = repair_green_pair(float(raw), self.cfg).p1
+                p1_value = repair_green_phases(float(raw), self.cfg).primary
             else:
-                p1_value = float(np.clip(raw, net.green_min, net.green_max))
-                p2_value = total - p1_value
-                if p2_value < net.green_min:
-                    p1_value = total - net.green_min
-                if p2_value > net.green_max:
-                    p1_value = total - net.green_max
+                p1_value = clamp_primary_green(net, float(raw))
             if not any(abs(p1_value - existing) <= 1.0e-9 for existing in candidates):
                 candidates.append(float(p1_value))
         return candidates
@@ -771,12 +784,12 @@ class WuFaithfulFollower:
         # 자기 movement 초기 큐.
         q0 = {m: max(0.0, state.urban_movement_queue.get(m, 0.0)) for m in model.movements}
         # phase 단위 고정 도착(결합변수, frozen).
-        arr_phase = {pid: float(coupling.get(f"arr_{signal}_{pid}", 0.0)) for pid in ("p1", "p2")}
+        arr_phase = {pid: float(coupling.get(f"arr_{phase_key(signal, pid)}", 0.0)) for pid in MODEL_PHASES}
         # ramp-aware 신호(D/F): off-ramp 유입을 phase 큐에서 분리해 storage로 보낸다. frozen
         # arr_phase는 `_coupling`에서 off-ramp inflow·β를 포함하므로, queue 도착에는 그 몫을
         # 빼고(phase별 off-ramp 기여), off-ramp inflow는 storage 유입으로 따로 넘긴다.
         offramp_inflow: Dict[str, float] = {}
-        offramp_contrib_phase = {"p1": 0.0, "p2": 0.0}
+        offramp_contrib_phase = {pid: 0.0 for pid in MODEL_PHASES}
         if model.has_ramps:
             for off_ramp, movements in model.offramp_movements.items():
                 inflow = self._frozen_offramp_inflow(off_ramp, state)
@@ -786,7 +799,7 @@ class WuFaithfulFollower:
                     offramp_contrib_phase[model.phase_of[m]] += model.beta_of[m] * inflow
         # movement별 도착을 frozen phase 총량(off-ramp 몫 제외)에 맞춰 재정규화.
         arr_mv: Dict[str, float] = {}
-        for pid in ("p1", "p2"):
+        for pid in MODEL_PHASES:
             # off_ramp movement는 큐 도착 대상이 아님(storage로 유입).
             phase_movements = [
                 m for m in model.movements
@@ -849,7 +862,7 @@ class WuFaithfulFollower:
                 if model.kind_of.get(m) != "off_ramp"
             }
 
-        prev_p1 = float(previous.green_times.get(f"{signal}_p1", total / 2.0))
+        prev_p1 = primary_green(previous, net, signal)
         # candidates_override: B2 가격 계산 등 외부에서 특정 후보만 채점할 때(단일 후보면
         # best_obj가 곧 그 후보의 cost). None이면 기존 후보 구성 그대로.
         if candidates_override is not None:
@@ -878,7 +891,8 @@ class WuFaithfulFollower:
             # 스텝당 12s 누수(실측). VSL 구멍과 동일 패턴.
             if (bool(getattr(self.cfg.mpc, "baseline_move_box", False))
                     and committed_prev is not None):
-                _bg = float(committed_prev.green_times.get(f"{signal}_p1", prev_p1))
+                _bg = float(committed_prev.green_times.get(
+                    phase_key(signal, PRIMARY_PHASE), prev_p1))
                 _bk = [p1 for p1 in candidates if abs(p1 - _bg) <= 6.0 + 1.0e-9]
                 candidates = _bk or [min(candidates, key=lambda p1: abs(p1 - _bg))]
 
@@ -901,9 +915,7 @@ class WuFaithfulFollower:
         best_p1, best_obj, best_nin = prev_p1, float("inf"), 0.0
         evals = 0
         for p1 in candidates:
-            p2 = total - p1
-            if p2 < net.green_min - 1.0e-9 or p2 > net.green_max + 1.0e-9:
-                continue
+            greens = distribute_phase_green(net, p1, signal_green_reference(previous, net, signal))
             if model.has_ramps:
                 if use_phased_ramp:
                     # phase-resolved 서비스(offset-aware) + platoon 도착(P1.5). offset은
@@ -915,7 +927,7 @@ class WuFaithfulFollower:
                         model, q0, arr_mv, s_eff0,
                         offramp_inflow, offramp_occ0, ramp_queue0, reservoir_drain,
                         freeway_congestion, self.ramp_metering_weight,
-                        p1, p2, substeps, dt_h,
+                        greens, substeps, dt_h,
                         arr_by_substep=arr_by_substep,
                         gf_by_substep=gf_by_substep,
                     )
@@ -924,7 +936,7 @@ class WuFaithfulFollower:
                         model, q0, arr_mv, s_eff0,
                         offramp_inflow, offramp_occ0, ramp_queue0, reservoir_drain,
                         freeway_congestion, self.ramp_metering_weight,
-                        p1, p2, substeps, dt_h,
+                        greens, substeps, dt_h,
                     )
             elif use_phased:
                 # phase-resolved 서비스(offset-aware) + platoon 도착. offset은 green search 동안
@@ -937,7 +949,7 @@ class WuFaithfulFollower:
                 )
             else:
                 cost = rollout_local_tts(
-                    model, q0, arr_mv, s_eff0, p1, p2, substeps, dt_h,
+                    model, q0, arr_mv, s_eff0, greens, substeps, dt_h,
                 )
             # PRICE-TR: 가격 활성 신호는 smoothness 마찰 0(trust region이 보폭 제약).
             if not (
@@ -1120,16 +1132,14 @@ class WuFaithfulFollower:
                 if model.has_ramps:
                     out[signal] = [0.0 for _ in offsets]
                     continue
-                green_p1 = float(ctrl.green_times.get(
-                    f"{signal}_p1", net.effective_green_total / 2.0
-                ))
+                green_p1 = primary_green(ctrl, net, signal)
                 arr_movement = self._per_movement_arrivals(signal, state, snapshot, demand)
                 arr_phase = {
-                    pid: float(coupling.get(f"arr_{signal}_{pid}", 0.0))
-                    for pid in ("p1", "p2")
+                    pid: float(coupling.get(f"arr_{phase_key(signal, pid)}", 0.0))
+                    for pid in MODEL_PHASES
                 }
                 arr_mv: Dict[str, float] = {}
-                for pid in ("p1", "p2"):
+                for pid in MODEL_PHASES:
                     phase_movements = [
                         m for m in model.movements
                         if model.phase_of[m] == pid and model.kind_of[m] != "off_ramp"
@@ -1215,10 +1225,11 @@ class WuFaithfulFollower:
                 continue
             arr_movement = self._per_movement_arrivals(signal, state, snapshot, demand)
             arr_phase = {
-                pid: float(coupling.get(f"arr_{signal}_{pid}", 0.0)) for pid in ("p1", "p2")
+                pid: float(coupling.get(f"arr_{phase_key(signal, pid)}", 0.0))
+                for pid in MODEL_PHASES
             }
             arr_mv: Dict[str, float] = {}
-            for pid in ("p1", "p2"):
+            for pid in MODEL_PHASES:
                 phase_movements = [
                     m for m in model.movements
                     if model.phase_of[m] == pid and model.kind_of[m] != "off_ramp"
@@ -1378,8 +1389,8 @@ class WuFaithfulFollower:
         total = float(net.effective_green_total)
         q0 = {m: max(0.0, state.urban_movement_queue.get(m, 0.0)) for m in model.movements}
         x_max = 0.0
-        for pid in ("p1", "p2"):
-            g = float(control.green_times.get(f"{signal}_{pid}", total / 2.0))
+        for pid in MODEL_PHASES:
+            g = float(control.green_times.get(phase_key(signal, pid), net.default_phase_green))
             cap = sum(
                 float(model.cap_flow_of.get(m, 0.0))
                 for m in model.movements
@@ -1387,7 +1398,7 @@ class WuFaithfulFollower:
             ) * max(g, 0.0) / max(total, 1.0e-9)
             demand_rate = (
                 q0_sum(q0, model, pid) / max(horizon_h, 1.0e-9)
-                + float(coupling.get(f"arr_{signal}_{pid}", 0.0))
+                + float(coupling.get(f"arr_{phase_key(signal, pid)}", 0.0))
             )
             if cap > 1.0e-9:
                 x_max = max(x_max, demand_rate / cap)
@@ -1428,8 +1439,8 @@ class WuFaithfulFollower:
         # 각 producer p: 상수 leaving_rate(p)에 offset-aware green window shape를 곱하고
         # mean으로 나눠 정규화(총량=leaving_rate(p) 보존).
         link_profile: Dict[str, List[float]] = {}
-        for phase_id in ("p1", "p2"):
-            key = f"{signal}_{phase_id}"
+        for phase_id in MODEL_PHASES:
+            key = phase_key(signal, phase_id)
             for up_signal, up_movement, _agg_beta in wu._upstream_leaving_map.get(key, []):
                 origin_link = str(wu._specs[up_movement].get("destination", ""))
                 if not origin_link:
@@ -1467,7 +1478,7 @@ class WuFaithfulFollower:
 
         # --- (3) movement별 profile = 균일 exogenous + β-split platoon(upstream), 예산 재정규화 ---
         arr_prof: Dict[str, List[float]] = {}
-        for phase_id in ("p1", "p2"):
+        for phase_id in MODEL_PHASES:
             for movement in self._phase_movements[signal][phase_id]:
                 spec = self._specs[movement]
                 kind = str(spec.get("kind", ""))
@@ -1504,10 +1515,11 @@ class WuFaithfulFollower:
         """movement별 offset-aware green fraction gf[m][sub] — service가 substep window 겹침."""
         net = self.cfg.network
         model = self._local_models[signal]
-        total = net.effective_green_total
-        green_p2 = total - green_p1
         probe = ControlAction.uncontrolled(self.cfg)
-        probe.green_times = {f"{signal}_p1": float(green_p1), f"{signal}_p2": float(green_p2)}
+        probe.green_times = {
+            phase_key(signal, pid): float(value)
+            for pid, value in distribute_phase_green(net, float(green_p1)).items()
+        }
         probe.offsets = {signal: float(offset)}
         probe.inflow_outflow_allocation = {}
         gf: Dict[str, List[float]] = {}
@@ -1564,9 +1576,9 @@ class WuFaithfulFollower:
         dual_mode = leader is not None and self.use_dual_np
 
         # phase 단위 고정 도착 → movement 재정규화(_solve_offset_local과 동일).
-        arr_phase = {pid: float(coupling.get(f"arr_{signal}_{pid}", 0.0)) for pid in ("p1", "p2")}
+        arr_phase = {pid: float(coupling.get(f"arr_{phase_key(signal, pid)}", 0.0)) for pid in MODEL_PHASES}
         arr_mv: Dict[str, float] = {}
-        for pid in ("p1", "p2"):
+        for pid in MODEL_PHASES:
             phase_movements = [
                 m for m in model.movements
                 if model.phase_of[m] == pid and model.kind_of[m] != "off_ramp"
@@ -1591,7 +1603,7 @@ class WuFaithfulFollower:
             signal, state, snapshot, demand, arr_mv, substeps, start_idx,
         )
 
-        prev_p1 = float(snapshot.green_times.get(f"{signal}_p1", total / 2.0))
+        prev_p1 = primary_green(snapshot, net, signal)
 
         def _circ_delta(off: float, ref: float) -> float:
             return ((off - ref + cycle / 2.0) % cycle) - cycle / 2.0
@@ -1629,7 +1641,7 @@ class WuFaithfulFollower:
                 green_cands = trusted
         # BASELINE-BOX green(joint 경로): local 경로와 동일 — PFO 무제한 green에 ±6s.
         if bool(getattr(self.cfg.mpc, "baseline_move_box", False)) and previous is not None:
-            _bgj = float(previous.green_times.get(f"{signal}_p1", prev_p1))
+            _bgj = float(previous.green_times.get(phase_key(signal, PRIMARY_PHASE), prev_p1))
             _bkj = [p for p in green_cands if abs(p - _bgj) <= 6.0 + 1.0e-9]
             green_cands = _bkj or [min(green_cands, key=lambda p: abs(p - _bgj))]
         offset_cands = []
@@ -1644,9 +1656,6 @@ class WuFaithfulFollower:
         best_p1, best_off, best_obj, best_nin = prev_p1, 0.0, float("inf"), 0.0
         evals = 0
         for p1 in green_cands:
-            p2 = total - p1
-            if p2 < net.green_min - 1.0e-9 or p2 > net.green_max + 1.0e-9:
-                continue
             nin = self._agent_net_inflow_veh(signal, p1, state, fa, horizon_h)
             # PRICE-TR: 가격 활성이면 smoothness 마찰 0(trust가 보폭 제약).
             green_lin = (
@@ -1716,9 +1725,9 @@ class WuFaithfulFollower:
         start_idx = _urban_step_index(state, self.cfg)
 
         # phase 단위 고정 도착(frozen 결합) → movement별 재정규화(_solve_urban_agent_local과 동일).
-        arr_phase = {pid: float(coupling.get(f"arr_{signal}_{pid}", 0.0)) for pid in ("p1", "p2")}
+        arr_phase = {pid: float(coupling.get(f"arr_{phase_key(signal, pid)}", 0.0)) for pid in MODEL_PHASES}
         arr_mv: Dict[str, float] = {}
-        for pid in ("p1", "p2"):
+        for pid in MODEL_PHASES:
             phase_movements = [
                 m for m in model.movements
                 if model.phase_of[m] == pid and model.kind_of[m] != "off_ramp"
@@ -1811,16 +1820,16 @@ class WuFaithfulFollower:
         reservoir_drain = self._frozen_reservoir_drain(state, snapshot, demand)
         freeway_congestion = self._frozen_freeway_congestion(state)
 
-        arr_phase = {pid: float(coupling.get(f"arr_{signal}_{pid}", 0.0)) for pid in ("p1", "p2")}
+        arr_phase = {pid: float(coupling.get(f"arr_{phase_key(signal, pid)}", 0.0)) for pid in MODEL_PHASES}
         offramp_inflow: Dict[str, float] = {}
-        offramp_contrib_phase = {"p1": 0.0, "p2": 0.0}
+        offramp_contrib_phase = {pid: 0.0 for pid in MODEL_PHASES}
         for off_ramp, movements in model.offramp_movements.items():
             inflow = self._frozen_offramp_inflow(off_ramp, state)
             offramp_inflow[off_ramp] = inflow
             for m in movements:
                 offramp_contrib_phase[model.phase_of[m]] += model.beta_of[m] * inflow
         arr_mv: Dict[str, float] = {}
-        for pid in ("p1", "p2"):
+        for pid in MODEL_PHASES:
             phase_movements = [
                 m for m in model.movements
                 if model.phase_of[m] == pid and model.kind_of[m] != "off_ramp"
@@ -1856,7 +1865,7 @@ class WuFaithfulFollower:
             m: prof for m, prof in arr_by_substep.items()
             if model.kind_of.get(m) != "off_ramp"
         }
-        p2 = total - green_p1
+        greens = distribute_phase_green(net, float(green_p1), signal_green_reference(snapshot, net, signal))
 
         price_active = (
             self.offset_marginal_price is not None
@@ -1885,7 +1894,7 @@ class WuFaithfulFollower:
                 model, q0, arr_mv, s_eff0,
                 offramp_inflow, offramp_occ0, ramp_queue0, reservoir_drain,
                 freeway_congestion, self.ramp_metering_weight,
-                green_p1, p2, substeps, dt_h,
+                greens, substeps, dt_h,
                 arr_by_substep=arr_by_substep,
                 gf_by_substep=gf_by_substep,
             )
@@ -3767,7 +3776,7 @@ class WuFaithfulFollower:
         model = self._local_models[signal]
         total = net.effective_green_total
         cycle = max(net.cycle_length, 1.0e-9)
-        green = {"p1": float(green_p1), "p2": float(total - green_p1)}
+        green = distribute_phase_green(net, float(green_p1))
         steps = max(1, int(round(horizon_h / max(sim.T_c_h, 1.0e-9))))
         arr_scale = (1.0 / steps) if mode == "current_interval" else 1.0
         # phase_substep: 후보 green으로 만든 임시 control의 substep green window로 용량 적분.
@@ -3776,7 +3785,9 @@ class WuFaithfulFollower:
             probe = ControlAction(
                 ramp_metering={},
                 vsl={},
-                green_times={f"{signal}_p1": green["p1"], f"{signal}_p2": green["p2"]},
+                green_times={
+                    phase_key(signal, pid): green[pid] for pid in MODEL_PHASES
+                },
                 offsets={},
                 inflow_outflow_allocation={},
             )
@@ -4245,8 +4256,10 @@ class WuFaithfulFollower:
                         lam_fixed, forecast_arrivals, horizon_h, demand,
                         committed_prev=previous,
                     )
-                    new_green[f"{signal}_p1"] = p1
-                    new_green[f"{signal}_p2"] = net.effective_green_total - p1
+                    for pid, green_sec in distribute_phase_green(
+                        net, p1, signal_green_reference(snapshot, net, signal)
+                    ).items():
+                        new_green[phase_key(signal, pid)] = float(green_sec)
                     sum_nin += nin_i
                     evals += e
                 # 합의 루프 동안 λ는 호출 인자 값으로 동결한다(스냅샷/결합 settle 우선). λ 갱신은
@@ -4473,10 +4486,10 @@ class WuFaithfulFollower:
                         )
                         if joint is not None:
                             jp1, joff, _, je, _ = joint
-                            control.green_times[f"{signal}_p1"] = float(jp1)
-                            control.green_times[f"{signal}_p2"] = float(
-                                net.effective_green_total - jp1
-                            )
+                            for pid, green_sec in distribute_phase_green(
+                                net, float(jp1), signal_green_reference(control, net, signal)
+                            ).items():
+                                control.green_times[phase_key(signal, pid)] = float(green_sec)
                             control.offsets[signal] = float(joff)
                             offset_evals += je
                             if abs(joff) > 1.0e-6:
@@ -4485,7 +4498,7 @@ class WuFaithfulFollower:
                     if ramp_only and not is_ramp:
                         continue
                     green_p1 = float(offset_snapshot.get(
-                        f"{signal}_p1", net.effective_green_total / 2.0
+                        phase_key(signal, PRIMARY_PHASE), net.default_phase_green
                     ))
                     arr_movement = self._per_movement_arrivals(signal, state, control, demand)
                     off, e = self._solve_offset_local(
@@ -4618,7 +4631,7 @@ class WuFaithfulFollower:
                     reservoir_drain, freeway_congestion, probe_snapshot, leader,
                     lambda_p, forecast_arrivals, horizon_h, demand,
                 )
-                p1_com = float(control.green_times.get(f"{signal}_p1", 0.0))
+                p1_com = float(control.green_times.get(phase_key(signal, PRIMARY_PHASE), 0.0))
                 _, j_com, _, _ = self._solve_urban_agent_local(
                     signal, state, coupling, arr_probe, s_eff_frozen,
                     reservoir_drain, freeway_congestion, probe_snapshot, leader,

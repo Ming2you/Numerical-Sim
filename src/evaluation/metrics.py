@@ -4,7 +4,7 @@ from typing import Any, Dict, Iterable, Mapping
 
 import numpy as np
 
-from src.models.state import EvaluationResult, ExperimentConfig
+from src.models.state import MODEL_PHASES, EvaluationResult, ExperimentConfig, phase_key
 from src.models.urban_queue_model import boundary_indices, movement_balance_summary
 
 
@@ -237,11 +237,15 @@ def validate_controls(
     offset_smooth_v = 0
     for row in controls:
         for signal in cfg.network.signals:
-            p1 = row.get(f"green_{signal}_p1", 0.0)
-            p2 = row.get(f"green_{signal}_p2", 0.0)
-            cycle_errors.append(abs(p1 + p2 + cfg.network.lost_time - cfg.network.cycle_length))
-            green_min_v += int(p1 < cfg.network.green_min - 1e-9 or p2 < cfg.network.green_min - 1e-9)
-            green_max_v += int(p1 > cfg.network.green_max + 1e-9 or p2 > cfg.network.green_max + 1e-9)
+            greens = [
+                row.get(f"green_{phase_key(signal, phase)}", 0.0)
+                for phase in MODEL_PHASES
+            ]
+            cycle_errors.append(
+                abs(sum(greens) + cfg.network.lost_time - cfg.network.cycle_length)
+            )
+            green_min_v += int(any(g < cfg.network.green_min - 1e-9 for g in greens))
+            green_max_v += int(any(g > cfg.network.green_max + 1e-9 for g in greens))
             offset = row.get(f"offset_{signal}", 0.0)
             offset_v += int(offset < 0.0 or offset >= cfg.network.cycle_length)
     for prev, cur in zip(controls, controls[1:]):

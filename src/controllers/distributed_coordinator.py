@@ -40,7 +40,18 @@ from src.controllers.structured_grid import (
 from src.controllers.urban_follower import UrbanFollower
 from src.models.demand import DemandStep, merge_freeway_lane_loss
 from src.models.metanet import effective_lane_profile
-from src.models.state import ControlAction, ExperimentConfig, TrafficState
+from src.models.state import (
+    MODEL_PHASES,
+    PRIMARY_PHASE,
+    ControlAction,
+    ExperimentConfig,
+    TrafficState,
+    clamp_primary_green,
+    phase_key,
+    primary_green,
+    set_signal_green,
+    signal_phase_keys,
+)
 from src.models.urban_queue_model import (
     _movement_capacity_flow,
     _phase_green_fraction,
@@ -1190,28 +1201,32 @@ class DistributedCoordinator:
             allocation[link] = sum(allocation.get(movement, 0.0) for movement in movements)
         return allocation
 
+    def _phase_setpoint_targets(
+        self, signal: str, phase_setpoints: Mapping[str, float]
+    ) -> tuple[Optional[float], Optional[float]]:
+        """(주 현시 setpoint, 나머지 현시 setpoint 합). 없으면 None."""
+        primary = phase_setpoints.get(phase_key(signal, PRIMARY_PHASE))
+        rest = [
+            phase_setpoints.get(phase_key(signal, pid))
+            for pid in MODEL_PHASES[1:]
+        ]
+        present = [float(v) for v in rest if v is not None]
+        rest_total = sum(present) if present else None
+        return (None if primary is None else float(primary)), rest_total
+
     def _bounded_leader_green(self, signal: str, phase_setpoints: Mapping[str, float], fallback_p1: float) -> float:
         net = self.cfg.network
         total = net.effective_green_total
-        p1_target = phase_setpoints.get(f"{signal}_p1")
-        p2_target = phase_setpoints.get(f"{signal}_p2")
-        if p1_target is not None and p2_target is not None:
-            p1 = 0.5 * (float(p1_target) + (total - float(p2_target)))
+        p1_target, rest_target = self._phase_setpoint_targets(signal, phase_setpoints)
+        if p1_target is not None and rest_target is not None:
+            p1 = 0.5 * (p1_target + (total - rest_target))
         elif p1_target is not None:
-            p1 = float(p1_target)
-        elif p2_target is not None:
-            p1 = total - float(p2_target)
+            p1 = p1_target
+        elif rest_target is not None:
+            p1 = total - rest_target
         else:
             p1 = float(fallback_p1)
-        p1 = float(np.clip(p1, net.green_min, net.green_max))
-        p2 = total - p1
-        if p2 < net.green_min:
-            p2 = net.green_min
-            p1 = total - p2
-        if p2 > net.green_max:
-            p2 = net.green_max
-            p1 = total - p2
-        return float(p1)
+        return clamp_primary_green(net, p1)
 
     def _leader_allocation_band_green(
         self,
@@ -1222,38 +1237,27 @@ class DistributedCoordinator:
         """Leader allocation 기준 band 안에서 공통 grid의 green 변화를 보존한다."""
         net = self.cfg.network
         total = float(net.effective_green_total)
-        p1_target = phase_setpoints.get(f"{signal}_p1")
-        p2_target = phase_setpoints.get(f"{signal}_p2")
-        if p1_target is None and p2_target is None:
+        p1_target, rest_target = self._phase_setpoint_targets(signal, phase_setpoints)
+        if p1_target is None and rest_target is None:
             return self._bounded_leader_green(signal, {}, candidate_p1)
 
         if p1_target is None:
-            p1_target = total - float(p2_target)
-        if p2_target is None:
-            p2_target = total - float(p1_target)
+            p1_target = total - float(rest_target)
+        if rest_target is None:
+            rest_target = total - float(p1_target)
         band = max(
             0.0,
             float(self.cfg.urban_follower.allocation_green_band_sec),
             float(self.cfg.urban_follower.eps_g),
         )
-        low = max(float(net.green_min), float(p1_target) - band, total - (float(p2_target) + band))
-        high = min(float(net.green_max), float(p1_target) + band, total - (float(p2_target) - band))
+        low = max(float(net.green_min), float(p1_target) - band, total - (float(rest_target) + band))
+        high = min(float(net.green_max), float(p1_target) + band, total - (float(rest_target) - band))
         if low > high:
             low, high = float(net.green_min), float(net.green_max)
-        p1 = float(np.clip(candidate_p1, low, high))
-        p2 = total - p1
-        if p2 < net.green_min:
-            p2 = float(net.green_min)
-            p1 = total - p2
-        if p2 > net.green_max:
-            p2 = float(net.green_max)
-            p1 = total - p2
-        return float(p1)
+        return clamp_primary_green(net, float(np.clip(candidate_p1, low, high)))
 
     def _set_leader_green(self, control: ControlAction, signal: str, p1: float) -> None:
-        p1 = self._bounded_leader_green(signal, {}, p1)
-        control.green_times[f"{signal}_p1"] = p1
-        control.green_times[f"{signal}_p2"] = float(self.cfg.network.effective_green_total - p1)
+        set_signal_green(control, self.cfg.network, signal, self._bounded_leader_green(signal, {}, p1))
 
     def _leader_metering_projection(
         self,
@@ -1303,10 +1307,9 @@ class DistributedCoordinator:
         }
         out.ramp_metering = self._leader_metering_projection(leader, weights)
         for signal in net.signals:
-            candidate_p1 = float(out.green_times.get(f"{signal}_p1", net.effective_green_total / 2.0))
+            candidate_p1 = primary_green(out, net, signal)
             p1 = self._leader_allocation_band_green(signal, phase_setpoints, candidate_p1)
-            out.green_times[f"{signal}_p1"] = p1
-            out.green_times[f"{signal}_p2"] = float(net.effective_green_total - p1)
+            set_signal_green(out, net, signal, p1)
             out.offsets[signal] = float(out.offsets.get(signal, 0.0)) % max(float(net.cycle_length), 1.0e-9)
         for link in net.freeway_links:
             out.vsl[link] = float(out.vsl.get(link, max(self.cfg.freeway_follower.vsl_set)))
@@ -1363,12 +1366,7 @@ class DistributedCoordinator:
         ]
         out: list[float] = []
         for value in raw:
-            p1 = float(np.clip(value, net.green_min, net.green_max))
-            p2 = total - p1
-            if p2 < net.green_min:
-                p1 = total - float(net.green_min)
-            if p2 > net.green_max:
-                p1 = total - float(net.green_max)
+            p1 = clamp_primary_green(net, value)
             if not any(abs(p1 - existing) <= 1.0e-9 for existing in out):
                 out.append(float(p1))
         return out
@@ -1392,8 +1390,7 @@ class DistributedCoordinator:
         ):
             trial = best.copy()
             for signal, p1 in zip(net.signals, values):
-                trial.green_times[f"{signal}_p1"] = float(p1)
-                trial.green_times[f"{signal}_p2"] = float(net.effective_green_total - p1)
+                set_signal_green(trial, net, signal, float(p1))
             trial = self._project_control_to_leader_constraints(trial, leader, allocation_plan)
             diag = self._leader_direct_feasible_set_diagnostics(state, trial, forecast, leader)
             residual_abs = float(diag.get(
@@ -1409,17 +1406,13 @@ class DistributedCoordinator:
         for _pass in range(2):
             improved = False
             for signal in net.signals:
-                current_p1 = float(best.green_times.get(
-                    f"{signal}_p1",
-                    net.effective_green_total / 2.0,
-                ))
+                current_p1 = primary_green(best, net, signal)
                 signal_best = best
                 signal_diag = best_diag
                 signal_abs = best_abs
                 for p1 in self._leader_green_candidate_values(current_p1):
                     trial = best.copy()
-                    trial.green_times[f"{signal}_p1"] = float(p1)
-                    trial.green_times[f"{signal}_p2"] = float(net.effective_green_total - p1)
+                    set_signal_green(trial, net, signal, float(p1))
                     trial = self._project_control_to_leader_constraints(trial, leader, allocation_plan)
                     diag = self._leader_direct_feasible_set_diagnostics(state, trial, forecast, leader)
                     residual_abs = float(diag.get(
@@ -3063,8 +3056,7 @@ class DistributedCoordinator:
             agent_id=agent.id,
             objective=0.0,
             green_times={
-                f"{agent.signal}_p1": fixed.green_times[f"{agent.signal}_p1"],
-                f"{agent.signal}_p2": fixed.green_times[f"{agent.signal}_p2"],
+                key: fixed.green_times[key] for key in signal_phase_keys(agent.signal)
             },
             offsets={agent.signal: 0.0},
             allocation={m: fixed.inflow_outflow_allocation.get(m, 0.5 * net.movement_capacity_veh_h)

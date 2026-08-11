@@ -70,7 +70,14 @@ from src.controllers.rollout_endpoint import (
 )
 from src.controllers.wu_faithful_follower import WuFaithfulFollower
 from src.models.demand import DemandStep
-from src.models.state import ControlAction, ExperimentConfig, TrafficState, segment_vsl
+from src.models.state import (
+    ControlAction,
+    ExperimentConfig,
+    TrafficState,
+    clamp_primary_green,
+    primary_green,
+    segment_vsl,
+)
 from src.controllers.leader import Leader, LeaderAction
 
 
@@ -643,12 +650,12 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         return True
 
     def _signal_price_p1_bounds(self) -> tuple[float, float]:
-        # p1 pair-feasible 범위: p1∈[green_min, green_max] ∧ p2=total−p1∈[green_min, green_max].
+        # 주 현시 실행가능 범위 — 나머지 (N-1) 현시가 각각 상자를 지킬 수 있는 구간.
         net = self.cfg.network
-        total = float(net.effective_green_total)
-        lo = max(float(net.green_min), total - float(net.green_max))
-        hi = min(float(net.green_max), total - float(net.green_min))
-        return lo, hi
+        return (
+            clamp_primary_green(net, float("-inf")),
+            clamp_primary_green(net, float("inf")),
+        )
 
     def _global_rollout_ttt_with_green(
         self,
@@ -1068,7 +1075,7 @@ class StackelbergWuMeteredController(StackelbergMPCController):
             ]
             if abs(green_shift) > 1.0e-9:
                 for s in signals:
-                    p1 = float(previous.green_times.get(f"{s}_p1", total / 2.0))
+                    p1 = primary_green(previous, net, s)
                     moves.append(LeverMove("green", s, clamp(p1 + green_shift)))
             ttt = evaluate_price_point(
                 state, previous, forecast, tuple(moves),
@@ -1194,7 +1201,7 @@ class StackelbergWuMeteredController(StackelbergMPCController):
         _price_sigs = self.signal_price_signals
         op_green: Dict[str, float] = (
             {
-                signal: clamp(previous.green_times.get(f"{signal}_p1", total / 2.0))
+                signal: clamp(primary_green(previous, net, signal))
                 for signal in net.signals
                 if _price_sigs is None or signal in _price_sigs
             }
@@ -1619,7 +1626,7 @@ class StackelbergWuMeteredController(StackelbergMPCController):
                 moves = [LeverMove("offset", s, float(off)) for s, off in pat.items()]
                 if abs(green_shift) > 1.0e-9:
                     for s in joint_signals:
-                        p1 = float(previous.green_times.get(f"{s}_p1", total / 2.0))
+                        p1 = primary_green(previous, net, s)
                         moves.append(LeverMove("green", s, clamp(p1 + green_shift)))
                 return float(evaluate_price_point(
                     state, previous, forecast, tuple(moves),
@@ -1796,7 +1803,7 @@ class StackelbergWuMeteredController(StackelbergMPCController):
             gp_ref: Dict[str, tuple] = {}
             gp_corners: Dict[str, tuple] = {}
             for s in nonramp:
-                p0 = clamp(previous.green_times.get(f"{s}_p1", total / 2.0))
+                p0 = clamp(primary_green(previous, net, s))
                 o0 = float(previous.offsets.get(s, 0.0)) % cycle
                 p_hi = clamp(p0 + dp)
                 p_lo = clamp(p0 - dp)
@@ -2063,7 +2070,7 @@ class StackelbergWuMeteredController(StackelbergMPCController):
             corners: Dict[str, tuple] = {}
             for s in nonramp:
                 p0, p_pl, j_p = green_pt.get(
-                    s, (clamp(previous.green_times.get(f"{s}_p1", total / 2.0)), None, None)
+                    s, (clamp(primary_green(previous, net, s)), None, None)
                 )
                 o0 = float(previous.offsets.get(s, 0.0)) % cycle
                 o_pl = (o0 + do) % cycle

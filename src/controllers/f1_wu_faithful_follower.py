@@ -27,7 +27,7 @@ from src.controllers.stackelberg_wu_metered import StackelbergWuMeteredControlle
 from src.controllers.wu_faithful_follower import WuFaithfulFollower
 from src.models.demand import DemandStep
 from src.models.metanet import effective_rho_crit
-from src.models.state import ControlAction, ExperimentConfig, TrafficState, segment_vsl
+from src.models.state import MODEL_PHASES, ControlAction, ExperimentConfig, TrafficState, segment_vsl
 
 
 # ---------------------------------------------------------------------------
@@ -57,8 +57,7 @@ def f1_rollout_local_tts(
     q0: Mapping[str, float],
     arr_movement: Mapping[str, float],
     s_eff0: Mapping[str, float],
-    green_p1: float,
-    green_p2: float,
+    greens: Mapping[str, float],
     substeps: int,
     dt_h: float,
     s_eff_by_substep: Optional[Mapping[str, Sequence[float]]] = None,
@@ -68,7 +67,7 @@ def f1_rollout_local_tts(
     """rollout_local_tts 사본 + spill hinge(원본: local_signal_plant.py:128)."""
     net = model.cfg.network
     cycle = max(net.cycle_length, 1.0e-9)
-    green = {"p1": float(green_p1), "p2": float(green_p2)}
+    green = {pid: float(greens.get(pid, 0.0)) for pid in MODEL_PHASES}
     q: Dict[str, float] = {m: max(0.0, float(q0.get(m, 0.0))) for m in model.movements}
     own_origin_links = {model.origin_of[m] for m in model.movements if model.origin_of[m]}
     s_eff: Dict[str, float] = {link: max(0.0, float(v)) for link, v in s_eff0.items()}
@@ -180,8 +179,7 @@ def f1_rollout_local_tts_ramp_aware(
     reservoir_drain: Mapping[str, float],
     freeway_congestion: Mapping[str, float],
     ramp_metering_weight: float,
-    green_p1: float,
-    green_p2: float,
+    greens: Mapping[str, float],
     substeps: int,
     dt_h: float,
     arr_by_substep: Optional[Mapping[str, Sequence[float]]] = None,
@@ -193,7 +191,7 @@ def f1_rollout_local_tts_ramp_aware(
     """rollout_local_tts_ramp_aware 사본 + spill hinge(원본: local_signal_plant.py:272)."""
     net = model.cfg.network
     cycle = max(net.cycle_length, 1.0e-9)
-    green = {"p1": float(green_p1), "p2": float(green_p2)}
+    green = {pid: float(greens.get(pid, 0.0)) for pid in MODEL_PHASES}
 
     def _gf(m: str, sub: int) -> float:
         if gf_by_substep is not None:

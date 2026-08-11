@@ -6,13 +6,15 @@ from typing import Iterable, Mapping, MutableMapping
 
 import numpy as np
 
-from src.models.state import ExperimentConfig
+from src.models.state import MODEL_PHASES, ExperimentConfig
 
 
 @dataclass(frozen=True)
 class GreenRepairResult:
-    p1: float
-    p2: float
+    """복구된 현시별 녹색. `primary` 는 `phases[MODEL_PHASES[0]]` 과 같다."""
+
+    primary: float
+    phases: Mapping[str, float]
     quantization_residual_sec: float
     repair_count: int
 
@@ -120,65 +122,99 @@ def repair_vsl_value(
     )
 
 
-def repair_green_pair(
-    p1_target: float,
+def repair_green_phases(
+    primary_target: float,
     cfg: ExperimentConfig,
 ) -> GreenRepairResult:
-    """Spec 17.4 green: p1 target을 양 phase bounds와 cycle equality에 맞게 복구한다."""
+    """Spec 17.4 green: 주 현시 target 을 상자·양자화·주기 등식에 맞게 복구한다.
+
+    구 `repair_green_pair` 의 N 현시 일반화다. 주 현시를 양자화한 뒤 남는 예산을
+    나머지 (N-1) 현시에 **양자 배수로** 나누고 자투리를 첫 나머지 현시가 흡수한다.
+    그래서 Σ = effective_green_total 이 정확히 유지되면서 모든 현시가 양자 격자 위에 있다.
+    N=2 면 나머지가 하나라 자투리도 없어 `total - p1` 과 같다.
+    """
     net = cfg.network
     mpc = cfg.mpc
     total = float(net.effective_green_total)
     gmin = float(net.green_min)
     gmax = float(net.green_max)
-    low = max(gmin, total - gmax)
-    high = min(gmax, total - gmin)
+    rest_ids = list(MODEL_PHASES[1:])
+    others = max(len(rest_ids), 1)
+    low = max(gmin, total - others * gmax)
+    high = min(gmax, total - others * gmin)
     repair_count = 0
 
     if low > high:
-        midpoint = total / 2.0
-        p1 = float(np.clip(midpoint, gmin, gmax))
-        p2 = float(np.clip(total - p1, gmin, gmax))
+        # 상자가 예산을 담지 못한다 — 균등분배로 물러난다(예산 보존이 상자보다 우선).
+        share = total / float(net.num_phases)
         return GreenRepairResult(
-            p1=p1,
-            p2=p2,
-            quantization_residual_sec=abs(float(p1_target) - p1),
+            primary=share,
+            phases={pid: share for pid in MODEL_PHASES},
+            quantization_residual_sec=abs(float(primary_target) - share),
             repair_count=1,
         )
 
-    clipped = float(np.clip(p1_target, low, high))
-    repair_count += int(abs(clipped - p1_target) > 1.0e-9)
-    quantized = _quantize(clipped, mpc.relaxed_green_quantum_sec, mpc.relaxed_rounding_mode)
+    clipped = float(np.clip(primary_target, low, high))
+    repair_count += int(abs(clipped - primary_target) > 1.0e-9)
+    quantum = max(float(mpc.relaxed_green_quantum_sec), 1.0e-9)
+    quantized = _quantize(clipped, quantum, mpc.relaxed_rounding_mode)
     repair_count += int(abs(quantized - clipped) > 1.0e-9)
-    p1 = float(np.clip(quantized, low, high))
-    repair_count += int(abs(p1 - quantized) > 1.0e-9)
+    primary = float(np.clip(quantized, low, high))
+    repair_count += int(abs(primary - quantized) > 1.0e-9)
 
-    # cycle equality를 먼저 정확히 맞춘 뒤, p2 bound 위반 시 p1을 반대 방향으로 재보정한다.
-    p2 = total - p1
-    if p2 < gmin:
-        p2 = gmin
-        p1 = total - p2
+    rest_budget = total - primary
+    if not rest_ids:
+        return GreenRepairResult(
+            primary=primary,
+            phases={MODEL_PHASES[0]: primary},
+            quantization_residual_sec=abs(float(primary_target) - primary),
+            repair_count=repair_count,
+        )
+    base = math.floor(rest_budget / float(len(rest_ids)) / quantum + 1.0e-12) * quantum
+    values = [base] * len(rest_ids)
+    values[0] += rest_budget - base * float(len(rest_ids))
+    if any(v < gmin - 1.0e-9 or v > gmax + 1.0e-9 for v in values):
+        values = _project_rest_to_box(values, rest_budget, gmin, gmax)
         repair_count += 1
-    elif p2 > gmax:
-        p2 = gmax
-        p1 = total - p2
-        repair_count += 1
-    p1 = float(np.clip(p1, gmin, gmax))
-    p2 = float(total - p1)
-    if p2 < gmin - 1.0e-9 or p2 > gmax + 1.0e-9:
-        p2 = float(np.clip(p2, gmin, gmax))
-        p1 = float(np.clip(total - p2, gmin, gmax))
-        repair_count += 1
+    phases = {MODEL_PHASES[0]: primary}
+    phases.update({pid: float(v) for pid, v in zip(rest_ids, values)})
     return GreenRepairResult(
-        p1=float(p1),
-        p2=float(total - p1),
-        quantization_residual_sec=abs(float(p1_target) - float(p1)),
+        primary=float(primary),
+        phases=phases,
+        quantization_residual_sec=abs(float(primary_target) - float(primary)),
         repair_count=repair_count,
     )
 
 
-def queue_pressure_green_target(p1_pressure: float, p2_pressure: float, cfg: ExperimentConfig) -> float:
-    """두 phase pressure를 cycle 내 연속 split으로 변환하는 완화 solver 공통 휴리스틱."""
+def _project_rest_to_box(values: list[float], total: float, low: float, high: float) -> list[float]:
+    n = len(values)
+    share = total / float(n)
+    low = min(low, share)
+    high = max(high, share)
+    out = [float(np.clip(v, low, high)) for v in values]
+    for _ in range(n + 1):
+        residual = total - sum(out)
+        if abs(residual) <= 1.0e-12:
+            break
+        free = [
+            i for i in range(n)
+            if (residual > 0.0 and out[i] < high - 1.0e-12) or (residual < 0.0 and out[i] > low + 1.0e-12)
+        ]
+        if not free:
+            break
+        step = residual / float(len(free))
+        for i in free:
+            out[i] = float(np.clip(out[i] + step, low, high))
+    return out
+
+
+def queue_pressure_green_target(
+    primary_pressure: float,
+    other_pressure: float,
+    cfg: ExperimentConfig,
+) -> float:
+    """주 현시 압력 대 **나머지 현시 압력 합**을 주 현시 녹색 target 으로 변환한다."""
     total = float(cfg.network.effective_green_total)
-    pressure_sum = max(0.0, float(p1_pressure)) + max(0.0, float(p2_pressure))
-    ratio = max(0.0, float(p1_pressure)) / max(pressure_sum, 1.0e-9) if pressure_sum > 0.0 else 0.5
+    pressure_sum = max(0.0, float(primary_pressure)) + max(0.0, float(other_pressure))
+    ratio = max(0.0, float(primary_pressure)) / max(pressure_sum, 1.0e-9) if pressure_sum > 0.0 else 0.5
     return float(total * ratio)

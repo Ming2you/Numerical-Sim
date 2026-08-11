@@ -8,7 +8,7 @@ import numpy as np
 from src.controllers.relaxed_quantization import (
     accumulate_repair_diagnostics,
     queue_pressure_green_target,
-    repair_green_pair,
+    repair_green_phases,
 )
 from src.controllers.inflow_outflow_allocation import (
     AllocationResult,
@@ -18,7 +18,19 @@ from src.controllers.inflow_outflow_allocation import (
 )
 from src.controllers.leader import LeaderAction
 from src.models.demand import DemandStep
-from src.models.state import ControlAction, ExperimentConfig, TrafficState
+from src.models.state import (
+    MODEL_PHASES,
+    PRIMARY_PHASE,
+    ControlAction,
+    ExperimentConfig,
+    TrafficState,
+    allocate_phase_green,
+    clamp_primary_green,
+    distribute_phase_green,
+    phase_key,
+    phase_start_offsets,
+    primary_green,
+)
 from src.models.urban_queue_model import (
     boundary_indices,
     ensure_urban_state,
@@ -194,49 +206,40 @@ class UrbanFollower:
         green: Dict[str, float] = {}
         total = net.effective_green_total
         for signal in net.signals:
-            p1_queue = sum(
-                state.urban_movement_queue.get(movement, 0.0)
-                for movement, spec in specs.items()
-                if spec.get("phase") == f"{signal}_p1"
-            ) + float(arrivals.get(f"{signal}_p1", 0.0))
-            p2_queue = sum(
-                state.urban_movement_queue.get(movement, 0.0)
-                for movement, spec in specs.items()
-                if spec.get("phase") == f"{signal}_p2"
-            ) + float(arrivals.get(f"{signal}_p2", 0.0))
+            queues = {
+                pid: sum(
+                    state.urban_movement_queue.get(movement, 0.0)
+                    for movement, spec in specs.items()
+                    if spec.get("phase") == phase_key(signal, pid)
+                ) + float(arrivals.get(phase_key(signal, pid), 0.0))
+                for pid in MODEL_PHASES
+            }
             has_offramp_discharge_phase = any(
-                spec.get("phase") == f"{signal}_p1" and spec.get("kind") == "off_ramp"
+                spec.get("phase") == phase_key(signal, PRIMARY_PHASE) and spec.get("kind") == "off_ramp"
                 for spec in specs.values()
             )
             if has_offramp_discharge_phase:
                 # freeway 압력이 높으면 off-ramp storage를 비우는 도시 유입 phase를 우선한다.
-                p1_queue += pressure["total_pressure"] * net.ramp_queue_max_veh
-            ratio = p1_queue / max(p1_queue + p2_queue, 1.0e-9) if p1_queue + p2_queue > 0 else 0.5
-            p1 = float(np.clip(total * ratio, net.green_min, net.green_max))
-            p2 = total - p1
+                queues[PRIMARY_PHASE] += pressure["total_pressure"] * net.ramp_queue_max_veh
+            values = allocate_phase_green(net, queues)
+            p1 = values[PRIMARY_PHASE]
             if has_offramp_discharge_phase:
                 # off-ramp 방출 phase가 최소 green에 묶이면 urban net outflow가 구조적으로 부족해진다.
-                p1_floor = max(net.green_min, 0.35 * total)
-                if p1 < p1_floor:
-                    p1 = p1_floor
-                    p2 = total - p1
-            if p2 < net.green_min:
-                p2 = net.green_min
-                p1 = total - p2
-            if p2 > net.green_max:
-                p2 = net.green_max
-                p1 = total - p2
+                p1 = max(p1, max(net.green_min, 0.35 * total))
+            p1 = clamp_primary_green(net, p1)
             if allocation_plan is not None:
-                p1, p2 = self._clamp_green_to_allocation_band(signal, p1, p2, phase_setpoints)
+                p1 = self._clamp_green_to_allocation_band(signal, p1, phase_setpoints)
             if self.cfg.mpc.relaxed_quantized_controls:
                 # Spec 17.5 proposed follower relaxed: allocation/pressure로 얻은 연속 green도
                 # plant 적용 전 동일한 quantized repair를 거친다.
-                repaired = repair_green_pair(p1, self.cfg)
+                repaired = repair_green_phases(p1, self.cfg)
                 if record_repair:
                     accumulate_repair_diagnostics(self._repair_diagnostics, green=repaired)
-                p1, p2 = repaired.p1, repaired.p2
-            green[f"{signal}_p1"] = float(p1)
-            green[f"{signal}_p2"] = float(p2)
+                values = dict(repaired.phases)
+            else:
+                values = distribute_phase_green(net, p1, values)
+            for pid, green_sec in values.items():
+                green[phase_key(signal, pid)] = float(green_sec)
         return green
 
     def _allocation_phase_setpoints(
@@ -261,29 +264,28 @@ class UrbanFollower:
         self,
         signal: str,
         p1: float,
-        p2: float,
         phase_setpoints: Mapping[str, float],
-    ) -> tuple[float, float]:
+    ) -> float:
+        """allocation setpoint 근방 band 로 주 현시 녹색을 자른다.
+
+        band 는 주 현시 setpoint 와 **나머지 현시 setpoint 합** 양쪽에서 온다(N=2 의
+        p2_target 자리가 나머지 합으로 일반화된 것).
+        """
         net = self.cfg.network
         total = net.effective_green_total
         band = max(0.0, float(self.cfg.urban_follower.allocation_green_band_sec))
-        p1_key = f"{signal}_p1"
-        p2_key = f"{signal}_p2"
-        p1_target = phase_setpoints.get(p1_key, p1)
-        p2_target = phase_setpoints.get(p2_key, p2)
-        low = max(net.green_min, p1_target - band, total - (p2_target + band))
-        high = min(net.green_max, p1_target + band, total - (p2_target - band))
+        p1_target = float(phase_setpoints.get(phase_key(signal, PRIMARY_PHASE), p1))
+        rest_present = [
+            phase_setpoints[phase_key(signal, pid)]
+            for pid in MODEL_PHASES[1:]
+            if phase_key(signal, pid) in phase_setpoints
+        ]
+        rest_target = float(sum(rest_present)) if rest_present else total - p1
+        low = max(net.green_min, p1_target - band, total - (rest_target + band))
+        high = min(net.green_max, p1_target + band, total - (rest_target - band))
         if low > high:
             low, high = net.green_min, net.green_max
-        p1_new = float(np.clip(p1, low, high))
-        p2_new = total - p1_new
-        if p2_new < net.green_min:
-            p2_new = net.green_min
-            p1_new = total - p2_new
-        if p2_new > net.green_max:
-            p2_new = net.green_max
-            p1_new = total - p2_new
-        return float(p1_new), float(p2_new)
+        return clamp_primary_green(net, float(np.clip(p1, low, high)))
 
     def _green_candidate_values(
         self,
@@ -296,41 +298,39 @@ class UrbanFollower:
         """Spec 18.8/18.9: default, previous, setpoint, pressure 중심과 주변 green 후보."""
         net = self.cfg.network
         total = net.effective_green_total
-        prev_p1 = float(previous.green_times.get(f"{signal}_p1", total / 2.0)) if previous else total / 2.0
-        pressure_center = queue_pressure_green_target(q0.get("p1", 0.0), q0.get("p2", 0.0), self.cfg)
+        default_p1 = net.default_phase_green
+        prev_p1 = primary_green(previous, net, signal) if previous else default_p1
+        pressure_center = queue_pressure_green_target(
+            q0.get(PRIMARY_PHASE, 0.0),
+            sum(q0.get(pid, 0.0) for pid in MODEL_PHASES[1:]),
+            self.cfg,
+        )
+        setpoint_center = phase_setpoints.get(phase_key(signal, PRIMARY_PHASE), heuristic_p1)
         raw = [
-            total / 2.0,
+            default_p1,
             prev_p1,
             heuristic_p1,
             pressure_center,
-            phase_setpoints.get(f"{signal}_p1", heuristic_p1),
+            setpoint_center,
         ]
         if self.cfg.mpc.relaxed_quantized_controls:
-            for center in (heuristic_p1, pressure_center, phase_setpoints.get(f"{signal}_p1", heuristic_p1)):
+            for center in (heuristic_p1, pressure_center, setpoint_center):
                 raw.extend([center - 1.0, center + 1.0, center - 2.0, center + 2.0, center - 5.0, center + 5.0])
         else:
             raw.extend(float(v) for v in np.linspace(net.green_min, net.green_max, 7))
         out: list[float] = []
         for value in raw:
             p1 = float(value)
-            p2 = total - p1
             if phase_setpoints:
-                p1, p2 = self._clamp_green_to_allocation_band(signal, p1, p2, phase_setpoints)
+                p1 = self._clamp_green_to_allocation_band(signal, p1, phase_setpoints)
             if self.cfg.mpc.relaxed_quantized_controls:
-                repaired = repair_green_pair(p1, self.cfg)
+                repaired = repair_green_phases(p1, self.cfg)
                 accumulate_repair_diagnostics(self._repair_diagnostics, green=repaired)
-                p1 = repaired.p1
+                p1 = repaired.primary
                 if phase_setpoints:
-                    p1, _ = self._clamp_green_to_allocation_band(signal, p1, total - p1, phase_setpoints)
+                    p1 = self._clamp_green_to_allocation_band(signal, p1, phase_setpoints)
             else:
-                p1 = float(np.clip(p1, net.green_min, net.green_max))
-                p2 = total - p1
-                if p2 < net.green_min:
-                    p2 = net.green_min
-                    p1 = total - p2
-                if p2 > net.green_max:
-                    p2 = net.green_max
-                    p1 = total - p2
+                p1 = clamp_primary_green(net, p1)
             if not any(abs(p1 - existing) <= 1.0e-9 for existing in out):
                 out.append(float(p1))
         return out
@@ -368,17 +368,18 @@ class UrbanFollower:
                 out.append(candidate)
         return out
 
-    def _phase_wait_seconds(self, offset: float, p1: float, phase_id: str) -> float:
+    def _phase_wait_seconds(
+        self,
+        offset: float,
+        greens: Mapping[str, float],
+        phase_id: str,
+    ) -> float:
         """Offset 후보가 현재 cycle에서 각 phase queue에 주는 1차 대기시간 근사."""
         net = self.cfg.network
         cycle = max(net.cycle_length, 1.0e-9)
-        p2 = net.effective_green_total - p1
-        if phase_id == "p1":
-            start = offset
-            duration = p1
-        else:
-            start = offset + p1 + net.lost_time / 2.0
-            duration = p2
+        starts = phase_start_offsets(net, greens)
+        start = offset + starts[phase_id]
+        duration = float(greens.get(phase_id, net.default_phase_green))
         t = (0.0 - start) % cycle
         return 0.0 if t <= duration + 1.0e-9 else float(cycle - t)
 
@@ -396,19 +397,22 @@ class UrbanFollower:
         uc = self.cfg.urban_follower
         horizon = max(1, self.cfg.mpc.horizon_steps)
         dt_h = self.cfg.simulation.T_c_h
-        p2 = net.effective_green_total - p1
-        q = {"p1": max(0.0, q0.get("p1", 0.0)), "p2": max(0.0, q0.get("p2", 0.0))}
-        cost = sum(q[pid] * self._phase_wait_seconds(offset, p1, pid) / 3600.0 for pid in ("p1", "p2"))
+        greens = distribute_phase_green(net, p1, q0)
+        q = {pid: max(0.0, q0.get(pid, 0.0)) for pid in MODEL_PHASES}
+        cost = sum(
+            q[pid] * self._phase_wait_seconds(offset, greens, pid) / 3600.0
+            for pid in MODEL_PHASES
+        )
         for _ in range(horizon):
-            for pid, green_sec in (("p1", p1), ("p2", p2)):
-                service = (green_sec / max(net.cycle_length, 1.0e-9)) * sat[pid] * dt_h
+            for pid in MODEL_PHASES:
+                service = (greens[pid] / max(net.cycle_length, 1.0e-9)) * sat[pid] * dt_h
                 q[pid] = max(0.0, q[pid] - service)
-            cost += (q["p1"] + q["p2"]) * dt_h
+            cost += sum(q[pid] for pid in MODEL_PHASES) * dt_h
         if previous:
-            prev_p1 = float(previous.green_times.get(f"{signal}_p1", net.effective_green_total / 2.0))
+            prev_p1 = primary_green(previous, net, signal)
             prev_offset = float(previous.offsets.get(signal, 0.0))
         else:
-            prev_p1 = net.effective_green_total / 2.0
+            prev_p1 = net.default_phase_green
             prev_offset = 0.0
         cost += uc.green_smoothness_weight * abs(p1 - prev_p1)
         cost += uc.offset_smoothness_weight * abs(self._offset_delta(prev_offset, offset))
@@ -461,24 +465,24 @@ class UrbanFollower:
         default_selected = 0
         for signal in net.signals:
             phase_movements = {
-                pid: [m for m, spec in specs.items() if spec.get("phase") == f"{signal}_{pid}"]
-                for pid in ("p1", "p2")
+                pid: [m for m, spec in specs.items() if spec.get("phase") == phase_key(signal, pid)]
+                for pid in MODEL_PHASES
             }
             q0 = {
                 pid: sum(max(0.0, state.urban_movement_queue.get(m, 0.0)) for m in phase_movements[pid])
-                + float(arrivals.get(f"{signal}_{pid}", 0.0))
-                for pid in ("p1", "p2")
+                + float(arrivals.get(phase_key(signal, pid), 0.0))
+                for pid in MODEL_PHASES
             }
-            for pid in ("p1", "p2"):
+            for pid in MODEL_PHASES:
                 if any(specs[m].get("kind") == "off_ramp" for m in phase_movements[pid]):
                     q0[pid] += float(pressure.get("total_pressure", 0.0)) * net.ramp_queue_max_veh
             sat = {
                 pid: max(len(phase_movements[pid]) * net.movement_capacity_veh_h, 1.0e-9)
-                for pid in ("p1", "p2")
+                for pid in MODEL_PHASES
             }
             p1_candidates = self._green_candidate_values(
                 signal,
-                heuristic_green.get(f"{signal}_p1", net.effective_green_total / 2.0),
+                float(heuristic_green.get(phase_key(signal, PRIMARY_PHASE), net.default_phase_green)),
                 previous,
                 phase_setpoints,
                 q0,
@@ -493,12 +497,11 @@ class UrbanFollower:
                         best = (float(cost), float(p1), float(offset))
             assert best is not None
             cost, p1_best, offset_best = best
-            p2_best = net.effective_green_total - p1_best
-            green[f"{signal}_p1"] = float(p1_best)
-            green[f"{signal}_p2"] = float(p2_best)
+            for pid, green_sec in distribute_phase_green(net, p1_best, q0).items():
+                green[phase_key(signal, pid)] = float(green_sec)
             offsets[signal] = float(offset_best)
             total_cost += cost
-            if abs(p1_best - net.effective_green_total / 2.0) <= 1.0e-9 and abs(offset_best) <= 1.0e-9:
+            if abs(p1_best - net.default_phase_green) <= 1.0e-9 and abs(offset_best) <= 1.0e-9:
                 default_selected += 1
         diagnostics = {
             "urban_stage2_candidate_evaluations": float(evaluations),
@@ -530,67 +533,67 @@ class UrbanFollower:
         objective = 0.0
         for signal in net.signals:
             phase_movements = {
-                pid: [m for m, spec in specs.items() if spec.get("phase") == f"{signal}_{pid}"]
-                for pid in ("p1", "p2")
+                pid: [m for m, spec in specs.items() if spec.get("phase") == phase_key(signal, pid)]
+                for pid in MODEL_PHASES
             }
             arrivals = phase_arrivals or {}
             q0 = {
                 pid: sum(
                     max(0.0, state.urban_movement_queue.get(m, 0.0))
                     for m in phase_movements[pid]
-                ) + float(arrivals.get(f"{signal}_{pid}", 0.0))  # forecast-aware: 미래 도착 가산.
-                for pid in ("p1", "p2")
+                ) + float(arrivals.get(phase_key(signal, pid), 0.0))  # forecast-aware: 미래 도착 가산.
+                for pid in MODEL_PHASES
             }
-            for pid in ("p1", "p2"):
+            for pid in MODEL_PHASES:
                 # freeway 압력이 높으면 off-ramp storage를 비우는 phase를 우선한다
                 # (full follower의 _green_times와 같은 coupling 경로).
                 if any(specs[m].get("kind") == "off_ramp" for m in phase_movements[pid]):
                     q0[pid] += float(pressure.get("total_pressure", 0.0)) * net.ramp_queue_max_veh
             sat = {
                 pid: max(len(phase_movements[pid]) * net.movement_capacity_veh_h, 1.0e-9)
-                for pid in ("p1", "p2")
+                for pid in MODEL_PHASES
             }
-            prev_p1 = (
-                float(previous.green_times.get(f"{signal}_p1", total / 2.0))
-                if previous else total / 2.0
-            )
-            if self.cfg.mpc.relaxed_quantized_controls:
-                # Spec 17.5 P-FO relaxed: grid search를 pressure split 하나로 대체하고
-                # 공통 repair가 cycle sum과 green bound를 보장한다.
-                repaired = repair_green_pair(
-                    queue_pressure_green_target(q0["p1"], q0["p2"], self.cfg),
-                    self.cfg,
-                )
-                accumulate_repair_diagnostics(self._repair_diagnostics, green=repaired)
+            prev_p1 = primary_green(previous, net, signal) if previous else net.default_phase_green
+
+            def rollout_cost(greens: Mapping[str, float]) -> float:
                 q = dict(q0)
                 cost = 0.0
                 for _ in range(horizon):
-                    for pid, g in (("p1", repaired.p1), ("p2", repaired.p2)):
-                        service = (g / max(net.cycle_length, 1.0e-9)) * sat[pid] * dt_h
+                    for pid in MODEL_PHASES:
+                        service = (greens[pid] / max(net.cycle_length, 1.0e-9)) * sat[pid] * dt_h
                         q[pid] = max(0.0, q[pid] - service)
-                    cost += (q["p1"] + q["p2"]) * dt_h
-                cost += smooth_w * abs(repaired.p1 - prev_p1)
-                green[f"{signal}_p1"] = repaired.p1
-                green[f"{signal}_p2"] = repaired.p2
+                    cost += sum(q[pid] for pid in MODEL_PHASES) * dt_h
+                return cost
+
+            if self.cfg.mpc.relaxed_quantized_controls:
+                # Spec 17.5 P-FO relaxed: grid search를 pressure split 하나로 대체하고
+                # 공통 repair가 cycle sum과 green bound를 보장한다.
+                repaired = repair_green_phases(
+                    queue_pressure_green_target(
+                        q0[PRIMARY_PHASE],
+                        sum(q0[pid] for pid in MODEL_PHASES[1:]),
+                        self.cfg,
+                    ),
+                    self.cfg,
+                )
+                accumulate_repair_diagnostics(self._repair_diagnostics, green=repaired)
+                cost = rollout_cost(repaired.phases)
+                cost += smooth_w * abs(repaired.primary - prev_p1)
+                for pid, green_sec in repaired.phases.items():
+                    green[phase_key(signal, pid)] = float(green_sec)
                 objective += cost
                 continue
             best_p1, best_cost = prev_p1, float("inf")
             for p1 in np.linspace(net.green_min, net.green_max, 7):
-                p2 = total - p1
-                if p2 < net.green_min - 1.0e-9 or p2 > net.green_max + 1.0e-9:
+                candidate = clamp_primary_green(net, float(p1))
+                if abs(candidate - float(p1)) > 1.0e-9:
                     continue
-                q = dict(q0)
-                cost = 0.0
-                for _ in range(horizon):
-                    for pid, g in (("p1", p1), ("p2", p2)):
-                        service = (g / max(net.cycle_length, 1.0e-9)) * sat[pid] * dt_h
-                        q[pid] = max(0.0, q[pid] - service)
-                    cost += (q["p1"] + q["p2"]) * dt_h
-                cost += smooth_w * abs(p1 - prev_p1)
+                cost = rollout_cost(distribute_phase_green(net, candidate, q0))
+                cost += smooth_w * abs(candidate - prev_p1)
                 if cost < best_cost:
-                    best_cost, best_p1 = cost, float(p1)
-            green[f"{signal}_p1"] = float(best_p1)
-            green[f"{signal}_p2"] = float(total - best_p1)
+                    best_cost, best_p1 = cost, float(candidate)
+            for pid, green_sec in distribute_phase_green(net, best_p1, q0).items():
+                green[phase_key(signal, pid)] = float(green_sec)
             objective += best_cost
         return green, float(objective)
 
@@ -606,19 +609,26 @@ class UrbanFollower:
         해당 축 phase 시작이 링크 통과시간(t_link = storage×차길이/urban 속도 ≈95s)
         만큼 어긋나게 offset을 정한다. 진행 방향은 회랑별 양방향 부하(링크 점유 +
         하류 접근 대기열)로 매 interval 선택 — 상태에 따라 신호별·시간별로 움직인다.
-        회랑: 상단 A–B–C(EW, p2 정렬), 수직 A–D(NS, p1 정렬), 하단 D–(E)–F(EW,
-        p2 정렬, E는 비통제라 2링크 통과시간). 앵커는 A(이전 offset 유지)."""
+        회랑: 상단 A–B–C(minor축, minor 직진 현시 정렬), 수직 A–D(major축, 주 현시
+        정렬), 하단 D–(E)–F(minor축, E는 비통제라 2링크 통과시간). 앵커는 A(이전 offset 유지)."""
         net = self.cfg.network
         uc = self.cfg.urban_follower
         cycle = max(net.cycle_length, 1.0e-9)
         prev = previous.offsets if previous else {}
         green = green_times or {}
-        default_green = net.effective_green_total / 2.0
+        default_green = net.default_phase_green
         link_len_km = float(net.grid_link_storage_veh) * net.urban_avg_vehicle_length_m / 1000.0
         t_link = link_len_km / max(net.urban_avg_speed_km_h, 1.0e-9) * 3600.0
+        # minor 축 진행을 맞출 현시 = minor 직진(MODEL_PHASES 의 3번째). 4현시에서는
+        # p1 뒤에 major 좌회전 현시가 하나 더 있어 시작점이 그만큼 뒤로 밀린다.
+        minor_through = MODEL_PHASES[min(2, len(MODEL_PHASES) - 1)]
 
         def p2_start(signal: str) -> float:
-            return float(green.get(f"{signal}_p1", default_green)) + net.lost_time / 2.0
+            greens = {
+                pid: float(green.get(phase_key(signal, pid), default_green))
+                for pid in MODEL_PHASES
+            }
+            return float(phase_start_offsets(net, greens)[minor_through])
 
         def occ(link: str) -> float:
             cap = net.urban_link_storage_veh.get(link, 0.0)
@@ -673,7 +683,7 @@ class UrbanFollower:
         specs = movement_specs(self.cfg)
         plan = allocation_plan or self.allocation_module.solve(state, leader)
         alloc: Dict[str, float] = {}
-        default_green = net.effective_green_total / 2.0
+        default_green = net.default_phase_green
         for movement, target_flow in plan.movement_flows.items():
             spec = specs.get(movement, {})
             phase = str(spec.get("phase", ""))

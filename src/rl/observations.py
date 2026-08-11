@@ -6,7 +6,13 @@ from typing import Any, Dict, Mapping, Tuple
 import numpy as np
 
 from src.models.demand import DemandStep
-from src.models.state import ControlAction, ExperimentConfig, TrafficState, segment_vsl
+from src.models.state import (
+    ControlAction,
+    ExperimentConfig,
+    TrafficState,
+    primary_green,
+    segment_vsl,
+)
 from src.models.urban_queue_model import movement_storage_capacity
 from src.rl.action_space import LeaderTargetAction
 from src.rl.agents import RLAgentSpec
@@ -239,7 +245,7 @@ def _build_urban_observation(
         tuple(net.off_ramp_storage_link.get(off_ramp, "") for off_ramp in agent.off_ramps),
     )
     effective_green = max(net.effective_green_total, 1.0e-9)
-    previous_green = previous_control.green_times.get(f"{signal}_p1", 0.5 * effective_green)
+    previous_green = primary_green(previous_control, net, signal)
     previous_offset = previous_control.offsets.get(signal, 0.0)
 
     # Spec 19 locality: signal actor에는 자기 movement/link/ramp coupling 요약만 넣는다.

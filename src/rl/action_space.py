@@ -5,7 +5,14 @@ from typing import Any, Dict, Mapping, Tuple
 
 import numpy as np
 
-from src.models.state import ControlAction, ExperimentConfig, segment_vsl
+from src.models.state import (
+    ControlAction,
+    ExperimentConfig,
+    clamp_primary_green,
+    distribute_phase_green,
+    phase_key,
+    segment_vsl,
+)
 from src.rl.agents import RLAgentSpec
 
 
@@ -53,8 +60,7 @@ class UrbanLocalAction:
     """intersection actor가 자기 signal의 green split과 offset만 갱신한다."""
 
     index: int
-    green_p1_sec: float
-    green_p2_sec: float
+    green_primary_sec: float
     offset_delta_sec: float
     green_times: Dict[str, float]
     offsets: Dict[str, float]
@@ -62,8 +68,7 @@ class UrbanLocalAction:
     def as_dict(self) -> Dict[str, Any]:
         return {
             "index": self.index,
-            "green_p1_sec": self.green_p1_sec,
-            "green_p2_sec": self.green_p2_sec,
+            "green_primary_sec": self.green_primary_sec,
             "offset_delta_sec": self.offset_delta_sec,
             "green_times": dict(self.green_times),
             "offsets": dict(self.offsets),
@@ -193,12 +198,12 @@ class UrbanIntersectionActionSpace:
             raise ValueError("UrbanIntersectionActionSpace requires an urban agent.")
         self.cfg = cfg
         self.agent = agent
-        self.green_pairs = _green_split_candidates(cfg)
+        self.green_splits = _green_split_candidates(cfg)
         self.offset_deltas = _offset_delta_candidates(cfg)
-        self.size = len(self.green_pairs) * len(self.offset_deltas)
+        self.size = len(self.green_splits) * len(self.offset_deltas)
 
     def neutral_index(self) -> int:
-        green_idx = len(self.green_pairs) // 2
+        green_idx = len(self.green_splits) // 2
         zero_delta_idx = min(
             range(len(self.offset_deltas)),
             key=lambda idx: abs(self.offset_deltas[idx]),
@@ -213,7 +218,7 @@ class UrbanIntersectionActionSpace:
         index = _checked_index(index, self.size)
         green_idx = index // len(self.offset_deltas)
         delta_idx = index % len(self.offset_deltas)
-        p1, p2 = self.green_pairs[green_idx]
+        p1 = self.green_splits[green_idx]
         delta = self.offset_deltas[delta_idx]
         signal = str(self.agent.signal)
         previous_offset = 0.0
@@ -222,10 +227,12 @@ class UrbanIntersectionActionSpace:
         offset = (previous_offset + delta) % max(float(self.cfg.network.cycle_length), 1.0e-9)
         return UrbanLocalAction(
             index=index,
-            green_p1_sec=float(p1),
-            green_p2_sec=float(p2),
+            green_primary_sec=float(p1),
             offset_delta_sec=float(delta),
-            green_times={f"{signal}_p1": float(p1), f"{signal}_p2": float(p2)},
+            green_times={
+                phase_key(signal, pid): float(value)
+                for pid, value in distribute_phase_green(self.cfg.network, float(p1)).items()
+            },
             offsets={signal: float(offset)},
         )
 
@@ -401,14 +408,16 @@ def _ramp_factors(cfg: ExperimentConfig) -> Tuple[float, ...]:
     return tuple(sorted({float(np.clip(v, low, high)) for v in (low, mid, high)}))
 
 
-def _green_split_candidates(cfg: ExperimentConfig) -> Tuple[Tuple[float, float], ...]:
+def _green_split_candidates(cfg: ExperimentConfig) -> Tuple[float, ...]:
+    """주 현시 녹색 후보 — 실행가능 상자의 하한·중점·상한.
+
+    나머지 현시는 `distribute_phase_green` 이 예산에서 유도하므로 후보는 스칼라다.
+    """
     net = cfg.network
-    effective = float(net.effective_green_total)
-    lower = max(float(net.green_min), effective - float(net.green_max))
-    upper = min(float(net.green_max), effective - float(net.green_min))
+    lower = clamp_primary_green(net, float("-inf"))
+    upper = clamp_primary_green(net, float("inf"))
     midpoint = 0.5 * (lower + upper)
-    p1_values = sorted({float(np.clip(v, lower, upper)) for v in (lower, midpoint, upper)})
-    return tuple((p1, effective - p1) for p1 in p1_values)
+    return tuple(sorted({lower, midpoint, upper}))
 
 
 def _offset_delta_candidates(cfg: ExperimentConfig) -> Tuple[float, ...]:

@@ -5,7 +5,14 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
 from src.models.demand import DemandStep
-from src.models.state import ControlAction, ExperimentConfig, TrafficState, segment_vsl
+from src.models.state import (
+    MODEL_PHASES,
+    ControlAction,
+    ExperimentConfig,
+    TrafficState,
+    phase_key,
+    segment_vsl,
+)
 from src.simulation.coupling import run_coupled_interval
 
 
@@ -99,8 +106,9 @@ def control_row(control: ControlAction, cfg: ExperimentConfig, step: int, time_s
         # 기존 분석/metrics가 읽는 link 열은 segment 최소값으로 유지(하위호환 + 작동 가시화).
         row[f"vsl_{link}"] = min(seg_vsls) if seg_vsls else control.vsl.get(link, vsl_max)
     for signal in cfg.network.signals:
-        row[f"green_{signal}_p1"] = control.green_times.get(f"{signal}_p1", 0.0)
-        row[f"green_{signal}_p2"] = control.green_times.get(f"{signal}_p2", 0.0)
+        for phase in MODEL_PHASES:
+            key = phase_key(signal, phase)
+            row[f"green_{key}"] = control.green_times.get(key, 0.0)
         row[f"offset_{signal}"] = control.offsets.get(signal, 0.0)
     for link in cfg.network.movement_links:
         row[f"allocation_{link}"] = control.inflow_outflow_allocation.get(link, 0.0)

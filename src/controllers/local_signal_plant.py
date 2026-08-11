@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Mapping, Optional, Sequence
 
-from src.models.state import ControlAction, ExperimentConfig
+from src.models.state import MODEL_PHASES, ControlAction, ExperimentConfig
 from src.models.urban_queue_model import (
     _allocate_receiving_counts,
     _movement_capacity_flow,
@@ -130,8 +130,7 @@ def rollout_local_tts(
     q0: Mapping[str, float],
     arr_movement: Mapping[str, float],
     s_eff0: Mapping[str, float],
-    green_p1: float,
-    green_p2: float,
+    greens: Mapping[str, float],
     substeps: int,
     dt_h: float,
     s_eff_by_substep: Optional[Mapping[str, Sequence[float]]] = None,
@@ -147,7 +146,7 @@ def rollout_local_tts(
     이게 검증 포인트 1: B·C·D·F·freeway는 절대 전진하지 않는다."""
     net = model.cfg.network
     cycle = max(net.cycle_length, 1.0e-9)
-    green = {"p1": float(green_p1), "p2": float(green_p2)}
+    green = {pid: float(greens.get(pid, 0.0)) for pid in MODEL_PHASES}
     q: Dict[str, float] = {m: max(0.0, float(q0.get(m, 0.0))) for m in model.movements}
     # 자기 origin 링크(이 신호의 movement가 점유하는 링크) 집합 — 이 링크들만 전진 중 S_eff 갱신.
     own_origin_links = {model.origin_of[m] for m in model.movements if model.origin_of[m]}
@@ -280,8 +279,7 @@ def rollout_local_tts_ramp_aware(
     reservoir_drain: Mapping[str, float],
     freeway_congestion: Mapping[str, float],
     ramp_metering_weight: float,
-    green_p1: float,
-    green_p2: float,
+    greens: Mapping[str, float],
     substeps: int,
     dt_h: float,
     arr_by_substep: Optional[Mapping[str, Sequence[float]]] = None,
@@ -320,7 +318,7 @@ def rollout_local_tts_ramp_aware(
     """
     net = model.cfg.network
     cycle = max(net.cycle_length, 1.0e-9)
-    green = {"p1": float(green_p1), "p2": float(green_p2)}
+    green = {pid: float(greens.get(pid, 0.0)) for pid in MODEL_PHASES}
 
     def _gf(m: str, sub: int) -> float:
         # phase-resolved green fraction(제공 시) — 아니면 기존 cycle-평균.

@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from src.models.demand import DemandProfile, ScenarioConfig
-from src.models.state import ControlAction, ExperimentConfig, TrafficState
+from src.models.state import ControlAction, ExperimentConfig, TrafficState, primary_green
 
 # event 판정 상태(plan §3.1).
 NOT_CHALLENGED = "NOT_CHALLENGED"
@@ -191,8 +191,8 @@ def _action_active(cfg: ExperimentConfig, control: ControlAction, prev: Optional
     if target == "allocation_green":
         if not control.inflow_outflow_allocation:
             return False
-        fixed = net.effective_green_total / 2.0
-        return any(abs(control.green_times.get(f"{s}_p1", fixed) - fixed) > 1.0 for s in net.signals)
+        fixed = net.default_phase_green
+        return any(abs(primary_green(control, net, s) - fixed) > 1.0 for s in net.signals)
     if target == "offset":
         if prev is None:
             return any(abs(v) > 1.0 for v in control.offsets.values())

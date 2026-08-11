@@ -6,7 +6,16 @@ from typing import Dict, Iterable, Mapping, Optional
 import numpy as np
 
 from src.models.demand import DemandStep
-from src.models.state import ControlAction, ExperimentConfig, TrafficState, segment_vsl
+from src.models.state import (
+    MODEL_PHASES,
+    ControlAction,
+    ExperimentConfig,
+    TrafficState,
+    allocate_phase_green,
+    phase_key,
+    segment_vsl,
+    signal_green_reference,
+)
 from src.models.urban_queue_model import (
     boundary_indices,
     ensure_urban_state,
@@ -216,22 +225,12 @@ class ClassicalHierarchicalController:
             total += max(0.0, state.urban_movement_queue.get(item, 0.0))
         return float(total)
 
-    def _repair_green_pair(self, p1_raw: float) -> tuple[float, float, float]:
-        # cycle repair: p1+p2+lost_time=cycle_length를 보존하면서 green min/max를 만족시킨다.
+    def _repair_green_phases(self, scores: Mapping[str, float]) -> tuple[Dict[str, float], float]:
+        # cycle repair: Sum(g_i) + lost_time = cycle_length 를 보존하면서 green min/max 를 만족시킨다.
         net = self.cfg.network
-        total = max(0.0, float(net.effective_green_total))
-        p1 = float(np.clip(p1_raw, net.green_min, net.green_max))
-        p2 = total - p1
-        if p2 < net.green_min:
-            p2 = float(net.green_min)
-            p1 = total - p2
-        if p2 > net.green_max:
-            p2 = float(net.green_max)
-            p1 = total - p2
-        p1 = float(np.clip(p1, 0.0, total))
-        p2 = float(np.clip(total - p1, 0.0, total))
-        residual = abs(p1 + p2 + net.lost_time - net.cycle_length)
-        return p1, p2, float(residual)
+        values = allocate_phase_green(net, scores)
+        residual = abs(sum(values.values()) + net.lost_time - net.cycle_length)
+        return values, float(residual)
 
     def _green_times(
         self,
@@ -252,7 +251,7 @@ class ClassicalHierarchicalController:
         max_residual = 0.0
 
         for signal in net.signals:
-            phase_scores = {"p1": 0.0, "p2": 0.0}
+            phase_scores = {pid: 0.0 for pid in MODEL_PHASES}
             for movement, spec in specs.items():
                 phase = str(spec.get("phase", ""))
                 if not phase.startswith(f"{signal}_"):
@@ -272,22 +271,26 @@ class ClassicalHierarchicalController:
                 )
                 phase_scores[phase_id] += (queue + arrival) * weight
 
-            score_sum = phase_scores["p1"] + phase_scores["p2"]
+            score_sum = sum(phase_scores.values())
             if score_sum <= 1.0e-9:
-                prev_p1 = previous.green_times.get(f"{signal}_p1", net.effective_green_total / 2.0)
-                ratio = prev_p1 / max(net.effective_green_total, 1.0e-9)
-            else:
-                ratio = phase_scores["p1"] / score_sum
-            p1_raw = net.effective_green_total * float(np.clip(ratio, 0.0, 1.0))
-            p1, p2, residual = self._repair_green_pair(p1_raw)
-            repair_count += float(abs(p1 - p1_raw) > 1.0e-9 or residual > 1.0e-9)
+                # 압력이 없으면 직전 계획의 현시 비율을 그대로 쓴다(구 동작과 같은 뜻).
+                phase_scores = signal_green_reference(previous, net, signal)
+            # raw = 상자를 무시한 순수 비례배분. 사영이 그것을 얼마나 움직였는지가 repair 다.
+            total_green = net.effective_green_total
+            weight_sum = max(sum(max(0.0, float(v)) for v in phase_scores.values()), 1.0e-9)
+            raw = {
+                pid: total_green * max(0.0, float(phase_scores.get(pid, 0.0))) / weight_sum
+                for pid in MODEL_PHASES
+            }
+            values, residual = self._repair_green_phases(phase_scores)
+            repair_count += float(
+                any(abs(values[pid] - raw[pid]) > 1.0e-9 for pid in MODEL_PHASES) or residual > 1.0e-9
+            )
             max_residual = max(max_residual, residual)
-            green[f"{signal}_p1"] = p1
-            green[f"{signal}_p2"] = p2
-            diag[f"classical_green_score_{signal}_p1"] = float(phase_scores["p1"])
-            diag[f"classical_green_score_{signal}_p2"] = float(phase_scores["p2"])
-            diag[f"classical_green_{signal}_p1_sec"] = p1
-            diag[f"classical_green_{signal}_p2_sec"] = p2
+            for pid in MODEL_PHASES:
+                green[phase_key(signal, pid)] = values[pid]
+                diag[f"classical_green_score_{signal}_{pid}"] = float(phase_scores[pid])
+                diag[f"classical_green_{signal}_{pid}_sec"] = values[pid]
 
         diag["classical_green_repair_count"] = repair_count
         diag["classical_green_cycle_residual_sec"] = max_residual
