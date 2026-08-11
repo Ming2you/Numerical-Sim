@@ -71,6 +71,13 @@ network:
   - E_F
   cycle_length: 120.0
   lost_time: 8.0
+  # 녹색 예산 계약 — 자유 파라미터는 cycle_length / lost_time / green_min 셋뿐이고
+  # 나머지 둘은 유도값이다(src/tests/test_cycle_green_budget_accounting.py 가 고정).
+  #   effective_green_total = cycle_length - lost_time            (state.py:400)
+  #   green_max             = effective_green_total - green_min
+  # 컨트롤러가 예외 없이 p2 = effective_green_total - p1 로 배분하므로 두 상자 끝은
+  # 서로의 거울상이다. 합이 예산과 다르면 큰 쪽 끝은 사영이 되돌려 놓아 **절대 도달할
+  # 수 없는 죽은 상한/하한**이 된다. 즉 lost_time 을 옮기면 green_max 도 같이 옮겨야 한다.
   green_min: 20.0
   green_max: 92.0
   boundary_in_links:
