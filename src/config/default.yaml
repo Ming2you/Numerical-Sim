@@ -69,17 +69,22 @@ network:
   - C_F
   - D_E
   - E_F
-  cycle_length: 120.0
-  lost_time: 8.0
+  # N4-0 목표 스펙(2026-08-12) — dual-ring 4현시 · 주기 150 s 통일.
+  #   clearance 현시 전이당 3 s -> lost_time = 4 x 3 = 12
+  #   effective_green_total = 150 - 12 = 138
+  #   green_min x 4 = 80 <= 138 (여유 58)
+  cycle_length: 150.0
+  lost_time: 12.0
   # 녹색 예산 계약 — 자유 파라미터는 cycle_length / lost_time / green_min 셋뿐이고
   # 나머지 둘은 유도값이다(src/tests/test_cycle_green_budget_accounting.py 가 고정).
-  #   effective_green_total = cycle_length - lost_time            (state.py:400)
-  #   green_max             = effective_green_total - green_min
-  # 컨트롤러가 예외 없이 p2 = effective_green_total - p1 로 배분하므로 두 상자 끝은
+  #   effective_green_total = cycle_length - lost_time            (state.py)
+  #   green_max             = effective_green_total - (현시수 - 1) x green_min
+  # 컨트롤러는 주 현시(p1) 하나만 움직이고 나머지 예산은 distribute_phase_green 이 나눈다.
+  # 그래서 p1 = green_max 면 나머지 세 현시가 정확히 green_min 에 앉는다 — 상자 양끝이
   # 서로의 거울상이다. 합이 예산과 다르면 큰 쪽 끝은 사영이 되돌려 놓아 **절대 도달할
   # 수 없는 죽은 상한/하한**이 된다. 즉 lost_time 을 옮기면 green_max 도 같이 옮겨야 한다.
   green_min: 20.0
-  green_max: 92.0
+  green_max: 78.0
   boundary_in_links:
   - in_A_top
   - in_A_left

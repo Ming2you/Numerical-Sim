@@ -10,11 +10,17 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 # **21쌍이 4방위로는 표현 불가**였다(같은 방위에 이웃 2개 이상). 대각 연결·5지 교차로 때문이다.
 # 4방위로 강행하면 그 21쌍을 버려야 하고, 어느 것을 버릴지가 순서 의존이라 재현성도 없다.
 #
-# 신호는 여전히 2-phase(p1/p2)다. 8방위를 두 phase로 묶는 규칙은 **축 방위각**이다.
+# 8방위를 축으로 묶는 규칙은 **축 방위각**이다.
 #   축 각도(mod 180): N-S 90°, NE-SW 45°, E-W 0°, NW-SE 135°
-#   [45°, 135°) 구간 = 세로축에 가까움 -> p1,  나머지 = 가로축에 가까움 -> p2
-# 즉 p1 = {N, S, NE, SW}, p2 = {E, W, NE 반대편인 NW, SE}.
+#   [45°, 135°) 구간 = 세로축에 가까움 -> major,  나머지 = 가로축에 가까움 -> minor
+#
+# 2026-08-12 4현시 전환. 축만으로는 현시가 정해지지 않는다 — 현시는 (축, 회전)의 조합이다.
+#   p1 major 직진(+우)   p2 major 좌   p3 minor 직진(+우)   p4 minor 좌
+# 우회전은 같은 접근로의 직진 현시에 붙인다(NEMA 관행, 실 `.sig` 136 SG 에 우회전 SG 없음).
+#
+# LEG_DIRECTIONS 는 **시계방향** 이다. 이 순서가 회전 분류의 근거다(movement_turn 참조).
 LEG_DIRECTIONS = ("N", "NE", "E", "SE", "S", "SW", "W", "NW")
+_LEG_INDEX = {leg: i for i, leg in enumerate(LEG_DIRECTIONS)}
 OPPOSITE_LEG = {
     "N": "S", "S": "N", "E": "W", "W": "E",
     "NE": "SW", "SW": "NE", "NW": "SE", "SE": "NW",
@@ -28,7 +34,11 @@ OPPOSITE_LEG = {
 # 것은 derive_intersection_adjacency 의 22.5° 이산화 산물이다. 코드 자신의 기준을 실제
 # 방위각에 적용하면 현행 배정은 대각 leg 76개 중 **0개**가 맞고 뒤집은 배정이 76개 맞는다.
 # 4방위 격자에는 대각 leg 가 없으므로 이 정정으로 기존 회귀는 비트 동일하다.
+#
+# 2026-08-12 4현시 전환 후에도 이 집합은 남는다. 다만 역할이 "phase 그 자체"에서
+# "**major 축 leg 집합**"으로 좁아졌다 — 현시는 여기에 회전(직진/좌)을 곱해야 나온다.
 NS_AXIS = {"N", "S", "NW", "SE"}
+MAJOR_AXIS_LEGS = NS_AXIS
 
 # 램프 leg(D·F의 S)는 4갈래: 나가는 on_ramp 2(W/E) + 들어오는 off_ramp 2(W/E) — proposal §1.
 RAMP_SIDES = ("W", "E")
@@ -198,6 +208,47 @@ def leg_base_dir(leg_key: str) -> str:
     return head if head in OPPOSITE_LEG else str(leg_key)
 
 
+def movement_turn(approach_leg_key: str, exit_leg_key: str) -> str:
+    """movement 의 회전 종류 — "through" | "left" | "right" | "u_turn" | "unknown".
+
+    approach leg d 로 **들어온** 차량의 진행 방위는 정반대 leg 다(OPPOSITE_LEG). 거기서
+    exit leg 까지의 시계방향 각 차이로 회전을 가른다. LEG_DIRECTIONS 가 시계방향이므로
+    인덱스 증가 = 우회전 쪽이다(우측통행).
+
+        delta = (exit_idx - heading_idx) mod 8
+        0 -> 직진 · 1~3 -> 우 · 4 -> U턴 · 5~7 -> 좌
+
+    검산: N 에서 들어오면 진행은 S(idx 4). 좌회전 출구는 E(idx 2), delta=6 -> left.
+    우회전 출구는 W(idx 6), delta=2 -> right. 직진 출구는 S, delta=0 -> through.
+
+    방위를 모르는 leg 키(격자 밖 토큰)는 "unknown" 이고 호출측이 직진과 같이 다룬다.
+    """
+    approach = leg_base_dir(approach_leg_key)
+    exit_dir = leg_base_dir(exit_leg_key)
+    if approach not in _LEG_INDEX or exit_dir not in _LEG_INDEX:
+        return "unknown"
+    heading = _LEG_INDEX[OPPOSITE_LEG[approach]]
+    delta = (_LEG_INDEX[exit_dir] - heading) % len(LEG_DIRECTIONS)
+    if delta == 0:
+        return "through"
+    if delta == 4:
+        return "u_turn"
+    return "right" if delta < 4 else "left"
+
+
+def movement_phase_id(approach_leg_key: str, exit_leg_key: str) -> str:
+    """(축, 회전) -> 현시 id. src.models.state.MODEL_PHASES 와 순서가 같다.
+
+    major 직진 p1 · major 좌 p2 · minor 직진 p3 · minor 좌 p4.
+    우회전·미상 회전은 같은 축의 직진 현시에 붙인다.
+    """
+    major = leg_base_dir(approach_leg_key) in MAJOR_AXIS_LEGS
+    left = movement_turn(approach_leg_key, exit_leg_key) == "left"
+    if major:
+        return "p2" if left else "p1"
+    return "p4" if left else "p3"
+
+
 def build_urban_movements(
     grid_node_legs: Mapping[str, Mapping[str, Mapping[str, Any]]],
     turning_ratios: Mapping[str, Mapping[str, Mapping[str, float]]],
@@ -206,7 +257,7 @@ def build_urban_movements(
 ) -> Dict[str, Dict[str, Any]]:
     """movement (o,s,d)를 토폴로지+β에서 자동 생성한다 — proposal §3.
 
-    - phase = incoming approach 축: N·S → p1, E·W → p2 (2-phase 확정, 램프 movement 포함).
+    - phase = (incoming approach 축) x (회전) 4현시 — movement_phase_id (램프 movement 포함).
     - E(비통제)는 phase=""(green=1 상당)로 신호 없이 통과.
     - kind 우선순위: origin이 경계 게이트 → boundary_in, origin이 off_ramp → off_ramp,
       exit이 on_ramp → on_ramp, exit이 경계 → boundary_out, 그 외 internal.
@@ -228,11 +279,13 @@ def build_urban_movements(
                     "beta": float(beta),
                     "signal": node,
                 }
-                # phase: incoming approach 축으로 결정(2-phase NS/EW), E는 비통제.
+                # phase: (approach 축) x (회전) 으로 결정하는 4현시. E는 비통제.
                 if node in signal_set:
-                    axis_dir = leg_base_dir(_token_leg_dir(token, legs))
-                    spec["phase"] = f"{node}_p1" if axis_dir in NS_AXIS else f"{node}_p2"
+                    approach_leg_key = _token_leg_dir(token, legs)
+                    spec["turn"] = movement_turn(approach_leg_key, exit_leg_dir)
+                    spec["phase"] = f"{node}_{movement_phase_id(approach_leg_key, exit_leg_dir)}"
                 else:
+                    spec["turn"] = movement_turn(_token_leg_dir(token, legs), exit_leg_dir)
                     spec["phase"] = ""
                 # origin(legacy): 게이트 in링크 / off_ramp 이름 / 내부 incoming link.
                 if approach_leg.get("type") == "boundary":

@@ -6,7 +6,7 @@ from typing import Callable, Dict, Iterable, Mapping, Tuple
 import numpy as np
 
 from .demand import DemandStep
-from .state import ControlAction, ExperimentConfig, TrafficState
+from .state import MODEL_PHASES, ControlAction, ExperimentConfig, TrafficState
 
 
 # inflow_outflow_allocation은 perimeter(경계/램프) 제어 전용 신호다. 내부 urban
@@ -650,9 +650,13 @@ def _phase_green_fraction(
     urban_step_index가 주어지면 cycle 위상(offset 반영) 기반으로 해당 substep
     [t, t+T_u)와 green window의 겹침 비율(이진 + 경계 분수)을 돌려준다 — offset이
     plant 동역학(플래툰 도착–green 정렬)에 들어가는 유일한 지점. 없으면 기존처럼
-    cycle 평균 비율(예측/추정 헬퍼용). 신호 cycle 구조는
-    [p1 green][lost/2][p2 green][lost/2], 시작점이 offset만큼 뒤로 이동한다.
-    cycle 평균 서비스량은 두 방식이 동일(g_sec×saturation)해 기존 회계와 정합."""
+    cycle 평균 비율(예측/추정 헬퍼용). 신호 cycle 구조는 N 현시가 MODEL_PHASES 순서대로
+    놓이고 현시마다 뒤에 clearance(lost_time/N)가 붙는다.
+
+        [p1][c][p2][c][p3][c][p4][c]        c = lost_time / N
+
+    시작점이 offset만큼 뒤로 이동한다. N=2 면 [p1][lost/2][p2][lost/2] 로 구 배치와
+    비트 동일하다. cycle 평균 서비스량은 두 방식이 동일(g_sec×saturation)해 기존 회계와 정합."""
     phase = str(spec.get("phase", ""))
     if not phase:
         return 1.0
@@ -662,7 +666,8 @@ def _phase_green_fraction(
     # default_green 도 같은 주기에서 유도해야 g/C 가 한 신호 안에서 정합한다.
     signal, _, phase_id = phase.rpartition("_")
     signal_cycle = net.signal_cycle_length(signal)
-    default_green = max(0.0, signal_cycle - net.lost_time) / 2.0
+    n_phases = net.num_phases
+    default_green = max(0.0, signal_cycle - net.lost_time) / float(n_phases)
     green_sec = float(control.green_times.get(phase, default_green))
     cycle = max(signal_cycle, 1.0e-9)
     if urban_step_index is None:
@@ -670,9 +675,15 @@ def _phase_green_fraction(
         # 스칼라 clip 은 _wrapit -> _wrapfunc -> _clip 을 거쳐 오버헤드가 크다. 값은
         # 유한값·NaN·무한대 모두에서 동일하다(test_phase_green_fraction_clip 이 고정한다).
         return min(max(green_sec / cycle, 0.0), 1.0)
-    g1 = float(control.green_times.get(f"{signal}_p1", default_green))
-    half_lost = max(0.0, net.lost_time) / 2.0
-    start = 0.0 if phase_id == "p1" else g1 + half_lost
+    # 누적 시작점 — 앞선 현시들의 녹색 + 그만큼의 clearance.
+    clearance = max(0.0, net.lost_time) / float(n_phases)
+    start = 0.0
+    for index, pid in enumerate(MODEL_PHASES):
+        if pid == phase_id:
+            start = index * clearance
+            for earlier in MODEL_PHASES[:index]:
+                start += float(control.green_times.get(f"{signal}_{earlier}", default_green))
+            break
     end = min(start + green_sec, cycle)
     offset = float(control.offsets.get(signal, 0.0))
     t_u = cfg.simulation.T_u_sec

@@ -175,6 +175,20 @@ class SimulationConfig:
             raise ValueError("control_interval must be an integer multiple of T_f.")
 
 
+# 모델 현시 축 — dual-ring 4현시(N4-0 스펙). 순서가 곧 주기 안의 배치 순서다.
+#
+#   p1 major 직진(+우회전)   p2 major 좌   p3 minor 직진(+우회전)   p4 minor 좌
+#
+# 2026-08-12 이전에는 ("p1","p2") 두 현시였고 축(NS/EW)만 갈랐다. 실 `.sig` 15 SC 는
+# 전부 dual-ring 이고 좌회전이 직진과 분리돼 있어 축 2분할로는 좌회전 현시를 표현할 수
+# 없었다. 하류 어댑터(VISSIM/evaluation/controllers/signal_group_plan.py:MODEL_PHASES)
+# 와 이름·순서를 맞춘다.
+MODEL_PHASES: tuple[str, ...] = ("p1", "p2", "p3", "p4")
+
+# 주 현시(탐색 변수). 컨트롤러가 신호당 스칼라 하나를 움직이면 나머지 현시가 예산을 나눠 갖는다.
+PRIMARY_PHASE: str = MODEL_PHASES[0]
+
+
 # `cycle_length_by_signal` 에 없어 스칼라로 떨어진 신호별 횟수. 진단 전용이라 config 가
 # 아닌 모듈 전역에 둔다 — NetworkConfig 필드로 넣으면 dataclass 동등성/deepcopy 에 섞인다.
 _CYCLE_LENGTH_FALLBACK_COUNTS: Dict[str, int] = {}
@@ -237,7 +251,7 @@ class NetworkConfig:
     urban_links: List[str] = field(default_factory=lambda: [
         "A_B", "B_C", "A_D", "B_E", "C_F", "D_E", "E_F"
     ])
-    cycle_length: float = 120.0
+    cycle_length: float = 150.0
     # 신호별 주기[s]. 비어 있으면 위 스칼라를 쓴다(기존 동작과 비트 동일).
     #
     # 2026-08-09: 스칼라 120 s 는 개포동 실망에 **하나도 없는** 값이다. 실측 native 주기는
@@ -245,9 +259,13 @@ class NetworkConfig:
     # (VISSIM/outputs/signal_group_timing_v3.json, 생산자 scripts/derive_signal_group_timing.py).
     # 주기는 `_phase_green_fraction` 의 g/C 분모라 틀리면 green 분율이 통째로 틀어진다.
     cycle_length_by_signal: Dict[str, float] = field(default_factory=dict)
-    lost_time: float = 8.0
+    # 4현시 전이 4회 x clearance 3 s. 실 `.sig` 136 SG 의 amber 는 전부 3.0 s 단독이고
+    # all-red 는 없다(VISSIM/scripts/survey_signal_programs.py 실측).
+    lost_time: float = 12.0
     green_min: float = 20.0
-    green_max: float = 92.0
+    # green_max = effective_green_total - (현시수-1) x green_min. 한 현시를 끝까지 밀었을 때
+    # 나머지가 정확히 green_min 에 앉는 값이라 상자 양끝이 서로의 거울상이다.
+    green_max: float = 78.0
     boundary_in_links: List[str] = field(default_factory=lambda: [
         "in_A_top", "in_A_left", "in_B_top", "in_C_top", "in_C_right", "in_D_left", "in_F_right"
     ])
@@ -399,6 +417,15 @@ class NetworkConfig:
     @property
     def effective_green_total(self) -> float:
         return max(0.0, self.cycle_length - self.lost_time)
+
+    @property
+    def num_phases(self) -> int:
+        return len(MODEL_PHASES)
+
+    @property
+    def default_phase_green(self) -> float:
+        """현시 균등 배분값. 구 코드의 `effective_green_total / 2.0` 자리를 대신한다."""
+        return self.effective_green_total / float(self.num_phases)
 
 
 @dataclass
@@ -1253,6 +1280,162 @@ class TrafficState:
         return [float(v) for v in self.boundary_queue.values()]
 
 
+def phase_key(signal: str, phase_id: str) -> str:
+    """신호 하나의 현시 키. `green_times` / movement spec 의 `phase` 가 같은 문자열을 쓴다."""
+    return f"{signal}_{phase_id}"
+
+
+def signal_phase_keys(signal: str) -> List[str]:
+    return [phase_key(signal, phase) for phase in MODEL_PHASES]
+
+
+def clamp_primary_green(net: NetworkConfig, value: float) -> float:
+    """주 현시 녹색을 실행가능 상자로 자른다.
+
+    나머지 (N-1) 현시가 각각 [green_min, green_max] 를 지킬 수 있어야 하므로 상자는
+
+        [max(green_min, total - (N-1) x green_max), min(green_max, total - (N-1) x green_min)]
+
+    이다. N=2 에서 `[green_min, green_max]` 와 정확히 같다(구 규칙 비트 동일).
+    """
+    total = net.effective_green_total
+    others = max(net.num_phases - 1, 1)
+    low = max(float(net.green_min), total - others * float(net.green_max))
+    high = min(float(net.green_max), total - others * float(net.green_min))
+    if low > high:
+        low = high = total / float(net.num_phases)
+    return float(min(max(float(value), low), high))
+
+
+def _project_to_budget(values: List[float], total: float, low: float, high: float) -> List[float]:
+    """Σ=total, 각 성분 ∈[low, high] 로 사영한다. 입력 비율을 최대한 보존한다.
+
+    상자가 예산을 담을 수 없으면(low x n > total 등) 균등분배로 물러난다 — 예산 보존이
+    상자보다 우선이다. 녹색 합이 주기를 못 채우면 모델이 설명 못 하는 암흑시간이 생긴다.
+    """
+    n = len(values)
+    if n == 0:
+        return []
+    share = total / float(n)
+    low = min(low, share)
+    high = max(high, share)
+    out = [min(max(float(v), low), high) for v in values]
+    for _ in range(n + 1):
+        residual = total - sum(out)
+        if abs(residual) <= 1.0e-12:
+            break
+        if residual > 0.0:
+            free = [i for i in range(n) if out[i] < high - 1.0e-12]
+        else:
+            free = [i for i in range(n) if out[i] > low + 1.0e-12]
+        if not free:
+            break
+        step = residual / float(len(free))
+        for i in free:
+            out[i] = min(max(out[i] + step, low), high)
+    return out
+
+
+def distribute_phase_green(
+    net: NetworkConfig,
+    primary: float,
+    reference: Optional[Mapping[str, float]] = None,
+) -> Dict[str, float]:
+    """주 현시 녹색 하나에서 신호 하나의 현시별 녹색을 만든다(키는 현시 id).
+
+    구 코드의 `p2 = effective_green_total - p1` 을 N 현시로 일반화한 것이다. 남는 예산은
+    `reference` 의 비율대로 나눈다 — 컨트롤러가 주 현시만 움직일 때 나머지 현시의 **모양**이
+    보존된다. reference 가 없거나 합이 0 이면 균등분배한다. N=2 에서는 나머지가 하나뿐이라
+    reference 와 무관하게 `total - p1` 이고 구 동작과 비트 동일하다.
+    """
+    total = net.effective_green_total
+    primary = clamp_primary_green(net, primary)
+    rest_ids = list(MODEL_PHASES[1:])
+    out: Dict[str, float] = {MODEL_PHASES[0]: float(primary)}
+    if not rest_ids:
+        return out
+    rest_budget = total - primary
+    weights = [max(0.0, float((reference or {}).get(pid, 0.0))) for pid in rest_ids]
+    weight_sum = sum(weights)
+    if weight_sum <= 1.0e-12:
+        raw = [rest_budget / float(len(rest_ids))] * len(rest_ids)
+    else:
+        raw = [rest_budget * w / weight_sum for w in weights]
+    projected = _project_to_budget(raw, rest_budget, float(net.green_min), float(net.green_max))
+    for pid, value in zip(rest_ids, projected):
+        out[pid] = float(value)
+    return out
+
+
+def phase_start_offsets(net: NetworkConfig, greens: Mapping[str, float]) -> Dict[str, float]:
+    """현시별 주기 내 시작시각[s]. 현시마다 뒤에 clearance(lost_time/N)가 붙는다.
+
+    plant 의 `_phase_green_fraction` 이 쓰는 배치와 **같은 식**이다(그쪽은 핫패스라
+    dict 를 만들지 않고 인라인으로 같은 누적을 돈다).
+    """
+    clearance = max(0.0, net.lost_time) / float(net.num_phases)
+    default = net.default_phase_green
+    out: Dict[str, float] = {}
+    cursor = 0.0
+    for index, pid in enumerate(MODEL_PHASES):
+        out[pid] = cursor + index * clearance
+        cursor += float(greens.get(pid, default))
+    return out
+
+
+def allocate_phase_green(net: NetworkConfig, scores: Mapping[str, float]) -> Dict[str, float]:
+    """현시별 압력 점수를 현시별 녹색으로 배분한다(키는 현시 id).
+
+    Σ = effective_green_total 이고 각 현시가 [green_min, green_max] 안이다. 점수 합이
+    0 이면 균등분배. 구 코드의 `p1 = clip(total x ratio, gmin, gmax); p2 = total - p1` 을
+    N 현시로 일반화한 것이고 N=2 에서 같은 값을 준다.
+    """
+    total = net.effective_green_total
+    raw = [max(0.0, float(scores.get(pid, 0.0))) for pid in MODEL_PHASES]
+    score_sum = sum(raw)
+    if score_sum <= 1.0e-9:
+        raw = [total / float(net.num_phases)] * net.num_phases
+    else:
+        raw = [total * value / score_sum for value in raw]
+    projected = _project_to_budget(raw, total, float(net.green_min), float(net.green_max))
+    return {pid: float(value) for pid, value in zip(MODEL_PHASES, projected)}
+
+
+def signal_green_reference(control: "ControlAction", net: NetworkConfig, signal: str) -> Dict[str, float]:
+    """control 이 현재 들고 있는 그 신호의 현시별 녹색(없으면 균등)."""
+    default = net.default_phase_green
+    return {
+        pid: float(control.green_times.get(phase_key(signal, pid), default))
+        for pid in MODEL_PHASES
+    }
+
+
+def set_signal_green(
+    control: "ControlAction",
+    net: NetworkConfig,
+    signal: str,
+    primary: float,
+    reference: Optional[Mapping[str, float]] = None,
+) -> Dict[str, float]:
+    """신호 하나의 현시별 녹색을 주 현시 값 하나로 다시 쓴다.
+
+    reference 를 주지 않으면 control **자신의 현재 값**을 쓴다. 그래서
+    `trial = previous.copy(); set_signal_green(trial, net, s, cand)` 가 나머지 현시의
+    비율을 유지한 채 주 현시만 움직이는 편집이 된다.
+    """
+    if reference is None:
+        reference = signal_green_reference(control, net, signal)
+    values = distribute_phase_green(net, primary, reference)
+    for pid, value in values.items():
+        control.green_times[phase_key(signal, pid)] = float(value)
+    return values
+
+
+def primary_green(control: "ControlAction", net: NetworkConfig, signal: str) -> float:
+    """주 현시 녹색(없으면 균등분배값)."""
+    return float(control.green_times.get(phase_key(signal, PRIMARY_PHASE), net.default_phase_green))
+
+
 def segment_vsl(control: "ControlAction", link: str, i: int, cfg: ExperimentConfig) -> float:
     """freeway link의 segment i에 적용할 VSL 값을 읽는다(Option C per-segment).
 
@@ -1297,14 +1480,14 @@ class ControlAction:
         따라서 equal green fraction이 service capacity에 정확히 한 번만 적용된다.
         """
         net = cfg.network
-        phase_green = net.effective_green_total / 2.0
+        phase_green = net.default_phase_green
         return cls(
             ramp_metering={r: net.ramp_capacity_veh_h[r] for r in net.ramps},
             vsl={link: max(cfg.freeway_follower.vsl_set) for link in net.freeway_links},
             green_times={
-                f"{signal}_{phase}": phase_green
+                phase_key(signal, phase): phase_green
                 for signal in net.signals
-                for phase in ("p1", "p2")
+                for phase in MODEL_PHASES
             },
             offsets={signal: 0.0 for signal in net.signals},
             inflow_outflow_allocation={},
@@ -1314,10 +1497,10 @@ class ControlAction:
     def fixed(cls, cfg: ExperimentConfig) -> "ControlAction":
         net = cfg.network
         green = {}
-        phase_green = net.effective_green_total / 2.0
+        phase_green = net.default_phase_green
         for signal in net.signals:
-            green[f"{signal}_p1"] = phase_green
-            green[f"{signal}_p2"] = phase_green
+            for phase in MODEL_PHASES:
+                green[phase_key(signal, phase)] = phase_green
         # allocation은 perimeter(경계/램프) 제어 전용 신호다. 내부 movement는 사전충전하지
         # 않는다(green×saturation으로만 제어; allocation으로 throttle되면 안 됨).
         perimeter_kinds = {"boundary_in", "off_ramp", "boundary_out", "on_ramp"}
@@ -1352,7 +1535,7 @@ class ControlAction:
         return (
             [self.ramp_metering.get(r, 0.0) for r in net.ramps]
             + [self.vsl.get(link, max(cfg.freeway_follower.vsl_set)) for link in net.freeway_links]
-            + [self.green_times.get(f"{s}_p1", 0.0) for s in net.signals]
+            + [self.green_times.get(key, 0.0) for s in net.signals for key in signal_phase_keys(s)]
             + [self.offsets.get(s, 0.0) for s in net.signals]
             + [self.inflow_outflow_allocation.get(m, 0.0) for m in net.movement_links]
             + [self.inflow_outflow_allocation.get(m, 0.0) for m in net.urban_movements]
