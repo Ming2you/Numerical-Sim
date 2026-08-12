@@ -259,6 +259,8 @@ class NetworkConfig:
     # (VISSIM/outputs/signal_group_timing_v3.json, 생산자 scripts/derive_signal_group_timing.py).
     # 주기는 `_phase_green_fraction` 의 g/C 분모라 틀리면 green 분율이 통째로 틀어진다.
     cycle_length_by_signal: Dict[str, float] = field(default_factory=dict)
+    # SC별 실제 현시 수. 비면 legacy 스칼라 모드다(`signal_lost_time` 참조).
+    live_phase_count_by_signal: Dict[str, int] = field(default_factory=dict)
     # 4현시 전이 4회 x clearance 3 s. 실 `.sig` 136 SG 의 amber 는 전부 3.0 s 단독이고
     # all-red 는 없다(VISSIM/scripts/survey_signal_programs.py 실측).
     lost_time: float = 12.0
@@ -417,6 +419,35 @@ class NetworkConfig:
     @property
     def effective_green_total(self) -> float:
         return max(0.0, self.cycle_length - self.lost_time)
+
+    def signal_lost_time(self, signal: str) -> float:
+        """그 SC 가 한 주기에 쓰는 비녹색 시간 [s] = 현시 수 x clearance.
+
+        `cycle_length_by_signal` 과 같은 모양이다 — 매핑이 비면 스칼라로 폴백하고 기존
+        거동과 비트 동일하다. clearance 는 스칼라 `lost_time` 을 `MODEL_PHASES` 수로
+        나눠 얻는다. 그래야 상수를 두 곳에 적지 않는다.
+
+        현시 수가 SC마다 다른 이유는 실측이다 — 개포동 15 SC 중 SC107·108·109 는 한 현시의
+        신호군이 `.sig` 에서 영구적색이라 플랜트가 3현시로 돈다.
+        """
+        by_signal = self.live_phase_count_by_signal
+        if not by_signal:
+            return float(self.lost_time)
+        count = by_signal.get(str(signal))
+        if count is None:
+            return float(self.lost_time)
+        if int(count) <= 0:
+            raise ValueError(f"live phase count must be positive: {signal}={count}")
+        clearance = float(self.lost_time) / float(len(MODEL_PHASES))
+        return clearance * float(int(count))
+
+    def signal_effective_green_total(self, signal: str) -> float:
+        """그 SC 가 현시들에 나눠 줄 수 있는 녹색 예산 [s].
+
+        상수가 아니라 `C - N x clearance` 로 유도한다. 138 이나 141 을 손으로 적으면
+        현시 수가 바뀔 때 조용히 틀린다.
+        """
+        return max(0.0, float(self.cycle_length) - self.signal_lost_time(signal))
 
     @property
     def num_phases(self) -> int:
