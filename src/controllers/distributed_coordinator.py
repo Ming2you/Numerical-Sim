@@ -342,7 +342,7 @@ class DistributedCoordinator:
                     for movement, spec in self._specs.items()
                     if spec.get("phase") == f"{signal}_{phase_id}"
                 ]
-                for phase_id in ("p1", "p2")
+                for phase_id in MODEL_PHASES
             }
         self._upstream_leaving_map = self._build_upstream_leaving_map()
         # coupling player 식별(plan §9.2): ramp/off-ramp 결합을 가진 agent — topology에서 자동.
@@ -2800,7 +2800,7 @@ class DistributedCoordinator:
         dt_h = self.cfg.simulation.T_c_h
         horizon = max(1, self.cfg.mpc.horizon_steps)
         out: Dict[str, float] = {}
-        for phase_id in ("p1", "p2"):
+        for phase_id in MODEL_PHASES:
             phase = f"{agent.signal}_{phase_id}"
             flow = max(0.0, float(coupling.get(f"arr_{phase}", 0.0)))
             if flow > 0.0:
@@ -3146,7 +3146,7 @@ class DistributedCoordinator:
             values[f"w_ramp_{ramp}"] = float(state.ramp_queue.get(ramp, 0.0))
         # urban→urban coupling: 상류 green release rate를 하류 phase arrival pressure로 보낸다.
         for signal in net.signals:
-            for phase_id in ("p1", "p2"):
+            for phase_id in MODEL_PHASES:
                 phase = f"{signal}_{phase_id}"
                 arrival_flow = 0.0
                 for _up_signal, up_movement, beta in self._upstream_leaving_map.get(phase, []):

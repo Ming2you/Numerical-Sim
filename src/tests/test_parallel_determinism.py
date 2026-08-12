@@ -422,22 +422,43 @@ class LeaderIncumbentObjectiveInsensitivityTests(unittest.TestCase):
             float(evaluation.metadata["leader_candidate_follower_early_terminated_candidates"]),
         )
 
-    def test_tighter_incumbent_prunes_more_but_keeps_the_objective(self):
+    def test_no_incumbent_level_prunes_at_all_under_four_phases(self):
+        """4현시로 간 뒤 이 배선에서는 **조기절단이 아예 발동하지 않는다**.
+
+        2현시 시절 이 검사는 "bound 를 (H-1)/H 아래로 조이면 절단이 5배로 늘지만
+        목적함수는 비트 동일" 을 못박았다. 4현시(2026-08-12)에서 다시 재니 그 전제가
+        성립하지 않는다 - incumbent 를 0.25 배까지 조여도 절단이 **0** 이다.
+
+            incumbent   inf  0.90x  0.80x  0.67x  0.55x  0.45x  0.35x  0.25x
+            절단          0      0      0      0      0      0      0      0
+            objective  전부 61.876062 (비트 동일)
+
+        그래서 무해한 **이유가 바뀌었다.** "경계 위에서는 부분합 = 전체합" 이 아니라
+        "끊길 일이 없다" 다. 병렬/직렬 incumbent 격차가 무엇이든 목적함수에 닿지 못한다.
+
+        **왜 안 끊기는지는 확인하지 못했다.** 녹색 예산 138 이 넷으로 갈리면서 follower
+        grid 의 후보 지형이 바뀐 것으로 보이나 추적하지 않았다.
+
+        이 검사는 그 사실의 **트립와이어** 다. 절단이 다시 발동하기 시작하면
+        `_evaluate_candidate_set` 의 병렬/직렬 incumbent 배선(`:2116` 고정 대 `:2119` 조임)이
+        목적함수를 바꿀 수 있으므로, 그때 무해성 논거를 다시 세워야 한다.
+        """
         _cfg_unused, controller, state, previous, forecast = _distributed_fixture(0)
         try:
-            loose_obj, loose_pruned = self._evaluate(
+            base_obj, base_pruned = self._evaluate(
                 controller, state, forecast, previous, float("inf"),
             )
-            # 실 배선의 horizon_steps 는 3 이므로 (H-1)/H = 0.67 이 절단 경계다.
-            tight_obj, tight_pruned = self._evaluate(
-                controller, state, forecast, previous, loose_obj * 0.67,
-            )
+            measured = [
+                self._evaluate(controller, state, forecast, previous, base_obj * factor)
+                for factor in (0.67, 0.45, 0.25)
+            ]
         finally:
             controller.close()
-        # 조기종료가 발동하지 않으면 이 검사는 공허하다 - 발동 자체를 먼저 못박는다.
-        self.assertGreater(loose_pruned, 0.0)
-        self.assertGreater(tight_pruned, loose_pruned)
-        self.assertEqual(loose_obj, tight_obj)
+        self.assertEqual(base_pruned, 0.0, "절단이 발동했다 - 무해성 논거를 다시 세워라")
+        for factor, (objective, pruned) in zip((0.67, 0.45, 0.25), measured):
+            with self.subTest(factor=factor):
+                self.assertEqual(pruned, 0.0, "절단이 발동했다 - 무해성 논거를 다시 세워라")
+                self.assertEqual(objective, base_obj)
 
 
 class DistributedFollowerWorkerEquivalenceTests(unittest.TestCase):

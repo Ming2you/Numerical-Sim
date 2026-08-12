@@ -79,7 +79,7 @@ def build_local_model(
     # WU green-only 권한에서 allocation이 비어 cap_flow가 control 무관이므로 빈 control로 캐시한다.
     neutral_control = ControlAction.uncontrolled(cfg)
     neutral_control.inflow_outflow_allocation = {}
-    for pid in ("p1", "p2"):
+    for pid in MODEL_PHASES:
         for movement in phase_movements[signal][pid]:
             spec = specs[movement]
             movements.append(movement)
