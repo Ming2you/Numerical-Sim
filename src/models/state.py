@@ -1482,7 +1482,9 @@ def set_signal_green(
     """
     if reference is None:
         reference = signal_green_reference(control, net, signal)
-    values = distribute_phase_green(net, primary, reference)
+    # signal 을 넘긴다. 안 넘기면 그 SC 가 못 켜는 현시에도 녹색이 실린다 - 분산
+    # 코디네이터의 실 경로가 여기다(`set_signal_green` 4곳).
+    values = distribute_phase_green(net, primary, reference, signal=signal)
     for pid, value in values.items():
         control.green_times[phase_key(signal, pid)] = float(value)
     return values

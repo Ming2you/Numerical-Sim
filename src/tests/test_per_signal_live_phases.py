@@ -84,6 +84,26 @@ class PerSignalLivePhaseTests(unittest.TestCase):
             net.signal_effective_green_total("SC107"), sum(values.values()), places=6
         )
 
+    def test_set_signal_green_respects_the_live_set(self) -> None:
+        """실 경로가 여기다. 분산 코디네이터는 `set_signal_green` 으로만 녹색을 쓴다.
+
+        배분 함수 둘만 고치고 이 자리를 빠뜨리면 짝지은 런에서만 드러난다 - 실제로
+        52 분짜리 solve 를 두 번 태우고 나서야 잡혔다.
+        """
+        from src.models.state import ControlAction, set_signal_green
+
+        net = _config().network
+        net.live_phases_by_signal = {"SC107": ["p2", "p3", "p4"]}
+        control = ControlAction()
+        values = set_signal_green(control, net, "SC107", 50.0)
+        self.assertEqual(0.0, values["p1"])
+        self.assertEqual(0.0, control.green_times["SC107_p1"])
+        self.assertAlmostEqual(
+            net.signal_effective_green_total("SC107"),
+            sum(control.green_times[f"SC107_{pid}"] for pid in MODEL_PHASES),
+            places=6,
+        )
+
     def test_without_a_signal_the_functions_are_bit_identical(self) -> None:
         """되돌림 증명 - 기본 경로가 바뀌면 호출부 45곳이 조용히 움직인다."""
         net = _config().network
