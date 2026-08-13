@@ -1,4 +1,4 @@
-# v3 N4-6 - SC별 현시 수(live_phase_count_by_signal)와 그로부터 유도되는 녹색 예산을 고정한다
+# v3 N4-6 - SC별 현시 수(live_phases_by_signal)와 그로부터 유도되는 녹색 예산을 고정한다
 """전역 스칼라 녹색 예산 하나를 신호별 예산으로 쪼갠다.
 
 ## 왜
@@ -16,7 +16,7 @@ VISSIM 안에서 400 초를 돌려 SG 상태를 초당 받아 세면 15 SC 중 1
 
 `cycle_length_by_signal` 과 **같은 모양**이다.
 
-    스칼라 lost_time + dict live_phase_count_by_signal + 헬퍼 signal_lost_time() /
+    스칼라 lost_time + dict live_phases_by_signal + 헬퍼 signal_lost_time() /
     signal_effective_green_total()
 
 - 매핑이 **비면** 스칼라로 폴백하고 기존 거동과 비트 동일하다(legacy 모드).
@@ -39,7 +39,7 @@ class PerSignalPhaseCountTests(unittest.TestCase):
     def test_an_empty_mapping_keeps_the_scalar_behaviour(self) -> None:
         """legacy 모드 - 매핑이 비면 스칼라와 비트 동일하다."""
         net = _config().network
-        self.assertEqual({}, net.live_phase_count_by_signal)
+        self.assertEqual({}, net.live_phases_by_signal)
         for signal in ("SC1", "SC107", "없는신호"):
             with self.subTest(signal=signal):
                 self.assertEqual(net.lost_time, net.signal_lost_time(signal))
@@ -50,7 +50,7 @@ class PerSignalPhaseCountTests(unittest.TestCase):
     def test_a_three_phase_signal_gets_a_larger_green_budget(self) -> None:
         """현시가 하나 적으면 clearance 를 한 번 덜 문다 - 그만큼 녹색이 늘어난다."""
         net = _config().network
-        net.live_phase_count_by_signal = {"SC107": 3}
+        net.live_phases_by_signal = {"SC107": ["p2", "p3", "p4"]}
         clearance = net.lost_time / float(len(MODEL_PHASES))
 
         self.assertEqual(3.0 * clearance, net.signal_lost_time("SC107"))
@@ -71,7 +71,7 @@ class PerSignalPhaseCountTests(unittest.TestCase):
         net = _config().network
         for count in (2, 3, 4):
             with self.subTest(count=count):
-                net.live_phase_count_by_signal = {"SC107": count}
+                net.live_phases_by_signal = {"SC107": list(MODEL_PHASES[:count])}
                 self.assertAlmostEqual(
                     net.cycle_length,
                     net.signal_effective_green_total("SC107")
@@ -82,12 +82,12 @@ class PerSignalPhaseCountTests(unittest.TestCase):
     def test_a_signal_missing_from_a_populated_mapping_falls_back(self) -> None:
         """결선 실수는 조용히 넘어가되 스칼라로 떨어진다 - 주기 쪽과 같은 규칙이다."""
         net = _config().network
-        net.live_phase_count_by_signal = {"SC107": 3}
+        net.live_phases_by_signal = {"SC107": ["p2", "p3", "p4"]}
         self.assertEqual(net.lost_time, net.signal_lost_time("SC999"))
 
     def test_a_non_positive_phase_count_is_rejected(self) -> None:
         net = _config().network
-        net.live_phase_count_by_signal = {"SC107": 0}
+        net.live_phases_by_signal = {"SC107": []}
         with self.assertRaises(ValueError):
             net.signal_lost_time("SC107")
 

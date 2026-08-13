@@ -368,7 +368,7 @@ class WuDistributedController:
         best_p1, best_obj = prev_p1, float("inf")
         evals = 0
         for p1 in candidates:
-            greens = distribute_phase_green(net, p1, pressure)
+            greens = distribute_phase_green(net, p1, pressure, signal=signal)
             q = dict(q0)
             cost = 0.0
             for _ in range(horizon):

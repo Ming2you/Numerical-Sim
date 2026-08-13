@@ -221,7 +221,7 @@ class UrbanFollower:
             if has_offramp_discharge_phase:
                 # freeway 압력이 높으면 off-ramp storage를 비우는 도시 유입 phase를 우선한다.
                 queues[PRIMARY_PHASE] += pressure["total_pressure"] * net.ramp_queue_max_veh
-            values = allocate_phase_green(net, queues)
+            values = allocate_phase_green(net, queues, signal=signal)
             p1 = values[PRIMARY_PHASE]
             if has_offramp_discharge_phase:
                 # off-ramp 방출 phase가 최소 green에 묶이면 urban net outflow가 구조적으로 부족해진다.
@@ -237,7 +237,7 @@ class UrbanFollower:
                     accumulate_repair_diagnostics(self._repair_diagnostics, green=repaired)
                 values = dict(repaired.phases)
             else:
-                values = distribute_phase_green(net, p1, values)
+                values = distribute_phase_green(net, p1, values, signal=signal)
             for pid, green_sec in values.items():
                 green[phase_key(signal, pid)] = float(green_sec)
         return green
@@ -497,7 +497,9 @@ class UrbanFollower:
                         best = (float(cost), float(p1), float(offset))
             assert best is not None
             cost, p1_best, offset_best = best
-            for pid, green_sec in distribute_phase_green(net, p1_best, q0).items():
+            for pid, green_sec in distribute_phase_green(
+                net, p1_best, q0, signal=signal
+            ).items():
                 green[phase_key(signal, pid)] = float(green_sec)
             offsets[signal] = float(offset_best)
             total_cost += cost
@@ -588,11 +590,15 @@ class UrbanFollower:
                 candidate = clamp_primary_green(net, float(p1))
                 if abs(candidate - float(p1)) > 1.0e-9:
                     continue
-                cost = rollout_cost(distribute_phase_green(net, candidate, q0))
+                cost = rollout_cost(
+                    distribute_phase_green(net, candidate, q0, signal=signal)
+                )
                 cost += smooth_w * abs(candidate - prev_p1)
                 if cost < best_cost:
                     best_cost, best_p1 = cost, float(candidate)
-            for pid, green_sec in distribute_phase_green(net, best_p1, q0).items():
+            for pid, green_sec in distribute_phase_green(
+                net, best_p1, q0, signal=signal
+            ).items():
                 green[phase_key(signal, pid)] = float(green_sec)
             objective += best_cost
         return green, float(objective)

@@ -259,8 +259,9 @@ class NetworkConfig:
     # (VISSIM/outputs/signal_group_timing_v3.json, 생산자 scripts/derive_signal_group_timing.py).
     # 주기는 `_phase_green_fraction` 의 g/C 분모라 틀리면 green 분율이 통째로 틀어진다.
     cycle_length_by_signal: Dict[str, float] = field(default_factory=dict)
-    # SC별 실제 현시 수. 비면 legacy 스칼라 모드다(`signal_lost_time` 참조).
-    live_phase_count_by_signal: Dict[str, int] = field(default_factory=dict)
+    # SC별 **켤 수 있는 현시 목록**. 비면 legacy(전 현시)다. 개수만 들고 있으면 어느
+    # 현시가 죽었는지 못 담는다 - 실 망의 SC107 은 (p2,p3,p4) 라 "3개" 로는 부족하다.
+    live_phases_by_signal: Dict[str, List[str]] = field(default_factory=dict)
     # 4현시 전이 4회 x clearance 3 s. 실 `.sig` 136 SG 의 amber 는 전부 3.0 s 단독이고
     # all-red 는 없다(VISSIM/scripts/survey_signal_programs.py 실측).
     lost_time: float = 12.0
@@ -420,26 +421,36 @@ class NetworkConfig:
     def effective_green_total(self) -> float:
         return max(0.0, self.cycle_length - self.lost_time)
 
+    def signal_live_phases(self, signal: str) -> tuple:
+        """그 SC 가 **실제로 켤 수 있는** 현시. 없으면 전 현시다.
+
+        실 망의 SC107·108·109 는 한 현시의 신호군이 `.sig` 에서 영구적색이라 플랜트가
+        그 현시를 아예 안 돌린다. 모델이 거기 녹색을 주면 플랜트는 전현시 적색으로 흘린다.
+        """
+        by_signal = self.live_phases_by_signal
+        # 키가 없으면 폴백이고, 키가 있는데 비면 오류다. 둘을 뭉뚱그리면 결선 실수가
+        # "전 현시" 로 조용히 넘어간다 - 현시가 하나도 없는 SC 는 성립하지 않는다.
+        if not by_signal or str(signal) not in by_signal:
+            return tuple(MODEL_PHASES)
+        listed = set(by_signal[str(signal)] or ())
+        live = tuple(pid for pid in MODEL_PHASES if pid in listed)
+        if not live:
+            raise ValueError(f"live phase set is empty: {signal}={by_signal[str(signal)]}")
+        return live
+
     def signal_lost_time(self, signal: str) -> float:
-        """그 SC 가 한 주기에 쓰는 비녹색 시간 [s] = 현시 수 x clearance.
+        """그 SC 가 한 주기에 쓰는 비녹색 시간 [s] = 살아 있는 현시 수 x clearance.
 
         `cycle_length_by_signal` 과 같은 모양이다 — 매핑이 비면 스칼라로 폴백하고 기존
         거동과 비트 동일하다. clearance 는 스칼라 `lost_time` 을 `MODEL_PHASES` 수로
         나눠 얻는다. 그래야 상수를 두 곳에 적지 않는다.
 
-        현시 수가 SC마다 다른 이유는 실측이다 — 개포동 15 SC 중 SC107·108·109 는 한 현시의
-        신호군이 `.sig` 에서 영구적색이라 플랜트가 3현시로 돈다.
+        개수를 따로 들지 않고 `signal_live_phases` 에서 센다 - 둘을 따로 두면 어긋난다.
         """
-        by_signal = self.live_phase_count_by_signal
-        if not by_signal:
+        if not self.live_phases_by_signal:
             return float(self.lost_time)
-        count = by_signal.get(str(signal))
-        if count is None:
-            return float(self.lost_time)
-        if int(count) <= 0:
-            raise ValueError(f"live phase count must be positive: {signal}={count}")
         clearance = float(self.lost_time) / float(len(MODEL_PHASES))
-        return clearance * float(int(count))
+        return clearance * float(len(self.signal_live_phases(signal)))
 
     def signal_effective_green_total(self, signal: str) -> float:
         """그 SC 가 현시들에 나눠 줄 수 있는 녹색 예산 [s].
@@ -1371,6 +1382,7 @@ def distribute_phase_green(
     net: NetworkConfig,
     primary: float,
     reference: Optional[Mapping[str, float]] = None,
+    signal: Optional[str] = None,
 ) -> Dict[str, float]:
     """주 현시 녹색 하나에서 신호 하나의 현시별 녹색을 만든다(키는 현시 id).
 
@@ -1379,10 +1391,14 @@ def distribute_phase_green(
     보존된다. reference 가 없거나 합이 0 이면 균등분배한다. N=2 에서는 나머지가 하나뿐이라
     reference 와 무관하게 `total - p1` 이고 구 동작과 비트 동일하다.
     """
-    total = net.effective_green_total
+    # `signal` 을 주면 그 SC 가 켤 수 있는 현시 위에서만 돈다. 안 주면 종전과 비트 동일하다
+    # (호출부 45곳을 한꺼번에 안 건드리기 위한 기본값이다).
+    live = net.signal_live_phases(signal) if signal is not None else tuple(MODEL_PHASES)
+    total = net.effective_green_total if signal is None else net.signal_effective_green_total(signal)
     primary = clamp_primary_green(net, primary)
-    rest_ids = list(MODEL_PHASES[1:])
-    out: Dict[str, float] = {MODEL_PHASES[0]: float(primary)}
+    rest_ids = list(live[1:])
+    out: Dict[str, float] = {pid: 0.0 for pid in MODEL_PHASES}
+    out[live[0]] = float(primary)
     if not rest_ids:
         return out
     rest_budget = total - primary
@@ -1414,22 +1430,32 @@ def phase_start_offsets(net: NetworkConfig, greens: Mapping[str, float]) -> Dict
     return out
 
 
-def allocate_phase_green(net: NetworkConfig, scores: Mapping[str, float]) -> Dict[str, float]:
+def allocate_phase_green(
+    net: NetworkConfig,
+    scores: Mapping[str, float],
+    signal: Optional[str] = None,
+) -> Dict[str, float]:
     """현시별 압력 점수를 현시별 녹색으로 배분한다(키는 현시 id).
 
     Σ = effective_green_total 이고 각 현시가 [green_min, green_max] 안이다. 점수 합이
     0 이면 균등분배. 구 코드의 `p1 = clip(total x ratio, gmin, gmax); p2 = total - p1` 을
     N 현시로 일반화한 것이고 N=2 에서 같은 값을 준다.
     """
-    total = net.effective_green_total
-    raw = [max(0.0, float(scores.get(pid, 0.0))) for pid in MODEL_PHASES]
+    # `signal` 을 주면 그 SC 의 살아 있는 현시에만 배분한다 - 죽은 현시에 준 녹색은
+    # 플랜트가 전현시 적색으로 흘리므로 그만큼이 통째로 버려진다.
+    live = net.signal_live_phases(signal) if signal is not None else tuple(MODEL_PHASES)
+    total = net.effective_green_total if signal is None else net.signal_effective_green_total(signal)
+    raw = [max(0.0, float(scores.get(pid, 0.0))) for pid in live]
     score_sum = sum(raw)
     if score_sum <= 1.0e-9:
-        raw = [total / float(net.num_phases)] * net.num_phases
+        raw = [total / float(len(live))] * len(live)
     else:
         raw = [total * value / score_sum for value in raw]
     projected = _project_to_budget(raw, total, float(net.green_min), float(net.green_max))
-    return {pid: float(value) for pid, value in zip(MODEL_PHASES, projected)}
+    out: Dict[str, float] = {pid: 0.0 for pid in MODEL_PHASES}
+    for pid, value in zip(live, projected):
+        out[pid] = float(value)
+    return out
 
 
 def signal_green_reference(control: "ControlAction", net: NetworkConfig, signal: str) -> Dict[str, float]:

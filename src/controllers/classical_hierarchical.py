@@ -225,10 +225,12 @@ class ClassicalHierarchicalController:
             total += max(0.0, state.urban_movement_queue.get(item, 0.0))
         return float(total)
 
-    def _repair_green_phases(self, scores: Mapping[str, float]) -> tuple[Dict[str, float], float]:
+    def _repair_green_phases(
+        self, scores: Mapping[str, float], signal: Optional[str] = None
+    ) -> tuple[Dict[str, float], float]:
         # cycle repair: Sum(g_i) + lost_time = cycle_length 를 보존하면서 green min/max 를 만족시킨다.
         net = self.cfg.network
-        values = allocate_phase_green(net, scores)
+        values = allocate_phase_green(net, scores, signal=signal)
         residual = abs(sum(values.values()) + net.lost_time - net.cycle_length)
         return values, float(residual)
 
@@ -282,7 +284,7 @@ class ClassicalHierarchicalController:
                 pid: total_green * max(0.0, float(phase_scores.get(pid, 0.0))) / weight_sum
                 for pid in MODEL_PHASES
             }
-            values, residual = self._repair_green_phases(phase_scores)
+            values, residual = self._repair_green_phases(phase_scores, signal)
             repair_count += float(
                 any(abs(values[pid] - raw[pid]) > 1.0e-9 for pid in MODEL_PHASES) or residual > 1.0e-9
             )
